@@ -1,15 +1,20 @@
 name: Check
 on:
   push:
-  pull_request:
+  pull_request_target:
 permissions:
   contents: read
 jobs:
   check:
+    # Evaluate the PR gate from the base branch, before checking out PR code.
+    if: github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
