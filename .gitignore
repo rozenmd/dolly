@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+.cloudflare/
+dist/
+.dev.vars*
+!.dev.vars.example
+.env*
+/.sandbox-test.wrangler.json
+!.env.access.example
