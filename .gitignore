@@ -6,3 +6,4 @@ dist/
 !.dev.vars.example
 .env*
 /.sandbox-test.wrangler.json
+!.env.access.example

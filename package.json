@@ -9,7 +9,7 @@
     "check": "npm run format:check && npm run lint && npm run typecheck",
     "test": "node --test scripts/*.test.mjs && vitest run",
     "build": "cf deploy --dry-run",
-    "login": "node --env-file-if-exists=.dev.vars scripts/connect.mjs",
+    "login": "node --env-file-if-exists=.dev.vars --env-file-if-exists=.env.access scripts/connect.mjs",
     "test:sandbox": "vitest run --config vitest.sandbox.config.ts",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",

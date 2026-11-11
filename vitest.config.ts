@@ -10,6 +10,7 @@ export default defineConfig({
         compatibilityFlags: ["nodejs_compat"],
         bindings: {
           API_TOKEN: "test-token-with-at-least-32-characters",
+          ACCESS_LOCAL_DEV: "true",
           CODEX_MODEL: "gpt-6-luna",
         },
         durableObjects: {

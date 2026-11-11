@@ -10,6 +10,10 @@ test("typed Cloudflare config keeps SQLite namespaces and the native sandbox ima
   assert.equal(worker.entrypoint, "./src/index.ts");
   assert.deepEqual(worker.compatibilityFlags, ["nodejs_compat"]);
   assert.equal(worker.env.API_TOKEN.type, "secret");
+  assert.equal(worker.previewUrls, false);
+  assert.equal(worker.env.ACCESS_LOCAL_DEV.value, "false");
+  assert.equal(worker.env.ACCESS_TEAM_DOMAIN.type, "text");
+  assert.equal(worker.env.ACCESS_AUD.type, "text");
   assert.equal(worker.env.CODEX_MODEL.value, "gpt-6-luna");
   assert.deepEqual(worker.env.AGENT, {
     type: "durable-object",

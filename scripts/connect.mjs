@@ -1,6 +1,7 @@
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
@@ -32,6 +33,21 @@ const connect = Effect.gen(function* () {
     return yield* new LoginError({ message: "Use HTTPS except for local development" });
   }
 
+  const clientId = yield* Config.redacted("CF_ACCESS_CLIENT_ID").pipe(Config.option);
+  const clientSecret = yield* Config.redacted("CF_ACCESS_CLIENT_SECRET").pipe(Config.option);
+
+  if (Option.isSome(clientId) !== Option.isSome(clientSecret))
+    return yield* new LoginError({
+      message: "Set both CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET",
+    });
+
+  const headers = new Headers({ Authorization: `Bearer ${Redacted.value(token)}` });
+
+  if (Option.isSome(clientId) && Option.isSome(clientSecret)) {
+    headers.set("CF-Access-Client-Id", Redacted.value(clientId.value));
+    headers.set("CF-Access-Client-Secret", Redacted.value(clientSecret.value));
+  }
+
   const request = Effect.fn("connect.request")(function* (method) {
     return yield* Effect.acquireUseRelease(
       Effect.sync(() => new AbortController()),
@@ -41,7 +57,7 @@ const connect = Effect.gen(function* () {
             try: (signal) =>
               fetch(url, {
                 method,
-                headers: { Authorization: `Bearer ${Redacted.value(token)}` },
+                headers,
                 redirect: "error",
                 signal: AbortSignal.any([controller.signal, signal]),
               }),

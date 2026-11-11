@@ -5,6 +5,7 @@ import { bodyLimit } from "hono/body-limit";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { authorizeAccess } from "./access";
 import { AgentApi } from "./api";
 import { ChildRequest, NewSession } from "./models";
 import { OperationError } from "./operations";
@@ -71,6 +72,19 @@ app.use("/api/*", async (c, next) => {
     return c.json({ error: "Set API_TOKEN to at least 32 characters" }, 503);
 
   return bearerAuth<{ Bindings: Env }>({ token: c.env.API_TOKEN })(c, next);
+});
+
+app.use("/api/*", async (c, next) => {
+  const access = await Effect.runPromise(authorizeAccess(c.req.raw, c.env), {
+    signal: c.req.raw.signal,
+  });
+
+  if (access === "unconfigured")
+    return c.json({ error: "Configure Cloudflare Access before using the API" }, 503);
+
+  if (access === "denied")
+    return c.json({ error: "Cloudflare Access authentication required" }, 401);
+  await next();
 });
 
 app.use(
