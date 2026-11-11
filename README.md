@@ -2,39 +2,54 @@
 
 A personal coding-agent API on Cloudflare Workers, using Hono, Effect 4.0.0-rc.112, Pi Durable 1.5.2, Cloudflare Sandbox 1.0.3, and a ChatGPT/Codex subscription. No OpenAI API key is required.
 
-## Run locally
+## Deploy to Cloudflare
 
-Use Node.js 24.22.2 (pinned in `.node-version` and CI) and a running Docker engine. Cloudflare's container runtime also needs a paid Workers account for deployment.
+Use Node.js 24.22.2 (pinned in `.node-version` and CI), a running Docker engine to build the container image, and a paid Cloudflare Workers account.
 
 ```sh
 npm ci
+npx cf auth login
+```
+
+For first-time setup, create a private secrets file and generate an API token:
+
+```sh
 cp .dev.vars.example .dev.vars
 openssl rand -hex 32
 ```
 
-Save the generated value as `API_TOKEN` in `.dev.vars`. Keep that file private. Then:
+Save the generated value as `API_TOKEN` in `.dev.vars`. Keep that file private. If you already have a configured `.dev.vars`, reuse it instead of copying the example or generating another token.
 
 ```sh
-npm run dev
+# First deployment only: upload the configured API token.
+npm run deploy -- --secrets-file .dev.vars
 ```
 
-In another terminal:
+Set `API_URL` to the HTTPS Worker URL printed by deployment, then connect your Codex subscription:
 
 ```sh
+export API_URL=https://pi-hard.your-subdomain.workers.dev
 npm run login
 ```
 
-Open the printed OpenAI URL and enter the one-time code. Enable device-code authentication in your ChatGPT security settings if OpenAI requires it. The client polls until connected. Access depends on your subscription's Codex entitlement and usage limits.
+The login client reads `API_TOKEN` from `.dev.vars` and connects to the deployed Worker. Open the printed OpenAI URL and enter the one-time code. Enable device-code authentication in your ChatGPT security settings if OpenAI requires it. The client polls until connected. Access depends on your subscription's Codex entitlement and usage limits.
 
 This creates a fresh login for this Worker. Do not copy an existing Codex `auth.json` or share a refresh token with another process. OpenAI rotates refresh tokens, and two independent refresh owners can invalidate each other's login.
 
+For later deployments, run `npm run deploy` without `--secrets-file` to preserve the deployed secret. The deployed secret and the `API_TOKEN` used by the login client must match. No deployment is performed by the test or build commands.
+
+`cloudflare.config.ts` owns Worker bindings, SQLite Durable Object exports, observability, and the native Sandbox container definition. The pinned `cf` CLI loads it for development and deployment; Wrangler remains only its underlying bundler, with no hand-maintained Wrangler configuration file. Cloudflare's programmatic configuration is currently in open beta.
+
+`CODEX_MODEL` in `cloudflare.config.ts` selects the default model for new conversations; a session request's `model` overrides it. It must be present in the pinned Pi Codex provider catalog and available to your subscription. Requests use the subscription-backed Codex Responses endpoint over SSE, not the billed OpenAI API endpoint.
+
 ## Use the API
 
-Set `API_URL` to the local or deployed Worker URL and `API_TOKEN` to the same private bearer token configured on that Worker. All `/api/*` routes require it.
+Use the deployed `API_URL` and load the same private bearer token configured on that Worker. All `/api/*` routes require it.
 
 ```sh
-export API_URL=http://localhost:8787
-# Set API_TOKEN in your shell without committing it.
+# Load the existing token for curl; do not generate another one.
+. ./.dev.vars
+export API_TOKEN
 
 curl -sS "$API_URL/api/sessions" \
   -H "Authorization: Bearer $API_TOKEN" \
@@ -112,20 +127,22 @@ Treat both session and task IDs as opaque strings. HTTP `requestId` values must 
 
 Aborting a parent also stops all descendants and pending deliveries. Aborting does not delete conversations or files, and a stopped child can receive new messages. New work admitted after an abort's snapshot is not part of that cancellation. Children cannot read a parent's workspace; container files remain ephemeral.
 
-## Deploy
+## Optional local development
+
+To develop locally after installing dependencies and configuring `.dev.vars`, start the Worker with Docker running:
 
 ```sh
-npx cf auth login
-# First deployment only: upload the token already configured in .dev.vars.
-npm run deploy -- --secrets-file .dev.vars
-API_URL=https://your-worker.workers.dev npm run login
+npm run dev
 ```
 
-For later deployments, run `npm run deploy` without `--secrets-file` to preserve the deployed secret. The deployed secret and the local `API_TOKEN` used by the login client must match. Keep an already-configured token rather than generating another on every deploy. Local and deployed Durable Object storage are separate; each environment needs its own subscription login. No deployment is performed by the test or build commands.
+In another terminal, explicitly select the local Worker and connect its Codex login:
 
-`cloudflare.config.ts` owns Worker bindings, SQLite Durable Object exports, observability, and the native Sandbox container definition. The pinned `cf` CLI loads it for development and deployment; Wrangler remains only its underlying bundler, with no hand-maintained Wrangler configuration file. Cloudflare's programmatic configuration is currently in open beta.
+```sh
+export API_URL=http://localhost:8787
+npm run login
+```
 
-`CODEX_MODEL` in `cloudflare.config.ts` selects the default model for new conversations; a session request's `model` overrides it. It must be present in the pinned Pi Codex provider catalog and available to your subscription. Requests use the subscription-backed Codex Responses endpoint over SSE, not the billed OpenAI API endpoint.
+Local and deployed Durable Object storage are separate; each environment needs its own subscription login. Use the same API examples with this local `API_URL`. Set `API_URL` back to your deployed HTTPS URL when returning to the deployed Worker.
 
 ## Effect architecture
 
