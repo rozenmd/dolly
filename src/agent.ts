@@ -1,7 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels } from "@earendil-works/pi-ai/models";
+import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
+import { stream, streamSimple } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import {
   configure,
   createRegistry,
@@ -50,29 +52,41 @@ export class Agent extends DurableObject<Env> {
     const oauth = provider.auth.oauth;
 
     if (!oauth) return yield* Effect.die("Codex provider must support OAuth");
-    models.setProvider({
-      ...provider,
-      auth: {
-        oauth: {
-          ...oauth,
-          refresh: (credential, signal) =>
-            Effect.runPromise(
-              Effect.tryPromise({
-                try: () => oauth.refresh(credential, signal),
-                catch: (cause) => {
-                  const details = exceptionDetails(cause, [credential.access, credential.refresh]);
+    models.setProvider(
+      createProvider({
+        id: provider.id,
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        models: Object.values(OPENAI_CODEX_MODELS),
+        // Load the SSE adapter with the Worker, not in an evictable generation request.
+        api: { stream, streamSimple },
+        auth: {
+          oauth: {
+            ...oauth,
+            // Request auth needs only the stored token, not Pi's Node-only OAuth flow loader.
+            toAuth: async (credential) => ({ apiKey: credential.access }),
+            refresh: (credential, signal) =>
+              Effect.runPromise(
+                Effect.tryPromise({
+                  try: () => oauth.refresh(credential, signal),
+                  catch: (cause) => {
+                    const details = exceptionDetails(cause, [
+                      credential.access,
+                      credential.refresh,
+                    ]);
 
-                  return new OperationError({
-                    operation: "codex.refresh",
-                    message: details.message,
-                    details,
-                  });
-                },
-              }),
-            ),
+                    return new OperationError({
+                      operation: "codex.refresh",
+                      message: details.message,
+                      details,
+                    });
+                  },
+                }),
+              ),
+          },
         },
-      },
-    });
+      }),
+    );
 
     const shell = {
       name: "shell",

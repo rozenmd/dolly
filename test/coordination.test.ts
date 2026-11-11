@@ -173,6 +173,34 @@ it("creates children atomically, deduplicates concurrent requests, persists rece
   expect(fetch).toHaveBeenCalledTimes(2);
 });
 
+it("starts root and child generations after repeated object eviction", async () => {
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+  const parent = await root();
+
+  for (let cycle = 0; cycle < 3; cycle++) {
+    await abortAllDurableObjects();
+    const child = await spawn(parent, `Child prompt ${cycle}`);
+
+    const response = await post(`${parent}/messages`, {
+      content: `Root prompt ${cycle}`,
+      requestId: crypto.randomUUID(),
+    });
+
+    expect(response.status).toBe(202);
+    await expect.poll(async () => (await receipt(parent, child.taskId)).status).toBe("terminal");
+    await expect
+      .poll(async () => {
+        const transcript = await SELF.fetch(`https://worker/api/sessions/${parent}`, { headers });
+        const text = await transcript.text();
+
+        return text.split('"kind":"pi.assistant"').length - 1;
+      })
+      .toBe(cycle + 1);
+  }
+
+  expect(fetch).toHaveBeenCalledTimes(6);
+});
+
 it("enforces depth and width limits on the server, including after recovery", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
   const parent = await root();
