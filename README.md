@@ -194,7 +194,7 @@ Hono and Cloudflare Durable Objects remain native hosts. They run Effects at HTT
 
 ## Code quality
 
-`pnpm-workspace.yaml` permits dependency install scripts only for esbuild and workerd. New dependencies with unreviewed install scripts fail installation until approved or explicitly blocked.
+`pnpm-workspace.yaml` keeps a 24-hour minimum release age, with exact-version exceptions for existing dependencies published more recently. It permits dependency install scripts only for esbuild and workerd. New dependencies with unreviewed install scripts fail installation until approved or explicitly blocked.
 
 `pnpm run check` runs oxfmt, Oxlint (warnings fail), and TypeScript, including in CI. Use `pnpm run format` to format files and `pnpm run lint:fix` for safe lint autofixes; run lint autofix before formatting.
 
