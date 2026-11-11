@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Predicate from "effect/Predicate";
 import { exceptionDetails } from "./diagnostics";
 
 export class OperationError extends Schema.TaggedError<OperationError>()("OperationError", {
@@ -14,18 +15,19 @@ export const attempt = <A>(operation: string, run: (signal: AbortSignal) => Prom
     try: run,
     catch: (cause) => {
       const details = exceptionDetails(cause);
+
       return new OperationError({ operation, message: details.message, details });
     },
   });
 
 /** RPC results are data-only, but Cloudflare still attaches a disposable response handle. */
-export const rpc = <A>(operation: string, call: () => Promise<A>) => Effect.acquireUseRelease(
-  attempt(operation, call),
-  Effect.succeed,
-  (result) => Effect.sync(() => {
-    if (typeof result === "object" && result !== null && Symbol.dispose in result) {
-      const dispose = result[Symbol.dispose];
-      if (typeof dispose === "function") dispose.call(result);
-    }
-  }),
-);
+export const rpc = <A>(operation: string, call: () => Promise<A>) =>
+  Effect.acquireUseRelease(attempt(operation, call), Effect.succeed, (result) =>
+    Effect.sync(() => {
+      if (Predicate.hasProperty(result, Symbol.dispose)) {
+        const dispose = result[Symbol.dispose];
+
+        if (Predicate.isFunction(dispose)) dispose.call(result);
+      }
+    }),
+  );

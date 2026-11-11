@@ -8,17 +8,19 @@
   "durable_objects": {
     "bindings": [
       { "name": "AGENT", "class_name": "Agent" },
-      { "name": "SANDBOX", "class_name": "Sandbox" }
-    ]
+      { "name": "SANDBOX", "class_name": "Sandbox" },
+    ],
   },
   "exports": {
     "Agent": { "type": "durable-object", "storage": "sqlite" },
-    "Sandbox": { "type": "durable-object", "storage": "sqlite" }
+    "Sandbox": { "type": "durable-object", "storage": "sqlite" },
   },
-  "containers": [{
-    "class_name": "Sandbox",
-    "scheduling_policy": "durable_object",
-    "images": { "sandbox": { "dockerfile": "./Dockerfile" } }
-  }],
-  "observability": { "enabled": true }
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "scheduling_policy": "durable_object",
+      "images": { "sandbox": { "dockerfile": "./Dockerfile" } },
+    },
+  ],
+  "observability": { "enabled": true },
 }

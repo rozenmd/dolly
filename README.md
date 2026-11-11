@@ -55,16 +55,16 @@ curl -sS "$API_URL/api/sessions/$SESSION_ID" \
 
 A prompt returns `202` after durable admission, not after generation. Poll the session to read its Pi conversation view, including recent entries and live progress. Reuse the same UUID `requestId` when retrying the same prompt to avoid duplicate work. The snapshot contains a bounded recent transcript window, not an export of all history.
 
-| Route | Operation |
-| --- | --- |
-| `GET /health` | Public liveness check |
-| `POST /api/auth/codex` | Start or reuse device login |
-| `GET /api/auth/codex` | Poll login, respecting `pollAfterSeconds` |
-| `DELETE /api/auth/codex` | Delete the Worker's local credentials and pending login |
-| `POST /api/sessions` | Create a conversation |
-| `GET /api/sessions/:id` | Read the latest conversation view |
-| `POST /api/sessions/:id/messages` | Submit `{content, requestId}` |
-| `POST /api/sessions/:id/abort` | Abort current and queued work |
+| Route                             | Operation                                               |
+| --------------------------------- | ------------------------------------------------------- |
+| `GET /health`                     | Public liveness check                                   |
+| `POST /api/auth/codex`            | Start or reuse device login                             |
+| `GET /api/auth/codex`             | Poll login, respecting `pollAfterSeconds`               |
+| `DELETE /api/auth/codex`          | Delete the Worker's local credentials and pending login |
+| `POST /api/sessions`              | Create a conversation                                   |
+| `GET /api/sessions/:id`           | Read the latest conversation view                       |
+| `POST /api/sessions/:id/messages` | Submit `{content, requestId}`                           |
+| `POST /api/sessions/:id/abort`    | Abort current and queued work                           |
 
 Logout does not revoke the grant at OpenAI or cancel an already-authorized model request. Abort active sessions before disconnecting if you need work to stop.
 
@@ -97,11 +97,17 @@ Hono and Cloudflare Durable Objects remain native hosts. They run Effects at HTT
 - This is single-owner software. Anyone with `API_TOKEN` can use your subscription, run sandbox commands, and read conversations. There is no multi-user authorization, rate limiter, browser UI, or public sandbox preview.
 - Worker storage holds OAuth secrets. Protect access to the Cloudflare account and local `.wrangler` data. Logs and transcript responses redact known tokens and OAuth fields while retaining diagnostic messages.
 
+## Code quality
+
+`npm run check` runs oxfmt, Oxlint (warnings fail), and TypeScript, including in CI. Use `npm run format` to format files and `npm run lint:fix` for safe lint autofixes; run lint autofix before formatting.
+
+All generic and Effect rules from [anti-slop](https://github.com/dmmulroy/anti-slop) are enabled in `oxlint.config.ts`. The plugin is vendored in `tools/oxlint/anti-slop/`, with its source revision and licenses recorded there. Vendored rules, generated output and installed agent tooling are excluded from lint and formatting. Keep `oxlint` and `@oxlint/plugins` on the same exact version when upgrading.
+
 ## Verification
 
 ```sh
-npm run check         # TypeScript
-npm test              # login client, workerd protocols and Effect lifecycle tests
+npm run check         # oxfmt, Oxlint + anti-slop, TypeScript
+npm test              # tooling enforcement, login client, workerd and Effect lifecycle tests
 npm run test:sandbox  # native Container + Files integration, requires Docker
 npm run build         # deployment dry run including Docker image build
 ```

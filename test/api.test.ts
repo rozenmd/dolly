@@ -11,7 +11,15 @@ describe("Hono Worker in workerd", () => {
     expect(await response.json()).toEqual({ ok: true });
   });
   it("rejects unauthenticated access to every protected operation", async () => {
-    for (const [path, method] of [["auth/codex", "GET"], ["auth/codex", "POST"], ["auth/codex", "DELETE"], ["sessions", "POST"], ["sessions/missing", "GET"], ["sessions/missing/messages", "POST"], ["sessions/missing/abort", "POST"]]) {
+    for (const [path, method] of [
+      ["auth/codex", "GET"],
+      ["auth/codex", "POST"],
+      ["auth/codex", "DELETE"],
+      ["sessions", "POST"],
+      ["sessions/missing", "GET"],
+      ["sessions/missing/messages", "POST"],
+      ["sessions/missing/abort", "POST"],
+    ]) {
       expect((await SELF.fetch(`https://worker/api/${path}`, { method })).status).toBe(401);
     }
   });
@@ -21,13 +29,42 @@ describe("Hono Worker in workerd", () => {
     expect(await response.json()).toEqual({ error: "Connect your Codex subscription first" });
   });
   it("validates messages and returns 404 for unknown sessions", async () => {
-    for (const body of ["not json", JSON.stringify({ content: "" }), JSON.stringify({ content: "hello", requestId: "bad" })]) {
-      expect((await SELF.fetch("https://worker/api/sessions/missing/messages", { method: "POST", headers, body })).status).toBe(400);
+    for (const body of [
+      "not json",
+      JSON.stringify({ content: "" }),
+      JSON.stringify({ content: "hello", requestId: "bad" }),
+    ]) {
+      expect(
+        (
+          await SELF.fetch("https://worker/api/sessions/missing/messages", {
+            method: "POST",
+            headers,
+            body,
+          })
+        ).status,
+      ).toBe(400);
     }
+
     expect((await SELF.fetch("https://worker/api/sessions/missing", { headers })).status).toBe(404);
-    expect((await SELF.fetch("https://worker/api/sessions/missing/messages", { method: "POST", headers, body: JSON.stringify({ content: "hello", requestId: crypto.randomUUID() }) })).status).toBe(404);
+    expect(
+      (
+        await SELF.fetch("https://worker/api/sessions/missing/messages", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ content: "hello", requestId: crypto.randomUUID() }),
+        })
+      ).status,
+    ).toBe(404);
   });
   it("bounds request bodies", async () => {
-    expect((await SELF.fetch("https://worker/api/sessions/missing/messages", { method: "POST", headers, body: "x".repeat(65_537) })).status).toBe(413);
+    expect(
+      (
+        await SELF.fetch("https://worker/api/sessions/missing/messages", {
+          method: "POST",
+          headers,
+          body: "x".repeat(65_537),
+        })
+      ).status,
+    ).toBe(413);
   });
 });

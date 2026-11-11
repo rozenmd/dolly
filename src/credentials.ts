@@ -6,7 +6,10 @@ import * as Semaphore from "effect/Semaphore";
 import { attempt } from "./operations";
 
 /** The same permit protects login, logout, and Pi's rotating-token refresh. */
-export class Account extends Context.Service<Account, Pick<Credentials, "storage" | "get" | "put" | "remove" | "locked">>()("pi-hard/Account") {}
+export class Account extends Context.Service<
+  Account,
+  Pick<Credentials, "storage" | "get" | "put" | "remove" | "locked">
+>()("pi-hard/Account") {}
 
 export class Credentials implements CredentialStore {
   private readonly permit = Semaphore.makeUnsafe(1);
@@ -19,13 +22,16 @@ export class Credentials implements CredentialStore {
   get = Effect.fn("Account.get")((providerId: string) =>
     attempt("credential.read", () => this.storage.get<Credential>(`credential:${providerId}`)).pipe(
       Effect.map(Option.fromUndefinedOr),
-    ));
+    ),
+  );
 
   put = Effect.fn("Account.put")((providerId: string, credential: Credential) =>
-    attempt("credential.write", () => this.storage.put(`credential:${providerId}`, credential)));
+    attempt("credential.write", () => this.storage.put(`credential:${providerId}`, credential)),
+  );
 
   remove = Effect.fn("Account.remove")((providerId: string) =>
-    attempt("credential.delete", () => this.storage.delete(`credential:${providerId}`)));
+    attempt("credential.delete", () => this.storage.delete(`credential:${providerId}`)),
+  );
 
   // Pi requires a Promise-based CredentialStore. Run only at that interop boundary.
   read(providerId: string) {
@@ -33,19 +39,37 @@ export class Credentials implements CredentialStore {
   }
 
   list() {
-    return Effect.runPromise(this.get("openai-codex").pipe(
-      Effect.map(Option.match({ onNone: () => [], onSome: (credential) => [{ providerId: "openai-codex", type: credential.type }] })),
-    ));
+    return Effect.runPromise(
+      this.get("openai-codex").pipe(
+        Effect.map(
+          Option.match({
+            onNone: () => [],
+            onSome: (credential) => [{ providerId: "openai-codex", type: credential.type }],
+          }),
+        ),
+      ),
+    );
   }
 
-  modify(providerId: string, fn: (current: Credential | undefined) => Promise<Credential | undefined>) {
-    const self = this;
-    return Effect.runPromise(this.locked(Effect.gen(function*() {
-      const current = yield* self.get(providerId);
-      const next = yield* attempt("credential.modify", () => fn(Option.getOrUndefined(current)));
-      if (next) yield* self.put(providerId, next);
-      return next ?? Option.getOrUndefined(current);
-    })));
+  modify(
+    providerId: string,
+    fn: (current: Credential | undefined) => Promise<Credential | undefined>,
+  ) {
+    return Effect.runPromise(
+      this.locked(
+        Effect.gen({ self: this }, function* () {
+          const current = yield* this.get(providerId);
+
+          const next = yield* attempt("credential.modify", () =>
+            fn(Option.getOrUndefined(current)),
+          );
+
+          if (next) yield* this.put(providerId, next);
+
+          return next ?? Option.getOrUndefined(current);
+        }),
+      ),
+    );
   }
 
   delete(providerId: string) {
