@@ -1,6 +1,6 @@
 # pi-hard
 
-A personal coding-agent API on Cloudflare Workers, using Hono, Pi Durable 1.5.2, Cloudflare Sandbox 1.0.3, and a ChatGPT/Codex subscription. No OpenAI API key is required.
+A personal coding-agent API on Cloudflare Workers, using Hono, Effect 4.0.0-rc.112, Pi Durable 1.5.2, Cloudflare Sandbox 1.0.3, and a ChatGPT/Codex subscription. No OpenAI API key is required.
 
 ## Run locally
 
@@ -81,6 +81,12 @@ The deployed secret and the local `API_TOKEN` used by the login client must matc
 
 `CODEX_MODEL` in `wrangler.jsonc` selects the model for new conversations. It must be present in the pinned Pi Codex provider catalog and available to your subscription. Requests use the subscription-backed Codex Responses endpoint over SSE, not the billed OpenAI API endpoint.
 
+## Effect architecture
+
+Effect owns API workflows, schema validation, the Codex device protocol, credential serialization, timeouts, stream and process cleanup, and the login client. `Account`, `CodexProtocol`, and `AgentApi` are explicit services wired with Layers. Owned request and upstream schemas use Effect Schema, not Zod.
+
+Hono and Cloudflare Durable Objects remain native hosts. They run Effects at HTTP, RPC and Pi callback boundaries. Pi still owns durable task scheduling and transcript storage; Effect fibers do not replace Pi's recovery mechanism. Credential locking uses one Effect semaphore per account object, shared with Pi's Promise-based credential adapter. Scoped finalizers stop transcript watches and cancel sandbox readers and processes.
+
 ## Ownership and limits
 
 - One `Agent` Durable Object owns the account credentials and Pi SQLite storage. Credential writes, refresh and logout share one serialized queue. Login grants survive object restarts; alarms resume pending Pi work.
@@ -95,12 +101,12 @@ The deployed secret and the local `API_TOKEN` used by the login client must matc
 
 ```sh
 npm run check         # TypeScript
-npm test              # workerd API, OAuth protocol and Pi adapter tests
+npm test              # login client, workerd protocols and Effect lifecycle tests
 npm run test:sandbox  # native Container + Files integration, requires Docker
 npm run build         # deployment dry run including Docker image build
 ```
 
-The ordinary tests stub OpenAI only. They run Hono, Durable Objects, SQLite, credential locking, Pi generation and the Codex SSE adapter in workerd, including crash recovery and duplicate prompt admission. Container integration checks actual execution, file reads and isolation. No test uses a real subscription. A successful live login and model/tool round trip remain the final deployment smoke test.
+The ordinary tests stub OpenAI only. They run Hono, Durable Objects, SQLite, credential locking, Pi generation and the Codex SSE adapter in workerd, including crash recovery and duplicate prompt admission. Effect tests cover interruption cleanup, permit release and TestClock-driven expiry. The login client runs against an authenticated loopback fixture. Container integration checks actual execution, file reads and isolation. No test uses a real subscription. A successful live login and model/tool round trip remain the final deployment smoke test.
 
 ## References
 

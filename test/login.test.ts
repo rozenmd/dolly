@@ -41,8 +41,8 @@ describe("Codex device login", () => {
     const result = await auth();
     expect(await result.json()).toEqual({ state: "connected" });
     const exchange = fetch.mock.calls.at(-1);
-    expect(exchange?.[0]).toBe("https://auth.openai.com/oauth/token");
-    expect(String(exchange?.[1]?.body)).toContain("code_verifier=private-verifier");
+    expect(String(exchange?.[0])).toBe("https://auth.openai.com/oauth/token");
+    expect(await new Response(exchange?.[1]?.body).text()).toContain("code_verifier=private-verifier");
     const created = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
     expect(created.status).toBe(201);
     const { id } = await created.json<{ id: string }>();
@@ -51,6 +51,14 @@ describe("Codex device login", () => {
     expect((await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })).status).toBe(200);
     expect(await (await SELF.fetch("https://worker/api/auth/codex", { method: "DELETE", headers })).json()).toEqual({ state: "not_connected" });
     expect(await (await auth()).json()).toEqual({ state: "not_connected" });
+  });
+
+  it("releases RPC handles so an idle account can be evicted cleanly", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => json({ device_auth_id: "device", user_code: "CODE", interval: 5 }));
+    const response = await SELF.fetch("https://worker/api/auth/codex", { method: "POST", headers });
+    expect(await response.json()).toMatchObject({ state: "awaiting_code" });
+    await evictDurableObject(env.AGENT.getByName("owner"));
+    expect(await (await auth()).json()).toMatchObject({ state: "awaiting_code" });
   });
 
   it("backs off on slow_down and expires old attempts", async () => {

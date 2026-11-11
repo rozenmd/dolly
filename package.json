@@ -7,7 +7,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "check": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "node --test scripts/*.test.mjs && vitest run",
     "build": "wrangler deploy --dry-run",
     "login": "node --env-file-if-exists=.dev.vars scripts/connect.mjs",
     "test:sandbox": "vitest run --config vitest.sandbox.config.ts"
@@ -18,8 +18,8 @@
     "@earendil-works/pi-ai": "1.5.2",
     "@earendil-works/pi-durable": "1.5.2",
     "@earendil-works/pi-schema": "1.5.2",
-    "hono": "4.13.18",
-    "zod": "4.6.7"
+    "effect": "4.0.0-rc.112",
+    "hono": "4.13.18"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.7.0",

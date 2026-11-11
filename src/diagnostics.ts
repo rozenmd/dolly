@@ -12,6 +12,10 @@ export function redact(text: string, secrets: readonly string[] = []): string {
 
 export function exceptionDetails(error: unknown, secrets: readonly string[] = []) {
   return error instanceof Error
-    ? { name: error.name, message: redact(error.message, secrets), stack: redact(error.stack ?? "", secrets) }
+    ? {
+        name: error.name,
+        message: redact(typeof error.message === "string" ? error.message : String(error), secrets),
+        stack: redact(typeof error.stack === "string" ? error.stack : "", secrets),
+      }
     : { message: redact(String(error), secrets) };
 }

@@ -5,39 +5,46 @@ import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-code
 import { configure, createRegistry, defineExtension, Harness, section, type ConversationId, type ToolRegistration, type Wake } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { obj, str } from "@earendil-works/pi-schema";
-import { Credentials } from "./credentials";
-import { CodexLogin } from "./codex-login";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Semaphore from "effect/Semaphore";
+import { Account, Credentials } from "./credentials";
+import { CodexProtocol, startLogin, pollLogin, logout } from "./codex-login";
 import { exceptionDetails, redact } from "./diagnostics";
+import { attempt, rpc, OperationError } from "./operations";
 import type { Env } from "./env";
 
+/** Native Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
 export class Agent extends DurableObject<Env> {
   private harness!: Harness;
   private readonly credentials: Credentials;
-  private readonly login: CodexLogin;
-  private alarmWrites: Promise<void> = Promise.resolve();
+  private readonly services: Layer.Layer<Account | CodexProtocol>;
+  private readonly alarmPermit = Semaphore.makeUnsafe(1);
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.credentials = new Credentials(ctx.storage);
-    this.login = new CodexLogin(ctx.storage, this.credentials);
-    void ctx.blockConcurrencyWhile(() => this.initialize());
+    this.services = Layer.mergeAll(Layer.succeed(Account, this.credentials), CodexProtocol.layer);
+    void ctx.blockConcurrencyWhile(() => Effect.runPromise(this.initialize()));
   }
 
-  private async initialize() {
-    await this.ctx.storage.setAlarm(Date.now() + 60_000);
+  private initialize = Effect.fn("Agent.initialize")(function*(this: Agent) {
+    yield* this.arm({ active: true });
     const models = createModels({ credentials: this.credentials });
     const provider = openaiCodexProvider();
     const oauth = provider.auth.oauth;
-    if (!oauth) throw new Error("Codex provider must support OAuth");
+    if (!oauth) return yield* Effect.die("Codex provider must support OAuth");
     models.setProvider({ ...provider, auth: { oauth: {
       ...oauth,
-      refresh: async (credential, signal) => {
-        try {
-          return await oauth.refresh(credential, signal);
-        } catch (error) {
-          throw new Error(exceptionDetails(error, [credential.access, credential.refresh]).message);
-        }
-      },
+      refresh: (credential, signal) => Effect.runPromise(Effect.tryPromise({
+        try: () => oauth.refresh(credential, signal),
+        catch: (cause) => {
+          const details = exceptionDetails(cause, [credential.access, credential.refresh]);
+          return new OperationError({ operation: "codex.refresh", message: details.message, details });
+        },
+      })),
     } } });
     const shell = {
       name: "shell",
@@ -45,18 +52,22 @@ export class Agent extends DurableObject<Env> {
       parameters: obj({ command: str() }),
       replay: "unsafe",
       executionMode: "sequential",
-      execute: async ({ command }: { command: string }, api) => ({
-        output: [{ type: "text", text: JSON.stringify(await this.env.SANDBOX.getByName(String(api.conversationId)).run(command)) }],
-      }),
+      execute: ({ command }: { command: string }, api) => Effect.runPromise(
+        rpc("sandbox.shell", async () => await this.env.SANDBOX.getByName(String(api.conversationId)).run(command)).pipe(
+          Effect.map((result) => ({ output: [{ type: "text", text: JSON.stringify(result) }] })),
+        ),
+      ),
     } satisfies ToolRegistration;
     const readFile = {
       name: "read_file",
       description: "Read a UTF-8 file in this conversation's sandbox, maximum 64 KiB. Relative paths use /workspace.",
       parameters: obj({ path: str() }),
       replay: "safe",
-      execute: async ({ path }: { path: string }, api) => ({
-        output: [{ type: "text", text: await this.env.SANDBOX.getByName(String(api.conversationId)).readFile(path.startsWith("/") ? path : `/workspace/${path}`) }],
-      }),
+      execute: ({ path }: { path: string }, api) => Effect.runPromise(
+        rpc("sandbox.readFile", async () => await this.env.SANDBOX.getByName(String(api.conversationId)).readFile(path.startsWith("/") ? path : `/workspace/${path}`)).pipe(
+          Effect.map((text) => ({ output: [{ type: "text", text }] })),
+        ),
+      ),
     } satisfies ToolRegistration;
     const extension = defineExtension({
       name: "sandbox",
@@ -65,8 +76,8 @@ export class Agent extends DurableObject<Env> {
     });
     const registry = createRegistry();
     registry.install(extension);
-    const storage = await openDurableObjectSqliteStorage(this.ctx.storage);
-    this.harness = await Harness.open(storage, {
+    const storage = yield* attempt("pi.storage.open", () => openDurableObjectSqliteStorage(this.ctx.storage));
+    this.harness = yield* attempt("pi.open", () => Harness.open(storage, {
       models,
       registry,
       settings: { extensions: [extension], stream: { transport: "sse", timeoutMs: 120_000 } },
@@ -76,79 +87,98 @@ export class Agent extends DurableObject<Env> {
         maxTurns: 20,
         tools: [shell, readFile],
       }),
-      onWake: (wake) => { void this.arm(wake).catch(() => this.ctx.abort("Alarm persistence failed")); },
-      onReport: ({ error, ...report }) => {
-        void this.credentials.read("openai-codex").then((credential) => {
-          const secrets = credential?.type === "oauth" ? [credential.access, credential.refresh] : [];
-          console.error(JSON.stringify({ event: "agent_failure", ...report, error: exceptionDetails(error, secrets) }));
-        });
+      onWake: (wake) => {
+        void Effect.runPromise(this.arm(wake).pipe(
+          Effect.tapError((error) => Effect.logError({ event: "alarm_write_failed", operation: error.operation, details: error.details })),
+        )).catch(() => this.ctx.abort("Alarm persistence failed"));
       },
-    }, BACKGROUND_CONTEXT);
+      onReport: ({ error, ...report }) => {
+        void Effect.runPromise(this.credentials.get("openai-codex").pipe(
+          Effect.flatMap((credential) => {
+            const value = Option.getOrUndefined(credential);
+            return Effect.logError({ event: "agent_failure", ...report, error: exceptionDetails(error, value?.type === "oauth" ? [value.access, value.refresh] : []) });
+          }),
+          Effect.catch((cause) => Effect.logError({ event: "diagnostics_failed", error: exceptionDetails(cause) })),
+        ));
+      },
+    }, BACKGROUND_CONTEXT));
     void this.harness.closed.then((end) => {
       if (end.kind === "failed") this.ctx.abort("Harness storage failed");
     });
-    await this.arm(this.harness.wake());
+    yield* this.arm(this.harness.wake());
     this.harness.resume();
+  });
+
+  private arm = Effect.fn("Agent.arm")(function*(this: Agent, wake: Wake) {
+    yield* this.alarmPermit.withPermit(Effect.gen({ self: this }, function*() {
+      const now = yield* Clock.currentTimeMillis;
+      const at = wake.active ? Math.min(now + 60_000, wake.at ?? Infinity) : wake.at;
+      yield* at === undefined
+        ? attempt("alarm.delete", () => this.ctx.storage.deleteAlarm())
+        : attempt("alarm.write", () => this.ctx.storage.setAlarm(at));
+    }));
+  });
+
+  override alarm() {
+    return Effect.runPromise(Effect.gen({ self: this }, function*() {
+      yield* this.arm({ ...this.harness.wake(), active: true });
+      this.harness.resume();
+      yield* this.arm(this.harness.wake());
+    }));
   }
 
-  private arm(wake: Wake) {
-    const next = this.alarmWrites.then(async () => {
-      const at = wake.active ? Math.min(Date.now() + 60_000, wake.at ?? Infinity) : wake.at;
-      if (at === undefined) await this.ctx.storage.deleteAlarm();
-      else await this.ctx.storage.setAlarm(at);
-    });
-    this.alarmWrites = next.catch(() => undefined);
-    return next;
+  startLogin() { return Effect.runPromise(Effect.provide(startLogin, this.services)); }
+  pollLogin() { return Effect.runPromise(Effect.provide(pollLogin, this.services)); }
+  logout() { return Effect.runPromise(Effect.provide(logout, this.services)); }
+
+  createSession() {
+    return Effect.runPromise(Effect.gen({ self: this }, function*() {
+      if (Option.isNone(yield* this.credentials.get("openai-codex"))) return { error: "Connect your Codex subscription first" };
+      const conversation = yield* attempt("pi.conversation.create", () => this.harness.createConversation({ ownership: { kind: "ownerless" } }, BACKGROUND_CONTEXT));
+      const id = crypto.randomUUID();
+      yield* attempt("session.write", () => this.ctx.storage.put(`session:${id}`, conversation.id));
+      return { id };
+    }));
   }
 
-  override async alarm() {
-    await this.arm({ ...this.harness.wake(), active: true });
-    this.harness.resume();
-    await this.arm(this.harness.wake());
+  private conversation = Effect.fn("Agent.conversation")(function*(this: Agent, id: string) {
+    const conversationId = yield* attempt("session.read", () => this.ctx.storage.get<ConversationId>(`session:${id}`));
+    if (conversationId === undefined) return Option.none();
+    return Option.fromUndefinedOr(yield* attempt("pi.conversation.read", () => this.harness.conversation(conversationId, BACKGROUND_CONTEXT)));
+  });
+
+  prompt(id: string, content: string, requestId: string) {
+    return Effect.runPromise(Effect.gen({ self: this }, function*() {
+      const conversation = yield* this.conversation(id);
+      if (Option.isNone(conversation)) return undefined;
+      if (Option.isNone(yield* this.credentials.get("openai-codex"))) return { error: "Connect your Codex subscription first" };
+      yield* this.arm({ active: true });
+      const submission = yield* attempt("pi.submit", () => conversation.value.submit({ type: "input", content, requestId, whenBusy: "followUp" }, BACKGROUND_CONTEXT));
+      return { submissionId: submission.id };
+    }));
   }
 
-  async startLogin() { return await this.login.start(); }
-  async pollLogin() { return await this.login.poll(); }
-  async logout() { return await this.login.logout(); }
-
-  async createSession() {
-    if (!await this.credentials.read("openai-codex")) return { error: "Connect your Codex subscription first" };
-    const conversation = await this.harness.createConversation({ ownership: { kind: "ownerless" } }, BACKGROUND_CONTEXT);
-    const id = crypto.randomUUID();
-    await this.ctx.storage.put(`session:${id}`, conversation.id);
-    return { id };
+  transcript(id: string) {
+    return Effect.runPromise(Effect.gen({ self: this }, function*() {
+      const conversation = yield* this.conversation(id);
+      if (Option.isNone(conversation)) return undefined;
+      return yield* Effect.acquireUseRelease(
+        attempt("pi.watch", () => conversation.value.watch(BACKGROUND_CONTEXT)),
+        (view) => this.credentials.get("openai-codex").pipe(Effect.map((credential) => {
+          const value = Option.getOrUndefined(credential);
+          return redact(JSON.stringify(view.value), value?.type === "oauth" ? [value.access, value.refresh] : []);
+        })),
+        (view) => attempt("pi.watch.stop", () => view.stop()).pipe(Effect.orDie),
+      );
+    }));
   }
 
-  private async conversation(id: string) {
-    const conversationId = await this.ctx.storage.get<ConversationId>(`session:${id}`);
-    return conversationId === undefined ? undefined : this.harness.conversation(conversationId, BACKGROUND_CONTEXT);
-  }
-
-  async prompt(id: string, content: string, requestId: string) {
-    const conversation = await this.conversation(id);
-    if (!conversation) return undefined;
-    if (!await this.credentials.read("openai-codex")) return { error: "Connect your Codex subscription first" };
-    await this.arm({ active: true });
-    const submission = await conversation.submit({ type: "input", content, requestId, whenBusy: "followUp" }, BACKGROUND_CONTEXT);
-    return { submissionId: submission.id };
-  }
-
-  async transcript(id: string) {
-    const conversation = await this.conversation(id);
-    if (!conversation) return undefined;
-    const view = await conversation.watch(BACKGROUND_CONTEXT);
-    try {
-      const credential = await this.credentials.read("openai-codex");
-      return redact(JSON.stringify(view.value), credential?.type === "oauth" ? [credential.access, credential.refresh] : []);
-    } finally {
-      await view.stop();
-    }
-  }
-
-  async abort(id: string) {
-    const conversation = await this.conversation(id);
-    if (!conversation) return undefined;
-    await conversation.abort(BACKGROUND_CONTEXT);
-    return { state: "aborted" };
+  abort(id: string) {
+    return Effect.runPromise(Effect.gen({ self: this }, function*() {
+      const conversation = yield* this.conversation(id);
+      if (Option.isNone(conversation)) return undefined;
+      yield* attempt("pi.abort", () => conversation.value.abort(BACKGROUND_CONTEXT));
+      return { state: "aborted" };
+    }));
   }
 }
