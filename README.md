@@ -4,11 +4,14 @@ A Cloudflare Access-protected personal coding-agent API on Cloudflare Workers, u
 
 ## Deploy to Cloudflare
 
-Use Node.js 24.22.2 (pinned in `.node-version` and CI), a running Docker engine to build the container image, and a paid Cloudflare Workers account.
+Use Node.js 24.22.2 and pnpm 12.18.0 (pinned in `.node-version` and `package.json`), a running Docker engine to build the container image, and a paid Cloudflare Workers account.
+
+Install pnpm using the [official instructions](https://pnpm.io/installation). With Node.js already installed:
 
 ```sh
-npm ci
-npx cf auth login
+npm install --global pnpm@12.18.0
+pnpm install --frozen-lockfile
+pnpm exec cf auth login
 ```
 
 For first-time setup, create a private secrets file and generate an API token:
@@ -22,7 +25,7 @@ Save the generated value as `API_TOKEN` in `.dev.vars`. Keep that file private. 
 
 ```sh
 # First deployment only: upload the configured API token.
-npm run deploy -- --secrets-file .dev.vars
+pnpm run deploy --secrets-file .dev.vars
 ```
 
 ### Require Cloudflare Access
@@ -32,7 +35,7 @@ The first deployment refuses API calls until Access is configured. Before connec
 1. In Cloudflare, enable [Access protection for this Worker's production `workers.dev` URL](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/#manage-access-to-workersdev). Protect the entire hostname, not just one API path. In Zero Trust, restrict the application's Allow policy to your identity or approved users; do not use an Everyone or Bypass policy.
 2. For the login script and `curl`, create or reuse an Access service token. Add a **Service Auth** policy to this application that includes only that token. A service token is a machine credential, separate from your Codex subscription and the Worker's `API_TOKEN`.
 3. Copy the Access application's audience (AUD) tag and your team domain into `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` in `cloudflare.config.ts`. The team domain is a hostname such as `your-team.cloudflareaccess.com`, without `https://` or a path. Keep `ACCESS_LOCAL_DEV` set to `"false"` for deployments.
-4. Redeploy with `npm run deploy`. The Worker verifies the Access JWT's RS256 signature, issuer, audience and expiration on every `/api/*` request, in addition to requiring `API_TOKEN`. Missing configuration, missing/forged tokens and failed certificate lookups cannot authorize API access.
+4. Redeploy with `pnpm run deploy`. The Worker verifies the Access JWT's RS256 signature, issuer, audience and expiration on every `/api/*` request, in addition to requiring `API_TOKEN`. Missing configuration, missing/forged tokens and failed certificate lookups cannot authorize API access.
 
 Preview URLs are disabled in the configuration. If you add a custom domain, protect that entire hostname with Access too, and either protect or disable the alternate `workers.dev` route (`workersDev: false`). Never leave an alternate public hostname or preview unprotected. The Worker-side JWT check also prevents those routes from accepting requests with only the API token.
 
@@ -43,20 +46,20 @@ Save your approved service token in a separate local file:
 test -f .env.access || cp .env.access.example .env.access
 ```
 
-Fill in `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` in `.env.access`. It is ignored by Git and loaded by `npm run login`. Do not upload this file with `--secrets-file`: these credentials belong to your client, not the Worker. Keep existing service credentials instead of creating a new token for each deployment.
+Fill in `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` in `.env.access`. It is ignored by Git and loaded by `pnpm run login`. Do not upload this file with `--secrets-file`: these credentials belong to your client, not the Worker. Keep existing service credentials instead of creating a new token for each deployment.
 
 Set `API_URL` to the Access-protected HTTPS Worker URL printed by deployment, then connect your Codex subscription:
 
 ```sh
 export API_URL=https://pi-hard.your-subdomain.workers.dev
-npm run login
+pnpm run login
 ```
 
 The login client reads `API_TOKEN` from `.dev.vars` and the Access service credentials from `.env.access`, then connects to the deployed Worker. Open the printed OpenAI URL and enter the one-time code. Enable device-code authentication in your ChatGPT security settings if OpenAI requires it. The client polls until connected. Access depends on your subscription's Codex entitlement and usage limits.
 
 This creates a fresh login for this Worker. Do not copy an existing Codex `auth.json` or share a refresh token with another process. OpenAI rotates refresh tokens, and two independent refresh owners can invalidate each other's login.
 
-For later deployments, run `npm run deploy` without `--secrets-file` to preserve the deployed secret. The deployed secret and the `API_TOKEN` used by the login client must match. No deployment is performed by the test or build commands.
+For later deployments, run `pnpm run deploy` without `--secrets-file` to preserve the deployed secret. The deployed secret and the `API_TOKEN` used by the login client must match. No deployment is performed by the test or build commands.
 
 `cloudflare.config.ts` owns Worker bindings, SQLite Durable Object exports, observability, and the native Sandbox container definition. The pinned `cf` CLI loads it for development and deployment; Wrangler remains only its underlying bundler, with no hand-maintained Wrangler configuration file. Cloudflare's programmatic configuration is currently in open beta.
 
@@ -159,7 +162,7 @@ Aborting a parent also stops all descendants and pending deliveries. Aborting do
 To develop locally after installing dependencies and configuring `.dev.vars`, start the Worker with Docker running:
 
 ```sh
-npm run dev -- --var ACCESS_LOCAL_DEV:true
+pnpm run dev --var ACCESS_LOCAL_DEV:true
 ```
 
 This command bypasses JWT verification only for this local development invocation; the API bearer token is still required. Never deploy with `ACCESS_LOCAL_DEV` enabled or put that override in `.dev.vars`. The automated Worker tests use the same explicit bypass except for the Access authentication tests.
@@ -168,7 +171,7 @@ In another terminal, explicitly select the local Worker and connect its Codex lo
 
 ```sh
 export API_URL=http://localhost:8787
-npm run login
+pnpm run login
 ```
 
 Local and deployed Durable Object storage are separate; each environment needs its own subscription login. Use the same API examples with this local `API_URL`. Set `API_URL` back to your deployed HTTPS URL when returning to the deployed Worker.
@@ -191,17 +194,19 @@ Hono and Cloudflare Durable Objects remain native hosts. They run Effects at HTT
 
 ## Code quality
 
-`npm run check` runs oxfmt, Oxlint (warnings fail), and TypeScript, including in CI. Use `npm run format` to format files and `npm run lint:fix` for safe lint autofixes; run lint autofix before formatting.
+`pnpm-workspace.yaml` permits dependency install scripts only for esbuild and workerd. New dependencies with unreviewed install scripts fail installation until approved or explicitly blocked.
+
+`pnpm run check` runs oxfmt, Oxlint (warnings fail), and TypeScript, including in CI. Use `pnpm run format` to format files and `pnpm run lint:fix` for safe lint autofixes; run lint autofix before formatting.
 
 All generic and Effect rules from [anti-slop](https://github.com/dmmulroy/anti-slop) are enabled in `oxlint.config.ts`. The plugin is vendored in `tools/oxlint/anti-slop/`, with its source revision and licenses recorded there. Vendored rules, generated output and installed agent tooling are excluded from lint and formatting. Keep `oxlint` and `@oxlint/plugins` on the same exact version when upgrading.
 
 ## Verification
 
 ```sh
-npm run check         # oxfmt, Oxlint + anti-slop, TypeScript
-npm test              # config, tooling, login client, workerd and Effect lifecycle tests
-npm run test:sandbox  # native Container + Files integration, requires Docker
-npm run build         # deployment dry run including Docker image build
+pnpm run check         # oxfmt, Oxlint + anti-slop, TypeScript
+pnpm test               # config, tooling, login client, workerd and Effect lifecycle tests
+pnpm run test:sandbox  # native Container + Files integration, requires Docker
+pnpm run build         # deployment dry run including Docker image build
 ```
 
 The ordinary tests stub OpenAI only. They run Hono, Durable Objects, SQLite, credential locking, Pi generation and the Codex SSE adapter in workerd, including crash recovery and duplicate prompt admission. Coordination tests exercise model-driven delegation and waiting, restart during a wait, inherited and overridden models, child-scoped messaging, recursive cancellation, depth/width/delivery limits, and unanswered child results. Effect tests cover interruption cleanup, permit release and TestClock-driven expiry. The login client runs against an authenticated loopback fixture. Container integration checks actual execution, file reads and isolation. The current Vitest plugin only prepares native containers through its legacy loader, so sandbox tests generate an ignored `.sandbox-test.wrangler.json` from `cloudflare.config.ts` using Cloudflare's converter. This is test-only compatibility output, not another configuration source. Access tests generate RSA keys and verify signed JWTs against a fixture JWKS, including rejection of missing configuration, forged signatures, wrong issuers/audiences and expired tokens. The login-client fixture verifies both Access service headers without exposing them. No test uses a real subscription or creates a Cloudflare Access policy. A successful live login and model/tool round trip remain the final deployment smoke test.

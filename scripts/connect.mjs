@@ -87,7 +87,7 @@ const connect = Effect.gen(function* () {
 
   if (result.state !== "connected")
     return yield* new LoginError({
-      message: `Login ended with state: ${result.state}. Run npm run login to start again.`,
+      message: `Login ended with state: ${result.state}. Run pnpm run login to start again.`,
     });
   yield* Effect.logInfo("Codex subscription connected. Credentials stay in the Worker.");
 });
