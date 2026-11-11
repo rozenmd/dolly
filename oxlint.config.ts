@@ -15,6 +15,7 @@ export default defineConfig({
     ".windsurf/**",
     ".agent-sources/**",
     ".wrangler/**",
+    ".cloudflare/**",
     "dist/**",
     "tools/oxlint/anti-slop/**",
   ],

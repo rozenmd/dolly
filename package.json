@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev": "cf dev",
+    "deploy": "cf deploy",
     "check": "npm run format:check && npm run lint && npm run typecheck",
     "test": "node --test scripts/*.test.mjs && vitest run",
-    "build": "wrangler deploy --dry-run",
+    "build": "cf deploy --dry-run",
     "login": "node --env-file-if-exists=.dev.vars scripts/connect.mjs",
     "test:sandbox": "vitest run --config vitest.sandbox.config.ts",
     "format": "oxfmt --write .",
@@ -30,6 +30,7 @@
     "@cloudflare/vitest-plugin": "1.7.0",
     "@cloudflare/workers-types": "5.20261110.1",
     "@oxlint/plugins": "1.93.0",
+    "cf": "1.0.0-beta.29",
     "oxfmt": "0.78.0",
     "oxlint": "1.93.0",
     "typescript": "7.0.2",
@@ -37,6 +38,6 @@
     "wrangler": "4.160.0"
   },
   "engines": {
-    "node": ">=22.19"
+    "node": ">=24.22.2 <25"
   }
 }

@@ -4,7 +4,7 @@ A personal coding-agent API on Cloudflare Workers, using Hono, Effect 4.0.0-rc.1
 
 ## Run locally
 
-Use Node.js 22.19 or newer and a running Docker engine. Cloudflare's container runtime also needs a paid Workers account for deployment.
+Use Node.js 24.22.2 (pinned in `.node-version` and CI) and a running Docker engine. Cloudflare's container runtime also needs a paid Workers account for deployment.
 
 ```sh
 npm ci
@@ -37,8 +37,12 @@ export API_URL=http://localhost:8787
 # Set API_TOKEN in your shell without committing it.
 
 curl -sS "$API_URL/api/sessions" \
-  -H "Authorization: Bearer $API_TOKEN" -X POST
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-6-sol"}'
 ```
+
+The response includes `id` and the selected `model`. The optional `model` must be in Pi's pinned Codex catalog; unknown models return `400`. For example, `gpt-6-luna`, `gpt-6-sol`, and `gpt-6.1-terra` are supported by this version. Your subscription must also allow the selected model. An empty body or `{}` uses `CODEX_MODEL` from `cloudflare.config.ts`. Selection is saved with the conversation, survives restarts, and does not change other sessions.
 
 Use the returned `id`:
 
@@ -71,15 +75,17 @@ Logout does not revoke the grant at OpenAI or cancel an already-authorized model
 ## Deploy
 
 ```sh
-npx wrangler login
-npx wrangler secret put API_TOKEN
-npm run deploy
+npx cf auth login
+# First deployment only: upload the token already configured in .dev.vars.
+npm run deploy -- --secrets-file .dev.vars
 API_URL=https://your-worker.workers.dev npm run login
 ```
 
-The deployed secret and the local `API_TOKEN` used by the login client must match. Keep an already-configured token rather than generating another on every deploy. Local and deployed Durable Object storage are separate; each environment needs its own subscription login. No deployment is performed by the test or build commands.
+For later deployments, run `npm run deploy` without `--secrets-file` to preserve the deployed secret. The deployed secret and the local `API_TOKEN` used by the login client must match. Keep an already-configured token rather than generating another on every deploy. Local and deployed Durable Object storage are separate; each environment needs its own subscription login. No deployment is performed by the test or build commands.
 
-`CODEX_MODEL` in `wrangler.jsonc` selects the model for new conversations. It must be present in the pinned Pi Codex provider catalog and available to your subscription. Requests use the subscription-backed Codex Responses endpoint over SSE, not the billed OpenAI API endpoint.
+`cloudflare.config.ts` owns Worker bindings, SQLite Durable Object exports, observability, and the native Sandbox container definition. The pinned `cf` CLI loads it for development and deployment; Wrangler remains only its underlying bundler, with no separate Wrangler configuration file. Cloudflare's programmatic configuration is currently in open beta.
+
+`CODEX_MODEL` in `cloudflare.config.ts` selects the default model for new conversations; a session request's `model` overrides it. It must be present in the pinned Pi Codex provider catalog and available to your subscription. Requests use the subscription-backed Codex Responses endpoint over SSE, not the billed OpenAI API endpoint.
 
 ## Effect architecture
 
@@ -107,7 +113,7 @@ All generic and Effect rules from [anti-slop](https://github.com/dmmulroy/anti-s
 
 ```sh
 npm run check         # oxfmt, Oxlint + anti-slop, TypeScript
-npm test              # tooling enforcement, login client, workerd and Effect lifecycle tests
+npm test              # config, tooling, login client, workerd and Effect lifecycle tests
 npm run test:sandbox  # native Container + Files integration, requires Docker
 npm run build         # deployment dry run including Docker image build
 ```

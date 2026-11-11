@@ -28,6 +28,28 @@ describe("Hono Worker in workerd", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({ error: "Connect your Codex subscription first" });
   });
+  it("rejects malformed session requests and unknown Codex models before creating a session", async () => {
+    for (const body of [
+      "not json",
+      "null",
+      "[]",
+      JSON.stringify({ model: 42 }),
+      JSON.stringify({ model: null }),
+      JSON.stringify({ model: "" }),
+      JSON.stringify({ model: "not-a-codex-model" }),
+    ]) {
+      const response = await SELF.fetch("https://worker/api/sessions", {
+        method: "POST",
+        headers,
+        body,
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: "Expected an optional model from the Codex catalog",
+      });
+    }
+  });
   it("validates messages and returns 404 for unknown sessions", async () => {
     for (const body of [
       "not json",

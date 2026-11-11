@@ -10,5 +10,11 @@
     "lib": ["ES2024"],
     "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "vitest*.config.ts", "oxlint.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "vitest*.config.ts",
+    "oxlint.config.ts",
+    "cloudflare.config.ts"
+  ]
 }

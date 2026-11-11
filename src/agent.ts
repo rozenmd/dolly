@@ -19,6 +19,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Semaphore from "effect/Semaphore";
+import * as Schema from "effect/Schema";
+import { CodexModel } from "./models";
 import { Account, Credentials } from "./credentials";
 import { CodexProtocol, startLogin, pollLogin, logout } from "./codex-login";
 import { exceptionDetails, redact } from "./diagnostics";
@@ -217,14 +219,33 @@ export class Agent extends DurableObject<Env> {
     return Effect.runPromise(Effect.provide(logout, this.services));
   }
 
-  createSession() {
+  createSession(model?: string) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
         if (Option.isNone(yield* this.credentials.get("openai-codex")))
           return { error: "Connect your Codex subscription first" };
 
+        const modelId = yield* Schema.decodeUnknownEffect(CodexModel)(
+          model ?? this.env.CODEX_MODEL,
+        ).pipe(
+          Effect.mapError(
+            () =>
+              new OperationError({
+                operation: "session.model",
+                message: "Unknown Codex model",
+                details: "Select a model from the pinned Pi Codex catalog",
+              }),
+          ),
+        );
+
         const conversation = yield* attempt("pi.conversation.create", () =>
-          this.harness.createConversation({ ownership: { kind: "ownerless" } }, BACKGROUND_CONTEXT),
+          this.harness.createConversation(
+            {
+              ownership: { kind: "ownerless" },
+              agent: { model: { provider: "openai-codex", modelId } },
+            },
+            BACKGROUND_CONTEXT,
+          ),
         );
 
         const id = crypto.randomUUID();
@@ -232,7 +253,7 @@ export class Agent extends DurableObject<Env> {
           this.ctx.storage.put(`session:${id}`, conversation.id),
         );
 
-        return { id };
+        return { id, model: modelId };
       }),
     );
   }

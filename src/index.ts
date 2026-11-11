@@ -6,6 +6,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { AgentApi } from "./api";
+import { NewSession } from "./models";
 import { OperationError } from "./operations";
 import { exceptionDetails, redact } from "./diagnostics";
 import type { Env } from "./env";
@@ -114,8 +115,17 @@ app.post("/api/sessions", (c) =>
   handle(
     c,
     Effect.gen(function* () {
+      const parsed = yield* Effect.tryPromise(() => c.req.text()).pipe(
+        Effect.flatMap((body) =>
+          Schema.decodeUnknownEffect(Schema.fromJsonString(NewSession))(body || "{}"),
+        ),
+        Effect.mapError(
+          () => new InvalidInput({ message: "Expected an optional model from the Codex catalog" }),
+        ),
+      );
+
       const agent = yield* AgentApi;
-      const result = yield* agent.createSession;
+      const result = yield* agent.createSession(parsed.model);
 
       return c.json(result, "error" in result ? 409 : 201);
     }),

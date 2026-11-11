@@ -11,7 +11,9 @@ function makeAgentApi(env: Env) {
     startLogin: rpc("agent.login.start", async () => await agent.startLogin()),
     pollLogin: rpc("agent.login.poll", async () => await agent.pollLogin()),
     logout: rpc("agent.logout", async () => await agent.logout()),
-    createSession: rpc("agent.session.create", async () => await agent.createSession()),
+    createSession: Effect.fn("AgentApi.createSession")((model?: string) =>
+      rpc("agent.session.create", async () => await agent.createSession(model)),
+    ),
     transcript: Effect.fn("AgentApi.transcript")((id: string) =>
       rpc("agent.transcript", async () => await agent.transcript(id)),
     ),
