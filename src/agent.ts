@@ -20,6 +20,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
+import * as Predicate from "effect/Predicate";
 import { CodexModel } from "./models";
 import { Account, Credentials } from "./credentials";
 import { CodexProtocol, startLogin, pollLogin, logout } from "./codex-login";
@@ -309,10 +310,21 @@ export class Agent extends DurableObject<Env> {
               Effect.map((credential) => {
                 const value = Option.getOrUndefined(credential);
 
-                return redact(
-                  JSON.stringify(view.value),
-                  value?.type === "oauth" ? [value.access, value.refresh] : [],
-                );
+                const secrets = value?.type === "oauth" ? [value.access, value.refresh] : [];
+
+                return JSON.stringify(view.value, (key, item) => {
+                  if (!Predicate.isString(item)) return item;
+
+                  // Preserve field-based redaction for credentials other than the current grant.
+                  if (
+                    /^(?:access_token|refresh_token|id_token|code_verifier|device_auth_id|user_code|authorization_code)$/i.test(
+                      key,
+                    )
+                  )
+                    return "[redacted]";
+
+                  return redact(item, secrets);
+                });
               }),
             ),
           (view) => attempt("pi.watch.stop", () => view.stop()).pipe(Effect.orDie),

@@ -111,7 +111,11 @@ it.each([
     expect(await other.json()).toMatchObject({ model: "gpt-6-luna" });
     // Creating another session and recovering the object must not change this model.
     await abortAllDurableObjects();
-    const body = JSON.stringify({ content: "Say hello", requestId: crypto.randomUUID() });
+
+    const body = JSON.stringify({
+      content: "Say hello. Use Bearer abc",
+      requestId: crypto.randomUUID(),
+    });
 
     const submit = () =>
       SELF.fetch(`https://worker/api/sessions/${id}/messages`, { method: "POST", headers, body });
@@ -134,7 +138,12 @@ it.each([
     expect(fetch).toHaveBeenCalledTimes(1);
     await abortAllDurableObjects();
     const transcript = await SELF.fetch(`https://worker/api/sessions/${id}`, { headers });
-    const text = await transcript.text();
+    expect(transcript.status).toBe(200);
+    expect(transcript.headers.get("Content-Type")).toContain("application/json");
+    const snapshot = await transcript.json();
+    const text = JSON.stringify(snapshot);
+    expect(text).toContain("Use Bearer [redacted]");
+    expect(text).not.toContain("Bearer abc");
     expect(text).toContain("Hello from Codex");
     expect(text).not.toContain(access);
     expect(text).not.toContain("test-refresh");
