@@ -15,6 +15,7 @@
     "test/**/*.ts",
     "vitest*.config.ts",
     "oxlint.config.ts",
-    "cloudflare.config.ts"
+    "cloudflare.config.ts",
+    "scripts/**/*.ts"
   ]
 }

@@ -83,7 +83,7 @@ API_URL=https://your-worker.workers.dev npm run login
 
 For later deployments, run `npm run deploy` without `--secrets-file` to preserve the deployed secret. The deployed secret and the local `API_TOKEN` used by the login client must match. Keep an already-configured token rather than generating another on every deploy. Local and deployed Durable Object storage are separate; each environment needs its own subscription login. No deployment is performed by the test or build commands.
 
-`cloudflare.config.ts` owns Worker bindings, SQLite Durable Object exports, observability, and the native Sandbox container definition. The pinned `cf` CLI loads it for development and deployment; Wrangler remains only its underlying bundler, with no separate Wrangler configuration file. Cloudflare's programmatic configuration is currently in open beta.
+`cloudflare.config.ts` owns Worker bindings, SQLite Durable Object exports, observability, and the native Sandbox container definition. The pinned `cf` CLI loads it for development and deployment; Wrangler remains only its underlying bundler, with no hand-maintained Wrangler configuration file. Cloudflare's programmatic configuration is currently in open beta.
 
 `CODEX_MODEL` in `cloudflare.config.ts` selects the default model for new conversations; a session request's `model` overrides it. It must be present in the pinned Pi Codex provider catalog and available to your subscription. Requests use the subscription-backed Codex Responses endpoint over SSE, not the billed OpenAI API endpoint.
 
@@ -118,7 +118,7 @@ npm run test:sandbox  # native Container + Files integration, requires Docker
 npm run build         # deployment dry run including Docker image build
 ```
 
-The ordinary tests stub OpenAI only. They run Hono, Durable Objects, SQLite, credential locking, Pi generation and the Codex SSE adapter in workerd, including crash recovery and duplicate prompt admission. Effect tests cover interruption cleanup, permit release and TestClock-driven expiry. The login client runs against an authenticated loopback fixture. Container integration checks actual execution, file reads and isolation. No test uses a real subscription. A successful live login and model/tool round trip remain the final deployment smoke test.
+The ordinary tests stub OpenAI only. They run Hono, Durable Objects, SQLite, credential locking, Pi generation and the Codex SSE adapter in workerd, including crash recovery and duplicate prompt admission. Effect tests cover interruption cleanup, permit release and TestClock-driven expiry. The login client runs against an authenticated loopback fixture. Container integration checks actual execution, file reads and isolation. The current Vitest plugin only prepares native containers through its legacy loader, so sandbox tests generate an ignored `.sandbox-test.wrangler.json` from `cloudflare.config.ts` using Cloudflare's converter. This is test-only compatibility output, not another configuration source. No test uses a real subscription. A successful live login and model/tool round trip remain the final deployment smoke test.
 
 ## References
 
