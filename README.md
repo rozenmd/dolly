@@ -72,6 +72,46 @@ A prompt returns `202` after durable admission, not after generation. Poll the s
 
 Logout does not revoke the grant at OpenAI or cancel an already-authorized model request. Abort active sessions before disconnecting if you need work to stop.
 
+## Child agents
+
+Agents can delegate through `spawn_task`, `send_to_session`, `list_children`, `task_status`, `wait_for_task`, and `cancel_task`. Children have their own conversation and sandbox; they receive only the supplied prompt, not a copy of the parent's transcript or files. The child inherits its parent's model unless an optional `model` selects another model from the Codex catalog.
+
+```text
+Parent session
+  | spawn_task({ content, model? })
+  +-- Child session + separate sandbox
+  |     +-- Grandchild session + separate sandbox
+  |
+  | wait_for_task({ taskId })
+  <--- Answer or failure receipt
+```
+
+Spawning and sending return immediately. Each returns a `taskId` for that message's answer. `wait_for_task` waits for the receipt; `task_status` checks without waiting. There is no automatic follow-up turn when a child finishes: the parent must explicitly wait or check. Child creation, message delivery and results survive Durable Object restarts, using Pi's durable tasks and ownership edges. Interrupted model requests may be retried; prompts and child creation are deduplicated.
+
+The server enforces these limits, including for API clients:
+
+- Three child levels below a root (root depth is zero).
+- Eight children per session over its lifetime, not just eight running at once.
+- 32 child-message deliveries per session, including each child's initial prompt.
+- Child answers in task receipts retain the first 16,384 characters; read the child's transcript for its recent full answer.
+
+These bound delegation but are not a spending limit. All sessions share your subscription's usage allowance. Creating another root starts a new set of limits.
+
+The same operations are available over authenticated HTTP:
+
+| Route                                               | Operation                                                                           |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `POST /api/sessions/:id/children`                   | Spawn with `{content, requestId, model?}`; returns `202` with `{id, model, taskId}` |
+| `GET /api/sessions/:id/children`                    | List direct children                                                                |
+| `POST /api/sessions/:id/children/:childId/messages` | Queue `{content, requestId}` for a direct child; returns `202` with `{taskId}`      |
+| `GET /api/sessions/:id/tasks/:taskId`               | Poll a message's status and answer/failure receipt                                  |
+| `GET /api/sessions/:childId`                        | Read the child's transcript                                                         |
+| `POST /api/sessions/:childId/abort`                 | Stop that child and all descendants, including queued deliveries                    |
+
+Treat both session and task IDs as opaque strings. HTTP `requestId` values must be UUIDs: retrying the same request returns its original receipt, while reusing it with different content or options returns `409`. Unknown models and invalid inputs return `400`; delegation limits return `409`. Agents can message, inspect and cancel only their own direct children; the bearer-token holder can access all sessions.
+
+Aborting a parent also stops all descendants and pending deliveries. Aborting does not delete conversations or files, and a stopped child can receive new messages. New work admitted after an abort's snapshot is not part of that cancellation. Children cannot read a parent's workspace; container files remain ephemeral.
+
 ## Deploy
 
 ```sh
@@ -118,7 +158,7 @@ npm run test:sandbox  # native Container + Files integration, requires Docker
 npm run build         # deployment dry run including Docker image build
 ```
 
-The ordinary tests stub OpenAI only. They run Hono, Durable Objects, SQLite, credential locking, Pi generation and the Codex SSE adapter in workerd, including crash recovery and duplicate prompt admission. Effect tests cover interruption cleanup, permit release and TestClock-driven expiry. The login client runs against an authenticated loopback fixture. Container integration checks actual execution, file reads and isolation. The current Vitest plugin only prepares native containers through its legacy loader, so sandbox tests generate an ignored `.sandbox-test.wrangler.json` from `cloudflare.config.ts` using Cloudflare's converter. This is test-only compatibility output, not another configuration source. No test uses a real subscription. A successful live login and model/tool round trip remain the final deployment smoke test.
+The ordinary tests stub OpenAI only. They run Hono, Durable Objects, SQLite, credential locking, Pi generation and the Codex SSE adapter in workerd, including crash recovery and duplicate prompt admission. Coordination tests exercise model-driven delegation and waiting, restart during a wait, inherited and overridden models, child-scoped messaging, recursive cancellation, depth/width/delivery limits, and unanswered child results. Effect tests cover interruption cleanup, permit release and TestClock-driven expiry. The login client runs against an authenticated loopback fixture. Container integration checks actual execution, file reads and isolation. The current Vitest plugin only prepares native containers through its legacy loader, so sandbox tests generate an ignored `.sandbox-test.wrangler.json` from `cloudflare.config.ts` using Cloudflare's converter. This is test-only compatibility output, not another configuration source. No test uses a real subscription. A successful live login and model/tool round trip remain the final deployment smoke test.
 
 ## References
 

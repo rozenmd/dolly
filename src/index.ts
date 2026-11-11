@@ -6,7 +6,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { AgentApi } from "./api";
-import { NewSession } from "./models";
+import { ChildRequest, NewSession } from "./models";
 import { OperationError } from "./operations";
 import { exceptionDetails, redact } from "./diagnostics";
 import type { Env } from "./env";
@@ -128,6 +128,81 @@ app.post("/api/sessions", (c) =>
       const result = yield* agent.createSession(parsed.model);
 
       return c.json(result, "error" in result ? 409 : 201);
+    }),
+  ),
+);
+
+app.get("/api/sessions/:id/children", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const agent = yield* AgentApi;
+      const result = yield* agent.children(c.req.param("id"));
+
+      return result ? c.json(result) : c.json({ error: "Session not found" }, 404);
+    }),
+  ),
+);
+
+app.post("/api/sessions/:id/children", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const parsed = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+        Effect.flatMap(
+          Schema.decodeUnknownEffect(
+            Schema.Struct({ ...ChildRequest.fields, requestId: Message.fields.requestId }),
+          ),
+        ),
+        Effect.mapError(
+          () =>
+            new InvalidInput({
+              message: "Expected content, a UUID requestId and an optional Codex model",
+            }),
+        ),
+      );
+
+      const agent = yield* AgentApi;
+      const result = yield* agent.spawnChild(c.req.param("id"), parsed);
+
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 409 : 202);
+    }),
+  ),
+);
+
+app.post("/api/sessions/:id/children/:childId/messages", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const parsed = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(Message)),
+        Effect.mapError(
+          () => new InvalidInput({ message: "Expected content and a UUID requestId" }),
+        ),
+      );
+
+      const agent = yield* AgentApi;
+      const result = yield* agent.sendChild(c.req.param("id"), c.req.param("childId"), parsed);
+
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 409 : 202);
+    }),
+  ),
+);
+
+app.get("/api/sessions/:id/tasks/:taskId", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const agent = yield* AgentApi;
+      const result = yield* agent.childTask(c.req.param("id"), c.req.param("taskId"));
+
+      return result && !("error" in result)
+        ? c.json(result)
+        : c.json({ error: "Task not found" }, 404);
     }),
   ),
 );

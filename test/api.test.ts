@@ -19,6 +19,10 @@ describe("Hono Worker in workerd", () => {
       ["sessions/missing", "GET"],
       ["sessions/missing/messages", "POST"],
       ["sessions/missing/abort", "POST"],
+      ["sessions/missing/children", "GET"],
+      ["sessions/missing/children", "POST"],
+      ["sessions/missing/children/child/messages", "POST"],
+      ["sessions/missing/tasks/task", "GET"],
     ]) {
       expect((await SELF.fetch(`https://worker/api/${path}`, { method })).status).toBe(401);
     }

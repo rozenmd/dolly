@@ -21,7 +21,8 @@ import * as Option from "effect/Option";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Predicate from "effect/Predicate";
-import { CodexModel } from "./models";
+import { Coordination, coordinationTasks, indexSession } from "./coordination";
+import { ChildRequest, ChildMessage, CodexModel } from "./models";
 import { Account, Credentials } from "./credentials";
 import { CodexProtocol, startLogin, pollLogin, logout } from "./codex-login";
 import { exceptionDetails, redact } from "./diagnostics";
@@ -109,9 +110,13 @@ export class Agent extends DurableObject<Env> {
         ),
     } satisfies ToolRegistration;
 
+    const coordination = new Coordination(() => this.harness);
+    const tools = [shell, readFile, ...coordination.tools()];
+
     const extension = defineExtension({
       name: "sandbox",
-      tools: [shell, readFile],
+      tools,
+      tasks: coordinationTasks,
       sections: [
         section(
           "preamble",
@@ -136,13 +141,15 @@ export class Agent extends DurableObject<Env> {
           models,
           registry,
           settings: { extensions: [extension], stream: { transport: "sse", timeoutMs: 120_000 } },
-          conversationCreated: (tx, conversation) =>
-            configure(tx, conversation.id, {
+          conversationCreated: async (tx, conversation) => {
+            await indexSession(tx, conversation.id);
+            await configure(tx, conversation.id, {
               model: { provider: "openai-codex", modelId: this.env.CODEX_MODEL },
               thinkingLevel: "low",
               maxTurns: 20,
-              tools: [shell, readFile],
-            }),
+              tools,
+            });
+          },
           onWake: (wake) => {
             void Effect.runPromise(
               this.arm(wake).pipe(
@@ -264,11 +271,13 @@ export class Agent extends DurableObject<Env> {
       this.ctx.storage.get<ConversationId>(`session:${id}`),
     );
 
-    if (conversationId === undefined) return Option.none();
+    const resolved = conversationId ?? (yield* new Coordination(() => this.harness).resolve(id));
+
+    if (resolved === undefined) return Option.none();
 
     return Option.fromUndefinedOr(
       yield* attempt("pi.conversation.read", () =>
-        this.harness.conversation(conversationId, BACKGROUND_CONTEXT),
+        this.harness.conversation(resolved, BACKGROUND_CONTEXT),
       ),
     );
   });
@@ -333,13 +342,95 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
+  children(id: string) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const parent = yield* this.conversation(id);
+
+        if (Option.isNone(parent)) return undefined;
+
+        return yield* new Coordination(() => this.harness).list(parent.value.id);
+      }),
+    );
+  }
+
+  spawnChild(
+    id: string,
+    input: typeof ChildRequest.Type,
+  ): Promise<{ id: string; model: string; taskId: string } | { error: string } | undefined> {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const parsed = yield* Schema.decodeUnknownEffect(ChildRequest)(input);
+        const parent = yield* this.conversation(id);
+
+        if (Option.isNone(parent)) return undefined;
+
+        if (Option.isNone(yield* this.credentials.get("openai-codex")))
+          return { error: "Connect your Codex subscription first" };
+        yield* this.arm({ active: true });
+
+        return yield* new Coordination(() => this.harness).spawn(parent.value.id, parsed);
+      }),
+    );
+  }
+
+  sendChild(
+    id: string,
+    childId: string,
+    input: typeof ChildMessage.Type,
+  ): Promise<{ taskId: string } | { error: string } | undefined> {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const parsed = yield* Schema.decodeUnknownEffect(ChildMessage)(input);
+        const parent = yield* this.conversation(id);
+
+        if (Option.isNone(parent)) return undefined;
+
+        if (Option.isNone(yield* this.credentials.get("openai-codex")))
+          return { error: "Connect your Codex subscription first" };
+        yield* this.arm({ active: true });
+
+        return yield* new Coordination(() => this.harness).send(parent.value.id, childId, parsed);
+      }),
+    );
+  }
+
+  childTask(id: string, taskId: string) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const parent = yield* this.conversation(id);
+
+        if (Option.isNone(parent)) return undefined;
+
+        const receipt = yield* new Coordination(() => this.harness).receipt(
+          parent.value.id,
+          taskId,
+          false,
+        );
+
+        const credential = Option.getOrUndefined(yield* this.credentials.get("openai-codex"));
+        const secrets = credential?.type === "oauth" ? [credential.access, credential.refresh] : [];
+
+        return "result" in receipt && receipt.result?.status === "answered"
+          ? {
+              ...receipt,
+              result: { ...receipt.result, text: redact(receipt.result.text, secrets) },
+            }
+          : receipt;
+      }),
+    );
+  }
+
   abort(id: string) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
         const conversation = yield* this.conversation(id);
 
         if (Option.isNone(conversation)) return undefined;
-        yield* attempt("pi.abort", () => conversation.value.abort(BACKGROUND_CONTEXT));
+
+        yield* attempt("pi.abort", () =>
+          conversation.value.abort(BACKGROUND_CONTEXT, { background: true }),
+        );
 
         return { state: "aborted" };
       }),
