@@ -1,0 +1,34 @@
+{
+  "name": "pi-hard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "wrangler deploy --dry-run",
+    "login": "node --env-file-if-exists=.dev.vars scripts/connect.mjs",
+    "test:sandbox": "vitest run --config vitest.sandbox.config.ts"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "1.0.3",
+    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2",
+    "@earendil-works/pi-schema": "1.5.2",
+    "hono": "4.13.18",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.7.0",
+    "@cloudflare/workers-types": "5.20261110.1",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0",
+    "wrangler": "4.160.0"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}
