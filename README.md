@@ -65,6 +65,44 @@ For later deployments, run `pnpm run deploy` without `--secrets-file` to preserv
 
 `CODEX_MODEL` in `cloudflare.config.ts` selects the default model for new conversations; a session request's `model` overrides it. It must be present in the pinned Pi Codex provider catalog and available to your subscription. Requests use the subscription-backed Codex Responses endpoint over SSE, not the billed OpenAI API endpoint.
 
+## Connect GitHub
+
+GitHub operations run in the Worker. The Linux sandbox stays offline and never receives App keys or installation tokens.
+
+After deployment and Access setup, load your existing client credentials as shown below, then request a setup link:
+
+```sh
+curl -sS "$API_URL/api/integrations/github/setup" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"owner":"your-account","ownerType":"personal","repositories":["your-account/your-repo"]}'
+```
+
+For an organization, use `"ownerType":"organization"`. This version connects one private App for one account, with up to 16 explicitly approved repositories. Open `setupUrl` in a browser signed into your Cloudflare Access application. Create the App, then open the returned `installUrl` and install it on **only selected repositories**, choosing those you approved. The browser setup and callback routes require Access; the API additionally requires the bearer token. No public callback bypass is needed.
+
+Setup links expire after one hour and survive Worker eviction. Repeating setup preserves an existing connection and returns its installation link without asking for credentials again. A consumed callback cannot be replayed. If conversion fails, request a fresh setup link; if GitHub created an unused App, remove it in GitHub settings before creating another. App private keys remain in Durable Object storage. Unused OAuth and webhook secrets are discarded, and short-lived installation tokens stay in Worker memory.
+
+New agent sessions have a `github` tool. It lists approved repositories, reads UTF-8 files up to 32 KiB, creates `pi-hard/*` branches, writes files up to 32 KiB with an expected file SHA, and opens pull requests. It cannot merge, write the default branch, or edit `.github/workflows/`. Use a new path without `sha` only when creating a file. Mutations are not automatically replayed after interruption; inspect GitHub before retrying an uncertain write.
+
+The same operations are available through `POST /api/integrations/github/execute`, with an `operation` object. For example:
+
+```json
+{
+  "operation": {
+    "action": "read_file",
+    "repository": "your-account/your-repo",
+    "path": "README.md",
+    "ref": "main"
+  }
+}
+```
+
+Other actions are `repositories`, `create_branch`, `write_file`, and `open_pull_request`; their shared contracts are in `src/github-contracts.ts`. `GET /api/integrations/github` returns connection metadata and the installation link, never credentials. Provider requests reject redirects, time out after 15 seconds, and cap response bodies at 1 MiB.
+
+App commits act as the App bot, not the person who installed it. With this repository's `rozenmd`-only CI policy, App-authored pushes do not start CI. Connected-user authorization is not included.
+
 ## Use the API
 
 Use the Access-protected deployed `API_URL`, your approved Access service token, and the same private bearer token configured on the Worker. Both authentication checks are required.

@@ -5,6 +5,7 @@ import { bodyLimit } from "hono/body-limit";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { githubRoutes } from "./github-routes";
 import { authorizeAccess } from "./access";
 import { AgentApi } from "./api";
 import { ChildRequest, NewSession } from "./models";
@@ -278,5 +279,7 @@ app.onError((error, c) => {
     }).pipe(Effect.as(c.json({ error: "Request failed; check Worker logs" }, 502))),
   );
 });
+
+app.route("/", githubRoutes);
 
 export default app;

@@ -24,6 +24,8 @@ import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Predicate from "effect/Predicate";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
+import { GitHub } from "./github";
+import { GitHubRequest, GitHubSetup, GitHubReply } from "./github-contracts";
 import { ChildRequest, ChildMessage, CodexModel } from "./models";
 import { Account, Credentials } from "./credentials";
 import { CodexProtocol, startLogin, pollLogin, logout } from "./codex-login";
@@ -35,13 +37,17 @@ import type { Env } from "./env";
 export class Agent extends DurableObject<Env> {
   private harness!: Harness;
   private readonly credentials: Credentials;
-  private readonly services: Layer.Layer<Account | CodexProtocol>;
+  private readonly services: Layer.Layer<Account | CodexProtocol | GitHub>;
   private readonly alarmPermit = Semaphore.makeUnsafe(1);
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.credentials = new Credentials(ctx.storage);
-    this.services = Layer.mergeAll(Layer.succeed(Account, this.credentials), CodexProtocol.layer);
+    this.services = Layer.mergeAll(
+      Layer.succeed(Account, this.credentials),
+      CodexProtocol.layer,
+      GitHub.layer(ctx.storage),
+    );
     void ctx.blockConcurrencyWhile(() => Effect.runPromise(this.initialize()));
   }
 
@@ -125,7 +131,31 @@ export class Agent extends DurableObject<Env> {
     } satisfies ToolRegistration;
 
     const coordination = new Coordination(() => this.harness);
-    const tools = [shell, readFile, ...coordination.tools()];
+    const githubSchema = Schema.toJsonSchemaDocument(GitHubRequest).schema;
+
+    if (!Predicate.isObject(githubSchema))
+      return yield* Effect.die("GitHub tool schema must be an object");
+
+    const githubTool = {
+      name: "github",
+      description:
+        "Operate on explicitly approved GitHub repositories without sandbox credentials. Read UTF-8 files, create pi-hard/* branches, write files with an expected sha, and open pull requests. Never merges or writes the default branch. Mutations are not automatically replayed; inspect GitHub after an interrupted write before trying again.",
+      parameters: githubSchema,
+      replay: "unsafe",
+      executionMode: "sequential",
+      execute: (input: typeof GitHubRequest.Type) =>
+        Effect.runPromise(
+          Schema.decodeUnknownEffect(GitHubRequest)(input).pipe(
+            Effect.orDie,
+            Effect.flatMap((parsed) => Effect.tryPromise(() => this.githubExecute(parsed))),
+            Effect.map((result) => ({
+              output: [{ type: "text" as const, text: JSON.stringify(result) }],
+            })),
+          ),
+        ),
+    } satisfies ToolRegistration;
+
+    const tools = [shell, readFile, githubTool, ...coordination.tools()];
 
     const extension = defineExtension({
       name: "sandbox",
@@ -228,6 +258,61 @@ export class Agent extends DurableObject<Env> {
         this.harness.resume();
         yield* this.arm(this.harness.wake());
       }),
+    );
+  }
+
+  private githubRun<A>(program: Effect.Effect<A, OperationError, GitHub>) {
+    return Effect.runPromise(
+      program.pipe(
+        Effect.provide(this.services),
+        Effect.catchTag("OperationError", (error) =>
+          Effect.logError({
+            event: "github_failed",
+            operation: error.operation,
+            error: exceptionDetails(error),
+            details: error.details,
+          }).pipe(Effect.as({ error: error.message })),
+        ),
+      ),
+    );
+  }
+
+  githubStatus() {
+    return this.githubRun(Effect.flatMap(GitHub, (github) => github.status));
+  }
+  githubStart(input: typeof GitHubSetup.Type, origin: string) {
+    return this.githubRun(
+      Schema.decodeUnknownEffect(GitHubSetup)(input).pipe(
+        Effect.orDie,
+        Effect.flatMap((parsed) =>
+          Effect.flatMap(GitHub, (github) => github.start(parsed, origin)),
+        ),
+      ),
+    );
+  }
+  githubManifest(state: string) {
+    return this.githubRun(Effect.flatMap(GitHub, (github) => github.manifest(state)));
+  }
+  githubComplete(state: string, code: string) {
+    return this.githubRun(Effect.flatMap(GitHub, (github) => github.complete(state, code)));
+  }
+  githubExecute(input: typeof GitHubRequest.Type): Promise<typeof GitHubReply.Type> {
+    return Effect.runPromise(
+      Schema.decodeUnknownEffect(GitHubRequest)(input).pipe(
+        Effect.orDie,
+        Effect.flatMap((parsed) => Effect.flatMap(GitHub, (github) => github.execute(parsed))),
+        Effect.provide(this.services),
+        Effect.catchTag("OperationError", (error) =>
+          Effect.logError({
+            event: "github_failed",
+            operation: error.operation,
+            error: exceptionDetails(error),
+            details: error.details,
+          }).pipe(
+            Effect.as({ ok: false as const, code: "provider_error", message: error.message }),
+          ),
+        ),
+      ),
     );
   }
 
