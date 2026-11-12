@@ -1,0 +1,8 @@
+{
+  "name": "pi-hard-ingress",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "wrangler": "4.160.0"
+  }
+}

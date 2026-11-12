@@ -7,6 +7,13 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { GitHubSetup, GitHubRequest, GitHubReply, Repository } from "./github-contracts";
+import {
+  WebhookSetup,
+  WebhookProfile,
+  verifyWebhook,
+  GitHubEvent,
+  WebhookUrl,
+} from "./github-webhook";
 import { exceptionDetails } from "./diagnostics";
 import { integrationJson } from "./integration-http";
 import { attempt, OperationError } from "./operations";
@@ -17,6 +24,7 @@ const App = Schema.Struct({
   id: Schema.Number,
   slug: Schema.NonEmptyString,
   pem: Schema.NonEmptyString,
+  webhook_secret: Schema.optional(Schema.NonEmptyString),
   owner: Schema.Struct({ login: Schema.String }),
 });
 
@@ -99,11 +107,12 @@ type GitHubBody =
       repositories: readonly string[];
       permissions: { contents: string; pull_requests: string; metadata: string };
     }
+  | { body: string }
   | { ref: string; sha: string }
   | { head: string; base: string; title: string; body: string }
   | { message: string; branch: string; content: string; sha?: string };
 
-function makeGitHub(storage: DurableObjectStorage) {
+function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
   const setupPermit = Semaphore.makeUnsafe(1);
   const tokens = new Map<string, { value: string; expires: number }>();
 
@@ -266,6 +275,8 @@ function makeGitHub(storage: DurableObjectStorage) {
   const manifest = Effect.fn("GitHub.manifest")(function* (state: string) {
     const value = yield* pending(state);
 
+    if (webhookUrl) yield* decode(WebhookUrl)(webhookUrl);
+
     const action =
       value.setup.ownerType === "organization"
         ? `https://github.com/organizations/${encodeURIComponent(value.setup.owner)}/settings/apps/new`
@@ -278,9 +289,12 @@ function makeGitHub(storage: DurableObjectStorage) {
         url: value.origin,
         public: false,
         redirect_url: `${value.origin}/setup/github/callback`,
-        default_permissions: Permissions,
-        default_events: [],
-        hook_attributes: { url: `${value.origin}/hooks/github`, active: false },
+        default_permissions: webhookUrl ? { ...Permissions, issues: "read" } : Permissions,
+        default_events: webhookUrl ? ["issue_comment"] : [],
+        hook_attributes: {
+          url: webhookUrl || `${value.origin}/hooks/github`,
+          active: Boolean(webhookUrl),
+        },
       },
     };
   });
@@ -431,12 +445,126 @@ function makeGitHub(storage: DurableObjectStorage) {
     }
   });
 
-  return { status, start, manifest, complete, execute };
+  const configureWebhook = Effect.fn("GitHub.configureWebhook")((input: typeof WebhookSetup.Type) =>
+    setupPermit.withPermit(
+      Effect.gen(function* () {
+        const connected = yield* read();
+        const previous = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
+        const saved = previous === undefined ? undefined : yield* decode(WebhookProfile)(previous);
+        const secret = input.secret ?? saved?.secret ?? connected.app.webhook_secret;
+
+        if (!secret || !webhookUrl)
+          return yield* new OperationError({
+            operation: "github.webhook.setup",
+            message: "Configure GITHUB_WEBHOOK_URL and a GitHub webhook secret first",
+            details: null,
+          });
+        yield* decode(WebhookUrl)(webhookUrl);
+        const installations: { repository: string; id: number }[] = [];
+        const token = yield* jwt(connected.app);
+
+        for (const repository of connected.repositories) {
+          const installation = yield* api(`/repos/${repository}/installation`, token).pipe(
+            Effect.flatMap(
+              decode(
+                Schema.Struct({
+                  id: Schema.Number,
+                  permissions: Schema.Struct({ issues: Schema.optional(Schema.String) }),
+                  events: Schema.Array(Schema.String),
+                }),
+              ),
+            ),
+          );
+
+          if (
+            !["read", "write"].includes(installation.permissions.issues ?? "") ||
+            !installation.events.includes("issue_comment")
+          )
+            return yield* new OperationError({
+              operation: "github.webhook.permissions",
+              message:
+                "Enable Issues read permission and Issue comments events in GitHub App settings, then approve installation changes",
+              details: { repository },
+            });
+          installations.push({ repository, id: installation.id });
+        }
+
+        yield* attempt("github.webhook.save", () =>
+          storage.put("github:webhook", { secret, senders: input.senders, installations }),
+        );
+
+        return { configured: true, url: webhookUrl, senders: input.senders };
+      }),
+    ),
+  );
+
+  const receiveWebhook = Effect.fn("GitHub.receiveWebhook")(function* (
+    body: ArrayBuffer,
+    signature: string,
+    event: string,
+  ) {
+    const raw = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
+
+    if (raw === undefined) return { status: 503 as const };
+    const profile = yield* decode(WebhookProfile)(raw);
+
+    return yield* verifyWebhook(profile, body, signature, event);
+  });
+
+  const reply = Effect.fn("GitHub.reply")(function* (event: typeof GitHubEvent.Type, text: string) {
+    const connected = yield* read();
+
+    if (
+      !connected.repositories.some((name) => name.toLowerCase() === event.repository.toLowerCase())
+    )
+      return yield* new OperationError({
+        operation: "github.reply",
+        message: "Repository is no longer approved",
+        details: null,
+      });
+    const token = yield* tokenFor(connected, event.repository, true);
+    const root = `/repos/${event.repository}/issues/${event.number}/comments`;
+    const marker = `<!-- pi-hard:comment:${event.commentId} -->`;
+
+    for (let page = 1; page <= 10; page++) {
+      const comments = yield* api(`${root}?per_page=100&page=${page}`, token).pipe(
+        Effect.flatMap(
+          decode(
+            Schema.Array(
+              Schema.Struct({ body: Schema.String, user: Schema.Struct({ login: Schema.String }) }),
+            ),
+          ),
+        ),
+      );
+
+      if (
+        comments.some(
+          (comment) =>
+            comment.user.login === `${connected.app.slug}[bot]` && comment.body.endsWith(marker),
+        )
+      )
+        return;
+
+      if (comments.length < 100) {
+        yield* api(root, token, { body: `${text.slice(0, 16_384)}\n\n${marker}` });
+
+        return;
+      }
+    }
+
+    return yield* new OperationError({
+      operation: "github.reply",
+      message: "Reply history exceeds safe deduplication limit (1000 comments)",
+      details: null,
+    });
+  });
+
+  return { status, start, manifest, complete, execute, configureWebhook, receiveWebhook, reply };
 }
 
 export class GitHub extends Context.Service<GitHub, ReturnType<typeof makeGitHub>>()(
   "pi-hard/GitHub",
 ) {
-  static readonly layer = (storage: DurableObjectStorage) =>
-    Layer.succeed(GitHub, makeGitHub(storage));
+  static readonly layer = (storage: DurableObjectStorage, webhookUrl = "") =>
+    Layer.succeed(GitHub, makeGitHub(storage, webhookUrl));
 }

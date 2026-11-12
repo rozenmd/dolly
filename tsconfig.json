@@ -16,6 +16,7 @@
     "vitest*.config.ts",
     "oxlint.config.ts",
     "cloudflare.config.ts",
+    "ingress/**/*.ts",
     "scripts/**/*.ts"
   ]
 }

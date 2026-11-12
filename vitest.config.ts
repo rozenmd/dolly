@@ -11,6 +11,7 @@ export default defineConfig({
         bindings: {
           API_TOKEN: "test-token-with-at-least-32-characters",
           ACCESS_LOCAL_DEV: "true",
+          GITHUB_WEBHOOK_URL: "https://ingress.example/hooks/github",
           CODEX_MODEL: "gpt-6-luna",
         },
         durableObjects: {

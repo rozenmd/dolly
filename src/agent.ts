@@ -24,6 +24,8 @@ import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Predicate from "effect/Predicate";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
+import { WebhookSetup } from "./github-webhook";
+import { admitGitHub, githubDelivery, GitHubThreads } from "./github-inbox";
 import { GitHub } from "./github";
 import { GitHubRequest, GitHubSetup, GitHubReply } from "./github-contracts";
 import { ChildRequest, ChildMessage, CodexModel } from "./models";
@@ -38,6 +40,11 @@ export class Agent extends DurableObject<Env> {
   private harness!: Harness;
   private readonly credentials: Credentials;
   private readonly services: Layer.Layer<Account | CodexProtocol | GitHub>;
+  private readonly githubTask = githubDelivery((event, text) =>
+    Effect.flatMap(GitHub, (github) => github.reply(event, text)).pipe(
+      Effect.provide(this.services),
+    ),
+  );
   private readonly alarmPermit = Semaphore.makeUnsafe(1);
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -46,7 +53,7 @@ export class Agent extends DurableObject<Env> {
     this.services = Layer.mergeAll(
       Layer.succeed(Account, this.credentials),
       CodexProtocol.layer,
-      GitHub.layer(ctx.storage),
+      GitHub.layer(ctx.storage, env.GITHUB_WEBHOOK_URL ?? ""),
     );
     void ctx.blockConcurrencyWhile(() => Effect.runPromise(this.initialize()));
   }
@@ -160,7 +167,7 @@ export class Agent extends DurableObject<Env> {
     const extension = defineExtension({
       name: "sandbox",
       tools,
-      tasks: coordinationTasks,
+      tasks: [...coordinationTasks, this.githubTask],
       sections: [
         section(
           "preamble",
@@ -311,6 +318,60 @@ export class Agent extends DurableObject<Env> {
           }).pipe(
             Effect.as({ ok: false as const, code: "provider_error", message: error.message }),
           ),
+        ),
+      ),
+    );
+  }
+
+  githubConfigureWebhook(input: typeof WebhookSetup.Type) {
+    return this.githubRun(Effect.flatMap(GitHub, (github) => github.configureWebhook(input)));
+  }
+
+  async githubThreads() {
+    const state = await this.harness.snapshot(GitHubThreads, BACKGROUND_CONTEXT);
+
+    return Promise.all(
+      Object.entries(state?.threads ?? {}).map(async ([thread, value]) => ({
+        thread,
+        id: String(value.id),
+        deliveries: await Promise.all(
+          Object.entries(value.events).map(async ([commentId, taskId]) => {
+            const task = await this.harness.getTask(taskId, BACKGROUND_CONTEXT);
+
+            return {
+              commentId,
+              taskId: String(taskId),
+              status: task?.state.status ?? "missing",
+              outcome: task?.state.status === "terminal" ? task.state.outcome.status : null,
+            };
+          }),
+        ),
+      })),
+    );
+  }
+
+  githubWebhook(body: ArrayBuffer, signature: string, event: string) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const verified = yield* Effect.flatMap(GitHub, (github) =>
+          github.receiveWebhook(body, signature, event),
+        );
+
+        if (verified.status !== 202) return verified;
+
+        if (Option.isNone(yield* this.credentials.get("openai-codex")))
+          return { status: 503 as const };
+        yield* this.arm({ active: true });
+
+        return yield* admitGitHub(this.harness, this.githubTask, verified.event);
+      }).pipe(
+        Effect.provide(this.services),
+        Effect.catchTag("OperationError", (error) =>
+          Effect.logError({
+            event: "github_ingress_failed",
+            error: exceptionDetails(error),
+            details: error.details,
+          }).pipe(Effect.as({ status: 503 as const })),
         ),
       ),
     );

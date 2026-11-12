@@ -7,6 +7,7 @@ export interface Env {
   ACCESS_AUD: string;
   ACCESS_LOCAL_DEV?: string;
   CODEX_MODEL: string;
+  GITHUB_WEBHOOK_URL?: string;
   AGENT: DurableObjectNamespace<Agent>;
   SANDBOX: DurableObjectNamespace<Sandbox>;
 }

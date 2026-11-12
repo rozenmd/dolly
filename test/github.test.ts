@@ -37,7 +37,7 @@ const app = {
   pem,
   client_id: "client-id",
   client_secret: "private-client-secret",
-  webhook_secret: "private-webhook-secret",
+  webhook_secret: "private-webhook-secret-at-least-32-characters",
   owner: { login: "example" },
 };
 
@@ -79,6 +79,7 @@ beforeEach(async () => {
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.delete("github:connected");
     await state.storage.delete("github:pending");
+    await state.storage.delete("github:webhook");
   });
 });
 
@@ -521,4 +522,82 @@ it("runs the registered github tool through Pi and persists its result without A
       await state.storage.delete("credential:openai-codex");
     });
   }
+});
+
+it("enables ingress in the manifest and configures allowed senders without replacing App credentials", async () => {
+  const started = await start();
+  const form = await (await SELF.fetch(started.url)).text();
+  expect(form).toContain("https://ingress.example/hooks/github");
+  expect(form).toContain("issue_comment");
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(app));
+  await SELF.fetch(
+    `https://worker/setup/github/callback?state=${started.state}&code=manifest-code`,
+  );
+  vi.restoreAllMocks();
+
+  let subscribed = true;
+
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    expect(String(url)).toBe("https://api.github.com/repos/example/project/installation");
+
+    return Response.json({
+      id: 7,
+      permissions: { issues: "read" },
+      events: subscribed ? ["issue_comment"] : [],
+    });
+  });
+
+  const configure = () =>
+    SELF.fetch("https://worker/api/integrations/github/webhook", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ senders: ["trusted"] }),
+    });
+
+  expect((await configure()).status).toBe(200);
+  expect((await configure()).status).toBe(200);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const connected = await state.storage.get<{ app: { pem: string; webhook_secret: string } }>(
+      "github:connected",
+    );
+
+    expect(connected?.app.pem).toBe(pem);
+
+    const profile = await state.storage.get<{
+      secret: string;
+      installations: { repository: string; id: number }[];
+    }>("github:webhook");
+
+    expect(profile?.secret).toBe(app.webhook_secret);
+    expect(profile?.installations).toEqual([{ repository, id: 7 }]);
+  });
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("github:connected", {
+      app: { id: app.id, slug: app.slug, pem, owner: app.owner },
+      repositories: [repository],
+    });
+    await state.storage.delete("github:webhook");
+  });
+  expect((await configure()).status).toBe(409);
+  expect(
+    (
+      await SELF.fetch("https://worker/api/integrations/github/webhook", {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ senders: ["trusted"], secret: app.webhook_secret }),
+      })
+    ).status,
+  ).toBe(200);
+  expect((await configure()).status).toBe(200);
+  subscribed = false;
+  expect((await configure()).status).toBe(409);
+  expect(
+    (
+      await SELF.fetch("https://worker/api/integrations/github/webhook", {
+        method: "PUT",
+        body: "{}",
+      })
+    ).status,
+  ).toBe(401);
 });

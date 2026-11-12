@@ -283,3 +283,5 @@ app.onError((error, c) => {
 app.route("/", githubRoutes);
 
 export default app;
+
+export { GitHubIngress } from "./github-ingress";

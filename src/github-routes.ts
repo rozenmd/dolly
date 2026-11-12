@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { authorizeAccess } from "./access";
+import { WebhookSetup } from "./github-webhook";
 import { GitHubRequest, GitHubSetup } from "./github-contracts";
 import { rpc } from "./operations";
 import type { Env } from "./env";
@@ -88,6 +89,40 @@ githubRoutes.post("/api/integrations/github/execute", async (c) => {
       ),
     ),
   );
+});
+
+githubRoutes.get("/api/integrations/github/threads", async (c) =>
+  c.json(
+    await Effect.runPromise(
+      rpc("github.threads", async () => await c.env.AGENT.getByName("owner").githubThreads()),
+    ),
+  ),
+);
+
+githubRoutes.put("/api/integrations/github/webhook", async (c) => {
+  const parsed = await Effect.runPromise(
+    Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(WebhookSetup)),
+      Effect.option,
+    ),
+  );
+
+  if (Option.isNone(parsed))
+    return c.json(
+      {
+        error: "Expected allowed senders and an optional webhook secret of at least 32 characters",
+      },
+      400,
+    );
+
+  const result = await Effect.runPromise(
+    rpc(
+      "github.webhook.configure",
+      async () => await c.env.AGENT.getByName("owner").githubConfigureWebhook(parsed.value),
+    ),
+  );
+
+  return c.json(result, "error" in result ? 409 : 200);
 });
 
 githubRoutes.get("/setup/github/callback", async (c) => {

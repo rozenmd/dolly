@@ -82,7 +82,7 @@ curl -sS "$API_URL/api/integrations/github/setup" \
 
 For an organization, use `"ownerType":"organization"`. This version connects one private App for one account, with up to 16 explicitly approved repositories. Open `setupUrl` in a browser signed into your Cloudflare Access application. Create the App, then open the returned `installUrl` and install it on **only selected repositories**, choosing those you approved. The browser setup and callback routes require Access; the API additionally requires the bearer token. No public callback bypass is needed.
 
-Setup links expire after one hour and survive Worker eviction. Repeating setup preserves an existing connection and returns its installation link without asking for credentials again. A consumed callback cannot be replayed. If conversion fails, request a fresh setup link; if GitHub created an unused App, remove it in GitHub settings before creating another. App private keys remain in Durable Object storage. Unused OAuth and webhook secrets are discarded, and short-lived installation tokens stay in Worker memory.
+Setup links expire after one hour and survive Worker eviction. Repeating setup preserves an existing connection and returns its installation link without asking for credentials again. A consumed callback cannot be replayed. If conversion fails, request a fresh setup link; if GitHub created an unused App, remove it in GitHub settings before creating another. App private keys remain in Durable Object storage. The webhook signing secret stays server-side; unused OAuth credentials are discarded, and short-lived installation tokens stay in Worker memory.
 
 New agent sessions have a `github` tool. It lists approved repositories, reads UTF-8 files up to 32 KiB, creates `pi-hard/*` branches, writes files up to 32 KiB with an expected file SHA, and opens pull requests. It cannot merge, write the default branch, or edit `.github/workflows/`. Use a new path without `sha` only when creating a file. Mutations are not automatically replayed after interruption; inspect GitHub before retrying an uncertain write.
 
@@ -102,6 +102,34 @@ The same operations are available through `POST /api/integrations/github/execute
 Other actions are `repositories`, `create_branch`, `write_file`, and `open_pull_request`; their shared contracts are in `src/github-contracts.ts`. `GET /api/integrations/github` returns connection metadata and the installation link, never credentials. Provider requests reject redirects, time out after 15 seconds, and cap response bodies at 1 MiB.
 
 App commits act as the App bot, not the person who installed it. With this repository's `rozenmd`-only CI policy, App-authored pushes do not start CI. Connected-user authorization is not included.
+
+### Receive GitHub PR commands
+
+The public webhook Worker is separate from the Access-protected API. Its only route is `POST /hooks/github`. It holds no credentials and calls the main Worker's named `GitHubIngress` entrypoint through a private service binding. The main hostname has no public webhook route.
+
+1. Deploy the updated main Worker with `pnpm run deploy`, preserving existing credentials. Then deploy the public receiver with `pnpm --dir ingress exec cf deploy`. Keep the main hostname protected by Access; the separate ingress hostname must accept GitHub requests without Access. Preview URLs remain disabled for both Workers.
+2. Set `GITHUB_WEBHOOK_URL` in `cloudflare.config.ts` to the ingress Worker's HTTPS URL ending in `/hooks/github`, then redeploy the main Worker. Do not put webhook secrets in configuration files or the public receiver.
+3. For a new GitHub App, the setup manifest enables the `issue_comment` event and the public webhook URL. For an existing App, update its webhook URL in GitHub App settings, enable webhooks, grant **Issues: Read-only**, and subscribe to **Issue comments**. Approve the updated permissions for the existing installation. Keep the existing App key and installation. If this deployment predates webhook-secret storage, set a new random secret of at least 32 characters in GitHub's webhook settings and supply that same secret once when configuring intake.
+4. Install the App on the approved repositories and connect Codex before enabling command intake. Configure the allowed GitHub users through the protected API:
+
+```sh
+curl -sS -X PUT "$API_URL/api/integrations/github/webhook" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"senders":["your-github-login"]}'
+```
+
+Only add `"secret":"your-webhook-secret"` to that JSON when no signing secret is stored yet, or when deliberately rotating it. Existing App credentials and an already-configured signing secret are preserved. Configuration verifies each approved repository's installation ID; repeat it after reinstalling the App to refresh those IDs.
+
+An allowed user can post `/pi Read README.md and explain the project` as a new comment on a PR in an approved repository. The command must start the comment. Issue comments without a PR, edits, bot comments, other events, and comments without `/pi` do not trigger agents. Repository, installation, and both comment-author and sender identity are checked after HMAC-SHA256 verification over the exact request bytes.
+
+Intake stores the conversation mapping, comment-ID receipt, and Pi delivery task together before returning `202`. It uses the signed comment ID rather than trusting the unsigned delivery header. Repeated deliveries resume the same task; additional commands on the same PR use the same conversation. Pi owns restart recovery and reply retries. Replies check the App bot's existing comment marker before posting, including after a lost response. GitHub comment visibility and deletion prevent a strict exactly-once guarantee.
+
+`GET /api/integrations/github/threads`, with the normal API authentication, lists conversation IDs and delivery status/outcomes. Open a conversation through the existing session API or abort it with the existing session abort route. Reply failures retain a failed task outcome after five attempts and diagnostic details in Worker logs.
+
+Payloads are capped at 256 KiB and command text at 16,384 characters. Intake permits 64 lifetime PR threads per deployment and 128 commands per thread; it returns `429` instead of deleting deduplication receipts when full. Unconfigured intake or a missing Codex connection returns `503`; invalid signatures return `401` and disallowed identities/repositories/installations return `403`. GitHub does not automatically retry failed deliveries: use **Redeliver** in the App's recent deliveries after fixing configuration or availability. An accepted task remains durable even if GitHub misses the acknowledgement.
 
 ## Use the API
 
