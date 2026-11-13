@@ -73,7 +73,7 @@ function request(assertion?: string, overrides: Partial<typeof env> = {}, author
 function certificates() {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     expect(String(url)).toBe(`https://${team}/cdn-cgi/access/certs`);
-    expect(init?.redirect).toBe("error");
+    expect(init?.redirect).toBe("manual");
 
     return Response.json({ keys: [publicKey] });
   });
@@ -128,6 +128,38 @@ it("fails closed on certificate errors without exposing assertions", async () =>
   const response = await request(jwt);
   expect(response.status).toBe(401);
   expect(await response.text()).not.toContain(jwt);
+});
+
+it("rejects certificate redirects without following them", async () => {
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    expect(String(url)).toBe(`https://${team}/cdn-cgi/access/certs`);
+    expect(init?.redirect).toBe("manual");
+
+    return new Response(null, {
+      status: 302,
+      headers: { Location: "https://attacker.example/keys" },
+    });
+  });
+
+  const response = await request(await sign(claims(), privateKey, "RS256"));
+  expect(response.status).toBe(401);
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it("accepts signed string audiences from Access service tokens without weakening validation", async () => {
+  certificates();
+  const payload = { ...claims(), aud: audience };
+  expect((await request(await sign(payload, privateKey, "RS256"))).status).toBe(404);
+
+  for (const invalid of [
+    { ...payload, aud: "other-application" },
+    { ...payload, iss: "https://other.cloudflareaccess.com" },
+    { ...payload, exp: 1 },
+  ]) {
+    expect((await request(await sign(invalid, privateKey, "RS256"))).status).toBe(401);
+  }
+
+  expect((await request(await sign(payload, "attacker-controlled-key", "HS256"))).status).toBe(401);
 });
 
 it("times out and aborts a stalled certificate fetch", async () => {
