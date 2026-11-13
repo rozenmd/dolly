@@ -17,6 +17,7 @@ export default defineConfig({
     ".wrangler/**",
     ".cloudflare/**",
     "dist/**",
+    "web/src/routeTree.gen.ts",
     "tools/oxlint/anti-slop/**",
   ],
   jsPlugins: [
