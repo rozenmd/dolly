@@ -22,7 +22,7 @@ import {
 } from "./lib/api";
 import { ago } from "./lib/time";
 
-const storageKey = "pi-hard.sessions.v1";
+const storageKey = "dolly.sessions.v1";
 
 export function WorkspaceApp() {
   const [auth, setAuth] = useState<AuthState | null>(null);
@@ -62,7 +62,7 @@ export function WorkspaceApp() {
     try {
       setAuth(await authState());
     } catch (cause) {
-      setAuthError(cause instanceof Error ? cause.message : "Could not reach pi-hard.");
+      setAuthError(cause instanceof Error ? cause.message : "Could not reach dolly.");
     }
   }
 
@@ -226,12 +226,12 @@ export function WorkspaceApp() {
       <main className="gate" id="main-content">
         <div className="gate-card">
           <span className="brand-mark large" aria-hidden="true">
-            π
+            D
           </span>
           {!auth ? (
             authError ? (
               <>
-                <h1>Can't reach pi-hard</h1>
+                <h1>Can't reach dolly</h1>
                 <p role="alert" className="error-text">
                   {authError}
                 </p>
@@ -246,12 +246,12 @@ export function WorkspaceApp() {
             )
           ) : !auth.github.connected ? (
             <>
-              <h1>Set up pi-hard</h1>
+              <h1>Set up dolly</h1>
               <GitHubSetup initialError={setupError} />
             </>
           ) : (
             <>
-              <h1>Sign in to pi-hard</h1>
+              <h1>Sign in to dolly</h1>
               <GitHubSignIn
                 settingsUrl={auth.github.settingsUrl}
                 firstRun={!auth.ownerClaimed}
@@ -305,7 +305,7 @@ export function WorkspaceApp() {
                 <ChevronRightIcon className="breadcrumb-chevron" />
               </>
             )}
-            <h1>{feed ? "Feed" : session ? session.title || "Untitled workspace" : "pi-hard"}</h1>
+            <h1>{feed ? "Feed" : session ? session.title || "Untitled workspace" : "dolly"}</h1>
           </div>
           <div className="header-actions">
             <IconButton label="New workspace" onClick={newWorkspace}>
@@ -350,7 +350,7 @@ export function WorkspaceApp() {
             ) : (
               <div className="empty-state">
                 <span className="brand-mark large" aria-hidden="true">
-                  π
+                  D
                 </span>
                 <h2>{codex === false ? "Sign in to ChatGPT" : "No workspace selected"}</h2>
                 <button type="button" className="primary-button" onClick={newWorkspace}>
@@ -710,7 +710,7 @@ function SettingsModal({
         </div>
       </form>
       <form onSubmit={saveAccess}>
-        <label htmlFor="settings-accounts">Accounts pi-hard can work in</label>
+        <label htmlFor="settings-accounts">Accounts dolly can work in</label>
         <Input
           id="settings-accounts"
           name="accounts"

@@ -160,7 +160,7 @@ export class Agent extends DurableObject<Env> {
     const githubTool = {
       name: "github",
       description:
-        "Operate on GitHub repositories accessible to the connected App installations without sandbox credentials. Read UTF-8 files, create pi-hard/* branches, write files with an expected sha, and open pull requests. Never merges or writes the default branch. Mutations are not automatically replayed; inspect GitHub after an interrupted write before trying again.",
+        "Operate on GitHub repositories accessible to the connected App installations without sandbox credentials. Read UTF-8 files, create dolly/* branches, write files with an expected sha, and open pull requests. Never merges or writes the default branch. Mutations are not automatically replayed; inspect GitHub after an interrupted write before trying again.",
       parameters: githubSchema,
       replay: "unsafe",
       executionMode: "sequential",

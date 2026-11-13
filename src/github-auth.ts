@@ -78,7 +78,7 @@ const post = Effect.fn("GitHubAuth.post")(
         headers: {
           Accept: "application/json",
           "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": "pi-hard",
+          "User-Agent": "dolly",
         },
         body: new URLSearchParams(body).toString(),
         redirect: "error",
@@ -265,7 +265,7 @@ function makeGitHubAuth(storage: DurableObjectStorage) {
             headers: {
               Accept: "application/vnd.github+json",
               Authorization: `Bearer ${token.value.access_token}`,
-              "User-Agent": "pi-hard",
+              "User-Agent": "dolly",
               "X-GitHub-Api-Version": "2022-11-28",
             },
             redirect: "error",
@@ -294,7 +294,7 @@ function makeGitHubAuth(storage: DurableObjectStorage) {
         else if (current.value.id !== user.id)
           return {
             state: "denied",
-            message: `You signed in as @${user.login}, but this pi-hard belongs to @${current.value.login}.`,
+            message: `You signed in as @${user.login}, but this dolly belongs to @${current.value.login}.`,
           };
 
         return { state: "signed_in", login: user.login, session: yield* createSession(user.id) };
@@ -343,7 +343,7 @@ function makeGitHubAuth(storage: DurableObjectStorage) {
 }
 
 export class GitHubAuth extends Context.Service<GitHubAuth, ReturnType<typeof makeGitHubAuth>>()(
-  "pi-hard/GitHubAuth",
+  "dolly/GitHubAuth",
 ) {
   static readonly layer = (storage: DurableObjectStorage) =>
     Layer.succeed(GitHubAuth, makeGitHubAuth(storage));

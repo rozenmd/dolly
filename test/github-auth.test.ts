@@ -30,7 +30,7 @@ const pem = createPrivateKey(
 
 const app = {
   id: 42,
-  slug: "pi-hard-test",
+  slug: "dolly-test",
   pem,
   client_id: "app-client-id",
   webhook_secret: "private-webhook-secret-at-least-32-characters",
@@ -78,7 +78,7 @@ async function signInAs(user: { id: number; login: string }) {
 
   const start = await SELF.fetch("https://worker/api/auth/github", { method: "POST" });
   expect(await start.json()).toMatchObject({ state: "awaiting_code", userCode: "WDJB-MJHT" });
-  const device = cookie(start, "__Host-pi-hard-github-device");
+  const device = cookie(start, "__Host-dolly-github-device");
   expect(device).toBeDefined();
   expect(fetch).toHaveBeenCalledTimes(1);
   fetch.mockRestore();
@@ -121,7 +121,7 @@ afterEach(() => {
 });
 
 describe("GitHub sign-in", () => {
-  it("lets Cloudflare Access alone start GitHub App setup only until someone owns pi-hard", async () => {
+  it("lets Cloudflare Access alone start GitHub App setup only until someone owns dolly", async () => {
     const setup = () =>
       SELF.fetch("https://worker/api/integrations/github/setup", {
         method: "POST",
@@ -150,7 +150,7 @@ describe("GitHub sign-in", () => {
     const result = await signInAs({ id: 7, login: "octocat" });
     expect(await result.clone().json()).toEqual({ state: "signed_in", login: "octocat" });
     expect(await result.clone().text()).not.toContain("private-user-token");
-    const session = cookie(result, "__Host-pi-hard-session");
+    const session = cookie(result, "__Host-dolly-session");
     expect(session).toBeDefined();
     expect(result.headers.getSetCookie().join("\n")).toMatch(/HttpOnly/);
 
@@ -176,7 +176,7 @@ describe("GitHub sign-in", () => {
     expect((await SELF.fetch("https://worker/api/sessions/missing", { headers })).status).toBe(401);
   });
 
-  it("refuses any other GitHub account once pi-hard has an owner", async () => {
+  it("refuses any other GitHub account once dolly has an owner", async () => {
     await connectApp();
     await signInAs({ id: 7, login: "octocat" });
 
@@ -184,9 +184,9 @@ describe("GitHub sign-in", () => {
     expect(result.status).toBe(403);
     expect(await result.clone().json()).toEqual({
       state: "denied",
-      message: "You signed in as @intruder, but this pi-hard belongs to @octocat.",
+      message: "You signed in as @intruder, but this dolly belongs to @octocat.",
     });
-    expect(cookie(result, "__Host-pi-hard-session")).toBeUndefined();
+    expect(cookie(result, "__Host-dolly-session")).toBeUndefined();
   });
 
   it("explains how to turn on device flow when GitHub has it disabled", async () => {
@@ -200,9 +200,9 @@ describe("GitHub sign-in", () => {
     expect(await start.json()).toEqual({ error: DEVICE_FLOW_DISABLED });
   });
 
-  it("points the GitHub App webhook at a new ingress URL without leaving pi-hard", async () => {
+  it("points the GitHub App webhook at a new ingress URL without leaving dolly", async () => {
     await connectApp();
-    const session = cookie(await signInAs({ id: 7, login: "octocat" }), "__Host-pi-hard-session");
+    const session = cookie(await signInAs({ id: 7, login: "octocat" }), "__Host-dolly-session");
     const headers = { Cookie: session ?? "" };
 
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
@@ -239,7 +239,7 @@ describe("GitHub sign-in", () => {
       await (await SELF.fetch("https://worker/api/integrations/github", { headers })).json(),
     ).toMatchObject({
       ingress: "https://new-ingress.example/hooks/github",
-      settingsUrl: "https://github.com/settings/apps/pi-hard-test",
+      settingsUrl: "https://github.com/settings/apps/dolly-test",
     });
   });
 });

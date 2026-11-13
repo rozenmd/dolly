@@ -72,7 +72,7 @@ export class CodexProtocol extends Context.Service<
       authorization: typeof Authorization.Type,
     ): Effect.Effect<typeof Tokens.Type, OperationError>;
   }
->()("pi-hard/CodexProtocol") {
+>()("dolly/CodexProtocol") {
   static readonly layer = Layer.effect(
     this,
     Effect.gen(function* () {

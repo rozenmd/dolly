@@ -1,20 +1,20 @@
-# pi-hard
+# dolly
 
-A Cloudflare Access-protected personal coding agent on Cloudflare Workers, using Hono, Effect 4.0.0-rc.112, Pi Durable 1.5.2, Cloudflare Sandbox 1.0.3, and a ChatGPT/Codex subscription. No OpenAI API key is required.
+A coding agent in development on Cloudflare Workers, using Hono, Effect 4.0.0-rc.112, Pi Durable 1.5.2, Cloudflare Sandbox 1.0.3, and a ChatGPT/Codex subscription. No OpenAI API key is required. The implementation and authorization model are unfinished; the behavior documented below describes the current code, not a finished product contract.
 
 ## Web frontend
 
 The `web/` workspace is a TanStack Start + React frontend with a dark, responsive workspace sidebar, searchable sessions, an activity feed, Markdown conversations, tool output, and a message composer.
 
-The app is served at the Worker's `/`, with the Hono endpoints under `/api/*` on the same origin. `/api/health` is available without credentials. Cloudflare Access protects the whole hostname. Behind Access, you sign in with GitHub: the first GitHub account to sign in after the GitHub App is created owns this pi-hard, and only that account can sign in afterwards. Signing in sets an HttpOnly session cookie that lasts 30 days.
+The app is served at the Worker's `/`, with the Hono endpoints under `/api/*` on the same origin. `/api/health` is available without credentials. Cloudflare Access protects the whole hostname. Behind Access, you sign in with GitHub. The current authentication implementation records the first GitHub account as an owner and refuses other accounts; this is an implementation limitation, not an intended single-user product constraint. Signing in sets an HttpOnly session cookie that lasts 30 days.
 
 The first visit walks through setup:
 
-1. **Create the GitHub App.** Enter your GitHub username (or organization) and the URL of your deployed `pi-hard-ingress` Worker, then choose **Create GitHub App**. GitHub opens with every setting filled in from a manifest, including the webhook URL, and returns to pi-hard.
+1. **Create the GitHub App.** Enter your GitHub username (or organization) and the URL of your deployed `dolly-ingress` Worker, then choose **Create GitHub App**. GitHub opens with every setting filled in from a manifest, including the webhook URL, and returns to dolly.
 2. **Enable device flow.** In the new App's settings on GitHub, tick **Enable Device Flow**. GitHub has no manifest setting for it. If you skip this, sign-in says so and links to the settings page.
-3. **Sign in with GitHub.** pi-hard shows a one-time code and a link to `github.com/login/device`. The first account to authorize becomes the owner.
-4. **Sign in to ChatGPT.** pi-hard shows another code for `auth.openai.com/codex/device`. Enable device-code authentication in your ChatGPT security settings if OpenAI requires it.
-5. **Choose repositories.** In **Settings** (the π menu), use **Add repositories** to install the App, and list the GitHub accounts pi-hard can work in. Nothing is usable until that list is set.
+3. **Sign in with GitHub.** dolly shows a one-time code and a link to `github.com/login/device`. The first account to authorize becomes the owner.
+4. **Sign in to ChatGPT.** dolly shows another code for `auth.openai.com/codex/device`. Enable device-code authentication in your ChatGPT security settings if OpenAI requires it.
+5. **Choose repositories.** In **Settings** (the D menu), use **Add repositories** to install the App, and list the GitHub accounts dolly can work in. Nothing is usable until that list is set.
 
 Then create a workspace with an optional `owner/repository`, or open a known session ID. Send a task; the frontend polls the recent transcript and live progress every 2.5 seconds. **Stop agent** aborts the selected session and its descendants.
 
@@ -35,7 +35,17 @@ Protect the **entire hostname** with Cloudflare Access, preserving the Worker's 
 
 ## Deploy to Cloudflare
 
-Use Node.js 24.22.2 and pnpm 12.18.0 (pinned in `.node-version` and `package.json`), a running Docker engine to build the container image, and a paid Cloudflare Workers account with Artifacts enabled. Create a private Artifacts namespace named `pi-hard-workspaces`; the typed configuration binds it as `WORKSPACES`. The image builds a pinned ArtifactFS driver and includes FUSE.
+### Existing deployments
+
+The configuration now names the main Worker `dolly`, the public receiver `dolly-ingress`, the container `dolly-sandbox`, and the Artifacts namespace `dolly-workspaces`. These are deployment identities, not cosmetic labels. Deploying them does not rename or migrate existing Workers, Durable Object namespaces, credentials, conversations, or checkpoints. An automatic migration is not implemented. Back up the existing deployment and plan its data migration before running the deployment commands below; do not delete the existing resources as part of a rename.
+
+Access inputs now use `DOLLY_ACCESS_*`, with Alchemy stack `DollyAccess` and application resource `Dolly`. Existing local environment files and state are not rewritten automatically. Migrate the previous stack/resource state with Alchemy's state tooling before planning changes, preserve the existing application and service-token IDs, and review the plan for unintended creations or replacements. Update the protected hostname and GitHub App callback/webhook URLs when moving traffic; keep ingress public and the main hostname protected.
+
+Browser cookie names and the local session-list key now use Dolly's name, so existing browsers will need to sign in again and re-import saved conversation IDs. New workspace branches use `dolly/*`; existing stored workspace configurations are not rewritten. Webhook reply markers also use Dolly's name: do not redeliver previously accepted commands during a migration without reviewing their durable delivery state and existing replies.
+
+### New deployments
+
+Use Node.js 24.22.2 and pnpm 12.18.0 (pinned in `.node-version` and `package.json`), a running Docker engine to build the container image, and a paid Cloudflare Workers account with Artifacts enabled. Create a private Artifacts namespace named `dolly-workspaces`; the typed configuration binds it as `WORKSPACES`. The image builds a pinned ArtifactFS driver and includes FUSE.
 
 Install pnpm using the [official instructions](https://pnpm.io/installation). With Node.js already installed:
 
@@ -57,7 +67,7 @@ pnpm --dir ingress run deploy
 The first deployment refuses web and API requests until Access is configured. The Alchemy 2 stack in `infra/` manages Access independently of `cf deploy`, following Rat Stack's typed infrastructure and plan-before-deploy approach. It does not own the Workers, containers, DNS, or your account-wide Zero Trust settings.
 
 1. Enable Zero Trust in your Cloudflare account if needed, and note its existing team domain (`your-team.cloudflareaccess.com`, without `https://` or a path). Create or reuse an Access service token; the stack only needs its **token UUID**, not its client ID or secret.
-2. Configure an Alchemy authentication profile with `pnpm --dir infra exec alchemy profile create pi-hard`, then `pnpm --dir infra exec alchemy profile edit --profile pi-hard`. Select the same Cloudflare account as the Worker deployment and run `export ALCHEMY_PROFILE=pi-hard` for subsequent commands. The credentials need Access application/policy and identity-provider edit permissions. Keep provider credentials in the profile, not Worker bindings or committed files.
+2. Configure an Alchemy authentication profile with `pnpm --dir infra exec alchemy profile create dolly`, then `pnpm --dir infra exec alchemy profile edit --profile dolly`. Select the same Cloudflare account as the Worker deployment and run `export ALCHEMY_PROFILE=dolly` for subsequent commands. The credentials need Access application/policy and identity-provider edit permissions. Keep provider credentials in the profile, not Worker bindings or committed files.
 3. Create local stack inputs, then edit `infra/.env`:
 
    ```sh
@@ -65,7 +75,7 @@ The first deployment refuses web and API requests until Access is configured. Th
    test -f infra/.env || cp infra/.env.example infra/.env
    ```
 
-   Set `PI_HARD_ACCESS_HOSTNAME` to the **main Worker's production hostname**, not the ingress hostname. Set the team domain, comma-separated exact allowed email addresses, and existing service-token UUID. No wildcard users or Everyone/Bypass policies are accepted. If Access already protects this hostname, also set `PI_HARD_ACCESS_APPLICATION_ID` to adopt that application and preserve its AUD. Adoption replaces its inline policies with the declared email and service-token policies: review this carefully.
+   Set `DOLLY_ACCESS_HOSTNAME` to the **main Worker's production hostname**, not the ingress hostname. Set the team domain, comma-separated exact allowed email addresses, and existing service-token UUID. No wildcard users or Everyone/Bypass policies are accepted. If Access already protects this hostname, also set `DOLLY_ACCESS_APPLICATION_ID` to adopt that application and preserve its AUD. Adoption replaces its inline policies with the declared email and service-token policies: review this carefully.
 
 4. Run checks, inspect the production plan, then explicitly deploy Access:
 
@@ -101,17 +111,17 @@ Open the Worker's URL and follow the setup steps under [Web frontend](#web-front
 
 GitHub authentication runs in the Worker. Each coding conversation can clone GitHub.com repositories accessible to the connected App installations whose user or organization is in your account allowlist. Containers never receive App keys or installation tokens.
 
-Create the App from the web UI's first-run setup. For an organization, choose **Organization** and enter its name. Then use **Add repositories** in **Settings** and choose **selected repositories** or **all repositories** for each installation. New Apps support installation on other accounts; if you previously created a private App, enable installation on other accounts in GitHub App settings without replacing its credentials. GitHub controls repository access within each installation; Pi Hard separately restricts which installation accounts it will use. The setup page and callback at `/api/setup/github/:state` and `/api/setup/github/callback` require Access only; the callback returns the browser to `/`.
+Create the App from the web UI's first-run setup. For an organization, choose **Organization** and enter its name. Then use **Add repositories** in **Settings** and choose **selected repositories** or **all repositories** for each installation. New Apps support installation on other accounts; if you previously created a private App, enable installation on other accounts in GitHub App settings without replacing its credentials. GitHub controls repository access within each installation; Dolly separately restricts which installation accounts it will use. The setup page and callback at `/api/setup/github/:state` and `/api/setup/github/callback` require Access only; the callback returns the browser to `/`.
 
-List the GitHub users and organizations pi-hard can work in under **Accounts pi-hard can work in** in **Settings** (`PUT /api/integrations/github/accounts`). Names are case-insensitive. An unset or empty list denies every account. The policy survives restarts and applies to repository discovery, repository tools, Git checkout/fetch/push, and webhook intake/replies. Removing an account prevents subsequent GitHub requests even when an installation token was cached. It does not uninstall the App, stop an already-running request, or erase existing checkouts. The webhook sender list is separate: allowed accounts identify repository owners, while allowed senders identify who may issue `/pi` commands. GitHub may still deliver webhooks from other installations, but Pi Hard rejects their commands before repository lookup or agent admission.
+List the GitHub users and organizations dolly can work in under **Accounts dolly can work in** in **Settings** (`PUT /api/integrations/github/accounts`). Names are case-insensitive. An unset or empty list denies every account. The policy survives restarts and applies to repository discovery, repository tools, Git checkout/fetch/push, and webhook intake/replies. Removing an account prevents subsequent GitHub requests even when an installation token was cached. It does not uninstall the App, stop an already-running request, or erase existing checkouts. The webhook sender list is separate: allowed accounts identify repository owners, while allowed senders identify who may issue `/pi` commands. GitHub may still deliver webhooks from other installations, but Dolly rejects their commands before repository lookup or agent admission.
 
 The App grant and read/write/code token permission maps match [Open Session's public permission definitions](https://github.com/tellahq/opensession/blob/main/packages/core/opensession-server/src/shared/github-app-permissions.ts), retained in `src/github-permissions.ts`. The grant includes Actions, Checks, Contents, Pull requests, Issues and Deployments write, plus Statuses, Members and Metadata read. Installation tokens are narrowed by operation and repository. Existing Apps must accept these permission updates in GitHub settings; no replacement App key is needed. This grants no Administration or Workflows permission. The copied definitions retain their MIT notice in `third_party/opensession/LICENSE`.
 
 Setup links expire after one hour and survive Worker eviction. Repeating setup preserves an existing connection. A consumed callback cannot be replayed. If conversion fails, start setup again; if GitHub created an unused App, remove it in GitHub settings before creating another. App private keys and the App's client ID remain in Durable Object storage; the client ID runs GitHub sign-in. The webhook signing secret stays server-side, and short-lived installation tokens stay in Worker memory. GitHub sign-in uses the user token only to read the signed-in account and does not store it; sessions are stored as hashes.
 
-Only the setup routes and `GET /api/auth`, `POST /api/auth/github` and `GET /api/auth/github` (sign-in) work without a session. Creating the GitHub App also works without a session, but only until someone has signed in and owns pi-hard.
+Only the setup routes and `GET /api/auth`, `POST /api/auth/github` and `GET /api/auth/github` (sign-in) work without a session. Creating the GitHub App also works without a session, but only until someone has signed in and owns dolly.
 
-New agent sessions have a `github` tool. It discovers repositories across App installations, reads UTF-8 files up to 32 KiB, creates `pi-hard/*` branches, writes files up to 32 KiB with an expected file SHA, and opens pull requests. It cannot merge, write the default branch, or edit `.github/workflows/`. Use a new path without `sha` only when creating a file. Mutations are not automatically replayed after interruption; inspect GitHub before retrying an uncertain write.
+New agent sessions have a `github` tool. It discovers repositories across App installations, reads UTF-8 files up to 32 KiB, creates `dolly/*` branches, writes files up to 32 KiB with an expected file SHA, and opens pull requests. It cannot merge, write the default branch, or edit `.github/workflows/`. Use a new path without `sha` only when creating a file. Mutations are not automatically replayed after interruption; inspect GitHub before retrying an uncertain write.
 
 The same operations are available through `POST /api/integrations/github/execute`, with an `operation` object. For example:
 
@@ -128,7 +138,7 @@ The same operations are available through `POST /api/integrations/github/execute
 
 Other actions are `repositories`, `create_branch`, `write_file`, and `open_pull_request`; their shared contracts are in `src/github-contracts.ts`. `GET /api/integrations/github` returns connection metadata and the installation link, never credentials. Provider requests reject redirects, time out after 15 seconds, and cap response bodies at 1 MiB.
 
-Pushes authenticate as the App installation, not the person who installed it. Local commit author metadata is configured as Pi Hard. With this repository's `rozenmd`-only CI policy, App-authored pushes do not start CI. Connected-user authorization is not included.
+Pushes authenticate as the App installation, not the person who installed it. Local commit author metadata is configured as Dolly. With this repository's `rozenmd`-only CI policy, App-authored pushes do not start CI. Connected-user authorization is not included.
 
 ### Work on a repository
 
@@ -148,7 +158,7 @@ Send that JSON to `POST /api/sessions`, then submit a task through its messages 
 
 You can also create a blank conversation and let the agent select a repository using `workspace` with `{"action":"checkout","repository":"another-owner/project","ref":"main"}`. Dependency network hosts are supplied by the API client when creating a repository session, not granted by the model. An omitted host list permits only brokered Git traffic. The HTTPS intercept trusts the Containers CA through the provided certificate environment settings; tools with their own certificate store may need configuration.
 
-Each conversation owns one checkout and a `pi-hard/session-<conversation-id>` branch. Repository selection cannot be changed in place. Children inherit the repository/ref and network policy but get separate checkouts and branches. PR webhook conversations start at `refs/pull/<number>/head` and push their own branch, not the original PR branch.
+Each conversation owns one checkout and a `dolly/session-<conversation-id>` branch. Repository selection cannot be changed in place. Children inherit the repository/ref and network policy but get separate checkouts and branches. PR webhook conversations start at `refs/pull/<number>/head` and push their own branch, not the original PR branch.
 
 For direct control, `POST /api/sessions/:id/workspace` accepts the same actions:
 
@@ -177,10 +187,10 @@ This replaces the earlier R2 checkpoint format. Existing R2 checkpoints fail clo
 The public webhook Worker is separate from the Access-protected API. Its only route is `POST /hooks/github`. It holds no credentials and calls the main Worker's named `GitHubIngress` entrypoint through a private service binding. The main hostname has no public webhook route.
 
 1. Deploy the main Worker with `pnpm run deploy` and the public receiver with `pnpm --dir ingress run deploy`. Keep the main hostname protected by Access; the separate ingress hostname must accept GitHub requests without Access. Preview URLs remain disabled for both Workers.
-2. Enter the ingress Worker's URL when creating the GitHub App. The manifest subscribes to `issue_comment` and points the webhook at `<ingress>/hooks/github`. To change it later, edit **Ingress URL** in **Settings**; pi-hard updates the App's webhook through GitHub's API (`PATCH /app/hook/config`), so you don't edit it on GitHub. For an App created before this, enable its webhook in GitHub App settings, grant **Issues: Read-only**, subscribe to **Issue comments**, and approve the updated permissions for the existing installation.
+2. Enter the ingress Worker's URL when creating the GitHub App. The manifest subscribes to `issue_comment` and points the webhook at `<ingress>/hooks/github`. To change it later, edit **Ingress URL** in **Settings**; dolly updates the App's webhook through GitHub's API (`PATCH /app/hook/config`), so you don't edit it on GitHub. For an App created before this, enable its webhook in GitHub App settings, grant **Issues: Read-only**, subscribe to **Issue comments**, and approve the updated permissions for the existing installation.
 3. Install the App on the repositories you want to use and sign in to ChatGPT before enabling command intake. List who may run commands under **Who can run /pi commands** in **Settings** (`PUT /api/integrations/github/webhook` with `{"senders":[...]}`).
 
-The API also accepts `"secret"` when no signing secret is stored yet, or when deliberately rotating it. Existing App credentials and an already-configured signing secret are preserved. Configuration checks the App event subscription and permission. Every command checks the current repository installation against the signed installation ID; new grants and reinstalls do not require rebuilding a Pi Hard repository list.
+The API also accepts `"secret"` when no signing secret is stored yet, or when deliberately rotating it. Existing App credentials and an already-configured signing secret are preserved. Configuration checks the App event subscription and permission. Every command checks the current repository installation against the signed installation ID; new grants and reinstalls do not require rebuilding a Dolly repository list.
 
 An allowed user can post `/pi Read README.md and explain the project` as a new comment on a PR in a repository available to an App installation. The command must start the comment. Issue comments without a PR, edits, bot comments, other events, and comments without `/pi` do not trigger agents. Repository, installation, and both comment-author and sender identity are checked after HMAC-SHA256 verification over the exact request bytes.
 
@@ -278,7 +288,7 @@ Hono handles HTTP routes; Cloudflare Durable Objects host sessions. They run Eff
 - Subscription credentials and GitHub credentials never enter the container. Direct container internet access is disabled. Git traffic uses a private per-session Worker broker; it can read only the selected repository and push only the session branch, never the default branch or a deletion. Dependency downloads use an optional per-session HTTPS hostname list, without injected credentials.
 - Conversation history and repository selection are durable. Repository workspaces, including `.git` and uncommitted files, are checkpointed to private Artifacts repositories after foreground shell commands, including failed commands. The last completed checkpoint is restored after container replacement. A crash during a command can lose changes since that checkpoint; interrupted commands are never automatically rerun. Blank sessions without a repository remain ephemeral. Containers stop after five minutes of inactivity.
 - Shell calls have a 60-second deadline and keep at most 32 KiB per output stream. File reads allow 64 KiB. Runs stop after 20 tool rounds. Interrupted shell calls are marked unsafe to replay because commands may have side effects.
-- This is single-owner software. Only the GitHub account that owns pi-hard can sign in, and only from browsers your Access policy allows. Signed in, it can use your subscription, run sandbox commands, and read conversations. There is no multi-user authorization, rate limiter, or public sandbox preview. Until someone signs in for the first time, anyone your Access policy allows can create the GitHub App and claim ownership.
+- Authorization is unfinished. The current implementation accepts only the recorded GitHub owner, behind Cloudflare Access, and does not yet provide multi-user authorization. An authenticated browser can use the connected subscription, run sandbox commands, and read conversations. Rate limiting and public sandbox previews are not implemented. During initial setup, anyone your Access policy allows can create the GitHub App and claim ownership; restrict that policy before exposing the deployment.
 - Worker storage holds OAuth secrets. Protect access to the Cloudflare account and local `.wrangler` data. Logs and transcript responses redact known tokens and OAuth fields while retaining diagnostic messages.
 
 ## Code quality

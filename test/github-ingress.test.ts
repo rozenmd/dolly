@@ -107,7 +107,7 @@ beforeEach(async () => {
     await state.storage.put("github:webhook", profile);
     await state.storage.put("github:accounts", ["example", "other"]);
     await state.storage.put("github:connected", {
-      app: { id: 42, slug: "pi-hard-test", pem, owner: { login: "example" } },
+      app: { id: 42, slug: "dolly-test", pem, owner: { login: "example" } },
     });
     await state.storage.delete("credential:openai-codex");
   });
@@ -203,7 +203,7 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
   const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("github:connected", {
-      app: { id: 42, slug: "pi-hard-test", pem, owner: { login: "example" } },
+      app: { id: 42, slug: "dolly-test", pem, owner: { login: "example" } },
       repositories: ["example/project"],
     });
     await state.storage.put("credential:openai-codex", {
@@ -275,7 +275,7 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
     ]).toContain(parsed.pathname);
 
     if (init?.method === "GET")
-      return Response.json(posted.map((body) => ({ body, user: { login: "pi-hard-test[bot]" } })));
+      return Response.json(posted.map((body) => ({ body, user: { login: "dolly-test[bot]" } })));
     const body = JSON.parse(String(init?.body)).body;
     posted.push(body);
 
@@ -320,9 +320,9 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
   await expect
     .poll(async () => (await threads())[0].deliveries[0].outcome, { timeout: 15_000 })
     .toBe("completed");
-  expect(posted).toEqual([expect.stringContaining("<!-- pi-hard:comment:123 -->")]);
+  expect(posted).toEqual([expect.stringContaining("<!-- dolly:comment:123 -->")]);
   expect(posted[0]).toContain("Completed GitHub request");
-  expect(posted[0]).toContain("<!-- pi-hard:comment:123 -->");
+  expect(posted[0]).toContain("<!-- dolly:comment:123 -->");
   await runInDurableObject(env.AGENT.getByName("owner"), async () => {
     await harnesses.at(-1)?.close(BACKGROUND_CONTEXT);
   });

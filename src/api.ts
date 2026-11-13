@@ -43,7 +43,7 @@ function makeAgentApi(env: Env) {
 }
 
 export class AgentApi extends Context.Service<AgentApi, ReturnType<typeof makeAgentApi>>()(
-  "pi-hard/AgentApi",
+  "dolly/AgentApi",
 ) {
   static readonly layer = (env: Env) => Layer.sync(AgentApi, () => makeAgentApi(env));
 }

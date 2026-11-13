@@ -307,7 +307,7 @@ export const AuthState = Schema.Struct({
 
 export type AuthState = typeof AuthState.Type;
 
-/** Whether a GitHub App exists, whether pi-hard has an owner, and who this browser is signed in as. */
+/** Whether a GitHub App exists, whether dolly has an owner, and who this browser is signed in as. */
 export async function authState() {
   return Schema.decodeUnknownSync(Schema.fromJsonString(AuthState))(await request("/auth"));
 }
@@ -368,7 +368,7 @@ export async function request(
   const text = await response.text();
 
   if (response.ok && !response.headers.get("content-type")?.includes("application/json")) {
-    throw new Error("The API did not return JSON. Check that /api routes to the pi-hard Worker.");
+    throw new Error("The API did not return JSON. Check that /api routes to the dolly Worker.");
   }
 
   if (!response.ok) {

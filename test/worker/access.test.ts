@@ -11,7 +11,7 @@ it("requires Cloudflare Access for the page, assets, and API even with a session
     `/api/setup/github/${"a".repeat(43)}`,
   ]) {
     const response = await SELF.fetch(`https://worker${path}`, {
-      headers: { Cookie: "__Host-pi-hard-session=test-session-token" },
+      headers: { Cookie: "__Host-dolly-session=test-session-token" },
     });
 
     expect(response.status).toBe(401);

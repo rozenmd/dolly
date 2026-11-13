@@ -8,7 +8,7 @@ export const Repository = Schema.String.check(
 
 const Ref = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200));
 
-const Branch = Schema.String.check(Schema.isPattern(/^pi-hard\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/));
+const Branch = Schema.String.check(Schema.isPattern(/^dolly\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/));
 
 const Path = Schema.String.check(
   Schema.isMinLength(1),

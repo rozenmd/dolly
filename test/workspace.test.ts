@@ -12,7 +12,7 @@ function packet(command: string) {
   return (new TextEncoder().encode(command).length + 4).toString(16).padStart(4, "0") + command;
 }
 
-const branch = "pi-hard/session-42";
+const branch = "dolly/session-42";
 
 const update = (ref: string, next = "b".repeat(40)) =>
   packet(`${"a".repeat(40)} ${next} ${ref}\0report-status side-band-64k\n`);

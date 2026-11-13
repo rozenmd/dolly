@@ -19,7 +19,7 @@ if [[ ${GITHUB_ACTIONS:-} == true && $(uname -s) == Linux ]]; then
     if ! grep -q "^$USER:" /etc/subgid; then
       sudo usermod --add-subgids 100000-165535 "$USER"
     fi
-    tools="$RUNNER_TEMP/pi-hard-rootless"
+    tools="$RUNNER_TEMP/dolly-rootless"
     mkdir -p "$tools"
     curl --fail --silent --show-error --location \
       https://download.docker.com/linux/static/stable/x86_64/docker-rootless-extras-28.5.1.tgz \

@@ -4,7 +4,7 @@ import { runInDurableObject } from "cloudflare:test";
 const token = "test-session-token";
 
 /** Request headers for a browser signed in with GitHub as the owner. Call `signIn` first. */
-export const headers = { Cookie: `__Host-pi-hard-session=${token}` };
+export const headers = { Cookie: `__Host-dolly-session=${token}` };
 
 /** Seed the owner and a signed-in session, as a completed GitHub device sign-in would. */
 export async function signIn() {

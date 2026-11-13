@@ -3,10 +3,10 @@ import { expect, test, type Page } from "@playwright/test";
 const app = {
   connected: true,
   owner: "octocat",
-  appSlug: "pi-hard-test",
-  installUrl: "https://github.com/apps/pi-hard-test/installations/new",
-  settingsUrl: "https://github.com/settings/apps/pi-hard-test",
-  ingress: "https://pi-hard-ingress.example.workers.dev/hooks/github",
+  appSlug: "dolly-test",
+  installUrl: "https://github.com/apps/dolly-test/installations/new",
+  settingsUrl: "https://github.com/settings/apps/dolly-test",
+  ingress: "https://dolly-ingress.example.workers.dev/hooks/github",
   senders: ["octocat"],
 };
 
@@ -23,7 +23,7 @@ async function signedInWorkspace(page: Page) {
   });
 }
 
-test("first run creates the GitHub App from pi-hard with the ingress URL filled in", async ({
+test("first run creates the GitHub App from dolly with the ingress URL filled in", async ({
   page,
 }) => {
   const errors: string[] = [];
@@ -53,23 +53,23 @@ test("first run creates the GitHub App from pi-hard with the ingress URL filled 
   await page.goto("/?github=GitHub%20App%20owner%20does%20not%20match", {
     waitUntil: "networkidle",
   });
-  await expect(page.getByRole("heading", { name: "Set up pi-hard" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Set up dolly" })).toBeVisible();
   await expect(page.getByRole("alert")).toHaveText("GitHub App owner does not match");
   expect(new URL(page.url()).search).toBe("");
   await expect(page.getByText("API token")).toHaveCount(0);
   await page.getByLabel("Your GitHub username").fill("octocat");
-  await page.getByLabel("Ingress URL").fill("https://pi-hard-ingress.example.workers.dev/");
+  await page.getByLabel("Ingress URL").fill("https://dolly-ingress.example.workers.dev/");
   await page.getByRole("button", { name: "Create GitHub App" }).click();
   await expect(page.getByRole("heading", { name: "Create GitHub App" })).toBeVisible();
   expect(setup).toEqual({
     owner: "octocat",
     ownerType: "personal",
-    ingress: "https://pi-hard-ingress.example.workers.dev/hooks/github",
+    ingress: "https://dolly-ingress.example.workers.dev/hooks/github",
   });
   expect(errors).toEqual([]);
 });
 
-test("GitHub device sign-in claims pi-hard, then continues to ChatGPT", async ({ page }) => {
+test("GitHub device sign-in claims dolly, then continues to ChatGPT", async ({ page }) => {
   let polls = 0;
 
   await page.route("**/api/**", (route) => {
@@ -102,7 +102,7 @@ test("GitHub device sign-in claims pi-hard, then continues to ChatGPT", async ({
     return route.fulfill({ json: { state: "not_connected" } });
   });
   await page.goto("/", { waitUntil: "networkidle" });
-  await expect(page.getByRole("heading", { name: "Sign in to pi-hard" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Sign in to dolly" })).toBeVisible();
   await expect(page.getByRole("link", { name: "its settings" })).toHaveAttribute(
     "href",
     app.settingsUrl,
@@ -144,14 +144,14 @@ test("GitHub sign-in as someone other than the owner is refused with the reason"
       status: 403,
       json: {
         state: "denied",
-        message: "You signed in as @intruder, but this pi-hard belongs to @octocat.",
+        message: "You signed in as @intruder, but this dolly belongs to @octocat.",
       },
     });
   });
   await page.goto("/", { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Sign in with GitHub" }).click();
   await expect(page.getByRole("alert")).toHaveText(
-    "You signed in as @intruder, but this pi-hard belongs to @octocat.",
+    "You signed in as @intruder, but this dolly belongs to @octocat.",
   );
   await expect(page.getByRole("button", { name: "Sign in with GitHub" })).toBeVisible();
 });
@@ -228,9 +228,9 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   await dialog.getByRole("button", { name: "Save" }).first().click();
   await expect(dialog).toContainText("GitHub now sends comments to this URL.");
   expect(ingress).toEqual({ url: "https://new-ingress.example/hooks/github" });
-  await expect(dialog.getByLabel("Accounts pi-hard can work in")).toHaveValue("octocat");
+  await expect(dialog.getByLabel("Accounts dolly can work in")).toHaveValue("octocat");
   await expect(dialog.getByLabel("Who can run /pi commands")).toHaveValue("octocat");
-  await dialog.getByLabel("Accounts pi-hard can work in").fill("octocat, @acme");
+  await dialog.getByLabel("Accounts dolly can work in").fill("octocat, @acme");
   await dialog.getByLabel("Who can run /pi commands").fill("octocat hubot");
   await dialog.getByRole("button", { name: "Save" }).last().click();
   await expect(dialog.getByText("Saved.", { exact: true })).toBeVisible();
@@ -245,7 +245,7 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   await expect(dialog.getByText("Saved.", { exact: true })).toBeVisible();
   expect(senders).toEqual({ senders: [] });
   await dialog.getByRole("button", { name: "Sign out" }).first().click();
-  await expect(page.getByRole("heading", { name: "Sign in to pi-hard" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Sign in to dolly" })).toBeVisible();
   expect(signedOut).toBe(true);
 });
 

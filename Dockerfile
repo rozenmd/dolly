@@ -7,8 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
     && python3 -c 'import tarfile; assert hasattr(tarfile, "data_filter"), "Python tar extraction filters are required"' \
     && corepack enable && mkdir -p /workspace /run/sandbox && chown node:node /workspace /run/sandbox && chmod 700 /run/sandbox
 COPY --from=artifact-fs-build /out/artifact-fs /usr/local/bin/artifact-fs
-COPY --chmod=0755 container/mount.sh /usr/local/bin/pi-hard-mount
-COPY container/checkpoint.py /usr/local/lib/pi-hard-checkpoint.py
+COPY --chmod=0755 container/mount.sh /usr/local/bin/dolly-mount
+COPY container/checkpoint.py /usr/local/lib/dolly-checkpoint.py
 USER node
 WORKDIR /workspace
 CMD ["sleep", "infinity"]

@@ -8,7 +8,7 @@ it("serves the rendered workspace at the Worker root and its real bundled assets
   expect(response.headers.get("content-type")).toContain("text/html");
   expect(response.headers.get("cache-control")).toBe("no-store");
   const html = await response.text();
-  expect(html).toContain("pi-hard");
+  expect(html).toContain("dolly");
   const stylesheet = html.match(/href="([^"]+\.css)"/);
   expect(stylesheet).not.toBeNull();
 
@@ -49,7 +49,7 @@ it("preserves the public health endpoint and missing asset status", async () => 
 it("routes GitHub App setup links and callbacks through Hono without a bearer token", async () => {
   await reset();
 
-  // Before anyone owns this pi-hard, Cloudflare Access alone may start GitHub App setup.
+  // Before anyone owns this dolly, Cloudflare Access alone may start GitHub App setup.
   const started = await SELF.fetch("https://worker/api/integrations/github/setup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

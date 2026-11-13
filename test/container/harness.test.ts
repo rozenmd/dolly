@@ -342,7 +342,7 @@ ln -s dirty.txt dirty-link`);
       "git --git-dir=remotes/another-owner/project.git for-each-ref --format='%(refname)' refs/heads/",
     );
 
-    expect(verification.stdout).toContain(`refs/heads/pi-hard/session-${id}`);
+    expect(verification.stdout).toContain(`refs/heads/dolly/session-${id}`);
     expect(
       (await remote.run("git --git-dir=remotes/another-owner/project.git show main:answer.mjs"))
         .stdout,

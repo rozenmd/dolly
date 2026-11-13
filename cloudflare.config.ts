@@ -1,11 +1,11 @@
 import { bindings, defineConfig, defineContainer, exports } from "cf/config";
 import { readAccessSettings } from "./scripts/access-settings.ts";
 
-const workerName = "pi-hard";
+const workerName = "dolly";
 const access = readAccessSettings();
 
 const sandbox = defineContainer({
-  name: "pi-hard-sandbox",
+  name: "dolly-sandbox",
   schedulingPolicy: "durable-object",
   images: { sandbox: { dockerfile: "./Dockerfile" } },
 });
@@ -20,7 +20,7 @@ export default defineConfig({
     compatibilityFlags: ["nodejs_compat"],
     env: {
       ASSETS: bindings.assets(),
-      WORKSPACES: bindings.artifacts({ namespace: "pi-hard-workspaces" }),
+      WORKSPACES: bindings.artifacts({ namespace: "dolly-workspaces" }),
       ACCESS_TEAM_DOMAIN: bindings.text(access.ACCESS_TEAM_DOMAIN),
       ACCESS_AUD: bindings.text(access.ACCESS_AUD),
       ACCESS_LOCAL_DEV: bindings.text("false"),

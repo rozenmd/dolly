@@ -1,5 +1,5 @@
 {
-  "name": "@pi-hard/web",
+  "name": "@dolly/web",
   "private": true,
   "type": "module",
   "scripts": {
