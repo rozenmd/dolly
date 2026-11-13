@@ -125,7 +125,7 @@ Setup links expire after one hour and survive Worker eviction. Repeating setup p
 
 Only the setup routes and `GET /api/auth`, `POST /api/auth/github` and `GET /api/auth/github` (sign-in) work without a session. Creating the GitHub App also works without a session, but only until someone has signed in and owns dolly.
 
-New agent sessions have a `github` tool. It discovers repositories across App installations, reads UTF-8 files up to 32 KiB, creates `dolly/*` branches, writes files up to 32 KiB with an expected file SHA, and opens pull requests. It cannot merge, write the default branch, or edit `.github/workflows/`. Use a new path without `sha` only when creating a file. Mutations are not automatically replayed after interruption; inspect GitHub before retrying an uncertain write.
+New agent sessions have a `github` tool. It discovers repositories across App installations, reads UTF-8 files up to 32 KiB, creates `dolly/*` branches, writes files with an expected file SHA, and opens pull requests. File writes have no dolly-specific content-size limit; GitHub and platform request limits still apply. It cannot merge, write the default branch, or edit `.github/workflows/`. Use a new path without `sha` only when creating a file. Mutations are not automatically replayed after interruption; inspect GitHub before retrying an uncertain write.
 
 The same operations are available through `POST /api/integrations/github/execute`, with an `operation` object. For example:
 

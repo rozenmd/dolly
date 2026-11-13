@@ -549,19 +549,6 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
       })
     ).json(),
   ).toMatchObject({ ok: false, code: "workflow_denied" });
-  expect(
-    await (
-      await execute({
-        action: "write_file",
-        repository,
-        branch: "dolly/fix",
-        path: "a.ts",
-        sha,
-        content: "漢".repeat(16_384),
-        message: "Fix",
-      })
-    ).json(),
-  ).toMatchObject({ ok: false, code: "file_too_large" });
   defaultBranch = "dolly/fix";
   expect(
     await (
@@ -582,6 +569,57 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
     "POST /repos/example/project/pulls",
   ]);
 });
+
+it.each(["x".repeat(32_769), "漢".repeat(16_384), "漢🙂".repeat(65_536), ""])(
+  "writes UTF-8 files without a dolly content-size limit (%#)",
+  async (content) => {
+    await connect();
+    const writes: unknown[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const path = new URL(String(url)).pathname;
+
+      if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+      if (path.endsWith("/access_tokens"))
+        return Response.json({
+          token: "private-installation-token",
+          expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        });
+
+      if (path === "/repos/example/project") return Response.json({ default_branch: "main" });
+
+      if (path === "/repos/example/project/contents/large.txt" && init?.method === "PUT") {
+        writes.push(JSON.parse(String(init.body)));
+
+        return Response.json({ commit: { sha } });
+      }
+
+      throw new Error(`Unexpected GitHub path ${path}`);
+    });
+
+    expect(
+      await (
+        await execute({
+          action: "write_file",
+          repository,
+          branch: "dolly/fix",
+          path: "large.txt",
+          sha,
+          content,
+          message: "Write file",
+        })
+      ).json(),
+    ).toEqual({ ok: true, result: { kind: "commit", sha } });
+    expect(writes).toEqual([
+      {
+        branch: "dolly/fix",
+        sha,
+        message: "Write file",
+        content: Buffer.from(content).toString("base64"),
+      },
+    ]);
+  },
+);
 
 it("rejects expired installation tokens, bounds responses and removes credentials from fetch failures", async () => {
   await connect();
