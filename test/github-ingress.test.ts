@@ -127,7 +127,7 @@ afterEach(async () => {
 it("exposes only the webhook POST and keeps the ordinary API protected", async () => {
   for (const [path, method] of [
     ["/api/sessions", "POST"],
-    ["/setup/github/callback", "GET"],
+    ["/api/setup/github/callback", "GET"],
     ["/hooks/github", "GET"],
     ["/other", "POST"],
   ]) {

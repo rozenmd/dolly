@@ -17,8 +17,9 @@ function escapeHtml(value: string) {
 }
 
 export const githubRoutes = new Hono<{ Bindings: Env }>();
+export const githubSetupRoutes = new Hono<{ Bindings: Env }>();
 
-githubRoutes.use("/setup/github/*", async (c, next) => {
+githubSetupRoutes.use("/api/setup/github/*", async (c, next) => {
   const access = await Effect.runPromise(authorizeAccess(c.req.raw, c.env), {
     signal: c.req.raw.signal,
   });
@@ -157,7 +158,7 @@ githubRoutes.put("/api/integrations/github/webhook", async (c) => {
   return c.json(result, "error" in result ? 409 : 200);
 });
 
-githubRoutes.get("/setup/github/callback", async (c) => {
+githubSetupRoutes.get("/api/setup/github/callback", async (c) => {
   const state = c.req.query("state");
   const code = c.req.query("code");
 
@@ -174,7 +175,7 @@ githubRoutes.get("/setup/github/callback", async (c) => {
   );
 });
 
-githubRoutes.get("/setup/github/:state", async (c) => {
+githubSetupRoutes.get("/api/setup/github/:state", async (c) => {
   const state = c.req.param("state");
 
   if (!/^[A-Za-z0-9_-]{43}$/.test(state)) return c.json({ error: "Invalid setup link" }, 400);

@@ -13,7 +13,11 @@ export async function sandboxTestConfig() {
 
   // Keep the generated file beside the source config so relative build paths retain their meaning.
   const path = fileURLToPath(new URL("../.sandbox-test.wrangler.json", import.meta.url));
-  await writeFile(path, JSON.stringify(convertToWranglerConfig(result.data), null, 2));
+  // Exercise the backend directly; the separately built HTTP suite covers the web entrypoint.
+  const config = convertToWranglerConfig(result.data);
+  config.main = "./src/index.ts";
+  delete config.assets;
+  await writeFile(path, JSON.stringify(config, null, 2));
 
   return path;
 }

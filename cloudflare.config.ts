@@ -12,11 +12,13 @@ export default defineConfig({
   worker: {
     name: workerName,
     previewUrls: false,
-    entrypoint: "./src/index.ts",
+    entrypoint: "./src/worker.ts",
+    assets: { runWorkerFirst: true },
     compatibilityDate: "2026-11-10",
     compatibilityFlags: ["nodejs_compat"],
     env: {
       API_TOKEN: bindings.secret(),
+      ASSETS: bindings.assets(),
       WORKSPACES: bindings.artifacts({ namespace: "pi-hard-workspaces" }),
       ACCESS_TEAM_DOMAIN: bindings.text(""),
       ACCESS_AUD: bindings.text(""),

@@ -3,6 +3,7 @@ import type { Sandbox } from "./sandbox";
 
 export interface Env {
   API_TOKEN: string;
+  ASSETS: Fetcher;
   WORKSPACES: Artifacts;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;

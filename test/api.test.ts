@@ -5,7 +5,7 @@ const headers = { Authorization: "Bearer test-token-with-at-least-32-characters"
 
 describe("Hono Worker in workerd", () => {
   it("serves health without credentials and never caches responses", async () => {
-    const response = await SELF.fetch("https://worker/health");
+    const response = await SELF.fetch("https://worker/api/health");
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(await response.json()).toEqual({ ok: true });
