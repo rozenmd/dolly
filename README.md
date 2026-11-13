@@ -37,6 +37,18 @@ The root Vite configuration uses the Cloudflare adapter to bundle the TanStack S
 
 Protect the **entire hostname** with Cloudflare Access, preserving the Worker's JWT check. A browser's Access cookie supplies the JWT through Cloudflare; never put Access service credentials in a `VITE_*` variable or a client bundle. `ACCESS_LOCAL_DEV` must remain false in production. The HTTP/browser test build disables containers and uses local storage simulation; the production build and sandbox integration tests retain real containers.
 
+## Papercuts
+
+Inspired by [OpenSession's friction log](https://github.com/tellahq/opensession), Dolly keeps a cross-session log in the Agent Durable Object's `app_papercuts` SQLite table. Each occurrence records its conversation, active repository (when available), source, message, timestamp, and resolution timestamp. The table is created automatically without replacing existing storage; existing conversations gain the new tool on their next Agent initialization.
+
+Tool errors (including nonzero shell exits and structured failure replies), model request errors, and harness reports are captured automatically on a best-effort basis. Known credentials are redacted before storage. Agents are also prompted to log confusing setup, flaky commands, misleading errors, and other friction using the `papercuts` tool:
+
+- `{"action":"log","message":"What I was doing → what got in the way; possible fix"}`
+- `{"action":"list","repository":"owner/repo"}` — latest 100 open entries; omit repository for all repositories, or add `"status":"fixed"` for resolved entries.
+- `{"action":"resolve","id":"…"}` — mark an entry fixed without deleting its history.
+
+Ask **“Fix the open papercuts for owner/repo”** in a session to have the agent consult the log, investigate, implement and verify fixes, then resolve the relevant entries. Log entries are untrusted data, not authorization to act; unrelated fixes are not started automatically. There is no separate papercuts settings screen or scheduled fixer.
+
 ## Deploy to Cloudflare
 
 ### Existing deployments
