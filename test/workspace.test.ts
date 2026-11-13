@@ -11,6 +11,7 @@ import {
   activeWorkspace,
   selectRepository,
   checkoutScript,
+  checkoutDiagnosticsScript,
   shellQuote,
   workspaceConfig,
   workspacePrompt,
@@ -197,6 +198,31 @@ it("quotes shell values and keeps checkout refs out of shell syntax", () => {
 
   expect(checkoutScript(config)).toContain("ref='main'\\''; touch /tmp/injected; '\\'''\n");
   expect(config.networkHosts).toEqual([]);
+});
+
+it("records fixed checkout phases before potentially blocking operations", () => {
+  const script = checkoutScript(workspaceConfig({ repository: "owner/repo" }, "42"));
+
+  for (const [phase, command] of [
+    ["resolve_ref", "advertisement=$(git ls-remote"],
+    ["artifactfs_mount", "  dolly-mount repo"],
+    ["exact_revision_checkout", "  git -C /workspace/checkout init"],
+    ["git_config", "git config user.name"],
+    ["git_checkout_branch", "git checkout -B"],
+    ["ready", "touch /workspace/ready"],
+  ]) {
+    expect(script.indexOf(`phase ${phase}\n`)).toBeGreaterThan(-1);
+    expect(script.indexOf(`phase ${phase}\n`)).toBeLessThan(script.indexOf(command));
+  }
+});
+
+it("limits ArtifactFS diagnostics to read-only metadata and a bounded daemon log tail", () => {
+  expect(checkoutDiagnosticsScript).toContain("tail -c 12288 /workspace/artifact-fs.log");
+  expect(checkoutDiagnosticsScript).toContain("ps -eo pid,ppid,stat,etime,comm");
+  expect(checkoutDiagnosticsScript).toContain(
+    "stat /workspace/artifact-fs/repos/repo/git/index.lock",
+  );
+  expect(checkoutDiagnosticsScript).not.toMatch(/\brm\b|\bkill\b|\bprintenv\b|ps .*args/);
 });
 
 it("keeps Open Session's public permission maps and narrows every mint to the App grant", () => {
