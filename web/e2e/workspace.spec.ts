@@ -327,7 +327,7 @@ test("mobile navigation and 320px layout", async ({ page }) => {
 });
 
 test("authenticated create, send, stop, reload, and error recovery", async ({ page }) => {
-  const entries: { id: string; kind: string; model: { role: string; content: string }[] }[] = [];
+  const entries: { id: number; kind: string; model: { role: string; content: string }[] }[] = [];
   let working = false;
   const requestIds: string[] = [];
   let failMessage = true;
@@ -354,7 +354,7 @@ test("authenticated create, send, stop, reload, and error recovery", async ({ pa
       }
 
       entries.push({
-        id: "entry-1",
+        id: 1,
         kind: "pi.input",
         model: [{ role: "user", content: body.content }],
       });

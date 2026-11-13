@@ -1,23 +1,8 @@
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
+import { Block, Message, Snapshot } from "../../../src/transcript";
 
-const Block = Schema.Struct({
-  type: Schema.String,
-  text: Schema.optional(Schema.String),
-  thinking: Schema.optional(Schema.String),
-  id: Schema.optional(Schema.String),
-  name: Schema.optional(Schema.String),
-  arguments: Schema.optional(Schema.Unknown),
-});
-
-const Message = Schema.Struct({
-  role: Schema.String,
-  content: Schema.Union([Schema.String, Schema.Array(Block)]),
-  toolName: Schema.optional(Schema.String),
-  toolCallId: Schema.optional(Schema.String),
-  isError: Schema.optional(Schema.Boolean),
-  timestamp: Schema.optional(Schema.Number),
-});
+export { Snapshot } from "../../../src/transcript";
 
 const Live = Schema.Struct({
   run: Schema.optional(Schema.Struct({})),
@@ -37,18 +22,6 @@ const Live = Schema.Struct({
 export function liveFromSnapshot(snapshot: typeof Snapshot.Type) {
   return Option.getOrNull(Schema.decodeUnknownOption(Live)(snapshot.docs["pi.live"]));
 }
-
-export const Snapshot = Schema.Struct({
-  entries: Schema.Array(
-    Schema.Struct({
-      id: Schema.String,
-      kind: Schema.String,
-      model: Schema.optional(Schema.Array(Message)),
-    }),
-  ),
-  before: Schema.optional(Schema.String),
-  docs: Schema.Record(Schema.String, Schema.Unknown),
-});
 
 export const Session = Schema.Struct({ id: Schema.String, model: Schema.String });
 
