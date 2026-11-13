@@ -762,7 +762,7 @@ function SettingsModal({
         <Input
           id="settings-accounts"
           name="accounts"
-          placeholder={github.owner}
+          placeholder={`e.g. ${github.owner}`}
           value={accounts}
           onChange={(event) => {
             setAccounts(event.target.value);
@@ -771,7 +771,9 @@ function SettingsModal({
           aria-describedby="settings-accounts-help"
         />
         <p id="settings-accounts-help" className="field-help">
-          GitHub users and organizations whose repositories agents may use, separated by commas.
+          {accounts.trim()
+            ? "GitHub users and organizations whose repositories agents may use, separated by commas."
+            : "No GitHub accounts are allowed. Add the repository owner and Save. Installing the App does not populate this list."}
         </p>
         <label htmlFor="settings-senders">Who can run /pi commands</label>
         <Input

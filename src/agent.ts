@@ -31,6 +31,7 @@ import {
   workspaceConfig,
   activeWorkspace,
   selectRepository,
+  workspacePrompt,
   WorkspaceRequest,
   shellQuote,
   type WorkspaceConfig,
@@ -236,6 +237,9 @@ export class Agent extends DurableObject<Env> {
           () =>
             "You are a coding assistant. Use the Linux sandbox for commands and files. Never claim a command ran unless its tool result confirms it.",
           { tag: false },
+        ),
+        section("workspace-context", async ({ read, conversationId }, context) =>
+          workspacePrompt(await read.snapshot(ConversationWorkspace, conversationId, context)),
         ),
       ],
     });

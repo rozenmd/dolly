@@ -225,7 +225,7 @@ function makeGitHub(storage: DurableObjectStorage) {
     if (!(yield* accountAllowed(repository.split("/")[0])))
       return yield* new OperationError({
         operation: "github.account",
-        message: "GitHub repository owner is not allowed",
+        message: `GitHub repository owner is not allowed. Add ${repository.split("/")[0]} to Settings → Accounts dolly can work in. Installing the GitHub App alone does not set this allowlist.`,
         details: null,
       });
 
@@ -625,14 +625,32 @@ function makeGitHub(storage: DurableObjectStorage) {
     const connected = yield* read();
     const op = input.operation;
 
-    if (op.action === "repositories")
+    if (op.action === "repositories") {
+      if ((yield* accounts).length === 0)
+        return {
+          ok: false,
+          code: "accounts_unconfigured",
+          message:
+            "No GitHub repository accounts are allowed. In Settings → Accounts dolly can work in, add the GitHub user or organization that owns the repository. This is separate from installing the App or enrolling a repo.",
+        };
+      const available = yield* repositories();
+
+      if (available.length === 0)
+        return {
+          ok: false,
+          code: "no_repositories_discovered",
+          message:
+            "No App repositories were discovered in the allowed accounts. Check Settings → Add repositories and the App's selected repository grants. If this session already names a repository, try workspace checkout with that full owner/repository to get its actual access result rather than asking the user to identify it again.",
+        };
+
       return {
         ok: true,
         result: {
           kind: "repositories",
-          repositories: (yield* repositories()).map((repo) => repo.fullName),
+          repositories: available.map((repo) => repo.fullName),
         },
       };
+    }
 
     const repository = op.repository;
     const write = op.action !== "read_file";

@@ -349,3 +349,31 @@ it("executes Dolly tools through Anthropic and resumes generation with their res
   expect(requests).toBe(2);
   expect(await (await call(`/sessions/${session.id}`)).text()).toContain("toolResult");
 });
+
+it("includes the selected repository in Claude's system prompt before any tool call", async () => {
+  await call("/auth/anthropic", "PUT", { token });
+  let system = "";
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    expect(String(url)).toContain("api.anthropic.com/v1/messages");
+    system = JSON.stringify(JSON.parse(String(init?.body)).system);
+
+    return reply("I know which repository this session selected.");
+  });
+
+  const session = await (
+    await call("/sessions", "POST", {
+      model: "claude-haiku-4-5",
+      workspace: { repository: "rozenmd/dolly", ref: "main" },
+    })
+  ).json<{ id: string }>();
+
+  await call(`/sessions/${session.id}/messages`, "POST", {
+    content: "Work on dolly",
+    requestId: crypto.randomUUID(),
+  });
+  await expect.poll(() => system, { timeout: 4000 }).toContain("rozenmd/dolly");
+  expect(system).toContain("workspace-context");
+  expect(system).toContain("workspace checkout");
+  expect(system).toContain("not proof of GitHub access");
+  expect(system).not.toContain(token);
+});
