@@ -461,11 +461,14 @@ it("bounds child message deliveries and validates authenticated HTTP inputs", as
   ).toBe(409);
 });
 
-it("lets a child answer after more than 20 tool turns", async () => {
+it.each([
+  { rounds: 21, result: { status: "answered", text: "Finished after 21 tool turns" } },
+  { rounds: 100, result: { status: "unanswered", reason: "turn_limit" } },
+])("settles a child correctly after $rounds tool turns", async ({ rounds, result }) => {
   let turns = 0;
 
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-    if (turns === 21) return answer("Finished after 21 tool turns");
+    if (turns === rounds) return answer(`Finished after ${rounds} tool turns`);
     turns++;
 
     return sse({
@@ -483,7 +486,7 @@ it("lets a child answer after more than 20 tool turns", async () => {
     .toBe("terminal");
   expect(await receipt(parent, child.taskId)).toMatchObject({
     outcome: "completed",
-    result: { status: "answered", text: "Finished after 21 tool turns" },
+    result,
   });
-  expect(turns).toBe(21);
+  expect(turns).toBe(rounds);
 });

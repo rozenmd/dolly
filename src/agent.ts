@@ -264,6 +264,7 @@ export class Agent extends DurableObject<Env> {
             await configure(tx, conversation.id, {
               model: { provider: "openai-codex", modelId: this.env.CODEX_MODEL },
               thinkingLevel: "low",
+              maxTurns: 100,
               tools,
             });
           },
@@ -304,13 +305,13 @@ export class Agent extends DurableObject<Env> {
       if (end.kind === "failed") this.ctx.abort("Harness storage failed");
     });
 
-    // Existing conversations persist their old limit; clear it before resuming work.
+    // Existing conversations persist their old limit; raise it before resuming work.
     if (
       !(yield* attempt("session.turn-limit.read", () =>
-        this.ctx.storage.get("migration:unlimited-turns"),
+        this.ctx.storage.get("migration:100-turns"),
       ))
     ) {
-      yield* attempt("pi.turn-limit.remove", () =>
+      yield* attempt("pi.turn-limit.update", () =>
         this.harness.commit(async (tx) => {
           let cursor: Cursor | undefined;
 
@@ -318,7 +319,7 @@ export class Agent extends DurableObject<Env> {
             const page = await tx.scanConversations({}, 100, cursor);
 
             for (const conversation of page.items) {
-              await configure(tx, conversation.id, { maxTurns: null });
+              await configure(tx, conversation.id, { maxTurns: 100 });
             }
 
             cursor = page.next;
@@ -326,7 +327,7 @@ export class Agent extends DurableObject<Env> {
         }, BACKGROUND_CONTEXT),
       );
       yield* attempt("session.turn-limit.migrated", () =>
-        this.ctx.storage.put("migration:unlimited-turns", true),
+        this.ctx.storage.put("migration:100-turns", true),
       );
     }
 

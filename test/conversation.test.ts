@@ -25,45 +25,45 @@ beforeEach(async () => {
 
 afterEach(() => vi.restoreAllMocks());
 
-it("leaves new conversations unlimited and removes persisted limits on restart", async () => {
-  const created = await SELF.fetch("https://worker/api/sessions", {
-    method: "POST",
-    headers,
-  });
+it.each([20, null])(
+  "sets new and existing conversations to 100 turns (old limit: %s)",
+  async (maxTurns) => {
+    const created = await SELF.fetch("https://worker/api/sessions", {
+      method: "POST",
+      headers,
+    });
 
-  expect(created.status).toBe(201);
+    expect(created.status).toBe(201);
 
-  const { id } = await created.json<{ id: string }>();
+    const { id } = await created.json<{ id: string }>();
 
-  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
-    const harness = agent["harness"];
-    const conversationId = await state.storage.get<ConversationId>(`session:${id}`);
+    await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+      const harness = agent["harness"];
+      const conversationId = await state.storage.get<ConversationId>(`session:${id}`);
 
-    if (!conversationId) throw new Error("Session missing");
+      if (!conversationId) throw new Error("Session missing");
 
-    const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
-    expect((await conversation!.agent(BACKGROUND_CONTEXT)).maxTurns).toBeUndefined();
-    await harness.commit(
-      (tx) => configure(tx, conversationId, { maxTurns: 20 }),
-      BACKGROUND_CONTEXT,
-    );
-    await state.storage.delete("migration:unlimited-turns");
-  });
+      const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
+      expect((await conversation!.agent(BACKGROUND_CONTEXT)).maxTurns).toBe(100);
+      await harness.commit((tx) => configure(tx, conversationId, { maxTurns }), BACKGROUND_CONTEXT);
+      await state.storage.delete("migration:100-turns");
+    });
 
-  await abortAllDurableObjects();
-  await SELF.fetch(`https://worker/api/sessions/${id}`, { headers });
+    await abortAllDurableObjects();
+    await SELF.fetch(`https://worker/api/sessions/${id}`, { headers });
 
-  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
-    const harness = agent["harness"];
-    const conversationId = await state.storage.get<ConversationId>(`session:${id}`);
+    await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+      const harness = agent["harness"];
+      const conversationId = await state.storage.get<ConversationId>(`session:${id}`);
 
-    if (!conversationId) throw new Error("Session missing");
+      if (!conversationId) throw new Error("Session missing");
 
-    const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
-    expect((await conversation!.agent(BACKGROUND_CONTEXT)).maxTurns).toBeUndefined();
-    expect(await state.storage.get("migration:unlimited-turns")).toBe(true);
-  });
-});
+      const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
+      expect((await conversation!.agent(BACKGROUND_CONTEXT)).maxTurns).toBe(100);
+      expect(await state.storage.get("migration:100-turns")).toBe(true);
+    });
+  },
+);
 
 it("pushes an initial snapshot and redacted live updates over an authenticated WebSocket", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
