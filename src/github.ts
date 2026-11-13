@@ -622,8 +622,48 @@ function makeGitHub(storage: DurableObjectStorage) {
   const execute = Effect.fn("GitHub.execute")(function* (
     input: typeof GitHubRequest.Type,
   ): Effect.fn.Return<typeof GitHubReply.Type, OperationError> {
-    const connected = yield* read();
     const op = input.operation;
+
+    if (op.action === "read_file") {
+      const path = `/repos/${op.repository}/contents/${op.path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(op.ref)}`;
+
+      // A successful anonymous contents request proves the file is public. Never
+      // send App credentials to an unapproved owner, even after a public failure.
+      const file = yield* api(path, "").pipe(
+        Effect.catchTag("OperationError", (error) =>
+          Effect.gen(function* () {
+            const status = Schema.decodeUnknownOption(Schema.Struct({ status: Schema.Number }))(
+              error.details,
+            );
+
+            if (
+              Option.isNone(status) ||
+              status.value.status !== 404 ||
+              !(yield* accountAllowed(op.repository.split("/")[0]))
+            )
+              return yield* Effect.fail(error);
+
+            const token = yield* tokenFor(yield* read(), op.repository, "read");
+
+            return yield* api(path, token);
+          }),
+        ),
+        Effect.flatMap(decode(FileResponse)),
+      );
+
+      if (file.size > 32_768 || file.content.replace(/\s/g, "").length > 43_692)
+        return { ok: false, code: "file_too_large", message: "File exceeds 32 KiB" };
+
+      const content = yield* attempt("github.file.decode", async () =>
+        new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
+          Uint8Array.from(atob(file.content.replace(/\s/g, "")), (char) => char.charCodeAt(0)),
+        ),
+      );
+
+      return { ok: true, result: { kind: "file", path: file.path, sha: file.sha, content } };
+    }
+
+    const connected = yield* read();
 
     if (op.action === "repositories") {
       if ((yield* accounts).length === 0)
@@ -653,40 +693,19 @@ function makeGitHub(storage: DurableObjectStorage) {
     }
 
     const repository = op.repository;
-    const write = op.action !== "read_file";
-    const token = yield* tokenFor(connected, repository, write ? "write" : "read");
+    const token = yield* tokenFor(connected, repository, "write");
     const root = `/repos/${repository}`;
 
-    if (write) {
-      const info = yield* api(root, token).pipe(Effect.flatMap(decode(RepoResponse)));
+    const info = yield* api(root, token).pipe(Effect.flatMap(decode(RepoResponse)));
 
-      if (op.branch === info.default_branch)
-        return {
-          ok: false,
-          code: "default_branch",
-          message: "Writes to the default branch are forbidden",
-        };
-    }
+    if (op.branch === info.default_branch)
+      return {
+        ok: false,
+        code: "default_branch",
+        message: "Writes to the default branch are forbidden",
+      };
 
     switch (op.action) {
-      case "read_file": {
-        const file = yield* api(
-          `${root}/contents/${op.path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(op.ref)}`,
-          token,
-        ).pipe(Effect.flatMap(decode(FileResponse)));
-
-        if (file.size > 32_768 || file.content.replace(/\s/g, "").length > 43_692)
-          return { ok: false, code: "file_too_large", message: "File exceeds 32 KiB" };
-
-        const content = yield* attempt("github.file.decode", async () =>
-          new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
-            Uint8Array.from(atob(file.content.replace(/\s/g, "")), (char) => char.charCodeAt(0)),
-          ),
-        );
-
-        return { ok: true, result: { kind: "file", path: file.path, sha: file.sha, content } };
-      }
-
       case "create_branch": {
         const base = yield* api(`${root}/git/ref/heads/${encodeURIComponent(op.base)}`, token).pipe(
           Effect.flatMap(decode(RefResponse)),
