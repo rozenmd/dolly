@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Schema from "effect/Schema";
+import type { Live } from "../../../src/transcript";
 import { readSessions, Snapshot, turnsFromSnapshot, sessionBody } from "./api";
 
 describe("new session context", () => {
@@ -50,6 +51,54 @@ describe("new session context", () => {
 });
 
 describe("session transcript", () => {
+  it("reports live activity without exposing reasoning, including sequential queued tools", () => {
+    const entries = [{ id: 1, kind: "pi.user", model: [{ role: "user", content: "Run tests" }] }];
+
+    const snapshot = (live: typeof Live.Type) =>
+      Schema.decodeUnknownSync(Snapshot)({ entries, docs: { "pi.live": live } });
+
+    const [thinking] = turnsFromSnapshot(
+      snapshot({
+        run: {},
+        generation: {
+          message: {
+            role: "assistant",
+            content: [{ type: "thinking", thinking: "Private reasoning" }],
+          },
+        },
+      }),
+    );
+
+    expect(thinking?.activity).toBe("Thinking");
+    expect(thinking?.items).toEqual([]);
+
+    const [responding] = turnsFromSnapshot(
+      snapshot({
+        run: {},
+        generation: { message: { role: "assistant", content: "Checking tests." } },
+      }),
+    );
+
+    expect(responding?.activity).toBe("Responding");
+    expect(responding?.items[0]).toMatchObject({ text: "Checking tests." });
+
+    const [tools] = turnsFromSnapshot(
+      snapshot({
+        run: {},
+        tools: [
+          { callId: "1", name: "shell", status: "running", output: "Testing" },
+          { callId: "2", name: "workspace", status: "pending" },
+        ],
+      }),
+    );
+
+    expect(tools?.activity).toBe("Running shell");
+    expect(tools?.items[0]).toMatchObject({
+      steps: [{ status: "running", output: "Testing" }, { status: "pending" }],
+    });
+    expect(turnsFromSnapshot(snapshot({}))[0]?.activity).toBeUndefined();
+  });
+
   it("shows provider failures with empty assistant content instead of silently dropping them", () => {
     const snapshot = Schema.decodeUnknownSync(Snapshot)({
       entries: [

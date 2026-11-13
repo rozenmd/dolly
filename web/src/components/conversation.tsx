@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import {
   ArrowUpIcon,
   CheckIcon,
@@ -34,7 +34,16 @@ export function Conversation({
 }) {
   const scroll = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
-  const now = Date.now();
+  const [now, setNow] = useState(Date.now);
+  const running = turns.some((turn) => turn.running);
+
+  useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+
+    return () => clearInterval(timer);
+  }, [running, sessionId]);
 
   useLayoutEffect(() => {
     pinned.current = true;
@@ -115,7 +124,10 @@ function TurnView({ turn, now }: { turn: Turn; now: number }) {
       {turn.running && (
         <p className="running-footer" role="status">
           <span className="status-dot working" />
-          Working{started !== undefined && <> · {duration(Math.max(0, now - started))}</>}
+          {turn.activity ?? "Working"}
+          {started !== undefined && (
+            <span aria-live="off"> · {duration(Math.max(0, now - started))}</span>
+          )}
         </p>
       )}
     </section>
@@ -176,7 +188,7 @@ function StepGroup({ steps }: { steps: readonly Step[] }) {
   const failed = steps.some((step) => step.status === "error");
 
   return (
-    <details className="step-group">
+    <details className="step-group" open={running || failed}>
       <summary>
         <Square2StackIcon />
         <span>{stepCount(steps.length)}</span>
@@ -186,18 +198,29 @@ function StepGroup({ steps }: { steps: readonly Step[] }) {
       <ol>
         {steps.map((step) => (
           <li key={step.id}>
-            <details className="step">
+            <details className="step" open={step.status === "running" || step.status === "error"}>
               <summary>
                 <span className={`step-name step-${step.status}`}>{step.name}</span>
                 {step.detail && <code>{step.detail}</code>}
               </summary>
-              <pre>{step.output || (step.status === "running" ? "Running…" : "No output")}</pre>
+              <pre>{step.output || stepPlaceholder(step.status)}</pre>
             </details>
           </li>
         ))}
       </ol>
     </details>
   );
+}
+
+function stepPlaceholder(status: Step["status"]) {
+  switch (status) {
+    case "running":
+      return "Running…";
+    case "pending":
+      return "Queued";
+    default:
+      return "No output";
+  }
 }
 
 function Answer({ id, text, at, now }: { id: string; text: string; at?: number; now: number }) {
