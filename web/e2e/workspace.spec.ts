@@ -231,7 +231,7 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
       return route.fulfill({
         json: {
           ok: probes > 1,
-          model: "claude-haiku-4-5",
+          model: "claude-haiku-5-5",
           durationMs: 25,
           message:
             probes === 1
@@ -295,14 +295,14 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
   await page.screenshot({ path: test.info().outputPath("claude-connection-mobile.png") });
   await connect.getByRole("button", { name: "Continue with Claude" }).click();
   const composer = page.getByRole("dialog", { name: "New session" });
-  await expect(composer.getByLabel("Model", { exact: true })).toHaveValue("claude-sonnet-4-6");
-  await composer.getByLabel("Model", { exact: true }).selectOption("claude-haiku-4-5");
+  await expect(composer.getByLabel("Model", { exact: true })).toHaveValue("claude-sonnet-5-5");
+  await composer.getByLabel("Model", { exact: true }).selectOption("claude-haiku-5-5");
   await composer.getByLabel("Task", { exact: true }).fill("Say hello");
   await composer.getByRole("button", { name: "Create", exact: true }).click();
   await expect(page.getByRole("article", { name: "assistant message" })).toContainText(
     "Hello from Claude",
   );
-  expect(selectedModel).toBe("claude-haiku-4-5");
+  expect(selectedModel).toBe("claude-haiku-5-5");
   expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.v1"))).not.toContain(token);
   await page.reload();
   await expect(page.getByRole("dialog")).toHaveCount(0);
