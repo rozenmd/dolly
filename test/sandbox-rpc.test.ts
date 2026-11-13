@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { expect, it } from "vitest";
 import * as Effect from "effect/Effect";
+import { checkoutDiagnosticsScript } from "../src/workspace";
 
 const config = {
   repository: "owner/project",
@@ -45,14 +46,23 @@ it("exposes checkout stderr and permits retry after a failed setup", async () =>
   await runInDurableObject(sandbox, async (instance) => {
     let checkouts = 0;
     let checkpoints = 0;
+    let diagnostics = 0;
     Object.assign(instance, {
       container: () => Effect.void,
-      execute: () =>
-        Effect.sync(() => ({
-          stdout: "",
-          stderr: checkouts++ === 0 ? "fatal: remote ref main not found" : "",
-          exitCode: checkouts === 1 ? 1 : 0,
-        })),
+      execute: (command: string) =>
+        Effect.sync(() => {
+          if (command === checkoutDiagnosticsScript) {
+            diagnostics++;
+
+            return { stdout: "phase: resolve_ref", stderr: "", exitCode: 0 };
+          }
+
+          return {
+            stdout: "",
+            stderr: checkouts++ === 0 ? "fatal: remote ref main not found" : "",
+            exitCode: checkouts === 1 ? 1 : 0,
+          };
+        }),
       checkpoint: () =>
         Effect.sync(() => {
           checkpoints++;
@@ -71,9 +81,59 @@ it("exposes checkout stderr and permits retry after a failed setup", async () =>
       message: "Git checkout failed (exit 1): fatal: remote ref main not found",
     });
     expect(checkpoints).toBe(0);
+    expect(diagnostics).toBe(1);
     await instance.prepare(config);
     expect(checkouts).toBe(2);
     expect(checkpoints).toBe(1);
+    expect(diagnostics).toBe(1);
+  });
+});
+
+it("collects bounded diagnostics after a checkout timeout without masking the timeout", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance) => {
+    const calls: { command: string; timeout: number }[] = [];
+    let checkpoints = 0;
+    Object.assign(instance, {
+      container: () => Effect.void,
+      execute: (command: string, _cwd: string, timeout: number) => {
+        calls.push({ command, timeout });
+
+        return command === checkoutDiagnosticsScript
+          ? Effect.fail(new Error("Diagnostic probe unavailable"))
+          : Effect.never.pipe(Effect.timeout("1 millis"));
+      },
+      checkpoint: () =>
+        Effect.sync(() => {
+          checkpoints++;
+        }),
+    });
+    await expect(instance.prepare(config)).rejects.toHaveProperty("_tag", "TimeoutError");
+    expect(calls).toHaveLength(2);
+    expect(calls[0].timeout).toBe(120);
+    expect(calls[1]).toEqual({ command: checkoutDiagnosticsScript, timeout: 10 });
+    expect(checkpoints).toBe(0);
+  });
+});
+
+it("preserves checkout errors even when the diagnostic probe defects", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance) => {
+    Object.assign(instance, {
+      container: () => Effect.void,
+      execute: (command: string) =>
+        command === checkoutDiagnosticsScript
+          ? Effect.die("Diagnostic process crashed")
+          : Effect.succeed({
+              stdout: "",
+              stderr: "fatal: index.lock exists",
+              exitCode: 128,
+            }),
+    });
+    await expect(instance.prepare(config)).rejects.toMatchObject({
+      operation: "workspace.checkout",
+      message: "Git checkout failed (exit 128): fatal: index.lock exists",
+    });
   });
 });
 

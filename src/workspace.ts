@@ -168,11 +168,31 @@ export const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") 
 
 export type WorkspaceCheckpoint = { branch: string; commit: string };
 
+/** Fixed, read-only diagnostics: never print environment, process arguments or user file contents. */
+export const checkoutDiagnosticsScript = `set +e
+printf '\\ncheckout phase\\n'
+cat /workspace/checkout-phase
+printf '\\nmounts\\n'
+findmnt -t fuse.artifact-fs -o TARGET,FSTYPE,OPTIONS
+printf '\\nprocesses (no arguments)\\n'
+ps -eo pid,ppid,stat,etime,comm
+printf '\\nlock metadata (no contents)\\n'
+stat /workspace/artifact-fs/repos/repo/git/index.lock
+printf '\\nFUSE permissions\\n'
+id
+stat /usr/bin/fusermount3 /dev/fuse /workspace/mounts/repo
+grep -E '^(Cap|NoNewPrivs)' /proc/self/status
+printf '\\nArtifactFS log tail (last 12 KiB)\\n'
+tail -c 12288 /workspace/artifact-fs.log
+exit 0`;
+
 export function checkoutScript(config: WorkspaceConfig) {
   const remote = shellQuote(`http://github.workspace/${config.repository}.git`);
 
   return `set -eu
 if test -f /workspace/ready; then exit 0; fi
+phase() { printf '%s\\n' "$1" > /workspace/checkout-phase; }
+phase resolve_ref
 remote=${remote}
 ref=${shellQuote(config.ref)}
 # Resolve HEAD, short branch names and tags without changing their meaning.
@@ -185,9 +205,11 @@ canonical=$(printf '%s\\n' "$advertisement" | awk -v ref="$ref" '
   END { if (symbolic) print symbolic; else if (exact) print exact; else if (branch) print branch; else print tag }
 ')
 if test -n "$canonical" && test "$canonical" != HEAD; then
+  phase artifactfs_mount
   dolly-mount repo "$remote" "$canonical"
   ln -sfn /workspace/mounts/repo /workspace/repo
 else
+  phase exact_revision_checkout
   # Unadvertised commit IDs have no named ref for ArtifactFS. Retain exact-revision checkout.
   rm -rf /workspace/checkout
   mkdir -p /workspace/checkout
@@ -197,10 +219,13 @@ else
   git -C /workspace/checkout checkout --detach FETCH_HEAD
   mv /workspace/checkout /workspace/repo
 fi
+phase git_config
 cd /workspace/repo
 git config user.name 'Dolly'
 git config user.email 'dolly@users.noreply.github.com'
+phase git_checkout_branch
 git checkout -B ${shellQuote(config.branch)} HEAD
+phase ready
 touch /workspace/ready`;
 }
 

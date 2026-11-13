@@ -1,11 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import { Files } from "@cloudflare/sandbox";
-import type * as Cause from "effect/Cause";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Semaphore from "effect/Semaphore";
 import { WorkspaceOutbound } from "./git-transport";
 import {
   checkoutScript,
+  checkoutDiagnosticsScript,
   restoreScript,
   checkpointScript,
   type WorkspaceConfig,
@@ -250,6 +251,66 @@ export class Sandbox extends DurableObject<Env> {
     );
   });
 
+  private checkout = Effect.fn("Sandbox.checkout")(function* (
+    this: Sandbox,
+    config: WorkspaceConfig,
+  ) {
+    const started = Date.now();
+    const context = { sandboxId: this.ctx.id.toString(), timeoutSeconds: 120 };
+    yield* Effect.logInfo({ event: "workspace_checkout_started", ...context });
+
+    return yield* Effect.gen({ self: this }, function* () {
+      const result = yield* this.execute(checkoutScript(config), "/workspace", 120);
+
+      if (result.exitCode !== 0)
+        return yield* new OperationError({
+          operation: "workspace.checkout",
+          message: `Git checkout failed (exit ${result.exitCode}): ${redact(
+            (result.stderr.trim() || result.stdout.trim() || "No command output").slice(-2000),
+          )}`,
+          details: {
+            ...result,
+            stdout: redact(result.stdout),
+            stderr: redact(result.stderr),
+          },
+        });
+
+      yield* Effect.logInfo({
+        event: "workspace_checkout_succeeded",
+        ...context,
+        elapsedMs: Date.now() - started,
+      });
+    }).pipe(
+      Effect.onError((cause) =>
+        Effect.gen({ self: this }, function* () {
+          // Log before collecting diagnostics so a failed/hung probe cannot hide the original failure.
+          yield* Effect.logError({
+            event: "workspace_checkout_failed",
+            ...context,
+            elapsedMs: Date.now() - started,
+            error: redact(Cause.pretty(cause)),
+          });
+          const diagnostics = yield* this.execute(checkoutDiagnosticsScript, "/workspace", 10);
+          yield* Effect.logWarning({
+            event: "workspace_checkout_diagnostics",
+            ...context,
+            exitCode: diagnostics.exitCode,
+            stdout: redact(diagnostics.stdout),
+            stderr: redact(diagnostics.stderr),
+          });
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning({
+              event: "workspace_checkout_diagnostics_failed",
+              ...context,
+              error: redact(Cause.pretty(cause)),
+            }),
+          ),
+        ),
+      ),
+    );
+  });
+
   prepare(config: WorkspaceConfig) {
     return Effect.runPromise(
       this.permit.withPermit(
@@ -281,19 +342,7 @@ export class Sandbox extends DurableObject<Env> {
 
           if (this.prepared) return info;
 
-          const result = yield* this.execute(checkoutScript(config), "/workspace", 120);
-
-          if (result.exitCode !== 0) {
-            yield* Effect.logError({ event: "workspace_checkout_failed", ...result });
-
-            return yield* new OperationError({
-              operation: "workspace.checkout",
-              message: `Git checkout failed (exit ${result.exitCode}): ${redact(
-                (result.stderr.trim() || result.stdout.trim() || "No command output").slice(-2000),
-              )}`,
-              details: result,
-            });
-          }
+          yield* this.checkout(config);
 
           yield* this.checkpoint();
           this.prepared = true;
