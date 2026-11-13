@@ -290,8 +290,16 @@ it("inherits Claude for child agents and redacts setup tokens from transcript an
 it("executes Dolly tools through Anthropic and resumes generation with their results", async () => {
   await call("/auth/anthropic", "PUT", { token });
   let requests = 0;
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
     if (requests++ > 0) return reply("No repositories enrolled.");
+    const tools = JSON.parse(String(init?.body)).tools;
+    expect(
+      tools.find((tool: { name: string }) => tool.name === "workspace").input_schema,
+    ).toMatchObject({
+      type: "object",
+      required: ["action"],
+      properties: { action: { enum: expect.arrayContaining(["checkout", "attach"]) } },
+    });
 
     const events = [
       {

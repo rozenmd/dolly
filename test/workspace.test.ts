@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import * as Schema from "effect/Schema";
 import {
   GITHUB_APP_GRANT_PERMISSIONS,
   GITHUB_APP_READ_PERMISSIONS,
@@ -13,8 +14,32 @@ import {
   shellQuote,
   workspaceConfig,
   workspacePrompt,
+  WorkspaceRequest,
+  WorkspaceToolInput,
   type WorkspaceState,
 } from "../src/workspace";
+
+it("publishes workspace actions as root object properties while validating action requirements", () => {
+  const schema = Schema.toJsonSchemaDocument(WorkspaceToolInput).schema;
+  expect(schema).toMatchObject({
+    type: "object",
+    required: ["action"],
+    properties: {
+      action: { enum: expect.arrayContaining(["repositories", "checkout", "attach"]) },
+      repository: { anyOf: expect.arrayContaining([{ type: "null" }]) },
+      ref: { anyOf: expect.arrayContaining([{ type: "null" }]) },
+    },
+  });
+  expect(schema).not.toHaveProperty("anyOf");
+  const decode = Schema.decodeUnknownSync(WorkspaceRequest);
+  expect(() => decode({ action: "checkout" })).toThrow();
+  expect(() => decode({ action: "commit" })).toThrow();
+  expect(() => decode({ action: "open_pull_request", title: "Fix" })).toThrow();
+  expect(decode({ action: "checkout", repository: "owner/repo" })).toEqual({
+    action: "checkout",
+    repository: "owner/repo",
+  });
+});
 
 it("gives the model authoritative primary/active repository context without inventing access", () => {
   const primary = workspaceConfig({ repository: "rozenmd/dolly", ref: "main" }, "42");

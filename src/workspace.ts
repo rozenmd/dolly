@@ -73,6 +73,26 @@ export const WorkspaceRequest = Schema.Union([
   }),
 ]);
 
+// Providers need an object at the root, not a union whose properties are hidden in anyOf.
+// Keep WorkspaceRequest as the stricter, action-specific execution validator.
+export const WorkspaceToolInput = Schema.Struct({
+  action: Schema.Literals([
+    "repositories",
+    "checkout",
+    "attach",
+    "status",
+    "diff",
+    "commit",
+    "push",
+    "open_pull_request",
+  ]),
+  repository: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(201))),
+  ref: WorkspaceInput.fields.ref,
+  message: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1000))),
+  title: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200))),
+  body: Schema.optional(Schema.String.check(Schema.isMaxLength(32768))),
+});
+
 /** Selecting a repository never reuses another repository's sandbox or resets a checkout. */
 export function selectRepository(
   state: WorkspaceState,

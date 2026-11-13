@@ -12,7 +12,7 @@ import {
   type WorkspaceCheckpoint,
 } from "./workspace";
 import { attempt, OperationError } from "./operations";
-import { exceptionDetails } from "./diagnostics";
+import { exceptionDetails, redact } from "./diagnostics";
 import type { Env } from "./env";
 
 /** Drain output without retaining unbounded bytes. Scoped cancellation releases the stream reader. */
@@ -66,6 +66,7 @@ interface SandboxState extends DurableObjectState {
 export class Sandbox extends DurableObject<Env> {
   private readonly permit = Semaphore.makeUnsafe(1);
   private initialized = false;
+  private prepared = false;
   private readonly artifactRepository = `session-${this.ctx.id}`;
   private readonly loopback: SandboxState["exports"];
 
@@ -84,6 +85,7 @@ export class Sandbox extends DurableObject<Env> {
     if (!container.running) {
       container.start({ image: container.images.sandbox, enableInternet: false });
       this.initialized = false;
+      this.prepared = false;
     }
 
     yield* attempt("sandbox.inactivity", () => container.setInactivityTimeout(300_000));
@@ -154,6 +156,8 @@ export class Sandbox extends DurableObject<Env> {
               details: restored,
             });
           }
+
+          this.prepared = true;
         }
       }
 
@@ -266,6 +270,17 @@ export class Sandbox extends DurableObject<Env> {
             this.initialized = false;
           }
 
+          // Initialize/restore first so a restarted container never uses a stale warm flag.
+          yield* this.container();
+
+          const info = {
+            repository: config.repository,
+            branch: config.branch,
+            ref: config.ref ?? "HEAD",
+          };
+
+          if (this.prepared) return info;
+
           const result = yield* this.execute(checkoutScript(config), "/workspace", 120);
 
           if (result.exitCode !== 0) {
@@ -273,18 +288,17 @@ export class Sandbox extends DurableObject<Env> {
 
             return yield* new OperationError({
               operation: "workspace.checkout",
-              message: "Git checkout failed",
+              message: `Git checkout failed (exit ${result.exitCode}): ${redact(
+                (result.stderr.trim() || result.stdout.trim() || "No command output").slice(-2000),
+              )}`,
               details: result,
             });
           }
 
           yield* this.checkpoint();
+          this.prepared = true;
 
-          return {
-            repository: config.repository,
-            branch: config.branch,
-            ref: config.ref ?? "HEAD",
-          };
+          return info;
         }),
       ),
     );
@@ -329,6 +343,7 @@ export class Sandbox extends DurableObject<Env> {
           if (this.ctx.container?.running)
             yield* attempt("workspace.restart", () => this.ctx.container!.destroy());
           this.initialized = false;
+          this.prepared = false;
         }),
       ),
     );
