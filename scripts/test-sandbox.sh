@@ -26,6 +26,8 @@ if [[ ${GITHUB_ACTIONS:-} == true && $(uname -s) == Linux ]]; then
       -o "$tools/extras.tgz"
     echo "d0bf8c7442ee9f6ed65966d74bf381c2293f78a89f181153c25ba39b3d708d4e  $tools/extras.tgz" | sha256sum --check
     tar -xzf "$tools/extras.tgz" -C "$tools"
+    # The upstream installer expects the Docker client beside the setup helper.
+    ln -s "$(command -v docker)" "$tools/docker-rootless-extras/docker"
     export PATH="$tools/docker-rootless-extras:$PATH"
     export XDG_RUNTIME_DIR="/run/user/$(id -u)"
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
