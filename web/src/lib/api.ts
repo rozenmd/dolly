@@ -291,14 +291,17 @@ export async function request(
 
   if (body) headers.set("Content-Type", "application/json");
 
-  const response = await fetch(`/api${path}`, {
+  const init: RequestInit = {
     method,
     headers,
-    body: body ? JSON.stringify(body) : undefined,
     signal,
     credentials: "same-origin",
     redirect: "error",
-  });
+  };
+
+  if (body) init.body = JSON.stringify(body);
+
+  const response = await fetch(`/api${path}`, init);
 
   const text = await response.text();
 
