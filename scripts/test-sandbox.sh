@@ -33,6 +33,12 @@ if [[ ${GITHUB_ACTIONS:-} == true && $(uname -s) == Linux ]]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
     sudo loginctl enable-linger "$USER"
     sudo systemctl start "user@$(id -u).service"
+    # The egress interceptor calls back into workerd on the runner host.
+    # Keep container internet disabled; permit the rootless daemon's host callback route.
+    mkdir -p "$HOME/.config/systemd/user/docker.service.d"
+    printf '[Service]\nEnvironment="DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false"\n' \
+      > "$HOME/.config/systemd/user/docker.service.d/workerd.conf"
+    systemctl --user daemon-reload
     dockerd-rootless-setuptool.sh install --force
     export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"
     # The later Worker dry run must build against the same daemon.
@@ -43,4 +49,12 @@ if [[ ${GITHUB_ACTIONS:-} == true && $(uname -s) == Linux ]]; then
   docker info --format '{{json .SecurityOptions}}' | grep -q rootless
 fi
 
-exec pnpm exec vitest run --config vitest.sandbox.config.ts "$@"
+status=0
+pnpm exec vitest run --config vitest.sandbox.config.ts "$@" || status=$?
+if [[ $status != 0 && ${GITHUB_ACTIONS:-} == true ]]; then
+  # Keep native network failures actionable even when workerd reports only a reset.
+  for container in $(docker ps -aq --filter name=workerd-); do
+    docker logs --tail 80 "$container" 2>&1 || true
+  done
+fi
+exit "$status"

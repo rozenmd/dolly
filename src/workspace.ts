@@ -79,7 +79,8 @@ if test -f /workspace/ready; then exit 0; fi
 remote=${remote}
 ref=${shellQuote(config.ref)}
 # Resolve HEAD, short branch names and tags without changing their meaning.
-canonical=$(git ls-remote --symref "$remote" "$ref" "refs/heads/$ref" "refs/tags/$ref" | awk -v ref="$ref" '
+advertisement=$(git ls-remote --symref "$remote" "$ref" "refs/heads/$ref" "refs/tags/$ref")
+canonical=$(printf '%s\\n' "$advertisement" | awk -v ref="$ref" '
   $1 == "ref:" { symbolic = $2 }
   $2 == ref { exact = $2 }
   $2 == "refs/heads/" ref { branch = $2 }

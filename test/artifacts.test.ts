@@ -76,3 +76,13 @@ it("brokers only the session Artifact repository with scoped, short-lived creden
     await env.WORKSPACES.delete(name);
   }
 });
+
+it("preserves the Artifacts missing-repository discriminator across its binding", async () => {
+  try {
+    using repo = await env.WORKSPACES.get(`missing-${crypto.randomUUID()}`);
+    await repo.info();
+    throw new Error("Expected a missing repository");
+  } catch (error) {
+    expect(error).toMatchObject({ code: "NOT_FOUND" });
+  }
+});
