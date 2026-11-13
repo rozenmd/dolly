@@ -268,7 +268,13 @@ mkdir -p remotes/another-owner
     expect((await sandbox.run("cat dirty.txt; git log -1 --format=%s")).stdout).toContain(
       "unsaved workFix answer",
     );
-    expect((await sandbox.run("curl --max-time 5 https://example.com")).exitCode).not.toBe(0);
+
+    const denied = await sandbox.run(
+      "curl --silent --show-error --fail-with-body --max-time 5 https://example.com",
+    );
+
+    expect(denied.exitCode).toBe(22);
+    expect(denied.stdout).toContain("Network destination not enabled for this session");
 
     const verification = await remote.run(
       "git --git-dir=remotes/another-owner/project.git for-each-ref --format='%(refname)' refs/heads/",
