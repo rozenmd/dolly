@@ -67,7 +67,7 @@ For later deployments, run `pnpm run deploy` without `--secrets-file` to preserv
 
 ## Connect GitHub
 
-GitHub authentication runs in the Worker. Each coding conversation can clone any GitHub.com repository accessible to the connected App installations, including repositories owned by other users and organizations. Containers never receive App keys or installation tokens.
+GitHub authentication runs in the Worker. Each coding conversation can clone GitHub.com repositories accessible to the connected App installations whose user or organization is in your account allowlist. Containers never receive App keys or installation tokens.
 
 After deployment and Access setup, load your existing client credentials as shown below, then request a setup link:
 
@@ -80,7 +80,20 @@ curl -sS "$API_URL/api/integrations/github/setup" \
   -d '{"owner":"your-account","ownerType":"personal"}'
 ```
 
-For an organization, use `"ownerType":"organization"`. Connect one App, then install it on the accounts and repositories you want to use. New Apps support installation on other accounts; if you previously created a private App, enable installation on other accounts in GitHub App settings without replacing its credentials. Open `setupUrl` in a browser signed into your Cloudflare Access application. Create the App, then open the returned `installUrl` and choose **selected repositories** or **all repositories** for each installation. GitHub owns that access list; Pi Hard does not keep a second allowlist. The browser setup and callback routes require Access; the API additionally requires the bearer token. No public callback bypass is needed.
+For an organization, use `"ownerType":"organization"`. Connect one App, then install it on the accounts and repositories you want to use. New Apps support installation on other accounts; if you previously created a private App, enable installation on other accounts in GitHub App settings without replacing its credentials. Open `setupUrl` in a browser signed into your Cloudflare Access application. Create the App, then open the returned `installUrl` and choose **selected repositories** or **all repositories** for each installation. GitHub controls repository access within each installation; Pi Hard separately restricts which installation accounts it will use. The browser setup and callback routes require Access; the API additionally requires the bearer token. No public callback bypass is needed.
+
+Configure the allowed GitHub users and organizations through the protected API:
+
+```sh
+curl -sS -X PUT "$API_URL/api/integrations/github/accounts" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"accounts":["your-account","your-organization"]}'
+```
+
+`GET /api/integrations/github/accounts` reads the list. `PUT` replaces it; names are case-insensitive. An unset or empty list denies every account, including for existing deployments until configured. The policy survives restarts and applies to repository discovery, repository tools, Git checkout/fetch/push, and webhook intake/replies. Removing an account prevents subsequent GitHub requests even when an installation token was cached. It does not uninstall the App, stop an already-running request, or erase existing checkouts. The webhook sender allowlist remains separate: allowed accounts identify repository owners, while allowed senders identify who may issue `/pi` commands. GitHub may still deliver webhooks from other installations, but Pi Hard rejects their commands before repository lookup or agent admission.
 
 The App grant and read/write/code token permission maps match [Open Session's public permission definitions](https://github.com/tellahq/opensession/blob/main/packages/core/opensession-server/src/shared/github-app-permissions.ts), retained in `src/github-permissions.ts`. The grant includes Actions, Checks, Contents, Pull requests, Issues and Deployments write, plus Statuses, Members and Metadata read. Installation tokens are narrowed by operation and repository. Existing Apps must accept these permission updates in GitHub settings; no replacement App key is needed. This grants no Administration or Workflows permission. The copied definitions retain their MIT notice in `third_party/opensession/LICENSE`.
 

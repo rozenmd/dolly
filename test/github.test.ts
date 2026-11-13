@@ -67,6 +67,11 @@ async function connect() {
 
   expect((await response.json<{ connected: boolean }>()).connected).toBe(true);
   vi.restoreAllMocks();
+  await SELF.fetch("https://worker/api/integrations/github/accounts", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ accounts: ["example", "another-owner", "third-owner", "other"] }),
+  });
 
   return started;
 }
@@ -81,6 +86,7 @@ beforeEach(async () => {
     await state.storage.delete("github:connected");
     await state.storage.delete("github:pending");
     await state.storage.delete("github:webhook");
+    await state.storage.delete("github:accounts");
   });
 });
 
@@ -422,7 +428,8 @@ it("runs the registered github tool through Pi and persists its result without A
   });
   let requests = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
-    if (new URL(String(url)).pathname === "/app/installations") return Response.json([{ id: 7 }]);
+    if (new URL(String(url)).pathname === "/app/installations")
+      return Response.json([{ id: 7, account: { login: "example" } }]);
 
     if (new URL(String(url)).pathname.endsWith("/access_tokens"))
       return Response.json({
@@ -645,7 +652,11 @@ it("discovers repositories across App installations and paginates GitHub's repos
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = new URL(String(input));
 
-    if (url.pathname === "/app/installations") return Response.json([{ id: 7 }, { id: 8 }]);
+    if (url.pathname === "/app/installations")
+      return Response.json([
+        { id: 7, account: { login: "another-owner" } },
+        { id: 8, account: { login: "third-owner" } },
+      ]);
 
     if (url.pathname.endsWith("/access_tokens"))
       return Response.json({
@@ -729,4 +740,118 @@ it("brokers real Worker RPC Git requests without exposing credentials or allowin
   }
 
   expect(upstream).toBe(2);
+});
+
+async function setAccounts(accounts: string[]) {
+  return SELF.fetch("https://worker/api/integrations/github/accounts", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ accounts }),
+  });
+}
+
+it("persists a user-configured account allowlist, validates it, and defaults to deny all", async () => {
+  const url = "https://worker/api/integrations/github/accounts";
+  expect((await SELF.fetch(url)).status).toBe(401);
+  expect((await SELF.fetch(url, { method: "PUT", body: '{"accounts":[]}' })).status).toBe(401);
+  expect(await (await SELF.fetch(url, { headers })).json()).toEqual({ accounts: [] });
+  expect((await setAccounts(["not/an-account"])).status).toBe(400);
+  expect(await (await setAccounts(["Example", "EXAMPLE", "another-owner"])).json()).toEqual({
+    accounts: ["example", "another-owner"],
+  });
+  await abortAllDurableObjects();
+  expect(await (await SELF.fetch(url, { headers })).json()).toEqual({
+    accounts: ["example", "another-owner"],
+  });
+  expect(await (await setAccounts([])).json()).toEqual({ accounts: [] });
+});
+
+it("skips disallowed installations before minting tokens and continues pagination", async () => {
+  await connect();
+  await setAccounts(["EXAMPLE"]);
+
+  const blocked = Array.from({ length: 100 }, (_, i) => ({
+    id: i + 100,
+    account: { login: "stranger" },
+  }));
+
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = new URL(String(input));
+
+    if (url.pathname === "/app/installations")
+      return Response.json(
+        url.searchParams.get("page") === "1" ? blocked : [{ id: 7, account: { login: "Example" } }],
+      );
+
+    if (url.pathname.endsWith("/access_tokens")) {
+      expect(url.pathname).toBe("/app/installations/7/access_tokens");
+
+      return Response.json({
+        token: "allowed-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+    }
+
+    expect(url.pathname).toBe("/installation/repositories");
+
+    return Response.json({
+      repositories: [{ full_name: repository }, { full_name: "stranger/hidden" }],
+    });
+  });
+
+  expect(await (await execute({ action: "repositories" })).json()).toEqual({
+    ok: true,
+    result: { kind: "repositories", repositories: [repository] },
+  });
+  expect(fetch).toHaveBeenCalledTimes(4);
+});
+
+it("blocks revoked accounts before cached tokens, direct operations, or Git transport can reach GitHub", async () => {
+  await connect();
+
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const path = new URL(String(input)).pathname;
+
+    if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (path.endsWith("/access_tokens"))
+      return Response.json({
+        token: "cached-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+
+    return Response.json({
+      type: "file",
+      path: "README.md",
+      sha,
+      encoding: "base64",
+      content: btoa("hello"),
+      size: 5,
+    });
+  });
+
+  const operation = { action: "read_file" as const, repository, path: "README.md", ref: "main" };
+  expect(await (await execute(operation)).json()).toMatchObject({ ok: true });
+  await setAccounts([]);
+  fetch.mockClear();
+
+  for (const op of [
+    operation,
+    { action: "create_branch" as const, repository, branch: "pi-hard/test", base: "main" },
+  ]) {
+    expect(await (await execute(op)).json()).toMatchObject({
+      ok: false,
+      message: "GitHub repository owner is not allowed",
+    });
+  }
+
+  const { workspaceConfig } = await import("../src/workspace");
+
+  const response = await env.AGENT.getByName("owner").gitTransport(
+    new Request(`http://github.workspace/${repository}.git/info/refs?service=git-upload-pack`),
+    workspaceConfig({ repository }, "policy"),
+  );
+
+  expect(response.status).toBe(502);
+  expect(fetch).not.toHaveBeenCalled();
 });

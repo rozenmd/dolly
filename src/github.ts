@@ -6,7 +6,13 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import { GitHubSetup, GitHubRequest, GitHubReply, Repository } from "./github-contracts";
+import {
+  GitHubSetup,
+  GitHubAccounts,
+  GitHubRequest,
+  GitHubReply,
+  Repository,
+} from "./github-contracts";
 import {
   WebhookSetup,
   WebhookProfile,
@@ -121,6 +127,35 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
   const setupPermit = Semaphore.makeUnsafe(1);
   const tokens = new Map<string, { value: string; expires: number }>();
 
+  // Stored policy is authoritative: absence or an empty list denies every owner.
+  const accounts = Effect.gen(function* () {
+    const raw = yield* attempt("github.accounts.read", () => storage.get("github:accounts"));
+
+    return raw === undefined ? [] : yield* decode(GitHubAccounts.fields.accounts)(raw);
+  });
+
+  const accountAllowed = Effect.fn("GitHub.accountAllowed")(function* (owner: string) {
+    const allowed = yield* accounts;
+
+    return allowed.some((account) => account.toLowerCase() === owner.toLowerCase());
+  });
+
+  const configureAccounts = Effect.fn("GitHub.configureAccounts")(
+    (input: typeof GitHubAccounts.Type) =>
+      setupPermit.withPermit(
+        Effect.gen(function* () {
+          const allowed = Array.from(
+            new Set(input.accounts.map((account) => account.toLowerCase())),
+          );
+
+          yield* attempt("github.accounts.save", () => storage.put("github:accounts", allowed));
+          tokens.clear();
+
+          return { accounts: allowed };
+        }),
+      ),
+  );
+
   const read = Effect.fn("GitHub.configuration")(function* () {
     const raw = yield* attempt("github.read", () => storage.get("github:connected"));
 
@@ -161,6 +196,13 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
     repository: string,
     scope: "read" | "write" | "code",
   ) {
+    if (!(yield* accountAllowed(repository.split("/")[0])))
+      return yield* new OperationError({
+        operation: "github.account",
+        message: "GitHub repository owner is not allowed",
+        details: null,
+      });
+
     const key = `${repository}:${scope}`;
     const cached = tokens.get(key);
 
@@ -204,9 +246,22 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
       const installations = yield* api(
         `/app/installations?per_page=100&page=${page}`,
         appToken,
-      ).pipe(Effect.flatMap(decode(Schema.Array(Schema.Struct({ id: Schema.Number })))));
+      ).pipe(
+        Effect.flatMap(
+          decode(
+            Schema.Array(
+              Schema.Struct({
+                id: Schema.Number,
+                account: Schema.Struct({ login: Schema.String }),
+              }),
+            ),
+          ),
+        ),
+      );
 
       for (const installation of installations) {
+        if (!(yield* accountAllowed(installation.account.login))) continue;
+
         const token = yield* api(`/app/installations/${installation.id}/access_tokens`, appToken, {
           permissions: GITHUB_APP_READ_PERMISSIONS,
         }).pipe(Effect.flatMap(decode(Token)));
@@ -225,7 +280,10 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
             ),
           );
 
-          names.push(...result.repositories.map((repository) => repository.full_name));
+          for (const repository of result.repositories) {
+            if (yield* accountAllowed(repository.full_name.split("/")[0]))
+              names.push(repository.full_name);
+          }
 
           if (result.repositories.length < 100) break;
         }
@@ -535,6 +593,9 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
     const verified = yield* verifyWebhook(profile, body, signature, event);
 
     if (verified.status !== 202) return verified;
+
+    if (!(yield* accountAllowed(verified.event.repository.split("/")[0])))
+      return { status: 403 as const };
     const connected = yield* read();
 
     const installation = yield* api(
@@ -606,6 +667,8 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
 
   return {
     status,
+    accounts,
+    configureAccounts,
     start,
     manifest,
     complete,
