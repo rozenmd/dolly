@@ -8,7 +8,7 @@ declare global {
   }
 }
 
-it("executes commands and uses Sandbox 1.0 Files in isolated native containers", async () => {
+it("executes commands and uses Sandbox 1.0 Files in isolated containers", async () => {
   const first = env.SANDBOX.getByName(crypto.randomUUID());
   expect(await first.run("printf 'sandbox proof' > proof.txt; cat proof.txt")).toMatchObject({
     stdout: "sandbox proof",

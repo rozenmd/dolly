@@ -171,7 +171,7 @@ mkdir -p remotes/another-owner
     const result = await runInDurableObject(env.SANDBOX.getByName(remoteName), async (_, state) => {
       const container = state.container;
 
-      if (!container) throw new Error("Missing native container");
+      if (!container) throw new Error("Missing container");
 
       const process = await container.exec(["git", "http-backend"], {
         cwd: "/workspace",

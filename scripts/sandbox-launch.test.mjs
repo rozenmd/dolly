@@ -9,7 +9,7 @@ import { test } from "node:test";
 const script = fileURLToPath(new URL("./run-sandbox-tests.sh", import.meta.url));
 
 for (const exitCode of [0, 7]) {
-  test(`rootless native launch preserves the checkout, arguments, and exit status ${exitCode}`, (t) => {
+  test(`rootless container launch preserves the checkout, arguments, and exit status ${exitCode}`, (t) => {
     const directory = mkdtempSync(join(tmpdir(), "pi-hard-launch-"));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
     const checkout = join(directory, "checkout with spaces");

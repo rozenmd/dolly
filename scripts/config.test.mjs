@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { sandboxTestConfig } from "./sandbox-config.ts";
 import config from "../cloudflare.config.ts";
 
-test("typed Cloudflare config keeps SQLite namespaces and the native sandbox image", () => {
+test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", () => {
   const { worker, containers } = config;
   assert.equal(worker.name, "pi-hard");
   assert.equal(worker.entrypoint, "./src/index.ts");

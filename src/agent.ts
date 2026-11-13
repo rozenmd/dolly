@@ -44,7 +44,7 @@ import { exceptionDetails, redact } from "./diagnostics";
 import { attempt, rpc, OperationError } from "./operations";
 import type { Env } from "./env";
 
-/** Native Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
+/** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
 export class Agent extends DurableObject<Env> {
   private harness!: Harness;
   private readonly credentials: Credentials;

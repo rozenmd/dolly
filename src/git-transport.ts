@@ -194,7 +194,7 @@ export async function artifactTransport(request: Request, env: Env, repository: 
 
     return response;
   } catch (cause) {
-    // Native fetch errors can contain the supplied Authorization header.
+    // Fetch errors can contain the supplied Authorization header.
     throw new OperationError({
       operation: "artifacts.transport",
       message: "Artifacts Git transport failed",

@@ -15,7 +15,7 @@ import { attempt, OperationError } from "./operations";
 import { exceptionDetails } from "./diagnostics";
 import type { Env } from "./env";
 
-/** Drain output without retaining unbounded bytes. Scoped cancellation releases the native reader. */
+/** Drain output without retaining unbounded bytes. Scoped cancellation releases the stream reader. */
 export const readBounded = Effect.fn("Sandbox.readBounded")(function* (
   stream: ReadableStream<Uint8Array> | null,
   options: { readonly limit: number; readonly overflow: "truncate" | "fail" },

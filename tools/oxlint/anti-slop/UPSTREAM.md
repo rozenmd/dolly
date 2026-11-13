@@ -6,6 +6,6 @@
 - Root MIT license copied from the same revision to `LICENSE`.
 - Local deviations: none. The plugin is excluded from repository lint and formatting to preserve the upstream snapshot.
 
-Both entry points are registered in `oxlint.config.ts`. All generic and Effect rules are enabled as errors alongside native `oxc/no-accumulating-spread`. Keep `oxlint` and `@oxlint/plugins` pinned to the same version when upgrading.
+Both entry points are registered in `oxlint.config.ts`. All generic and Effect rules are enabled as errors alongside `oxc/no-accumulating-spread`. Keep `oxlint` and `@oxlint/plugins` pinned to the same version when upgrading.
 
 To update, compare this pristine revision with a chosen upstream revision and retain any future local policy changes. Update this record, preserve both licenses, and verify rule rejection and lint/format stability before committing.
