@@ -947,3 +947,101 @@ select.input {
     transition: none !important;
   }
 }
+
+/* ChatGPT sign-in */
+.codex-login {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.codex-host {
+  color: var(--text);
+  font-weight: 500;
+}
+.codex-code-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.codex-code-row .primary-button {
+  min-height: 40px;
+  text-decoration: none;
+}
+.device-code {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid rgb(255 255 255 / 12%);
+  background: #181818;
+  font-family: var(--mono);
+  font-size: 17px;
+  font-weight: 700;
+}
+.device-code span {
+  letter-spacing: 0.14em;
+  margin-right: -0.14em;
+}
+.device-code svg {
+  width: 18px;
+  height: 18px;
+  color: var(--muted);
+}
+.device-code:hover {
+  background: var(--surface-hover);
+}
+.codex-waiting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.codex-waiting > [role="status"] {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+.ghost-button {
+  margin-left: auto;
+  padding: 6px 10px;
+  border-radius: 8px;
+  color: var(--text);
+}
+.ghost-button:hover {
+  background: var(--surface-hover);
+}
+.status-dot.pulse {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+.connection-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #1d1d1d;
+  border: 1px solid var(--line);
+}
+.connection-label {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  font-weight: 500;
+}
+.connection-label .muted {
+  font-size: 12px;
+  font-weight: 400;
+}
