@@ -95,6 +95,108 @@ async function execute(operation: typeof GitHubRequest.Type.operation) {
   return post("/api/integrations/github/execute", { operation });
 }
 
+it.each(["no App", "unapproved owner", "empty policy"])(
+  "reads public files anonymously with %s",
+  async (mode) => {
+    if (mode !== "no App") await connect();
+
+    if (mode === "empty policy") await setAccounts([]);
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      expect(String(input)).toBe(
+        "https://api.github.com/repos/tellahq/opensession/contents/src/main.ts?ref=feature%2Fread",
+      );
+      expect(new Headers(init?.headers).has("Authorization")).toBe(false);
+      expect(init?.method).toBe("GET");
+      expect(init?.redirect).toBe("manual");
+
+      return Response.json({
+        type: "file",
+        path: "src/main.ts",
+        sha,
+        encoding: "base64",
+        content: btoa("public code"),
+        size: 11,
+      });
+    });
+
+    expect(
+      await (
+        await execute({
+          action: "read_file",
+          repository: "tellahq/opensession",
+          path: "src/main.ts",
+          ref: "feature/read",
+        })
+      ).json(),
+    ).toEqual({
+      ok: true,
+      result: { kind: "file", path: "src/main.ts", sha, content: "public code" },
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each([403, 404, 429, 500])(
+  "does not send credentials to unapproved owners after anonymous HTTP %i",
+  async (status) => {
+    await connect();
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+      expect(new Headers(init?.headers).has("Authorization")).toBe(false);
+
+      return Response.json({ message: "Unavailable" }, { status });
+    });
+
+    expect(
+      await (
+        await execute({
+          action: "read_file",
+          repository: "tellahq/opensession",
+          path: "README.md",
+          ref: "main",
+        })
+      ).json(),
+    ).toMatchObject({ ok: false, message: `Provider returned HTTP ${status}` });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each([403, 429, 500])("preserves anonymous HTTP %i even for approved owners", async (status) => {
+  await connect();
+
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async () => Response.json({ message: "Unavailable" }, { status }));
+
+  expect(
+    await (
+      await execute({ action: "read_file", repository, path: "README.md", ref: "main" })
+    ).json(),
+  ).toMatchObject({ ok: false, message: `Provider returned HTTP ${status}` });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(new Headers(fetch.mock.calls[0][1]?.headers).has("Authorization")).toBe(false);
+});
+
+it("keeps the file size limit for anonymous public reads", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json({
+      type: "file",
+      path: "README.md",
+      sha,
+      encoding: "base64",
+      content: btoa("x".repeat(32_769)),
+      size: 32_769,
+    }),
+  );
+
+  expect(
+    await (
+      await execute({ action: "read_file", repository, path: "README.md", ref: "main" })
+    ).json(),
+  ).toMatchObject({ ok: false, code: "file_too_large" });
+});
+
 it("explains an unset account policy without contacting GitHub or granting any accounts", async () => {
   await connect();
   await setAccounts([]);
@@ -441,6 +543,9 @@ it("mints repository-scoped tokens with a valid App signature and reads UTF-8 fi
     }
 
     expect(path).toBe("/repos/example/project/contents/src/main.ts");
+
+    if (!new Headers(init?.headers).has("Authorization"))
+      return Response.json({ message: "Not Found" }, { status: 404 });
     expect(new Headers(init?.headers).get("authorization")).toBe(
       "Bearer private-installation-token",
     );
@@ -462,12 +567,12 @@ it("mints repository-scoped tokens with a valid App signature and reads UTF-8 fi
     result: { kind: "file", path: "src/main.ts", sha, content: "export const answer = 42;" },
   });
   expect(await (await execute(operation)).json()).toEqual(result);
-  expect(fetch).toHaveBeenCalledTimes(4);
+  expect(fetch).toHaveBeenCalledTimes(6);
   fetch.mockImplementation(async () => Response.json({ message: "Not Found" }, { status: 404 }));
   expect(await (await execute({ ...operation, repository: "other/project" })).text()).toContain(
     "HTTP 404",
   );
-  expect(fetch).toHaveBeenCalledTimes(5);
+  expect(fetch).toHaveBeenCalledTimes(8);
 });
 
 it("creates only feature branches, preserves optimistic file writes, and opens but never merges PRs", async () => {
@@ -629,6 +734,9 @@ it("rejects expired installation tokens, bounds responses and removes credential
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     const path = new URL(String(url)).pathname;
 
+    if (path.includes("/contents/") && !new Headers(init?.headers).has("Authorization"))
+      return Response.json({ message: "Not Found" }, { status: 404 });
+
     if (path.endsWith("/installation")) return Response.json({ id: 7 });
 
     if (path.endsWith("/access_tokens"))
@@ -646,7 +754,7 @@ it("rejects expired installation tokens, bounds responses and removes credential
   expect(await (await execute(operation)).text()).toContain(
     "expired or invalid installation token",
   );
-  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(fetch).toHaveBeenCalledTimes(3);
   mode = "large";
   expect(await (await execute(operation)).text()).toContain("exceeds 1 MiB");
   mode = "failure";
@@ -1056,11 +1164,14 @@ it("skips disallowed installations before minting tokens and continues paginatio
   expect(fetch).toHaveBeenCalledTimes(4);
 });
 
-it("blocks revoked accounts before cached tokens, direct operations, or Git transport can reach GitHub", async () => {
+it("blocks revoked accounts from authenticated reads, writes, and Git transport", async () => {
   await connect();
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const path = new URL(String(input)).pathname;
+
+    if (path.includes("/contents/") && !new Headers(init?.headers).has("Authorization"))
+      return Response.json({ message: "Not Found" }, { status: 404 });
 
     if (path.endsWith("/installation")) return Response.json({ id: 7 });
 
@@ -1085,9 +1196,32 @@ it("blocks revoked accounts before cached tokens, direct operations, or Git tran
   await setAccounts([]);
   fetch.mockClear();
 
+  expect(await (await execute(operation)).json()).toMatchObject({
+    ok: false,
+    message: "Provider returned HTTP 404",
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(new Headers(fetch.mock.calls[0][1]?.headers).has("Authorization")).toBe(false);
+  fetch.mockClear();
+
   for (const op of [
-    operation,
     { action: "create_branch" as const, repository, branch: "dolly/test", base: "main" },
+    {
+      action: "write_file" as const,
+      repository,
+      branch: "dolly/test",
+      path: "README.md",
+      content: "change",
+      message: "Update",
+    },
+    {
+      action: "open_pull_request" as const,
+      repository,
+      branch: "dolly/test",
+      base: "main",
+      title: "Update",
+      body: "Details",
+    },
   ]) {
     expect(await (await execute(op)).json()).toMatchObject({
       ok: false,
