@@ -224,7 +224,9 @@ cd /workspace/repo
 git config user.name 'Dolly'
 git config user.email 'dolly@users.noreply.github.com'
 phase git_checkout_branch
-git checkout -B ${shellQuote(config.branch)} HEAD
+# The mount (or exact-revision checkout) already has the right tree and index.
+# checkout -B refreshes the index through FUSE and eagerly hydrates the whole tree.
+dolly-branch ${shellQuote(config.branch)}
 phase ready
 touch /workspace/ready`;
 }

@@ -9,7 +9,8 @@ if ! artifact-fs status --name "$name" >/dev/null 2>&1; then
     --refresh never --mount-root /workspace/mounts
 fi
 if ! test -f /workspace/artifact-fs.pid || ! kill -0 "$(cat /workspace/artifact-fs.pid)" 2>/dev/null; then
-  artifact-fs daemon --root /workspace/mounts > /workspace/artifact-fs.log 2>&1 </dev/null &
+  # The mount outlives individual commands; exclude it from their process groups.
+  setsid artifact-fs daemon --root /workspace/mounts > /workspace/artifact-fs.log 2>&1 </dev/null &
   echo $! > /workspace/artifact-fs.pid
 fi
 # A registered repo is not necessarily mounted yet. Never use the empty mount directory.

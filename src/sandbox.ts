@@ -179,7 +179,7 @@ export class Sandbox extends DurableObject<Env> {
 
     return yield* Effect.acquireUseRelease(
       attempt("sandbox.exec", (signal) =>
-        container.exec(["sh", "-lc", command], {
+        container.exec(["python3", "/usr/local/lib/dolly-exec.py", command], {
           cwd,
           signal,
           env: {
@@ -209,11 +209,20 @@ export class Sandbox extends DurableObject<Env> {
       (process) =>
         exited
           ? Effect.void
-          : Effect.try(() => process.kill()).pipe(
-              Effect.catch((cause) =>
-                Effect.logWarning({
-                  event: "process_cleanup_failed",
-                  error: exceptionDetails(cause),
+          : attempt("sandbox.process.terminate", async () => {
+              // The supervisor forwards TERM to the command's isolated group,
+              // then escalates and waits. Do not kill just its shell.
+              process.kill(15);
+              await process.exitCode;
+            }).pipe(
+              Effect.timeout("5 seconds"),
+              Effect.catchCause((cause) =>
+                Effect.gen(function* () {
+                  yield* Effect.try(() => process.kill(9)).pipe(Effect.ignore);
+                  yield* Effect.logWarning({
+                    event: "process_cleanup_failed",
+                    error: redact(Cause.pretty(cause)),
+                  });
                 }),
               ),
             ),
