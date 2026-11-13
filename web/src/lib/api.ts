@@ -98,7 +98,7 @@ export type TurnItem =
 
 export type Turn = {
   id: string;
-  prompt?: { text: string; at?: number };
+  prompt?: { text: string; at?: number; images?: number };
   items: TurnItem[];
   answer?: { id: string; text: string };
   steps: number;
@@ -178,7 +178,13 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     if (message.role === "user") {
       turns.push({
         id,
-        prompt: { text: messageText(message), at: message.timestamp },
+        prompt: {
+          text: messageText(message),
+          at: message.timestamp,
+          images: Schema.is(Schema.String)(message.content)
+            ? 0
+            : message.content.filter((block) => block.type === "image").length,
+        },
         items: [],
         steps: 0,
         running: false,
@@ -310,6 +316,7 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 export type ApiBody = {
   content?: string;
   requestId?: string;
+  images?: readonly { mimeType: string; data: string }[];
   model?: string;
   workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] };
   repository?: string;

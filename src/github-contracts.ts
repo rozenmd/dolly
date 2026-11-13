@@ -59,7 +59,7 @@ export const GitHubRequest = Schema.Struct({
       repository: Repository,
       branch: Branch,
       path: Path,
-      content: Schema.String.check(Schema.isMaxLength(32_768)),
+      content: Schema.String,
       message: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
       sha: Schema.optional(Sha),
     }),

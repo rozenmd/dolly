@@ -26,6 +26,7 @@ import {
 } from "./lib/api";
 import { ago } from "./lib/time";
 import { watchSession } from "./lib/session-stream";
+import { imagesBody, type Attachment } from "./lib/images";
 
 const storageKey = "dolly.sessions.v1";
 
@@ -172,7 +173,7 @@ export function WorkspaceApp() {
     setModal(codex === false && !anthropic ? "codex" : "new");
   }
 
-  async function send(content: string, requestId: string) {
+  async function send(content: string, requestId: string, attachments: readonly Attachment[]) {
     setPending(true);
     setError("");
 
@@ -180,6 +181,7 @@ export function WorkspaceApp() {
       await request(`/sessions/${encodeURIComponent(selected)}/messages`, {
         content,
         requestId,
+        ...imagesBody(attachments),
       });
       save(
         sessions.map((item) => (item.id === selected ? { ...item, updatedAt: Date.now() } : item)),

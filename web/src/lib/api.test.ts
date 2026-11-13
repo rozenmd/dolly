@@ -241,7 +241,7 @@ describe("session transcript", () => {
     expect(turnsFromSnapshot(snapshot)).toEqual([
       {
         id: "1-0",
-        prompt: { text: "Run tests", at: 1_000 },
+        prompt: { text: "Run tests", at: 1_000, images: 0 },
         items: [
           { kind: "text", id: "2-0-1", text: "Checking now." },
           {

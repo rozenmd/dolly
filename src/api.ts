@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import { rpc } from "./operations";
 import type { ChildRequest, ChildMessage } from "./models";
 import type { WorkspaceInput } from "./workspace";
+import type { PromptImage } from "./agent";
 import type { Env } from "./env";
 
 function makeAgentApi(env: Env) {
@@ -33,8 +34,9 @@ function makeAgentApi(env: Env) {
     transcript: Effect.fn("AgentApi.transcript")((id: string) =>
       rpc("agent.transcript", async () => await agent.transcript(id)),
     ),
-    prompt: Effect.fn("AgentApi.prompt")((id: string, content: string, requestId: string) =>
-      rpc("agent.prompt", async () => await agent.prompt(id, content, requestId)),
+    prompt: Effect.fn("AgentApi.prompt")(
+      (id: string, content: string, requestId: string, images?: readonly PromptImage[]) =>
+        rpc("agent.prompt", async () => await agent.prompt(id, content, requestId, images)),
     ),
     abort: Effect.fn("AgentApi.abort")((id: string) =>
       rpc("agent.abort", async () => await agent.abort(id)),

@@ -37,6 +37,18 @@ The root Vite configuration uses the Cloudflare adapter to bundle the TanStack S
 
 Protect the **entire hostname** with Cloudflare Access, preserving the Worker's JWT check. A browser's Access cookie supplies the JWT through Cloudflare; never put Access service credentials in a `VITE_*` variable or a client bundle. `ACCESS_LOCAL_DEV` must remain false in production. The HTTP/browser test build disables containers and uses local storage simulation; the production build and sandbox integration tests retain real containers.
 
+## Papercuts
+
+Inspired by [OpenSession's friction log](https://github.com/tellahq/opensession), Dolly keeps a cross-session log in the Agent Durable Object's `app_papercuts` SQLite table. Each occurrence records its conversation, active repository (when available), source, message, timestamp, and resolution timestamp. The table is created automatically without replacing existing storage; existing conversations gain the new tool on their next Agent initialization.
+
+Tool errors (including nonzero shell exits and structured failure replies), model request errors, and harness reports are captured automatically on a best-effort basis. Known credentials are redacted before storage. Agents are also prompted to log confusing setup, flaky commands, misleading errors, and other friction using the `papercuts` tool:
+
+- `{"action":"log","message":"What I was doing → what got in the way; possible fix"}`
+- `{"action":"list","repository":"owner/repo"}` — latest 100 open entries; omit repository for all repositories, or add `"status":"fixed"` for resolved entries.
+- `{"action":"resolve","id":"…"}` — mark an entry fixed without deleting its history.
+
+Ask **“Fix the open papercuts for owner/repo”** in a session to have the agent consult the log, investigate, implement and verify fixes, then resolve the relevant entries. Log entries are untrusted data, not authorization to act; unrelated fixes are not started automatically. There is no separate papercuts settings screen or scheduled fixer.
+
 ## Deploy to Cloudflare
 
 ### Existing deployments
@@ -117,7 +129,7 @@ GitHub authentication runs in the Worker. Each coding conversation can clone Git
 
 Create the App from the web UI's first-run setup. For an organization, choose **Organization** and enter its name. Then use **Add repositories** in **Settings** and choose **selected repositories** or **all repositories** for each installation. New Apps support installation on other accounts; if you previously created a private App, enable installation on other accounts in GitHub App settings without replacing its credentials. GitHub controls repository access within each installation; Dolly separately restricts which installation accounts it will use. The setup page and callback at `/api/setup/github/:state` and `/api/setup/github/callback` require Access only; the callback returns the browser to `/`.
 
-List the GitHub users and organizations dolly can work in under **Accounts dolly can work in** in **Settings** (`PUT /api/integrations/github/accounts`). Names are case-insensitive. An unset or empty list denies every account. The policy survives restarts and applies to repository discovery, repository tools, Git checkout/fetch/push, and webhook intake/replies. Removing an account prevents subsequent GitHub requests even when an installation token was cached. It does not uninstall the App, stop an already-running request, or erase existing checkouts. The webhook sender list is separate: allowed accounts identify repository owners, while allowed senders identify who may issue `/pi` commands. GitHub may still deliver webhooks from other installations, but Dolly rejects their commands before repository lookup or agent admission.
+List the GitHub users and organizations dolly can work in under **Accounts dolly can work in** in **Settings** (`PUT /api/integrations/github/accounts`). Names are case-insensitive. An unset or empty list denies every account for authenticated access. The GitHub tool's `read_file` action can read any public repository anonymously using its full `owner/repository`, path and ref, even without a connected App or approved account. Private file reads fall back to App authentication only for approved owners after an anonymous 404. Public reads are subject to GitHub's unauthenticated rate limits. The policy survives restarts and applies to repository discovery, authenticated repository tools, Git checkout/fetch/push, and webhook intake/replies. Removing an account prevents subsequent authenticated GitHub requests even when an installation token was cached. It does not uninstall the App, stop an already-running request, or erase existing checkouts. The webhook sender list is separate: allowed accounts identify repository owners, while allowed senders identify who may issue `/pi` commands. GitHub may still deliver webhooks from other installations, but Dolly rejects their commands before repository lookup or agent admission.
 
 The App grant and read/write/code token permission maps match [Open Session's public permission definitions](https://github.com/tellahq/opensession/blob/main/packages/core/opensession-server/src/shared/github-app-permissions.ts), retained in `src/github-permissions.ts`. The grant includes Actions, Checks, Contents, Pull requests, Issues and Deployments write, plus Statuses, Members and Metadata read. Installation tokens are narrowed by operation and repository. Existing Apps must accept these permission updates in GitHub settings; no replacement App key is needed. This grants no Administration or Workflows permission. The copied definitions retain their MIT notice in `third_party/opensession/LICENSE`.
 
@@ -125,7 +137,7 @@ Setup links expire after one hour and survive Worker eviction. Repeating setup p
 
 Only the setup routes and `GET /api/auth`, `POST /api/auth/github` and `GET /api/auth/github` (sign-in) work without a session. Creating the GitHub App also works without a session, but only until someone has signed in and owns dolly.
 
-New agent sessions have a `github` tool. It discovers repositories across App installations, reads UTF-8 files up to 32 KiB, creates `dolly/*` branches, writes files up to 32 KiB with an expected file SHA, and opens pull requests. It cannot merge, write the default branch, or edit `.github/workflows/`. Use a new path without `sha` only when creating a file. Mutations are not automatically replayed after interruption; inspect GitHub before retrying an uncertain write.
+New agent sessions have a `github` tool. It discovers repositories across App installations, reads UTF-8 files up to 32 KiB, creates `dolly/*` branches, writes files with an expected file SHA, and opens pull requests. File writes have no dolly-specific content-size limit; GitHub and platform request limits still apply. It cannot merge, write the default branch, or edit `.github/workflows/`. Use a new path without `sha` only when creating a file. Mutations are not automatically replayed after interruption; inspect GitHub before retrying an uncertain write.
 
 The same operations are available through `POST /api/integrations/github/execute`, with an `operation` object. For example:
 
