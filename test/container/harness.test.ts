@@ -4,7 +4,8 @@ import { SELF, runInDurableObject } from "cloudflare:test";
 import { expect, it, vi } from "vitest";
 
 it("runs the registered coding tools on another owner's repository, pushes a tested commit, opens a PR, and restores dirty work", async () => {
-  const remote = env.SANDBOX.getByName(crypto.randomUUID());
+  const remoteName = crypto.randomUUID();
+  const remote = env.SANDBOX.getByName(remoteName);
 
   const seeded = await remote.run(`set -eu
 mkdir -p remotes/another-owner
@@ -152,7 +153,7 @@ mkdir -p remotes/another-owner
     const forwarded = new Request(String(input), init);
     const bytes = new Uint8Array(await forwarded.arrayBuffer());
 
-    const result = await runInDurableObject(remote, async (_, state) => {
+    const result = await runInDurableObject(env.SANDBOX.getByName(remoteName), async (_, state) => {
       const container = state.container;
 
       if (!container) throw new Error("Missing native container");

@@ -673,11 +673,15 @@ it("brokers real Worker RPC Git requests without exposing credentials or allowin
   await connect();
   const { workspaceConfig } = await import("../src/workspace");
   const config = workspaceConfig({ repository: "another-owner/project" }, "42");
+  const backendName = crypto.randomUUID();
   let upstream = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(String(input));
 
     if (url.hostname === "github.com") {
+      await runInDurableObject(env.SANDBOX.getByName(backendName), async (_, state) => {
+        await state.storage.put("git-request", true);
+      });
       upstream++;
       expect(new Headers(init?.headers).get("Authorization")).toBe(
         `Basic ${btoa("x-access-token:private-installation-token")}`,
