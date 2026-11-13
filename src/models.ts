@@ -1,5 +1,6 @@
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import * as Schema from "effect/Schema";
+import { WorkspaceInput } from "./workspace";
 
 /** Pi's pinned subscription-provider catalog owns the accepted model identifiers. */
 export const CodexModel = Schema.Literals(
@@ -8,7 +9,10 @@ export const CodexModel = Schema.Literals(
     .map((model) => model.id),
 );
 
-export const NewSession = Schema.Struct({ model: Schema.optional(CodexModel) });
+export const NewSession = Schema.Struct({
+  model: Schema.optional(CodexModel),
+  workspace: Schema.optional(WorkspaceInput),
+});
 
 export const ChildMessage = Schema.Struct({
   content: Schema.Trim.check(Schema.isMinLength(1), Schema.isMaxLength(32_768)),

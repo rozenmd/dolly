@@ -15,6 +15,7 @@ import {
 import { obj, opt, str } from "@earendil-works/pi-schema";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { ConversationWorkspace } from "./workspace";
 import { CodexModel, ChildRequest, ChildMessage } from "./models";
 import { attempt } from "./operations";
 
@@ -200,6 +201,15 @@ export class Coordination {
 
         const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
         await configure(tx, child.id, { model: { provider: "openai-codex", modelId: model } });
+        const parentWorkspace = await tx.doc(ConversationWorkspace, parent);
+
+        if (parentWorkspace.config) {
+          const childWorkspace = await tx.doc(ConversationWorkspace, child.id);
+          childWorkspace.config = {
+            ...parentWorkspace.config,
+            branch: `pi-hard/session-${child.id}`,
+          };
+        }
 
         const taskId = await tx.createTask(
           Delivery,

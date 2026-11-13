@@ -4,12 +4,14 @@ import { readFile } from "node:fs/promises";
 import { sandboxTestConfig } from "./sandbox-config.ts";
 import config from "../cloudflare.config.ts";
 
-test("typed Cloudflare config keeps SQLite namespaces and the native sandbox image", () => {
+test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", () => {
   const { worker, containers } = config;
   assert.equal(worker.name, "pi-hard");
   assert.equal(worker.entrypoint, "./src/index.ts");
   assert.deepEqual(worker.compatibilityFlags, ["nodejs_compat"]);
   assert.equal(worker.env.API_TOKEN.type, "secret");
+  assert.equal(worker.env.WORKSPACES.type, "artifacts");
+  assert.equal(worker.exports.WorkspaceOutbound.type, "worker");
   assert.equal(worker.previewUrls, false);
   assert.equal(worker.env.ACCESS_LOCAL_DEV.value, "false");
   assert.equal(worker.env.ACCESS_TEAM_DOMAIN.type, "text");
@@ -48,4 +50,19 @@ test("the sandbox test adapter retains the typed config's container link and ima
       ["SANDBOX", "Sandbox"],
     ],
   );
+});
+
+test("public ingress binds only the private webhook entrypoint and has no credentials or Durable Object binding", async () => {
+  const { default: ingress } = await import("../ingress/cloudflare.config.ts");
+  assert.equal(ingress.worker.name, "pi-hard-ingress");
+  assert.equal(ingress.worker.entrypoint, "../src/ingress.ts");
+  assert.equal(ingress.worker.previewUrls, false);
+  assert.deepEqual(Object.keys(ingress.worker.env), ["INGRESS"]);
+  assert.deepEqual(ingress.worker.env.INGRESS, {
+    type: "worker",
+    worker: config.worker.name,
+    exportName: "GitHubIngress",
+  });
+  assert.equal(config.worker.exports.GitHubIngress.type, "worker");
+  assert.equal(config.worker.env.GITHUB_WEBHOOK_URL.value, "");
 });

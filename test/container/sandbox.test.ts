@@ -8,7 +8,7 @@ declare global {
   }
 }
 
-it("executes commands and uses Sandbox 1.0 Files in isolated native containers", async () => {
+it("executes commands and uses Sandbox 1.0 Files in isolated containers", async () => {
   const first = env.SANDBOX.getByName(crypto.randomUUID());
   expect(await first.run("printf 'sandbox proof' > proof.txt; cat proof.txt")).toMatchObject({
     stdout: "sandbox proof",
@@ -20,6 +20,9 @@ it("executes commands and uses Sandbox 1.0 Files in isolated native containers",
   expect(environment.stdout).not.toContain("API_TOKEN");
   expect(environment.stdout).not.toContain("OPENAI");
   expect(environment.stdout).toContain("1000");
+  expect(await first.run("test -w /run/sandbox && test -x /run/sandbox")).toMatchObject({
+    exitCode: 0,
+  });
   const second = env.SANDBOX.getByName(crypto.randomUUID());
   expect(await second.run("test ! -e /workspace/proof.txt")).toMatchObject({ exitCode: 0 });
 });

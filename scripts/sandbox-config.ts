@@ -2,7 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { fileURLToPath, URL } from "node:url";
 import { convertToWranglerConfig, loadAndParseConfig } from "@cloudflare/config";
 
-/** Vitest 1.7 prepares native containers only through its legacy config loader. */
+/** Vitest 1.7 prepares containers only through its legacy config loader. */
 export async function sandboxTestConfig() {
   const { result } = await loadAndParseConfig(
     fileURLToPath(new URL("../cloudflare.config.ts", import.meta.url)),

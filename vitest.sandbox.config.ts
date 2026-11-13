@@ -7,8 +7,14 @@ export default defineConfig(async () => ({
     cloudflareTest({
       config: false,
       wrangler: { configPath: await sandboxTestConfig() },
-      miniflare: { bindings: { API_TOKEN: "test-token-with-at-least-32-characters" } },
+      miniflare: {
+        bindings: {
+          API_TOKEN: "test-token-with-at-least-32-characters",
+          ACCESS_LOCAL_DEV: "true",
+          CODEX_MODEL: "gpt-6-luna",
+        },
+      },
     }),
   ],
-  test: { include: ["test/container/*.test.ts"], testTimeout: 120_000 },
+  test: { include: ["test/container/*.test.ts"], testTimeout: 300_000 },
 }));

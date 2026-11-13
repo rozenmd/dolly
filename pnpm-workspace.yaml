@@ -17,3 +17,7 @@ minimumReleaseAgeExclude:
   - cf@1.0.0-beta.29
   - hono@4.13.18
   - vite@8.3.8
+
+packages:
+  - .
+  - ingress
