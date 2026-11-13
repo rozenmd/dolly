@@ -2,6 +2,8 @@ import { env } from "cloudflare:workers";
 import { zstdDecompressSync } from "node:zlib";
 import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { configure, type ConversationId } from "@earendil-works/pi-durable";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
 import { Snapshot, Live } from "../src/transcript";
@@ -22,6 +24,46 @@ beforeEach(async () => {
 });
 
 afterEach(() => vi.restoreAllMocks());
+
+it.each([20, null])(
+  "sets new and existing conversations to 100 turns (old limit: %s)",
+  async (maxTurns) => {
+    const created = await SELF.fetch("https://worker/api/sessions", {
+      method: "POST",
+      headers,
+    });
+
+    expect(created.status).toBe(201);
+
+    const { id } = await created.json<{ id: string }>();
+
+    await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+      const harness = agent["harness"];
+      const conversationId = await state.storage.get<ConversationId>(`session:${id}`);
+
+      if (!conversationId) throw new Error("Session missing");
+
+      const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
+      expect((await conversation!.agent(BACKGROUND_CONTEXT)).maxTurns).toBe(100);
+      await harness.commit((tx) => configure(tx, conversationId, { maxTurns }), BACKGROUND_CONTEXT);
+      await state.storage.delete("migration:100-turns");
+    });
+
+    await abortAllDurableObjects();
+    await SELF.fetch(`https://worker/api/sessions/${id}`, { headers });
+
+    await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+      const harness = agent["harness"];
+      const conversationId = await state.storage.get<ConversationId>(`session:${id}`);
+
+      if (!conversationId) throw new Error("Session missing");
+
+      const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
+      expect((await conversation!.agent(BACKGROUND_CONTEXT)).maxTurns).toBe(100);
+      expect(await state.storage.get("migration:100-turns")).toBe(true);
+    });
+  },
+);
 
 it("pushes an initial snapshot and redacted live updates over an authenticated WebSocket", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async () =>

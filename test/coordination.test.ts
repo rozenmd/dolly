@@ -461,16 +461,24 @@ it("bounds child message deliveries and validates authenticated HTTP inputs", as
   ).toBe(409);
 });
 
-it("returns an unanswered receipt when a child hits its tool-turn limit", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-    sse({
+it.each([
+  { rounds: 21, result: { status: "answered", text: "Finished after 21 tool turns" } },
+  { rounds: 100, result: { status: "unanswered", reason: "turn_limit" } },
+])("settles a child correctly after $rounds tool turns", async ({ rounds, result }) => {
+  let turns = 0;
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    if (turns === rounds) return answer(`Finished after ${rounds} tool turns`);
+    turns++;
+
+    return sse({
       type: "function_call",
-      id: "fc_status",
-      call_id: "call_status",
+      id: `fc_status_${turns}`,
+      call_id: `call_status_${turns}`,
       name: "task_status",
       arguments: JSON.stringify({ taskId: "missing" }),
-    }),
-  );
+    });
+  });
   const parent = await root();
   const child = await spawn(parent);
   await expect
@@ -478,6 +486,7 @@ it("returns an unanswered receipt when a child hits its tool-turn limit", async 
     .toBe("terminal");
   expect(await receipt(parent, child.taskId)).toMatchObject({
     outcome: "completed",
-    result: { status: "unanswered", reason: "turn_limit" },
+    result,
   });
+  expect(turns).toBe(rounds);
 });

@@ -12,6 +12,7 @@ import {
   section,
   type ConversationId,
   type ConversationView,
+  type Cursor,
   type ToolRegistration,
   type Wake,
 } from "@earendil-works/pi-durable";
@@ -263,7 +264,7 @@ export class Agent extends DurableObject<Env> {
             await configure(tx, conversation.id, {
               model: { provider: "openai-codex", modelId: this.env.CODEX_MODEL },
               thinkingLevel: "low",
-              maxTurns: 20,
+              maxTurns: 100,
               tools,
             });
           },
@@ -303,6 +304,33 @@ export class Agent extends DurableObject<Env> {
     void this.harness.closed.then((end) => {
       if (end.kind === "failed") this.ctx.abort("Harness storage failed");
     });
+
+    // Existing conversations persist their old limit; raise it before resuming work.
+    if (
+      !(yield* attempt("session.turn-limit.read", () =>
+        this.ctx.storage.get("migration:100-turns"),
+      ))
+    ) {
+      yield* attempt("pi.turn-limit.update", () =>
+        this.harness.commit(async (tx) => {
+          let cursor: Cursor | undefined;
+
+          do {
+            const page = await tx.scanConversations({}, 100, cursor);
+
+            for (const conversation of page.items) {
+              await configure(tx, conversation.id, { maxTurns: 100 });
+            }
+
+            cursor = page.next;
+          } while (cursor);
+        }, BACKGROUND_CONTEXT),
+      );
+      yield* attempt("session.turn-limit.migrated", () =>
+        this.ctx.storage.put("migration:100-turns", true),
+      );
+    }
+
     yield* this.arm(this.harness.wake());
     this.harness.resume();
   });
