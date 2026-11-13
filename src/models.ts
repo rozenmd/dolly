@@ -15,7 +15,12 @@ const catalogAnthropicIds = anthropicProvider()
   .map((model) => model.id);
 
 /** Extend the catalog with models not yet in the pinned @earendil-works/pi-ai release. */
-const extraAnthropicIds: string[] = ["claude-opus-5-5"];
+const extraAnthropicIds: string[] = [
+  "claude-opus-5-5",
+  "claude-fable-5-2",
+  "claude-sonnet-5-5",
+  "claude-haiku-5-5",
+];
 
 const allAnthropicIds = [
   ...catalogAnthropicIds,
