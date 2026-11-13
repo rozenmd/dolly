@@ -242,12 +242,12 @@ mkdir -p remotes/another-owner
         { timeout: 240000 },
       )
       .toContain("Harness workflow complete");
-    expect(opened).toBe(true);
 
     const transcript = await (
       await SELF.fetch(`https://worker/api/sessions/${session.id}`, { headers })
     ).text();
 
+    expect(opened, transcript).toBe(true);
     expect(transcript).not.toContain("private-installation-token");
     const decoded = JSON.parse(transcript);
 

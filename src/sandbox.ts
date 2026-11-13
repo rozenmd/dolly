@@ -268,12 +268,15 @@ export class Sandbox extends DurableObject<Env> {
 
           const result = yield* this.execute(checkoutScript(config), "/workspace", 120);
 
-          if (result.exitCode !== 0)
+          if (result.exitCode !== 0) {
+            yield* Effect.logError({ event: "workspace_checkout_failed", ...result });
+
             return yield* new OperationError({
               operation: "workspace.checkout",
               message: "Git checkout failed",
               details: result,
             });
+          }
 
           yield* this.checkpoint();
 
