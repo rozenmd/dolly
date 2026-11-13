@@ -293,7 +293,9 @@ export type ApiBody = {
 };
 
 export async function anthropicStatus() {
-  return Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({ connected: Schema.Boolean })))(await request("/auth/anthropic"));
+  return Schema.decodeUnknownSync(
+    Schema.fromJsonString(Schema.Struct({ connected: Schema.Boolean })),
+  )(await request("/auth/anthropic"));
 }
 
 export const CodexStatus = Schema.Union([

@@ -10,12 +10,18 @@ export const CodexModel = Schema.Literals(
     .map((model) => model.id),
 );
 
-export const AnthropicModel = Schema.Literals(anthropicProvider().getModels().map((model) => model.id));
+export const AnthropicModel = Schema.Literals(
+  anthropicProvider()
+    .getModels()
+    .map((model) => model.id),
+);
+
 export const SessionModel = Schema.Union([CodexModel, AnthropicModel]);
 export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6";
 
 /** Call only after validating against SessionModel. Existing Codex IDs keep their provider. */
-export const modelProvider = (model: string) => model.startsWith("claude-") ? "anthropic" : "openai-codex";
+export const modelProvider = (model: string) =>
+  model.startsWith("claude-") ? "anthropic" : "openai-codex";
 
 export const NewSession = Schema.Struct({
   model: Schema.optional(SessionModel),

@@ -99,7 +99,10 @@ export function WorkspaceApp() {
 
     let active = true;
 
-    Promise.all([codexLogin().catch(() => null), anthropicStatus().catch(() => ({ connected: false }))]).then(
+    Promise.all([
+      codexLogin().catch(() => null),
+      anthropicStatus().catch(() => ({ connected: false })),
+    ]).then(
       ([status, claude]) => {
         if (!active) return;
 
@@ -339,7 +342,9 @@ export function WorkspaceApp() {
                 <span className="brand-mark large" aria-hidden="true">
                   D
                 </span>
-                <h2>{codex === false && !anthropic ? "Connect a model" : "No workspace selected"}</h2>
+                <h2>
+                  {codex === false && !anthropic ? "Connect a model" : "No workspace selected"}
+                </h2>
                 <button type="button" className="primary-button" onClick={newSession}>
                   {codex === false && !anthropic ? "Connect a model" : "New session"}
                 </button>
@@ -399,16 +404,33 @@ export function WorkspaceApp() {
               setModal(null);
             }}
           />
-          <button type="button" className="ghost-button" onClick={() => setShowClaude(!showClaude)}>Use Claude instead</button>
-          {showClaude && <>
-            <AnthropicConnection onConnection={setAnthropic} />
-            <button type="button" className="primary-button" disabled={!anthropic} onClick={() => setModal("new")}>Continue with Claude</button>
-          </>}
+          <button type="button" className="ghost-button" onClick={() => setShowClaude(!showClaude)}>
+            Use Claude instead
+          </button>
+          {showClaude && (
+            <>
+              <AnthropicConnection onConnection={setAnthropic} />
+              <button
+                type="button"
+                className="primary-button"
+                disabled={!anthropic}
+                onClick={() => setModal("new")}
+              >
+                Continue with Claude
+              </button>
+            </>
+          )}
         </Modal>
       )}
       {modal === "new" && (
         <NewSessionComposer
-          initial={session ? sessionBody(session, snapshot) : anthropic && !codex ? { model: "claude-sonnet-4-6" } : {}}
+          initial={
+            session
+              ? sessionBody(session, snapshot)
+              : anthropic && !codex
+                ? { model: "claude-sonnet-4-6" }
+                : {}
+          }
           onClose={() => setModal(null)}
           onImport={() => setModal("import")}
           onSaved={(value) => save([value, ...sessions.filter((item) => item.id !== value.id)])}

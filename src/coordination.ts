@@ -200,7 +200,9 @@ export class Coordination {
         });
 
         const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
-        await configure(tx, child.id, { model: { provider: modelProvider(model), modelId: model } });
+        await configure(tx, child.id, {
+          model: { provider: modelProvider(model), modelId: model },
+        });
         const parentWorkspace = await tx.doc(ConversationWorkspace, parent);
 
         if (parentWorkspace.config) {

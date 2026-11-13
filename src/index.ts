@@ -208,35 +208,60 @@ app.delete("/api/auth/codex", (c) =>
   ),
 );
 
-app.get("/api/auth/anthropic", (c) => handle(c, Effect.gen(function* () {
-  return c.json(yield* rpc("anthropic.status", async () => await owner(c).anthropicStatus()));
-})));
+app.get("/api/auth/anthropic", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      return c.json(yield* rpc("anthropic.status", async () => await owner(c).anthropicStatus()));
+    }),
+  ),
+);
 
-app.put("/api/auth/anthropic", (c) => handle(c, Effect.gen(function* () {
-  const input = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
-    Effect.flatMap(Schema.decodeUnknownEffect(AnthropicSetup)),
-    Effect.mapError(() => new InvalidInput({ message: "Expected a Claude setup token" })),
-  );
+app.put("/api/auth/anthropic", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const input = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(AnthropicSetup)),
+        Effect.mapError(() => new InvalidInput({ message: "Expected a Claude setup token" })),
+      );
 
-  const result = yield* rpc("anthropic.save", async () => await owner(c).anthropicSave(input));
+      const result = yield* rpc("anthropic.save", async () => await owner(c).anthropicSave(input));
 
-  return c.json(result, "error" in result ? 400 : 200);
-})));
+      return c.json(result, "error" in result ? 400 : 200);
+    }),
+  ),
+);
 
-app.post("/api/auth/anthropic/test", (c) => handle(c, Effect.gen(function* () {
-  const input = yield* Effect.tryPromise(() => c.req.text()).pipe(
-    Effect.flatMap((body) => Schema.decodeUnknownEffect(Schema.fromJsonString(AnthropicProbe))(body || "{}")),
-    Effect.mapError(() => new InvalidInput({ message: "Expected an optional model from the Anthropic catalog" })),
-  );
+app.post("/api/auth/anthropic/test", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const input = yield* Effect.tryPromise(() => c.req.text()).pipe(
+        Effect.flatMap((body) =>
+          Schema.decodeUnknownEffect(Schema.fromJsonString(AnthropicProbe))(body || "{}"),
+        ),
+        Effect.mapError(
+          () =>
+            new InvalidInput({ message: "Expected an optional model from the Anthropic catalog" }),
+        ),
+      );
 
-  const result = yield* rpc("anthropic.test", async () => await owner(c).anthropicTest(input));
+      const result = yield* rpc("anthropic.test", async () => await owner(c).anthropicTest(input));
 
-  return c.json(result, "error" in result ? 409 : 200);
-})));
+      return c.json(result, "error" in result ? 409 : 200);
+    }),
+  ),
+);
 
-app.delete("/api/auth/anthropic", (c) => handle(c, Effect.gen(function* () {
-  return c.json(yield* rpc("anthropic.logout", async () => await owner(c).anthropicLogout()));
-})));
+app.delete("/api/auth/anthropic", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      return c.json(yield* rpc("anthropic.logout", async () => await owner(c).anthropicLogout()));
+    }),
+  ),
+);
 
 app.post("/api/sessions", (c) =>
   handle(
@@ -247,7 +272,10 @@ app.post("/api/sessions", (c) =>
           Schema.decodeUnknownEffect(Schema.fromJsonString(NewSession))(body || "{}"),
         ),
         Effect.mapError(
-          () => new InvalidInput({ message: "Expected an optional model from the Codex or Anthropic catalog" }),
+          () =>
+            new InvalidInput({
+              message: "Expected an optional model from the Codex or Anthropic catalog",
+            }),
         ),
       );
 
@@ -302,7 +330,8 @@ app.post("/api/sessions/:id/children", (c) =>
         Effect.mapError(
           () =>
             new InvalidInput({
-              message: "Expected content, a UUID requestId and an optional Codex model",
+              message:
+                "Expected content, a UUID requestId and an optional Codex or Anthropic model",
             }),
         ),
       );

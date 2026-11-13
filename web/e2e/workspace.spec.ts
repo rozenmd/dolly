@@ -13,7 +13,40 @@ const app = {
 
 const signedIn = { github: app, ownerClaimed: true, user: { login: "octocat" } };
 
-test("connects Claude without Codex, explicitly tests Worker inference, and starts a Claude conversation", async ({ page }) => {
+// Main now streams transcripts over WebSockets. Reuse each test's HTTP snapshot fixture
+// for the initial socket snapshot and push another only after a message/abort mutation.
+test.beforeEach(async ({ page }) => {
+  const updates = new Set<() => Promise<void>>();
+  page.on("requestfinished", (request) => {
+    if (request.method() === "POST" && /\/(messages|abort)$/.test(new URL(request.url()).pathname))
+      for (const update of updates) void update();
+  });
+  await page.routeWebSocket("**/api/sessions/*/events", (socket) => {
+    let active = true;
+    const path = new URL(socket.url()).pathname.replace(/\/events$/, "");
+
+    const update = async () => {
+      try {
+        const text = await page.evaluate(async (path) => await (await fetch(path)).text(), path);
+
+        if (active) socket.send(text);
+      } catch {
+        if (active) socket.close();
+      }
+    };
+
+    updates.add(update);
+    socket.onClose(() => {
+      active = false;
+      updates.delete(update);
+    });
+    void update();
+  });
+});
+
+test("connects Claude without Codex, explicitly tests Worker inference, and starts a Claude conversation", async ({
+  page,
+}) => {
   const token = `sk-ant-oat01-${"a".repeat(64)}`;
   let connected = false;
   let probes = 0;
@@ -37,10 +70,27 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
     if (path === "/api/auth/anthropic/test") {
       probes++;
 
-      return route.fulfill({ json: { ok: probes > 1, model: "claude-haiku-4-5", durationMs: 25, message: probes === 1 ? "Anthropic returned HTTP 403 HTML instead of a model response. This may be an upstream edge block." : "Claude returned a live inference response from this Worker.", upstream: { status: probes === 1 ? 403 : 200, contentType: probes === 1 ? "text/html" : "text/event-stream", requestId: "request-test", rayId: "ray-test" } } });
+      return route.fulfill({
+        json: {
+          ok: probes > 1,
+          model: "claude-haiku-4-5",
+          durationMs: 25,
+          message:
+            probes === 1
+              ? "Anthropic returned HTTP 403 HTML instead of a model response. This may be an upstream edge block."
+              : "Claude returned a live inference response from this Worker.",
+          upstream: {
+            status: probes === 1 ? 403 : 200,
+            contentType: probes === 1 ? "text/html" : "text/event-stream",
+            requestId: "request-test",
+            rayId: "ray-test",
+          },
+        },
+      });
     }
 
-    if (path === "/api/integrations/github/repositories") return route.fulfill({ json: { repositories: [] } });
+    if (path === "/api/integrations/github/repositories")
+      return route.fulfill({ json: { repositories: [] } });
 
     if (path === "/api/sessions") {
       selectedModel = route.request().postDataJSON().model;
@@ -48,12 +98,25 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
       return route.fulfill({ status: 201, json: { id: "claude-session", model: selectedModel } });
     }
 
-    if (path === "/api/sessions/claude-session/messages") return route.fulfill({ status: 202, json: {} });
+    if (path === "/api/sessions/claude-session/messages")
+      return route.fulfill({ status: 202, json: {} });
 
-    if (path === "/api/sessions/claude-session") return route.fulfill({ json: { entries: [
-      { id: 1, kind: "pi.user", model: [{ role: "user", content: "Say hello" }] },
-      { id: 2, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "Hello from Claude" }] }] },
-    ], docs: {} } });
+    if (path === "/api/sessions/claude-session")
+      return route.fulfill({
+        json: {
+          entries: [
+            { id: 1, kind: "pi.user", model: [{ role: "user", content: "Say hello" }] },
+            {
+              id: 2,
+              kind: "pi.assistant",
+              model: [
+                { role: "assistant", content: [{ type: "text", text: "Hello from Claude" }] },
+              ],
+            },
+          ],
+          docs: {},
+        },
+      });
 
     return route.fulfill({ json: {} });
   });
@@ -69,18 +132,25 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
   await connect.getByRole("button", { name: "Test connection" }).click();
   await expect(connect.getByRole("status")).toContainText("live inference response");
   await page.screenshot({ path: test.info().outputPath("claude-connection.png") });
+  await page.setViewportSize({ width: 320, height: 740 });
+  expect(await connect.evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath("claude-connection-mobile.png") });
   await connect.getByRole("button", { name: "Continue with Claude" }).click();
   const composer = page.getByRole("dialog", { name: "New session" });
   await expect(composer.getByLabel("Model", { exact: true })).toHaveValue("claude-sonnet-4-6");
   await composer.getByLabel("Model", { exact: true }).selectOption("claude-haiku-4-5");
   await composer.getByLabel("Task", { exact: true }).fill("Say hello");
   await composer.getByRole("button", { name: "Create", exact: true }).click();
-  await expect(page.getByRole("article", { name: "assistant message" })).toContainText("Hello from Claude");
+  await expect(page.getByRole("article", { name: "assistant message" })).toContainText(
+    "Hello from Claude",
+  );
   expect(selectedModel).toBe("claude-haiku-4-5");
   expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.v1"))).not.toContain(token);
   await page.reload();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(page.getByRole("article", { name: "assistant message" })).toContainText("Hello from Claude");
+  await expect(page.getByRole("article", { name: "assistant message" })).toContainText(
+    "Hello from Claude",
+  );
 });
 
 for (const outcome of ["answered", "failed", "retrying"] as const) {
