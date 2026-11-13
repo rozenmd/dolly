@@ -3,51 +3,43 @@ import {
   ArrowUpIcon,
   CheckIcon,
   ChevronRightIcon,
-  ClipboardIcon,
-  CodeBracketIcon,
-  CommandLineIcon,
+  ExclamationCircleIcon,
   StopIcon,
 } from "@heroicons/react/16/solid";
+import { DocumentDuplicateIcon, Square2StackIcon } from "@heroicons/react/24/outline";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage } from "../lib/api";
+import type { Step, Turn } from "../lib/api";
+import { ago, duration } from "../lib/time";
 import { IconButton, Textarea } from "./ui";
 
+function Prose({ text }: { text: string }) {
+  return (
+    <div className="prose">
+      <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
+    </div>
+  );
+}
+
 export function Conversation({
-  messages,
-  preview,
-  previewPrimary,
-  title,
+  turns,
+  sessionId,
   loading,
 }: {
-  messages: readonly ChatMessage[];
-  preview: boolean;
-  previewPrimary: boolean;
-  title: string;
+  turns: readonly Turn[];
+  sessionId: string;
   loading: boolean;
 }) {
-  const [copied, setCopied] = useState("");
-  const [copyError, setCopyError] = useState("");
   const scroll = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const now = Date.now();
 
   useLayoutEffect(() => {
     pinned.current = true;
-  }, [title]);
+  }, [sessionId]);
   useLayoutEffect(() => {
-    if (!preview && pinned.current && scroll.current)
-      scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [messages, preview]);
-
-  async function copy(message: ChatMessage) {
-    try {
-      await navigator.clipboard.writeText(message.text);
-      setCopied(message.id);
-      setCopyError("");
-    } catch {
-      setCopyError("Could not copy. Select the message text to copy it manually.");
-    }
-  }
+    if (pinned.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
+  }, [turns]);
 
   return (
     <div
@@ -59,102 +51,146 @@ export function Conversation({
       }}
     >
       <div className="conversation-content">
-        <div className="conversation-date">
-          <span />
-          {preview ? "Example conversation" : "Session transcript"}
-          <span />
-        </div>
-        {loading && messages.length === 0 && (
-          <p className="empty-message" role="status">
+        {loading && turns.length === 0 && (
+          <p className="conversation-status" role="status">
             Loading conversation…
           </p>
         )}
-        {!loading && messages.length === 0 && (
-          <div className="conversation-empty">
-            <CommandLineIcon />
-            <h2>{title}</h2>
-            <p>
-              Give your agent a task. It can explore your code, run tests, and prepare a pull
-              request.
-            </p>
-          </div>
+        {!loading && turns.length === 0 && (
+          <p className="conversation-status">Send a message to start.</p>
         )}
-        {messages.map((message, index) => (
-          <article
-            key={message.id}
-            className={`message message-${message.role}`}
-            aria-label={`${message.role} message`}
-          >
-            {previewPrimary && index === 1 && (
-              <WorkLog label="Worked for 6 minutes" steps="3 steps" />
-            )}
-            {previewPrimary && index === 2 && (
-              <WorkLog label="Worked for 5 minutes" steps="1 step" />
-            )}
-            {message.role === "toolResult" ? (
-              <details className="tool-result">
-                <summary>
-                  <CommandLineIcon />
-                  {message.toolName ?? "Tool output"}
-                </summary>
-                <pre>{message.text}</pre>
-              </details>
-            ) : (
-              <>
-                {message.role !== "user" && (
-                  <div className="agent-label">
-                    <span className="agent-symbol">π</span>
-                    <strong>pi-hard</strong>
-                    <span>Agent</span>
-                  </div>
-                )}
-                <div className="message-body prose">
-                  <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
-                </div>
-                {message.role !== "user" && (
-                  <div className="message-actions">
-                    <span>{preview ? "Example response" : "Agent response"}</span>
-                    <IconButton
-                      label={copied === message.id ? "Message copied" : "Copy message"}
-                      onClick={() => void copy(message)}
-                    >
-                      {copied === message.id ? <CheckIcon /> : <ClipboardIcon />}
-                    </IconButton>
-                  </div>
-                )}
-              </>
-            )}
-          </article>
+        {turns.map((turn) => (
+          <TurnView key={turn.id} turn={turn} now={now} />
         ))}
-        {copyError && (
-          <p role="status" className="error-text">
-            {copyError}
-          </p>
-        )}
       </div>
     </div>
   );
 }
 
-function WorkLog({ label, steps }: { label: string; steps: string }) {
+function TurnView({ turn, now }: { turn: Turn; now: number }) {
+  const started = turn.prompt?.at ?? turn.startedAt;
+
   return (
-    <details className="work-log">
+    <section className="turn">
+      {turn.prompt && (
+        <article className="prompt" aria-label="user message">
+          {turn.prompt.at !== undefined && (
+            <div className="prompt-meta">
+              <time dateTime={new Date(turn.prompt.at).toISOString()}>
+                {ago(turn.prompt.at, now)}
+              </time>
+              <span>You</span>
+            </div>
+          )}
+          <div className="prompt-bubble">
+            <Prose text={turn.prompt.text} />
+          </div>
+        </article>
+      )}
+      {turn.items.length > 0 && <WorkLog turn={turn} />}
+      {turn.answer && (
+        <Answer id={turn.answer.id} text={turn.answer.text} at={turn.endedAt} now={now} />
+      )}
+      {turn.running && (
+        <p className="running-footer" role="status">
+          <span className="status-dot working" />
+          Working{started !== undefined && <> · {duration(Math.max(0, now - started))}</>}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function WorkLog({ turn }: { turn: Turn }) {
+  const started = turn.prompt?.at ?? turn.startedAt;
+
+  const elapsed =
+    started !== undefined && turn.endedAt !== undefined ? duration(turn.endedAt - started) : "";
+
+  return (
+    <details className="work-log" open={turn.running}>
       <summary>
-        <ChevronRightIcon />
-        <span>{label}</span>
-        <span className="muted">· {steps}</span>
-        <CheckIcon className="success" />
+        <ChevronRightIcon className="disclosure" />
+        <span className="work-label">{turn.running ? "Working" : "Worked"}</span>
+        <span className="work-meta">
+          {[!turn.running && elapsed, stepCount(turn.steps)].filter(Boolean).join(" · ")}
+        </span>
       </summary>
-      <div>
-        <p>
-          <CodeBracketIcon /> Inspected workspace and updated the implementation
-        </p>
-        <p>
-          <CheckIcon /> Ran focused tests successfully
-        </p>
-        <p className="muted">Illustrative activity, not a live agent run.</p>
+      <div className="work-timeline">
+        {turn.items.map((item) =>
+          item.kind === "text" ? (
+            <Prose key={item.id} text={item.text} />
+          ) : (
+            <StepGroup key={item.id} steps={item.steps} />
+          ),
+        )}
       </div>
     </details>
+  );
+}
+
+function stepCount(count: number) {
+  return count === 0 ? "" : `${count} ${count === 1 ? "step" : "steps"}`;
+}
+
+function StepGroup({ steps }: { steps: readonly Step[] }) {
+  const running = steps.some((step) => step.status === "running");
+  const failed = steps.some((step) => step.status === "error");
+
+  return (
+    <details className="step-group">
+      <summary>
+        <Square2StackIcon />
+        <span>{stepCount(steps.length)}</span>
+        {running && <span className="status-dot working" aria-label="Running" />}
+        {failed && <ExclamationCircleIcon className="step-error" aria-label="A step failed" />}
+      </summary>
+      <ol>
+        {steps.map((step) => (
+          <li key={step.id}>
+            <details className="step">
+              <summary>
+                <span className={`step-name step-${step.status}`}>{step.name}</span>
+                {step.detail && <code>{step.detail}</code>}
+              </summary>
+              <pre>{step.output || (step.status === "running" ? "Running…" : "No output")}</pre>
+            </details>
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
+function Answer({ id, text, at, now }: { id: string; text: string; at?: number; now: number }) {
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setCopyError(false);
+    } catch {
+      setCopyError(true);
+    }
+  }
+
+  return (
+    <article className="answer" aria-label="assistant message" data-message={id}>
+      <Prose text={text} />
+      <div className="answer-actions">
+        {at !== undefined && <time dateTime={new Date(at).toISOString()}>{ago(at, now)}</time>}
+        <IconButton label={copied ? "Message copied" : "Copy message"} onClick={() => void copy()}>
+          {copied ? <CheckIcon /> : <DocumentDuplicateIcon />}
+        </IconButton>
+        {copyError && (
+          <span role="status" className="error-text">
+            Could not copy. Select the text instead.
+          </span>
+        )}
+      </div>
+    </article>
   );
 }
 
@@ -162,16 +198,14 @@ export function Composer({
   onSend,
   onStop,
   pending,
-  preview,
-  onConnect,
+  running,
   model,
   draftKey,
 }: {
   onSend: (content: string, requestId: string) => Promise<boolean>;
   onStop: () => void;
   pending: boolean;
-  preview: boolean;
-  onConnect: () => void;
+  running: boolean;
   model: string;
   draftKey: string;
 }) {
@@ -187,12 +221,6 @@ export function Composer({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-
-    if (preview) {
-      onConnect();
-
-      return;
-    }
 
     if (!content.trim() || pending) return;
 
@@ -218,7 +246,8 @@ export function Composer({
         <Textarea
           id="prompt"
           name="prompt"
-          placeholder={preview ? "What would you like to build?" : "Ask your agent…"}
+          rows={1}
+          placeholder={running ? "Queue for when it finishes…" : "Ask pi-hard…"}
           value={content}
           maxLength={32768}
           disabled={pending}
@@ -231,39 +260,29 @@ export function Composer({
           }}
         />
         <div className="composer-toolbar">
-          <div className="composer-context">
-            <CodeBracketIcon />
-            <span>{model}</span>
-            <span className="context-divider" />
-            <span>Workspace agent</span>
-          </div>
-          <div className="composer-controls">
-            {!preview && (
-              <IconButton label="Stop agent" onClick={onStop} disabled={pending || !draftKey}>
-                <StopIcon />
-              </IconButton>
-            )}
+          <span className="composer-model">{model}</span>
+          {running && !content.trim() ? (
+            <button
+              type="button"
+              className="round-button stop"
+              aria-label="Stop agent"
+              disabled={pending}
+              onClick={onStop}
+            >
+              <StopIcon />
+            </button>
+          ) : (
             <button
               type="submit"
-              className="send-button"
-              disabled={!preview && (!content.trim() || pending)}
-              aria-label={preview ? "Connect to start chatting" : "Send message"}
+              className="round-button send"
+              disabled={!content.trim() || pending}
+              aria-label={running ? "Queue message" : "Send message"}
             >
               <ArrowUpIcon />
             </button>
-          </div>
+          )}
         </div>
       </form>
-      <div className="composer-hint">
-        <span>
-          {preview
-            ? "Preview mode. Connect your API to start a real session."
-            : "Enter to send · Shift + Enter for a new line"}
-        </span>
-        <span className="durable-caption">
-          <span className="tiny-dot" /> Durable sessions
-        </span>
-      </div>
     </div>
   );
 }

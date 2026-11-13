@@ -1,23 +1,20 @@
 import { useState } from "react";
+import { ChevronDownIcon, XMarkIcon } from "@heroicons/react/16/solid";
 import {
-  BoltIcon,
-  ChevronDownIcon,
   CodeBracketIcon,
-  Cog6ToothIcon,
-  CommandLineIcon,
   MagnifyingGlassIcon,
   PlusIcon,
-  QueueListIcon,
-  XMarkIcon,
-} from "@heroicons/react/16/solid";
-import { IconButton, Input } from "./ui";
+  SignalIcon,
+} from "@heroicons/react/24/outline";
+import { ago } from "../lib/time";
+import { IconButton, Input, RepoBadge } from "./ui";
 
 export type WorkspaceRow = {
   id: string;
   title: string;
   repository: string;
-  status: string;
-  time: string;
+  updatedAt: number;
+  running: boolean;
 };
 
 export function Sidebar({
@@ -25,12 +22,12 @@ export function Sidebar({
   selected,
   connected,
   open,
+  feed,
   onSelect,
   onNew,
   onSettings,
   onClose,
   onFeed,
-  feed,
 }: {
   rows: readonly WorkspaceRow[];
   selected: string;
@@ -43,13 +40,12 @@ export function Sidebar({
   onClose: () => void;
   onFeed: () => void;
 }) {
+  const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
-  const [working, setWorking] = useState(false);
+  const now = Date.now();
 
-  const filtered = rows.filter(
-    (row) =>
-      row.title.toLowerCase().includes(query.toLowerCase()) &&
-      (!working || row.status === "Working"),
+  const filtered = rows.filter((row) =>
+    `${row.title} ${row.repository}`.toLowerCase().includes(query.trim().toLowerCase()),
   );
 
   return (
@@ -67,105 +63,100 @@ export function Sidebar({
         className={`sidebar ${open ? "sidebar-open" : ""}`}
         aria-label="Workspace navigation"
       >
-        <div className="brand-row">
-          <a href="/" aria-label="pi-hard homepage" className="brand">
-            <span className="brand-mark">π</span>
-            <span>
-              pi-hard<span className="brand-dot">.</span>
+        <div className="sidebar-top">
+          <button
+            type="button"
+            className="account-switch"
+            onClick={onSettings}
+            aria-label="Connection settings"
+          >
+            <span className="brand-mark" aria-hidden="true">
+              π
+              <span className={`brand-presence ${connected ? "online" : ""}`} />
             </span>
-          </a>
+            <span className="account-name">pi-hard</span>
+            <ChevronDownIcon />
+          </button>
           <IconButton label="Close navigation" className="mobile-only" onClick={onClose}>
             <XMarkIcon />
           </IconButton>
-          <span className="personal-label">
-            Personal
-            <ChevronDownIcon />
-          </span>
         </div>
-        <button type="button" className={`nav-row ${feed ? "active" : ""}`} onClick={onFeed}>
-          <QueueListIcon />
-          <span>Activity feed</span>
-          <span className="keycap">G F</span>
+        <button
+          type="button"
+          className={`nav-row ${feed ? "active" : ""}`}
+          aria-current={feed ? "page" : undefined}
+          onClick={onFeed}
+        >
+          <SignalIcon />
+          <span>Feed</span>
         </button>
-        <div className="sidebar-section-heading">
+        <div className="sidebar-heading">
           <h2>Workspaces</h2>
+          <IconButton
+            label="Search workspaces"
+            aria-pressed={searching}
+            onClick={() => {
+              setSearching(!searching);
+              setQuery("");
+            }}
+          >
+            <MagnifyingGlassIcon />
+          </IconButton>
           <IconButton label="New workspace" onClick={onNew}>
             <PlusIcon />
           </IconButton>
         </div>
-        <div className="search-field">
-          <MagnifyingGlassIcon />
+        {searching && (
           <Input
             type="search"
             name="search"
+            className="sidebar-search"
             aria-label="Search workspaces"
-            placeholder="Find a workspace…"
+            placeholder="Search"
+            autoFocus
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setSearching(false);
+                setQuery("");
+              }
+            }}
           />
-        </div>
-        <div className="workspace-filter">
-          <button type="button" onClick={() => setWorking(!working)} aria-pressed={working}>
-            {working ? "Working" : "All workspaces"}
-            <ChevronDownIcon />
-          </button>
-          <span>{filtered.length}</span>
-        </div>
+        )}
+        {rows.length > 0 && (
+          <p className="sidebar-group">
+            Recent <span>{filtered.length}</span>
+          </p>
+        )}
         <nav className="workspace-list" aria-label="Workspaces">
-          {filtered.map((row) => (
-            <button
-              type="button"
-              key={row.id}
-              className={`workspace-row ${selected === row.id && !feed ? "active" : ""}`}
-              aria-current={selected === row.id && !feed ? "page" : undefined}
-              onClick={() => onSelect(row.id)}
-            >
-              <span
-                className={`workspace-state state-${row.status.toLowerCase()}`}
-                title={row.status}
+          {filtered.map((row) => {
+            const active = selected === row.id && !feed;
+
+            return (
+              <button
+                type="button"
+                key={row.id}
+                className={`workspace-row ${active ? "active" : ""}`}
+                aria-current={active ? "page" : undefined}
+                onClick={() => onSelect(row.id)}
               >
-                {row.status === "Working" || row.status === "Unread" ? (
-                  <span className="status-dot" />
+                {row.running ? (
+                  <span className="status-dot working" aria-label="Working" />
                 ) : (
-                  <CodeBracketIcon />
+                  <CodeBracketIcon className="workspace-icon" />
                 )}
-              </span>
-              <span className="workspace-label">
-                <span>{row.title}</span>
-                <span className="workspace-repo">{row.repository}</span>
-              </span>
-              <span className="workspace-time">{row.time}</span>
-              <span className="sr-only">{row.status}</span>
-            </button>
-          ))}
-          {filtered.length === 0 && (
-            <p className="empty-search">
-              {query ? "No matching workspaces." : "No workspaces here yet."}
-            </p>
+                <RepoBadge repository={row.repository} />
+                <span className="workspace-title">{row.title}</span>
+                <span className="workspace-time">{ago(row.updatedAt, now)}</span>
+              </button>
+            );
+          })}
+          {query && filtered.length === 0 && (
+            <p className="sidebar-empty">No matching workspaces.</p>
           )}
+          {connected && rows.length === 0 && <p className="sidebar-empty">No workspaces yet.</p>}
         </nav>
-        <div className="sidebar-bottom">
-          <div className="runtime-note">
-            <CommandLineIcon />
-            <div>
-              <strong>Your code. Your agent.</strong>
-              <p>Durable by design.</p>
-            </div>
-          </div>
-          <button type="button" className="account-row" onClick={onSettings}>
-            <span className="account-avatar">Y</span>
-            <span>
-              <strong>Your workspace</strong>
-              <span className="connection-caption">
-                {connected ? "API connected" : "Preview mode"}
-              </span>
-            </span>
-            <Cog6ToothIcon />
-          </button>
-        </div>
-        <div className="sidebar-footnote">
-          <BoltIcon /> Powered by Pi Durable
-        </div>
       </aside>
     </>
   );

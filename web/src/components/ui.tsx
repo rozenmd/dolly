@@ -65,3 +65,13 @@ export function Textarea(props: ComponentProps<"textarea">) {
 export function Select(props: ComponentProps<"select">) {
   return <select {...props} className={`input ${props.className ?? ""}`} />;
 }
+
+export function RepoBadge({ repository }: { repository: string }) {
+  const name = repository.split("/").at(-1) ?? "";
+
+  return (
+    <span className="repo-badge" aria-hidden="true">
+      {name.charAt(0).toUpperCase() || "·"}
+    </span>
+  );
+}
