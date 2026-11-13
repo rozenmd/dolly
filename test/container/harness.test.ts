@@ -305,7 +305,20 @@ ln -s dirty.txt dirty-link`);
     expect(restored.stdout).toContain("AM staged.txt");
 
     failCheckpoint = true;
-    await expect(sandbox.run("printf 'not acknowledged' > lost.txt")).rejects.toThrow();
+    // Await RPC directly: Vitest's .rejects leaves an unhandled RPC rejection.
+    let checkpointError: unknown;
+
+    try {
+      await sandbox.run("printf 'not acknowledged' > lost.txt");
+    } catch (error) {
+      checkpointError = error;
+    }
+
+    expect(checkpointError).toMatchObject({
+      operation: "workspace.checkpoint",
+      message: "Artifact checkpoint failed",
+      details: { exitCode: 1 },
+    });
     failCheckpoint = false;
     await sandbox.restart();
 
