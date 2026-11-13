@@ -11,6 +11,8 @@ it("runs the registered coding tools on another owner's repository, pushes a tes
 mkdir -p remotes/another-owner
  git init --bare remotes/another-owner/project.git
  git --git-dir=remotes/another-owner/project.git config http.receivepack true
+ git --git-dir=remotes/another-owner/project.git config uploadpack.allowFilter true
+ git --git-dir=remotes/another-owner/project.git config uploadpack.allowAnySHA1InWant true
  git --git-dir=remotes/another-owner/project.git symbolic-ref HEAD refs/heads/main
  git init -b main seed
  cd seed
@@ -73,6 +75,9 @@ mkdir -p remotes/another-owner
 
   let generation = 0;
   let opened = false;
+  let failCheckpoint = false;
+
+  const originalFetch = globalThis.fetch;
 
   const mocked = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(String(input));
@@ -146,7 +151,17 @@ mkdir -p remotes/another-owner
       return Response.json({ default_branch: "main" });
     }
 
-    expect(url.hostname).toBe("github.com");
+    if (url.hostname !== "github.com") {
+      if (failCheckpoint && url.pathname.endsWith("/git-receive-pack")) {
+        const saved = await originalFetch(input, init);
+        await saved.arrayBuffer();
+
+        return new Response("Checkpoint saved but acknowledgement lost", { status: 503 });
+      }
+
+      return originalFetch(input, init);
+    }
+
     expect(new Headers(init?.headers).get("Authorization")).toBe(
       `Basic ${btoa("x-access-token:private-installation-token")}`,
     );
@@ -263,11 +278,43 @@ mkdir -p remotes/another-owner
     );
 
     const sandbox = env.SANDBOX.getByName(id);
-    expect((await sandbox.run("printf 'unsaved work' > dirty.txt")).exitCode).toBe(0);
+
+    const dirty = await sandbox.run(`set -eu
+mountpoint /workspace/mounts/repo
+printf 'staged work' > staged.txt
+git add staged.txt
+printf 'unstaged work' > staged.txt
+printf 'unsaved work' > dirty.txt
+printf 'ignored.txt\\n' > .gitignore
+printf 'ignored work' > ignored.txt
+mkdir empty-directory
+ln -s dirty.txt dirty-link`);
+
+    expect(dirty.exitCode, dirty.stderr).toBe(0);
     await sandbox.restart();
     expect((await sandbox.run("cat dirty.txt; git log -1 --format=%s")).stdout).toContain(
       "unsaved workFix answer",
     );
+
+    const restored = await sandbox.run(
+      "mountpoint /workspace/mounts/state; git show :staged.txt; cat staged.txt ignored.txt dirty-link; test -d empty-directory; git status --porcelain",
+    );
+
+    expect(restored.exitCode, restored.stderr).toBe(0);
+    expect(restored.stdout).toContain("staged workunstaged workignored workunsaved work");
+    expect(restored.stdout).toContain("AM staged.txt");
+
+    failCheckpoint = true;
+    await expect(sandbox.run("printf 'not acknowledged' > lost.txt")).rejects.toThrow();
+    failCheckpoint = false;
+    await sandbox.restart();
+
+    const recovered = await sandbox.run(
+      "test ! -e lost.txt && cat dirty.txt && git log -1 --format=%s",
+    );
+
+    expect(recovered.exitCode, recovered.stderr).toBe(0);
+    expect(recovered.stdout).toContain("unsaved workFix answer");
 
     const denied = await sandbox.run(
       "curl --silent --show-error --fail-with-body --max-time 5 https://example.com",
@@ -285,7 +332,7 @@ mkdir -p remotes/another-owner
       (await remote.run("git --git-dir=remotes/another-owner/project.git show main:answer.mjs"))
         .stdout,
     ).toContain("answer = 1");
-    expect((await env.WORKSPACES.list()).objects.length).toBeGreaterThan(0);
+    expect((await env.WORKSPACES.list()).repos.length).toBeGreaterThan(0);
   } finally {
     mocked.mockRestore();
     await remote.restart();

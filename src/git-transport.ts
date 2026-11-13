@@ -1,4 +1,7 @@
+import * as Effect from "effect/Effect";
 import { WorkerEntrypoint } from "cloudflare:workers";
+import { OperationError } from "./operations";
+import { exceptionDetails } from "./diagnostics";
 import type { Env } from "./env";
 import type { WorkspaceConfig } from "./workspace";
 
@@ -86,13 +89,18 @@ export async function checkedPush(body: ReadableStream<Uint8Array> | null, branc
   }
 }
 
+export type WorkspaceOutboundProps = WorkspaceConfig & { artifactRepository: string };
+
 /** Only a Sandbox can mint this per-conversation capability through ctx.exports. */
-export class WorkspaceOutbound extends WorkerEntrypoint<Env, WorkspaceConfig> {
+export class WorkspaceOutbound extends WorkerEntrypoint<Env, WorkspaceOutboundProps> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.hostname === "github.workspace" && url.protocol === "http:")
       return this.env.AGENT.getByName("owner").gitTransport(request, this.ctx.props);
+
+    if (url.hostname === "artifacts.workspace")
+      return artifactTransport(request, this.env, this.ctx.props.artifactRepository);
 
     if (
       url.protocol !== "https:" ||
@@ -111,11 +119,11 @@ export class WorkspaceOutbound extends WorkerEntrypoint<Env, WorkspaceConfig> {
   }
 }
 
-export function gitRoute(request: Request, repository: string) {
+export function gitRoute(request: Request, repository: string, hostname = "github.workspace") {
   const url = new URL(request.url);
 
   if (
-    url.hostname !== "github.workspace" ||
+    url.hostname !== hostname ||
     url.protocol !== "http:" ||
     url.username ||
     url.password ||
@@ -143,4 +151,65 @@ export function gitRoute(request: Request, repository: string) {
     return { write: url.pathname.endsWith("git-receive-pack"), path: url.pathname };
 
   return null;
+}
+
+/** Credentials exist only for the upstream request, never in the sandbox's remote URL. */
+export async function artifactTransport(request: Request, env: Env, repository: string) {
+  const route = gitRoute(request, repository, "artifacts.workspace");
+
+  if (!route) return new Response("Artifact Git route denied", { status: 403 });
+  using repo = await env.WORKSPACES.get(repository);
+  const info = await repo.info();
+  const credential = await repo.createToken(route.write ? "write" : "read", 300);
+  const headers = new Headers();
+
+  for (const name of ["Content-Type", "Accept", "Git-Protocol", "Content-Encoding"]) {
+    const value = request.headers.get(name);
+
+    if (value) headers.set(name, value);
+  }
+
+  headers.set("Authorization", `Bearer ${credential.plaintext}`);
+
+  try {
+    const remote = new URL(info.remote);
+
+    // The binding supplies this address. Local Artifacts uses loopback HTTP in development.
+    if (remote.username || remote.password || remote.search || remote.hash)
+      throw new Error("Artifacts returned an invalid Git remote");
+
+    const response = await fetch(remote.href + route.path.slice(`/${repository}.git`.length), {
+      method: request.method,
+      headers,
+      body: request.body,
+      redirect: "manual",
+      signal: AbortSignal.timeout(120_000),
+    });
+
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel();
+
+      return new Response("Artifact Git redirects are forbidden", { status: 502 });
+    }
+
+    return response;
+  } catch (cause) {
+    // Native fetch errors can contain the supplied Authorization header.
+    throw new OperationError({
+      operation: "artifacts.transport",
+      message: "Artifacts Git transport failed",
+      details: exceptionDetails(cause, [credential.plaintext, headers.get("Authorization") ?? ""]),
+    });
+  } finally {
+    try {
+      await repo.revokeToken(credential.id);
+    } catch (cause) {
+      await Effect.runPromise(
+        Effect.logWarning({
+          event: "artifacts_token_cleanup_failed",
+          error: exceptionDetails(cause, [credential.plaintext]),
+        }),
+      );
+    }
+  }
 }

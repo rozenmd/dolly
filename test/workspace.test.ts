@@ -98,9 +98,7 @@ it("quotes shell values and keeps checkout refs out of shell syntax", () => {
     "42",
   );
 
-  expect(checkoutScript(config)).toContain(
-    "fetch --no-tags -- origin 'main'\\''; touch /tmp/injected; '\\'''\n",
-  );
+  expect(checkoutScript(config)).toContain("ref='main'\\''; touch /tmp/injected; '\\'''\n");
   expect(config.networkHosts).toEqual([]);
 });
 

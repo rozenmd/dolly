@@ -69,18 +69,63 @@ export const WorkspaceRequest = Schema.Union([
 /** Values are passed as shell arguments, never interpreted as source. */
 export const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
 
+export type WorkspaceCheckpoint = { branch: string; commit: string };
+
 export function checkoutScript(config: WorkspaceConfig) {
+  const remote = shellQuote(`http://github.workspace/${config.repository}.git`);
+
   return `set -eu
-if test -d /workspace/repo/.git; then exit 0; fi
-mkdir -p /workspace/checkout
-cd /workspace/checkout
-git init
+if test -f /workspace/ready; then exit 0; fi
+remote=${remote}
+ref=${shellQuote(config.ref)}
+# Resolve HEAD, short branch names and tags without changing their meaning.
+canonical=$(git ls-remote --symref "$remote" "$ref" "refs/heads/$ref" "refs/tags/$ref" | awk -v ref="$ref" '
+  $1 == "ref:" { symbolic = $2 }
+  $2 == ref { exact = $2 }
+  $2 == "refs/heads/" ref { branch = $2 }
+  $2 == "refs/tags/" ref { tag = $2 }
+  END { if (symbolic) print symbolic; else if (exact) print exact; else if (branch) print branch; else print tag }
+')
+if test -n "$canonical" && test "$canonical" != HEAD; then
+  pi-hard-mount repo "$remote" "$canonical"
+  ln -sfn /workspace/mounts/repo /workspace/repo
+else
+  # Unadvertised commit IDs have no named ref for ArtifactFS. Retain exact-revision checkout.
+  rm -rf /workspace/checkout
+  mkdir -p /workspace/checkout
+  git -C /workspace/checkout init
+  git -C /workspace/checkout remote add origin "$remote"
+  git -C /workspace/checkout -c protocol.file.allow=never fetch --no-tags -- origin "$ref"
+  git -C /workspace/checkout checkout --detach FETCH_HEAD
+  mv /workspace/checkout /workspace/repo
+fi
+cd /workspace/repo
 git config user.name 'Pi Hard'
 git config user.email 'pi-hard@users.noreply.github.com'
-git remote remove origin 2>/dev/null || true
-git remote add origin ${shellQuote(`http://github.workspace/${config.repository}.git`)}
-git -c protocol.file.allow=never fetch --no-tags -- origin ${shellQuote(config.ref ?? "HEAD")}
-git checkout -B ${shellQuote(config.branch)} FETCH_HEAD
-cd /workspace
-mv checkout repo`;
+git checkout -B ${shellQuote(config.branch)} HEAD
+touch /workspace/ready`;
+}
+
+export function restoreScript(repository: string, checkpoint: WorkspaceCheckpoint) {
+  return `set -eu
+if test -f /workspace/ready; then exit 0; fi
+pi-hard-mount state ${shellQuote(`http://artifacts.workspace/${repository}.git`)} ${shellQuote(`refs/heads/${checkpoint.branch}`)}
+test "$(git -C /workspace/mounts/state rev-parse HEAD)" = ${shellQuote(checkpoint.commit)}
+mkdir -p /workspace/git /workspace/mounts/state/files
+python3 -c 'import os, tarfile; tarfile.open("/workspace/mounts/state/git.tar").extractall("/workspace/git", filter="data"); tarfile.open("/workspace/mounts/state/nested.tar").extractall("/workspace/mounts/state", filter="data"); [os.makedirs(b"/workspace/mounts/state/" + path, exist_ok=True) for path in open("/workspace/mounts/state/directories", "rb").read().split(b"\\0") if path]'
+# The user's index, refs, reflogs and dirty files are separate from the checkpoint repository.
+printf 'gitdir: /workspace/git\\n' > /workspace/mounts/state/files/.git
+ln -sfn /workspace/mounts/state/files /workspace/repo
+git -C /workspace/repo config core.worktree /workspace/repo
+git -C /workspace/repo config --unset core.fsmonitor || test "$?" = 5
+git -C /workspace/repo config --unset core.untrackedCache || test "$?" = 5
+touch /workspace/ready`;
+}
+
+export function checkpointScript(
+  repository: string,
+  branch: string,
+  previous?: WorkspaceCheckpoint,
+) {
+  return `python3 /usr/local/lib/pi-hard-checkpoint.py ${shellQuote(`http://artifacts.workspace/${repository}.git`)} ${shellQuote(branch)} ${shellQuote(previous ? `refs/heads/${previous.branch}` : "")}`;
 }

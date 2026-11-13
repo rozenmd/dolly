@@ -1,14 +1,16 @@
 import { DurableObject } from "cloudflare:workers";
-import {
-  Files,
-  DirectoryBackup,
-  DirectoryBackupGateway,
-  type DirectoryBackupRecord,
-} from "@cloudflare/sandbox";
+import { Files } from "@cloudflare/sandbox";
+import type * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Semaphore from "effect/Semaphore";
 import { WorkspaceOutbound } from "./git-transport";
-import { checkoutScript, type WorkspaceConfig } from "./workspace";
+import {
+  checkoutScript,
+  restoreScript,
+  checkpointScript,
+  type WorkspaceConfig,
+  type WorkspaceCheckpoint,
+} from "./workspace";
 import { attempt, OperationError } from "./operations";
 import { exceptionDetails } from "./diagnostics";
 import type { Env } from "./env";
@@ -58,14 +60,13 @@ export const readBounded = Effect.fn("Sandbox.readBounded")(function* (
 interface SandboxState extends DurableObjectState {
   readonly exports: Cloudflare.Exports & {
     WorkspaceOutbound: LoopbackForExport<typeof WorkspaceOutbound>;
-    DirectoryBackupGateway: LoopbackForExport<typeof DirectoryBackupGateway>;
   };
 }
 
 export class Sandbox extends DurableObject<Env> {
   private readonly permit = Semaphore.makeUnsafe(1);
   private initialized = false;
-  private backup?: DirectoryBackup;
+  private readonly artifactRepository = `session-${this.ctx.id}`;
   private readonly loopback: SandboxState["exports"];
 
   constructor(ctx: SandboxState, env: Env) {
@@ -73,13 +74,14 @@ export class Sandbox extends DurableObject<Env> {
     this.loopback = ctx.exports;
   }
 
-  private container = Effect.fn("Sandbox.container")(function* (this: Sandbox) {
+  private container = Effect.fn("Sandbox.container")(function* (
+    this: Sandbox,
+  ): Effect.fn.Return<Container, OperationError | Cause.TimeoutError> {
     const container = this.ctx.container;
 
     if (!container) return yield* Effect.die("Sandbox Container binding is not configured");
-    const started = !container.running;
 
-    if (started) {
+    if (!container.running) {
       container.start({ image: container.images.sandbox, enableInternet: false });
       this.initialized = false;
     }
@@ -92,14 +94,21 @@ export class Sandbox extends DurableObject<Env> {
       );
 
       if (workspace) {
-        const backup = new DirectoryBackup(container, this.loopback.DirectoryBackupGateway, {
-          binding: "WORKSPACES",
-          prefix: `workspaces/${this.ctx.id}/`,
+        yield* attempt("artifacts.repository", async () => {
+          try {
+            using repo = await this.env.WORKSPACES.get(this.artifactRepository);
+            await repo.info();
+          } catch (error) {
+            if (!(error instanceof Error) || !("code" in error) || error.code !== "NOT_FOUND")
+              throw error;
+            await this.env.WORKSPACES.create(this.artifactRepository);
+          }
         });
 
-        this.backup = backup;
-        yield* attempt("workspace.backup.intercept", () => backup.intercept());
-        const outbound = this.loopback.WorkspaceOutbound({ props: workspace });
+        const outbound = this.loopback.WorkspaceOutbound({
+          props: { ...workspace, artifactRepository: this.artifactRepository },
+        });
+
         yield* attempt("workspace.network.http", () =>
           container.interceptAllOutboundHttp(outbound),
         );
@@ -108,10 +117,44 @@ export class Sandbox extends DurableObject<Env> {
         );
 
         const saved = yield* attempt("workspace.checkpoint.read", () =>
-          this.ctx.storage.get<DirectoryBackupRecord>("checkpoint"),
+          this.ctx.storage.get<WorkspaceCheckpoint>("artifact:checkpoint"),
         );
 
-        if (started && saved) yield* attempt("workspace.restore", () => backup.restore(saved));
+        if (
+          !saved &&
+          (yield* attempt("workspace.legacy.read", () => this.ctx.storage.get("checkpoint")))
+        )
+          return yield* new OperationError({
+            operation: "workspace.migration",
+            message: "An R2 workspace checkpoint exists; migrate it before using Artifacts",
+            details: null,
+          });
+
+        if (saved) {
+          this.initialized = true;
+
+          const restored = yield* this.execute(
+            restoreScript(this.artifactRepository, saved),
+            "/workspace",
+            120,
+          ).pipe(
+            Effect.onError(() =>
+              Effect.sync(() => {
+                this.initialized = false;
+              }),
+            ),
+          );
+
+          if (restored.exitCode !== 0) {
+            this.initialized = false;
+
+            return yield* new OperationError({
+              operation: "workspace.restore",
+              message: "Artifact workspace restore failed",
+              details: restored,
+            });
+          }
+        }
       }
 
       this.initialized = true;
@@ -124,6 +167,7 @@ export class Sandbox extends DurableObject<Env> {
     this: Sandbox,
     command: string,
     cwd: string,
+    timeout = 60,
   ) {
     const container = yield* this.container();
     let exited = false;
@@ -168,30 +212,38 @@ export class Sandbox extends DurableObject<Env> {
                 }),
               ),
             ),
-    ).pipe(Effect.timeout("60 seconds"));
+    ).pipe(Effect.timeout(`${timeout} seconds`));
   });
 
   private checkpoint = Effect.fn("Sandbox.checkpoint")(function* (this: Sandbox) {
-    const backup = this.backup;
+    const workspace = yield* attempt("workspace.read", () => this.ctx.storage.get("workspace"));
 
-    if (!backup) return;
+    if (!workspace) return;
 
     const previous = yield* attempt("workspace.checkpoint.read", () =>
-      this.ctx.storage.get<DirectoryBackupRecord>("checkpoint"),
+      this.ctx.storage.get<WorkspaceCheckpoint>("artifact:checkpoint"),
     );
 
-    const next = yield* attempt("workspace.backup", () =>
-      backup.backup({ dir: "/workspace/repo" }),
+    // Immutable refs keep a pushed-but-unacknowledged checkpoint from replacing the last good one.
+    const branch = `checkpoint-${crypto.randomUUID()}`;
+
+    const result = yield* this.execute(
+      checkpointScript(this.artifactRepository, branch, previous),
+      "/workspace",
+      120,
     );
 
-    yield* attempt("workspace.checkpoint.save", () => this.ctx.storage.put("checkpoint", next));
+    const commit = result.stdout.trim();
 
-    if (previous)
-      yield* attempt("workspace.backup.delete", () => backup.delete(previous)).pipe(
-        Effect.catch((error) =>
-          Effect.logWarning({ event: "workspace_cleanup_failed", error: exceptionDetails(error) }),
-        ),
-      );
+    if (result.exitCode !== 0 || !/^[0-9a-f]{40}$/.test(commit))
+      return yield* new OperationError({
+        operation: "workspace.checkpoint",
+        message: "Artifact checkpoint failed",
+        details: result,
+      });
+    yield* attempt("workspace.checkpoint.save", () =>
+      this.ctx.storage.put("artifact:checkpoint", { branch, commit } satisfies WorkspaceCheckpoint),
+    );
   });
 
   prepare(config: WorkspaceConfig) {
@@ -214,7 +266,7 @@ export class Sandbox extends DurableObject<Env> {
             this.initialized = false;
           }
 
-          const result = yield* this.execute(checkoutScript(config), "/workspace");
+          const result = yield* this.execute(checkoutScript(config), "/workspace", 120);
 
           if (result.exitCode !== 0)
             return yield* new OperationError({
@@ -223,7 +275,7 @@ export class Sandbox extends DurableObject<Env> {
               details: result,
             });
 
-          if (!existing) yield* this.checkpoint();
+          yield* this.checkpoint();
 
           return {
             repository: config.repository,

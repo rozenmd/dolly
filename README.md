@@ -4,7 +4,7 @@ A Cloudflare Access-protected personal coding-agent API on Cloudflare Workers, u
 
 ## Deploy to Cloudflare
 
-Use Node.js 24.22.2 and pnpm 12.18.0 (pinned in `.node-version` and `package.json`), a running Docker engine to build the container image, and a paid Cloudflare Workers account with R2 enabled. The typed configuration provisions the private `pi-hard-workspaces` bucket for repository checkpoints.
+Use Node.js 24.22.2 and pnpm 12.18.0 (pinned in `.node-version` and `package.json`), a running Docker engine to build the container image, and a paid Cloudflare Workers account with Artifacts enabled. Create a private Artifacts namespace named `pi-hard-workspaces`; the typed configuration binds it as `WORKSPACES`. The image builds a pinned ArtifactFS driver and includes FUSE.
 
 Install pnpm using the [official instructions](https://pnpm.io/installation). With Node.js already installed:
 
@@ -137,7 +137,15 @@ For direct control, `POST /api/sessions/:id/workspace` accepts the same actions:
 
 Commit and push are separate, explicit operations. Opening a PR targets the repository's default branch. Pushing uses ordinary Git fast-forward checks; failed writes are not automatically retried. The App does not request workflow-writing permission, so GitHub may reject pushes changing workflows. No merge operation is provided.
 
-Checkpoints include the full repository directory, including dependencies and untracked files. This favors recovery over transfer cost: large workspaces make commands slower and incur R2 usage. Stop background writers before commands complete; backups do not freeze concurrent processes. A successful checkpoint replaces the previous one; failed cleanup is logged. R2 and Durable Object storage remain private and grow with usage.
+Workspaces use ArtifactFS for named Git refs. It mounts a blobless checkout and hydrates file contents on demand. Unadvertised commit IDs use an ordinary exact-revision checkout because ArtifactFS requires a named source ref. Direct network access stays disabled; both GitHub and Artifacts traffic pass through private Worker brokers. Repository-scoped credentials are minted and used only in the Worker.
+
+After foreground commands, a separate Artifacts repository records a checkpoint. Working files are a versioned Git tree, while Git metadata is stored separately so restoring a checkpoint preserves the user's HEAD, staged changes, reflogs, and uncommitted files. Checkpoint commits never enter the user's GitHub branch. Each checkpoint has an immutable ref; the Durable Object acknowledges it only after a successful push. A failed push or lost acknowledgement cannot replace the last acknowledged checkpoint.
+
+Checkpoints retain ignored files, dependencies, nested Git metadata, symlinks, and empty directories. This preserves recovery behavior but requires scanning the full workspace after commands, which hydrates unread source files on the first checkpoint. Large dependency trees still increase checkpoint time and storage. Stop background writers before commands complete; checkpoints do not freeze concurrent processes. Checkpoint history and Durable Object storage remain private and grow with usage.
+
+Container replacement mounts the last acknowledged Artifacts checkpoint through ArtifactFS and restores the user's Git metadata without replaying commands. The Linux runtime must expose `/dev/fuse` and permit FUSE mounting by the unprivileged container user. The native integration test verifies an actual mount, edits, commit/push, staged and ignored-file recovery, and recovery after checkpoint publication fails.
+
+This replaces the earlier R2 checkpoint format. Existing R2 checkpoints fail closed rather than silently starting with an empty checkout. If you deployed the earlier implementation, export or migrate those workspaces before switching; this change does not delete the old bucket.
 
 ### Receive GitHub PR commands
 
@@ -289,7 +297,7 @@ Hono and Cloudflare Durable Objects remain native hosts. They run Effects at HTT
 - One `Agent` Durable Object owns the account credentials and Pi SQLite storage. Credential writes, refresh and logout share one serialized queue. Login grants survive object restarts; alarms resume pending Pi work.
 - Each conversation gets a separate `Sandbox` Durable Object and native Linux container. The agent has `shell` and Sandbox 1.0 `Files`-backed `read_file` tools. Commands run as an unprivileged user.
 - Subscription credentials and the API token never enter the container. Direct container internet access is disabled. Git traffic uses a private per-session Worker broker; it can read only the selected repository and push only the session branch, never the default branch or a deletion. Dependency downloads use an optional per-session HTTPS hostname list, without injected credentials.
-- Conversation history and repository selection are durable. Repository workspaces, including `.git` and uncommitted files, are backed up to private R2 after foreground shell commands, including failed commands. The last completed checkpoint is restored after container replacement. A crash during a command can lose changes since that checkpoint; interrupted commands are never automatically rerun. Blank sessions without a repository remain ephemeral. Containers stop after five minutes of inactivity.
+- Conversation history and repository selection are durable. Repository workspaces, including `.git` and uncommitted files, are checkpointed to private Artifacts repositories after foreground shell commands, including failed commands. The last completed checkpoint is restored after container replacement. A crash during a command can lose changes since that checkpoint; interrupted commands are never automatically rerun. Blank sessions without a repository remain ephemeral. Containers stop after five minutes of inactivity.
 - Shell calls have a 60-second deadline and keep at most 32 KiB per output stream. File reads allow 64 KiB. Runs stop after 20 tool rounds. Interrupted shell calls are marked unsafe to replay because commands may have side effects.
 - This is single-owner software. Anyone allowed by your Access policy who also has `API_TOKEN` can use your subscription, run sandbox commands, and read conversations. There is no multi-user authorization, rate limiter, browser UI, or public sandbox preview.
 - Worker storage holds OAuth secrets. Protect access to the Cloudflare account and local `.wrangler` data. Logs and transcript responses redact known tokens and OAuth fields while retaining diagnostic messages.

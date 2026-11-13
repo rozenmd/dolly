@@ -307,5 +307,3 @@ export default app;
 export { GitHubIngress } from "./github-ingress";
 
 export { WorkspaceOutbound } from "./git-transport";
-
-export { DirectoryBackupGateway } from "@cloudflare/sandbox";
