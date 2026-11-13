@@ -5,13 +5,18 @@ const Block = Schema.Struct({
   type: Schema.String,
   text: Schema.optional(Schema.String),
   thinking: Schema.optional(Schema.String),
+  id: Schema.optional(Schema.String),
   name: Schema.optional(Schema.String),
+  arguments: Schema.optional(Schema.Unknown),
 });
 
 const Message = Schema.Struct({
   role: Schema.String,
   content: Schema.Union([Schema.String, Schema.Array(Block)]),
   toolName: Schema.optional(Schema.String),
+  toolCallId: Schema.optional(Schema.String),
+  isError: Schema.optional(Schema.Boolean),
+  timestamp: Schema.optional(Schema.Number),
 });
 
 const Live = Schema.Struct({
@@ -57,7 +62,28 @@ export const SavedSession = Schema.Struct({
 
 export type SavedSession = typeof SavedSession.Type;
 
-export type ChatMessage = { id: string; role: string; text: string; toolName?: string };
+export type Step = {
+  id: string;
+  name: string;
+  detail: string;
+  output: string;
+  status: "running" | "done" | "error";
+};
+
+export type TurnItem =
+  | { kind: "text"; id: string; text: string }
+  | { kind: "steps"; id: string; steps: Step[] };
+
+export type Turn = {
+  id: string;
+  prompt?: { text: string; at?: number };
+  items: TurnItem[];
+  answer?: { id: string; text: string };
+  steps: number;
+  startedAt?: number;
+  endedAt?: number;
+  running: boolean;
+};
 
 function messageText(message: typeof Message.Type) {
   return Schema.is(Schema.String)(message.content)
@@ -65,43 +91,166 @@ function messageText(message: typeof Message.Type) {
     : message.content.flatMap((block) => (block.text ? [block.text] : [])).join("\n\n");
 }
 
-export function messagesFromSnapshot(snapshot: typeof Snapshot.Type): ChatMessage[] {
-  const messages: ChatMessage[] = [];
+const ToolArguments = Schema.Struct({
+  command: Schema.optional(Schema.String),
+  path: Schema.optional(Schema.String),
+  file_path: Schema.optional(Schema.String),
+  pattern: Schema.optional(Schema.String),
+  query: Schema.optional(Schema.String),
+  url: Schema.optional(Schema.String),
+});
 
-  for (const entry of snapshot.entries) {
-    for (const [index, message] of (entry.model ?? []).entries()) {
-      const text = messageText(message);
+/** The most recognisable argument of a tool call, such as its command or file path. */
+function stepDetail(block: typeof Block.Type) {
+  const args = Option.getOrUndefined(Schema.decodeUnknownOption(ToolArguments)(block.arguments));
 
-      if (text)
-        messages.push({
-          id: `${entry.id}-${index}`,
-          role: message.role,
-          text,
-          toolName: message.toolName,
+  return (
+    args?.command ??
+    args?.path ??
+    args?.file_path ??
+    args?.pattern ??
+    args?.query ??
+    args?.url ??
+    ""
+  );
+}
+
+/** Groups a flat Pi transcript into prompt/response turns, folding tool calls into steps. */
+export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
+  const turns: Turn[] = [];
+  const calls = new Map<string, Step>();
+  const live = liveFromSnapshot(snapshot);
+
+  function current(id: string) {
+    const last = turns.at(-1);
+
+    if (last) return last;
+
+    const turn: Turn = { id, items: [], steps: 0, running: false };
+    turns.push(turn);
+
+    return turn;
+  }
+
+  function addStep(turn: Turn, id: string, step: Step) {
+    const last = turn.items.at(-1);
+
+    if (last?.kind === "steps") last.steps.push(step);
+    else turn.items.push({ kind: "steps", id, steps: [step] });
+
+    turn.steps += 1;
+    calls.set(step.id, step);
+  }
+
+  function touch(turn: Turn, at?: number) {
+    if (at === undefined) return;
+
+    turn.startedAt ??= at;
+    turn.endedAt = at;
+  }
+
+  function add(message: typeof Message.Type, id: string) {
+    if (message.role === "user") {
+      turns.push({
+        id,
+        prompt: { text: messageText(message), at: message.timestamp },
+        items: [],
+        steps: 0,
+        running: false,
+      });
+
+      return;
+    }
+
+    const turn = current(id);
+    touch(turn, message.timestamp);
+
+    if (message.role === "toolResult") {
+      const step = message.toolCallId ? calls.get(message.toolCallId) : undefined;
+      const output = messageText(message);
+      const status = message.isError ? "error" : "done";
+
+      if (step) Object.assign(step, { output, status });
+      else
+        addStep(turn, id, {
+          id: message.toolCallId ?? id,
+          name: message.toolName ?? "tool",
+          detail: "",
+          output,
+          status,
         });
+
+      return;
+    }
+
+    if (Schema.is(Schema.String)(message.content)) {
+      if (message.content) turn.items.push({ kind: "text", id, text: message.content });
+
+      return;
+    }
+
+    for (const [index, block] of message.content.entries()) {
+      const blockId = `${id}-${index}`;
+
+      if (block.type === "toolCall" && block.name)
+        addStep(turn, blockId, {
+          id: block.id ?? blockId,
+          name: block.name,
+          detail: stepDetail(block),
+          output: "",
+          status: "running",
+        });
+      else if (block.text) {
+        const last = turn.items.at(-1);
+
+        if (last?.kind === "text") last.text += `\n\n${block.text}`;
+        else turn.items.push({ kind: "text", id: blockId, text: block.text });
+      }
     }
   }
 
-  const live = liveFromSnapshot(snapshot);
-  const partial = live?.generation?.message;
+  for (const entry of snapshot.entries)
+    for (const [index, message] of (entry.model ?? []).entries())
+      add(message, `${entry.id}-${index}`);
 
-  if (partial) {
-    const text = messageText(partial);
-
-    if (text) messages.push({ id: "live-partial", role: "assistant", text });
-  }
+  if (live?.generation?.message) add(live.generation.message, "live");
 
   for (const tool of live?.tools ?? []) {
-    if (tool.status !== "done")
-      messages.push({
-        id: `live-tool-${tool.callId}`,
-        role: "toolResult",
-        toolName: `${tool.name} · ${tool.status}`,
-        text: tool.output ?? "Running…",
+    const step = calls.get(tool.callId);
+
+    const status: Step["status"] =
+      tool.status === "done" || tool.status === "error" ? tool.status : "running";
+
+    if (step) Object.assign(step, { status, output: tool.output ?? step.output });
+    else if (status !== "done")
+      addStep(current("live"), `live-${tool.callId}`, {
+        id: tool.callId,
+        name: tool.name,
+        detail: "",
+        output: tool.output ?? "",
+        status,
       });
   }
 
-  return messages;
+  const last = turns.at(-1);
+
+  if (last && live?.run) last.running = true;
+
+  for (const turn of turns) {
+    const tail = turn.items.at(-1);
+
+    if (!turn.running && tail?.kind === "text") {
+      turn.items.pop();
+      turn.answer = { id: tail.id, text: tail.text };
+    }
+
+    if (!turn.running)
+      for (const item of turn.items)
+        if (item.kind === "steps")
+          for (const step of item.steps) if (step.status === "running") step.status = "done";
+  }
+
+  return turns;
 }
 
 export type ApiBody = {
