@@ -71,6 +71,7 @@ async function due() {
 async function signInAs(user: { id: number; login: string }) {
   let fetch = vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (url, init) => {
     expect(String(url)).toBe("https://github.com/login/device/code");
+    expect(init?.redirect).toBe("manual");
     expect(String(init?.body)).toBe("client_id=app-client-id");
 
     return json(deviceCode);
@@ -95,12 +96,14 @@ async function signInAs(user: { id: number; login: string }) {
   await due();
   fetch.mockImplementationOnce(async (url, init) => {
     expect(String(url)).toBe("https://github.com/login/oauth/access_token");
+    expect(init?.redirect).toBe("manual");
     expect(String(init?.body)).toContain("device_code=private-device-code");
 
     return json({ access_token: "private-user-token", token_type: "bearer" });
   });
   fetch.mockImplementationOnce(async (url, init) => {
     expect(String(url)).toBe("https://api.github.com/user");
+    expect(init?.redirect).toBe("manual");
     expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer private-user-token");
 
     return json(user);
@@ -121,6 +124,72 @@ afterEach(() => {
 });
 
 describe("GitHub sign-in", () => {
+  it("rejects a redirected device-code response even when its JSON looks valid", async () => {
+    await connectApp();
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://github.com/login/device/code");
+      expect(init?.redirect).toBe("manual");
+
+      return Response.json(deviceCode, {
+        status: 302,
+        headers: { Location: "https://attacker.example/device" },
+      });
+    });
+
+    const result = await SELF.fetch("https://worker/api/auth/github", { method: "POST" });
+    expect(result.status).toBe(409);
+    expect(await result.clone().text()).toContain("unexpected redirect");
+    expect(cookie(result, "__Host-dolly-github-device")).toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  for (const redirected of ["token", "user"]) {
+    it(`rejects a redirected ${redirected} response without creating a session`, async () => {
+      await connectApp();
+
+      const fetch = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementationOnce(async () => json(deviceCode));
+
+      const start = await SELF.fetch("https://worker/api/auth/github", { method: "POST" });
+      const device = cookie(start, "__Host-dolly-github-device");
+      expect(device).toBeDefined();
+      await due();
+      fetch.mockClear();
+      fetch.mockImplementation(async (url, init) => {
+        expect(init?.redirect).toBe("manual");
+
+        if (String(url) === "https://github.com/login/oauth/access_token")
+          return Response.json(
+            { access_token: "private-user-token", token_type: "bearer" },
+            redirected === "token"
+              ? { status: 307, headers: { Location: "https://attacker.example/token" } }
+              : { status: 200 },
+          );
+
+        expect(String(url)).toBe("https://api.github.com/user");
+
+        return Response.json(
+          { id: 7, login: "octocat" },
+          { status: 302, headers: { Location: "https://attacker.example/user" } },
+        );
+      });
+
+      const result = await SELF.fetch("https://worker/api/auth/github", {
+        headers: { Cookie: device ?? "" },
+      });
+
+      expect(result.status).toBe(502);
+      expect(cookie(result, "__Host-dolly-session")).toBeUndefined();
+      expect(fetch).toHaveBeenCalledTimes(redirected === "token" ? 1 : 2);
+      expect(await (await SELF.fetch("https://worker/api/auth")).json()).toMatchObject({
+        ownerClaimed: false,
+        user: null,
+      });
+    });
+  }
+
   it("lets Cloudflare Access alone start GitHub App setup only until someone owns dolly", async () => {
     const setup = () =>
       SELF.fetch("https://worker/api/integrations/github/setup", {

@@ -81,10 +81,20 @@ const post = Effect.fn("GitHubAuth.post")(
           "User-Agent": "dolly",
         },
         body: new URLSearchParams(body).toString(),
-        redirect: "error",
+        redirect: "manual",
         signal,
       }),
     );
+
+    if (response.status >= 300 && response.status < 400) {
+      yield* attempt("auth.github.close", async () => response.body?.cancel());
+
+      return yield* new OperationError({
+        operation: "auth.github",
+        message: `GitHub returned an unexpected redirect (HTTP ${response.status})`,
+        details: { status: response.status },
+      });
+    }
 
     const json = yield* attempt("auth.github.json", () => response.json()).pipe(
       Effect.catch(() => Effect.succeed(null)),
@@ -268,7 +278,7 @@ function makeGitHubAuth(storage: DurableObjectStorage) {
               "User-Agent": "dolly",
               "X-GitHub-Api-Version": "2022-11-28",
             },
-            redirect: "error",
+            redirect: "manual",
             signal,
           }),
         );

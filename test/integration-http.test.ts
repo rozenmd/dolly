@@ -13,7 +13,7 @@ it("aborts stalled provider requests after 15 seconds and forbids redirects", as
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
       vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
-        expect(init?.redirect).toBe("error");
+        expect(init?.redirect).toBe("manual");
         Effect.runSync(Deferred.succeed(started, undefined));
 
         return new Promise<Response>((_, reject) =>
@@ -68,4 +68,32 @@ it("cancels and releases a response whose body stalls", async () => {
       expect(body.locked).toBe(false);
     }).pipe(Effect.provide(TestClock.layer())),
   );
+});
+
+it("rejects provider redirects without forwarding credentials or accepting their JSON", async () => {
+  for (const status of [301, 302, 303, 307, 308]) {
+    const response = Response.json(
+      { access_token: "must-not-be-accepted" },
+      { status, headers: { Location: "https://attacker.example/collect" } },
+    );
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://api.github.com/test");
+      expect(init?.redirect).toBe("manual");
+
+      return response;
+    });
+
+    const error = await Effect.runPromise(
+      integrationJson("https://api.github.com/test", {
+        headers: { Authorization: "Bearer private-provider-token" },
+      }).pipe(Effect.flip),
+    );
+
+    expect(error.message).toBe(`Provider returned HTTP ${status}`);
+    expect(JSON.stringify(error)).not.toContain("private-provider-token");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(response.bodyUsed).toBe(true);
+    fetch.mockRestore();
+  }
 });

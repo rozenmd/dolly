@@ -13,7 +13,7 @@ export const integrationJson = Effect.fn("Integration.request")(function* (
 
   return yield* Effect.gen(function* () {
     const response = yield* Effect.acquireRelease(
-      attempt("integration.fetch", (signal) => fetch(url, { ...init, signal, redirect: "error" })),
+      attempt("integration.fetch", (signal) => fetch(url, { ...init, signal, redirect: "manual" })),
       (value) =>
         attempt("integration.close", async () => {
           if (!value.body?.locked) await value.body?.cancel();
