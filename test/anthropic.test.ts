@@ -15,7 +15,7 @@ function reply(text = "OK") {
         id: "msg_claude",
         type: "message",
         role: "assistant",
-        model: "claude-haiku-4-5",
+        model: "claude-haiku-5-5",
         content: [],
         stop_reason: null,
         stop_sequence: null,
@@ -105,7 +105,7 @@ it("runs an explicit bounded live inference probe through the Worker Anthropic a
     expect(sent.has("x-api-key")).toBe(false);
     expect(sent.get("anthropic-beta")).toContain("oauth-2025-04-20");
     const body = JSON.parse(String(init?.body));
-    expect(body.model).toBe("claude-haiku-4-5");
+    expect(body.model).toBe("claude-haiku-5-5");
     expect(body.max_tokens).toBe(32);
 
     return reply();
@@ -114,7 +114,7 @@ it("runs an explicit bounded live inference probe through the Worker Anthropic a
   const response = await call("/auth/anthropic/test", "POST", {});
   expect(await response.json()).toMatchObject({
     ok: true,
-    model: "claude-haiku-4-5",
+    model: "claude-haiku-5-5",
     upstream: {
       status: 200,
       contentType: "text/event-stream",
@@ -174,7 +174,7 @@ it("distinguishes JSON authentication errors from HTML edge blocks without leaki
 });
 
 it("runs Claude-only conversations without Codex credentials and keeps existing model selection explicit", async () => {
-  expect((await call("/sessions", "POST", { model: "claude-haiku-4-5" })).status).toBe(409);
+  expect((await call("/sessions", "POST", { model: "claude-haiku-5-5" })).status).toBe(409);
   await call("/auth/anthropic", "PUT", { token });
 
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
@@ -183,13 +183,13 @@ it("runs Claude-only conversations without Codex credentials and keeps existing 
     return reply("Hello from Claude");
   });
 
-  const response = await call("/sessions", "POST", { model: "claude-haiku-4-5" });
+  const response = await call("/sessions", "POST", { model: "claude-haiku-5-5" });
   expect(response.status).toBe(201);
   const session = await response.json<{ id: string; model: string }>();
-  expect(session.model).toBe("claude-haiku-4-5");
+  expect(session.model).toBe("claude-haiku-5-5");
   expect((await call("/sessions", "POST", { model: "gpt-6-sol" })).status).toBe(409);
   const defaultSession = await call("/sessions", "POST", {});
-  expect(await defaultSession.json()).toMatchObject({ model: "claude-sonnet-4-6" });
+  expect(await defaultSession.json()).toMatchObject({ model: "claude-sonnet-5-5" });
   expect(
     (
       await call(`/sessions/${session.id}/messages`, "POST", {
@@ -230,7 +230,7 @@ it("inherits Claude for child agents and redacts setup tokens from transcript an
   });
 
   const parent = await (
-    await call("/sessions", "POST", { model: "claude-haiku-4-5" })
+    await call("/sessions", "POST", { model: "claude-haiku-5-5" })
   ).json<{ id: string }>();
 
   const response = await call(`/sessions/${parent.id}/children`, "POST", {
@@ -240,7 +240,7 @@ it("inherits Claude for child agents and redacts setup tokens from transcript an
 
   expect(response.status).toBe(202);
   const child = await response.json<{ id: string; model: string; taskId: string }>();
-  expect(child.model).toBe("claude-haiku-4-5");
+  expect(child.model).toBe("claude-haiku-5-5");
   await expect
     .poll(async () => (await call(`/sessions/${child.id}`)).text(), { timeout: 4000 })
     .toContain("Claude child answered");
@@ -300,7 +300,7 @@ it("executes Dolly tools through Anthropic and resumes generation with their res
           id: "msg_tool",
           type: "message",
           role: "assistant",
-          model: "claude-haiku-4-5",
+          model: "claude-haiku-5-5",
           content: [],
           stop_reason: null,
           stop_sequence: null,
@@ -336,7 +336,7 @@ it("executes Dolly tools through Anthropic and resumes generation with their res
   });
 
   const session = await (
-    await call("/sessions", "POST", { model: "claude-haiku-4-5" })
+    await call("/sessions", "POST", { model: "claude-haiku-5-5" })
   ).json<{ id: string }>();
 
   await call(`/sessions/${session.id}/messages`, "POST", {
@@ -362,7 +362,7 @@ it("includes the selected repository in Claude's system prompt before any tool c
 
   const session = await (
     await call("/sessions", "POST", {
-      model: "claude-haiku-4-5",
+      model: "claude-haiku-5-5",
       workspace: { repository: "rozenmd/dolly", ref: "main" },
     })
   ).json<{ id: string }>();
