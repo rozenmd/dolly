@@ -36,7 +36,7 @@ import { gitRoute, checkedPush } from "./git-transport";
 import { WebhookSetup } from "./github-webhook";
 import { admitGitHub, githubDelivery, GitHubThreads } from "./github-inbox";
 import { GitHub } from "./github";
-import { GitHubRequest, GitHubSetup, GitHubReply } from "./github-contracts";
+import { GitHubRequest, GitHubAccounts, GitHubSetup, GitHubReply } from "./github-contracts";
 import { ChildRequest, ChildMessage, CodexModel } from "./models";
 import { Account, Credentials } from "./credentials";
 import { CodexProtocol, startLogin, pollLogin, logout } from "./codex-login";
@@ -322,6 +322,23 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
+  githubAccounts() {
+    return this.githubRun(
+      Effect.flatMap(GitHub, (github) =>
+        github.accounts.pipe(Effect.map((accounts) => ({ accounts }))),
+      ),
+    );
+  }
+  githubConfigureAccounts(input: typeof GitHubAccounts.Type) {
+    return this.githubRun(
+      Schema.decodeUnknownEffect(GitHubAccounts)(input).pipe(
+        Effect.orDie,
+        Effect.flatMap((parsed) =>
+          Effect.flatMap(GitHub, (github) => github.configureAccounts(parsed)),
+        ),
+      ),
+    );
+  }
   githubStatus() {
     return this.githubRun(Effect.flatMap(GitHub, (github) => github.status));
   }

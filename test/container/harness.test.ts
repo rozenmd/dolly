@@ -41,6 +41,7 @@ mkdir -p remotes/another-owner
   if (!(key instanceof ArrayBuffer)) throw new Error("Expected PKCS8 key");
   const pem = `-----BEGIN PRIVATE KEY-----\n${Buffer.from(key).toString("base64")}\n-----END PRIVATE KEY-----`;
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("github:accounts", ["another-owner"]);
     await state.storage.put("github:connected", {
       app: { id: 42, slug: "fixture", pem, owner: { login: "different-app-owner" } },
     });

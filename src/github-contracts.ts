@@ -18,6 +18,8 @@ const Path = Schema.String.check(
 
 const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
 
+export const GitHubAccounts = Schema.Struct({ accounts: Schema.Array(Name) });
+
 export const GitHubSetup = Schema.Struct({
   owner: Name,
   ownerType: Schema.Literals(["personal", "organization"]),
