@@ -236,6 +236,14 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   await expect(dialog.getByText("Saved.", { exact: true })).toBeVisible();
   expect(accounts).toEqual({ accounts: ["octocat", "acme"] });
   expect(senders).toEqual({ senders: ["octocat", "hubot"] });
+  // Reopening shows what was saved, and clearing the list saves an empty list.
+  await dialog.getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(dialog.getByLabel("Who can run /pi commands")).toHaveValue("octocat, hubot");
+  await dialog.getByLabel("Who can run /pi commands").fill("");
+  await dialog.getByRole("button", { name: "Save" }).last().click();
+  await expect(dialog.getByText("Saved.", { exact: true })).toBeVisible();
+  expect(senders).toEqual({ senders: [] });
   await dialog.getByRole("button", { name: "Sign out" }).first().click();
   await expect(page.getByRole("heading", { name: "Sign in to pi-hard" })).toBeVisible();
   expect(signedOut).toBe(true);

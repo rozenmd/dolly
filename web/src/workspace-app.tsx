@@ -376,6 +376,12 @@ export function WorkspaceApp() {
               github: auth.github.connected ? { ...auth.github, ingress } : auth.github,
             })
           }
+          onSenders={(senders) =>
+            setAuth({
+              ...auth,
+              github: auth.github.connected ? { ...auth.github, senders } : auth.github,
+            })
+          }
           onSignOut={() => {
             setAuth({ ...auth, user: null });
             setCodex(null);
@@ -511,6 +517,7 @@ function SettingsModal({
   onCodexSignIn,
   onCodexSignOut,
   onIngress,
+  onSenders,
   onSignOut,
 }: {
   login: string;
@@ -520,6 +527,7 @@ function SettingsModal({
   onCodexSignIn: () => void;
   onCodexSignOut: () => void;
   onIngress: (ingress: string) => void;
+  onSenders: (senders: readonly string[]) => void;
   onSignOut: () => void;
 }) {
   const [ingress, setIngress] = useState(github.ingress ?? "");
@@ -569,13 +577,14 @@ function SettingsModal({
         "PUT",
       );
 
-      if (logins(senders).length)
-        await request(
-          "/integrations/github/webhook",
-          { senders: logins(senders) },
-          undefined,
-          "PUT",
-        );
+      const next = logins(senders);
+
+      // Saved whenever it changed, including to empty, which stops every /pi command.
+      if (next.join(",") !== github.senders.join(",")) {
+        await request("/integrations/github/webhook", { senders: next }, undefined, "PUT");
+        onSenders(next);
+      }
+
       setSaved("access");
     }, "Could not save GitHub access.");
   }

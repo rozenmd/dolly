@@ -595,6 +595,18 @@ it("enables ingress in the manifest and configures allowed senders without repla
     expect(profile?.secret).toBe(app.webhook_secret);
     expect(profile?.senders).toHaveLength(17);
   });
+
+  const cleared = await SELF.fetch("https://worker/api/integrations/github/webhook", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ senders: [] }),
+  });
+
+  expect(await cleared.json()).toMatchObject({ configured: true, senders: [] });
+  expect(
+    await (await SELF.fetch("https://worker/api/integrations/github", { headers })).json(),
+  ).toMatchObject({ senders: [] });
+  expect((await configure()).status).toBe(200);
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("github:connected", {
       app: { id: app.id, slug: app.slug, pem, owner: app.owner },
