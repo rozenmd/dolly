@@ -208,7 +208,7 @@ it("records fixed checkout phases before potentially blocking operations", () =>
     ["artifactfs_mount", "  dolly-mount repo"],
     ["exact_revision_checkout", "  git -C /workspace/checkout init"],
     ["git_config", "git config user.name"],
-    ["git_checkout_branch", "git checkout -B"],
+    ["git_checkout_branch", "dolly-branch"],
     ["ready", "touch /workspace/ready"],
   ]) {
     expect(script.indexOf(`phase ${phase}\n`)).toBeGreaterThan(-1);
