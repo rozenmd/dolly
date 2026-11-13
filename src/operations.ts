@@ -9,7 +9,7 @@ export class OperationError extends Schema.TaggedError<OperationError>()("Operat
   details: Schema.Unknown,
 }) {}
 
-/** Adapt native Promise APIs once, keeping their diagnostics in the typed error channel. */
+/** Adapt Promise APIs once, keeping their diagnostics in the typed error channel. */
 export const attempt = <A>(operation: string, run: (signal: AbortSignal) => PromiseLike<A>) =>
   Effect.tryPromise({
     try: run,

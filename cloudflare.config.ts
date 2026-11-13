@@ -17,14 +17,18 @@ export default defineConfig({
     compatibilityFlags: ["nodejs_compat"],
     env: {
       API_TOKEN: bindings.secret(),
+      WORKSPACES: bindings.artifacts({ namespace: "pi-hard-workspaces" }),
       ACCESS_TEAM_DOMAIN: bindings.text(""),
       ACCESS_AUD: bindings.text(""),
       ACCESS_LOCAL_DEV: bindings.text("false"),
+      GITHUB_WEBHOOK_URL: bindings.text(""),
       CODEX_MODEL: bindings.text("gpt-6-luna"),
       AGENT: bindings.durableObject({ worker: workerName, exportName: "Agent" }),
       SANDBOX: bindings.durableObject({ worker: workerName, exportName: "Sandbox" }),
     },
     exports: {
+      GitHubIngress: exports.worker(),
+      WorkspaceOutbound: exports.worker(),
       Agent: exports.durableObject({ storage: "sqlite" }),
       Sandbox: exports.durableObject({ storage: "sqlite", container: sandbox }),
     },

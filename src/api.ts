@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { rpc } from "./operations";
 import type { ChildRequest, ChildMessage } from "./models";
+import type { WorkspaceInput } from "./workspace";
 import type { Env } from "./env";
 
 function makeAgentApi(env: Env) {
@@ -12,8 +13,9 @@ function makeAgentApi(env: Env) {
     startLogin: rpc("agent.login.start", async () => await agent.startLogin()),
     pollLogin: rpc("agent.login.poll", async () => await agent.pollLogin()),
     logout: rpc("agent.logout", async () => await agent.logout()),
-    createSession: Effect.fn("AgentApi.createSession")((model?: string) =>
-      rpc("agent.session.create", async () => await agent.createSession(model)),
+    createSession: Effect.fn("AgentApi.createSession")(
+      (model?: string, workspace?: typeof WorkspaceInput.Type) =>
+        rpc("agent.session.create", async () => await agent.createSession(model, workspace)),
     ),
     children: Effect.fn("AgentApi.children")((id: string) =>
       rpc("agent.children", async () => await agent.children(id)),
