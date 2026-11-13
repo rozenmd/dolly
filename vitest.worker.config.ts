@@ -10,7 +10,6 @@ export default defineConfig({
         compatibilityDate: "2026-11-10",
         compatibilityFlags: ["nodejs_compat"],
         bindings: {
-          API_TOKEN: "test-token-with-at-least-32-characters",
           ACCESS_LOCAL_DEV: process.env.WEB_TEST_ACCESS === "required" ? "false" : "true",
           ACCESS_TEAM_DOMAIN: "example-team.cloudflareaccess.com",
           ACCESS_AUD: "test-audience",

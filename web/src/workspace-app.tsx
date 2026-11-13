@@ -6,8 +6,11 @@ import { Sidebar } from "./components/sidebar";
 import { Composer, Conversation } from "./components/conversation";
 import { IconButton, Input, Modal, RepoBadge, Select } from "./components/ui";
 import { CodexLogin } from "./components/codex-login";
+import { GitHubSetup, GitHubSignIn, ingressHook } from "./components/github";
 import {
+  authState,
   codexLogin,
+  type AuthState,
   liveFromSnapshot,
   readSessions,
   request,
@@ -22,21 +25,23 @@ import { ago } from "./lib/time";
 const storageKey = "pi-hard.sessions.v1";
 
 export function WorkspaceApp() {
-  const [token, setToken] = useState("");
+  const [auth, setAuth] = useState<AuthState | null>(null);
+  const [authError, setAuthError] = useState("");
+  const [setupError, setSetupError] = useState("");
   const [sessions, setSessions] = useState<readonly SavedSession[]>([]);
   const [selected, setSelected] = useState("");
   const [snapshot, setSnapshot] = useState<typeof Snapshot.Type | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [feed, setFeed] = useState(false);
   const [details, setDetails] = useState(false);
-  const [modal, setModal] = useState<"connect" | "codex" | "new" | "import" | null>(null);
+  const [modal, setModal] = useState<"settings" | "codex" | "new" | "import" | null>(null);
   const [codex, setCodex] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [pollError, setPollError] = useState("");
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(false);
-  const connected = Boolean(token);
+  const connected = Boolean(auth?.user);
   const session = connected ? sessions.find((item) => item.id === selected) : undefined;
   const running = Boolean(snapshot && liveFromSnapshot(snapshot)?.run);
   const turns = snapshot ? turnsFromSnapshot(snapshot) : [];
@@ -51,8 +56,30 @@ export function WorkspaceApp() {
       }))
     : [];
 
+  async function loadAuth() {
+    setAuthError("");
+
+    try {
+      setAuth(await authState());
+    } catch (cause) {
+      setAuthError(cause instanceof Error ? cause.message : "Could not reach pi-hard.");
+    }
+  }
+
   useEffect(() => {
     setDetails(window.matchMedia("(min-width: 1180px)").matches);
+
+    // GitHub App setup returns here, with an error in the query when it failed.
+    const url = new URL(window.location.href);
+    const failed = url.searchParams.get("github");
+
+    if (failed !== null) {
+      setSetupError(failed);
+      url.searchParams.delete("github");
+      window.history.replaceState(null, "", url);
+    }
+
+    void loadAuth();
 
     try {
       setSessions(readSessions(localStorage.getItem(storageKey) ?? "[]"));
@@ -62,7 +89,31 @@ export function WorkspaceApp() {
   }, []);
 
   useEffect(() => {
-    if (!token || !session) {
+    if (!connected) return;
+
+    let active = true;
+
+    codexLogin().then(
+      (status) => {
+        if (!active) return;
+
+        const signedIn = status.state === "connected";
+        setCodex(signedIn);
+        setSelected((current) => current || sessions[0]?.id || "");
+
+        setModal(!signedIn ? "codex" : sessions.length ? null : "new");
+      },
+      () => active && setCodex(null),
+    );
+
+    return () => {
+      active = false;
+    };
+    // Checked once per sign-in; the saved session list does not change who is signed in.
+  }, [connected]);
+
+  useEffect(() => {
+    if (!connected || !session) {
       setSnapshot(null);
 
       return;
@@ -77,7 +128,6 @@ export function WorkspaceApp() {
       try {
         const text = await request(
           `/sessions/${encodeURIComponent(selected)}`,
-          token,
           undefined,
           controller.signal,
         );
@@ -105,7 +155,7 @@ export function WorkspaceApp() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [selected, token, session?.id]);
+  }, [selected, connected, session?.id]);
 
   function save(next: readonly SavedSession[]) {
     setSessions(next);
@@ -127,7 +177,7 @@ export function WorkspaceApp() {
 
   function newWorkspace() {
     setMobileOpen(false);
-    setModal(!connected ? "connect" : codex === false ? "codex" : "new");
+    setModal(codex === false ? "codex" : "new");
   }
 
   async function send(content: string, requestId: string) {
@@ -135,7 +185,7 @@ export function WorkspaceApp() {
     setError("");
 
     try {
-      await request(`/sessions/${encodeURIComponent(selected)}/messages`, token, {
+      await request(`/sessions/${encodeURIComponent(selected)}/messages`, {
         content,
         requestId,
       });
@@ -161,7 +211,7 @@ export function WorkspaceApp() {
     setPending(true);
 
     try {
-      await request(`/sessions/${encodeURIComponent(selected)}/abort`, token, {});
+      await request(`/sessions/${encodeURIComponent(selected)}/abort`, {});
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not stop the agent.");
     } finally {
@@ -170,6 +220,48 @@ export function WorkspaceApp() {
   }
 
   const feedback = error || pollError || notice;
+
+  if (!auth?.user)
+    return (
+      <main className="gate" id="main-content">
+        <div className="gate-card">
+          <span className="brand-mark large" aria-hidden="true">
+            π
+          </span>
+          {!auth ? (
+            authError ? (
+              <>
+                <h1>Can't reach pi-hard</h1>
+                <p role="alert" className="error-text">
+                  {authError}
+                </p>
+                <button type="button" className="primary-button" onClick={() => void loadAuth()}>
+                  Try again
+                </button>
+              </>
+            ) : (
+              <p className="muted" role="status">
+                Loading…
+              </p>
+            )
+          ) : !auth.github.connected ? (
+            <>
+              <h1>Set up pi-hard</h1>
+              <GitHubSetup initialError={setupError} />
+            </>
+          ) : (
+            <>
+              <h1>Sign in to pi-hard</h1>
+              <GitHubSignIn
+                settingsUrl={auth.github.settingsUrl}
+                firstRun={!auth.ownerClaimed}
+                onSignedIn={(login) => setAuth({ ...auth, ownerClaimed: true, user: { login } })}
+              />
+            </>
+          )}
+        </div>
+      </main>
+    );
 
   return (
     <div className="app-shell">
@@ -186,7 +278,7 @@ export function WorkspaceApp() {
         onNew={newWorkspace}
         onSettings={() => {
           setMobileOpen(false);
-          setModal("connect");
+          setModal("settings");
         }}
         onClose={() => setMobileOpen(false)}
         onFeed={() => {
@@ -260,19 +352,9 @@ export function WorkspaceApp() {
                 <span className="brand-mark large" aria-hidden="true">
                   π
                 </span>
-                <h2>
-                  {!connected
-                    ? "Connect to pi-hard"
-                    : codex === false
-                      ? "Sign in to ChatGPT"
-                      : "No workspace selected"}
-                </h2>
+                <h2>{codex === false ? "Sign in to ChatGPT" : "No workspace selected"}</h2>
                 <button type="button" className="primary-button" onClick={newWorkspace}>
-                  {!connected
-                    ? "Connect"
-                    : codex === false
-                      ? "Sign in with ChatGPT"
-                      : "New workspace"}
+                  {codex === false ? "Sign in with ChatGPT" : "New workspace"}
                 </button>
               </div>
             )}
@@ -280,27 +362,30 @@ export function WorkspaceApp() {
           {session && !feed && details && <SessionDetails session={session} running={running} />}
         </div>
       </main>
-      {modal === "connect" && (
-        <ConnectModal
-          connected={connected}
-          token={token}
+      {modal === "settings" && auth?.user && auth.github.connected && (
+        <SettingsModal
+          login={auth.user.login}
+          github={auth.github}
           codex={codex}
           onClose={() => setModal(null)}
-          onConnect={(value, signedIn) => {
-            setToken(value);
-            setCodex(signedIn);
-            setSelected(sessions[0]?.id ?? "");
-            setSnapshot(null);
-            setModal(!signedIn ? "codex" : sessions.length ? null : "new");
-            setNotice("");
-            setError("");
-          }}
           onCodexSignIn={() => setModal("codex")}
           onCodexSignOut={() => setCodex(false)}
-          onDisconnect={() => {
-            setToken("");
+          onIngress={(ingress) =>
+            setAuth({
+              ...auth,
+              github: auth.github.connected ? { ...auth.github, ingress } : auth.github,
+            })
+          }
+          onSenders={(senders) =>
+            setAuth({
+              ...auth,
+              github: auth.github.connected ? { ...auth.github, senders } : auth.github,
+            })
+          }
+          onSignOut={() => {
+            setAuth({ ...auth, user: null });
             setCodex(null);
-            select("");
+            setSnapshot(null);
             setModal(null);
             setNotice("");
           }}
@@ -309,7 +394,6 @@ export function WorkspaceApp() {
       {modal === "codex" && (
         <Modal title="Sign in to ChatGPT" onClose={() => setModal(null)}>
           <CodexLogin
-            token={token}
             onConnected={() => {
               setCodex(true);
               setModal(sessions.length ? null : "new");
@@ -324,7 +408,6 @@ export function WorkspaceApp() {
       {(modal === "new" || modal === "import") && (
         <SessionModal
           mode={modal}
-          token={token}
           onClose={() => setModal(null)}
           onMode={setModal}
           onCreated={(value) => {
@@ -426,132 +509,261 @@ function SessionDetails({ session, running }: { session: SavedSession; running: 
   );
 }
 
-function ConnectModal({
-  connected,
-  token,
+function SettingsModal({
+  login,
+  github,
   codex,
   onClose,
-  onConnect,
   onCodexSignIn,
   onCodexSignOut,
-  onDisconnect,
+  onIngress,
+  onSenders,
+  onSignOut,
 }: {
-  connected: boolean;
-  token: string;
+  login: string;
+  github: Extract<AuthState["github"], { connected: true }>;
   codex: boolean | null;
   onClose: () => void;
-  onConnect: (token: string, codexSignedIn: boolean) => void;
   onCodexSignIn: () => void;
   onCodexSignOut: () => void;
-  onDisconnect: () => void;
+  onIngress: (ingress: string) => void;
+  onSenders: (senders: readonly string[]) => void;
+  onSignOut: () => void;
 }) {
-  const [value, setValue] = useState("");
+  const [ingress, setIngress] = useState(github.ingress ?? "");
+  const [accounts, setAccounts] = useState("");
+  const [senders, setSenders] = useState(github.senders.join(", "));
   const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
   const [pending, setPending] = useState(false);
 
-  async function signOut() {
-    if (!confirm("Sign out of ChatGPT? Agents can't run until you sign in again.")) return;
+  useEffect(() => {
+    let active = true;
 
+    request("/integrations/github/accounts").then(
+      (text) => {
+        const result = Schema.decodeUnknownSync(
+          Schema.fromJsonString(Schema.Struct({ accounts: Schema.Array(Schema.String) })),
+        )(text);
+
+        if (active) setAccounts(result.accounts.join(", "));
+      },
+      (cause) =>
+        active &&
+        setError(cause instanceof Error ? cause.message : "Could not load allowed accounts."),
+    );
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  /** Logins from a comma- or space-separated list, without a leading @. */
+  function logins(value: string) {
+    return value
+      .split(/[\s,]+/)
+      .map((login) => login.replace(/^@/, ""))
+      .filter(Boolean);
+  }
+
+  function saveAccess(event: FormEvent) {
+    event.preventDefault();
+    setSaved("");
+    void run(async () => {
+      await request(
+        "/integrations/github/accounts",
+        { accounts: logins(accounts) },
+        undefined,
+        "PUT",
+      );
+
+      const next = logins(senders);
+
+      // Saved whenever it changed, including to empty, which stops every /pi command.
+      if (next.join(",") !== github.senders.join(",")) {
+        await request("/integrations/github/webhook", { senders: next }, undefined, "PUT");
+        onSenders(next);
+      }
+
+      setSaved("access");
+    }, "Could not save GitHub access.");
+  }
+
+  async function run(action: () => Promise<void>, failure: string) {
     setPending(true);
     setError("");
 
     try {
-      await codexLogin(token, "DELETE");
-      onCodexSignOut();
+      await action();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not sign out of ChatGPT.");
+      setError(cause instanceof Error ? cause.message : failure);
     } finally {
       setPending(false);
     }
   }
 
-  async function submit(event: FormEvent) {
+  function saveIngress(event: FormEvent) {
     event.preventDefault();
-    setPending(true);
-    setError("");
+    setSaved("");
+    void run(async () => {
+      const text = await request(
+        "/integrations/github/ingress",
+        { url: ingressHook(ingress) },
+        undefined,
+        "PUT",
+      );
 
-    try {
-      const next = value.trim();
-      await request("/integrations/github", next);
-      const status = await codexLogin(next);
-      onConnect(next, status.state === "connected");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not connect to your API.");
-    } finally {
-      setPending(false);
-    }
+      const result = Schema.decodeUnknownSync(
+        Schema.fromJsonString(Schema.Struct({ ingress: Schema.String })),
+      )(text);
+
+      setIngress(result.ingress);
+      onIngress(result.ingress);
+      setSaved("ingress");
+    }, "Could not update the ingress URL.");
   }
 
   return (
-    <Modal title={connected ? "Connection" : "Connect"} onClose={onClose}>
-      {connected && (
-        <div className="connection-row">
-          <span className={`status-dot ${codex ? "idle" : ""}`} />
-          <span className="connection-label">
-            ChatGPT
-            <span className="muted">{codex ? "Signed in" : "Not signed in"}</span>
-          </span>
-          {codex ? (
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={pending}
-              onClick={() => void signOut()}
-            >
-              Sign out
-            </button>
-          ) : (
-            <button type="button" className="primary-button" onClick={onCodexSignIn}>
-              Sign in
-            </button>
-          )}
-        </div>
-      )}
-      <form onSubmit={(event) => void submit(event)}>
-        <label htmlFor="api-token">API token</label>
-        <Input
-          id="api-token"
-          name="token"
-          type="password"
-          autoComplete="off"
-          required
-          minLength={32}
-          value={value}
-          onChange={(event) => setValue(event.target.value)}
-          aria-describedby="token-help"
-        />
-        <p id="token-help" className="field-help">
-          Kept in this tab only.
-        </p>
-        {error && (
-          <p role="alert" className="error-text">
-            {error}
-          </p>
+    <Modal title="Settings" onClose={onClose}>
+      <div className="connection-row">
+        <span className="status-dot idle" />
+        <span className="connection-label">
+          GitHub
+          <span className="muted">Signed in as @{login}</span>
+        </span>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={pending}
+          onClick={() =>
+            void run(async () => {
+              await request("/auth/session", undefined, undefined, "DELETE");
+              onSignOut();
+            }, "Could not sign out.")
+          }
+        >
+          Sign out
+        </button>
+      </div>
+      <div className="connection-row">
+        <span className={`status-dot ${codex ? "idle" : ""}`} />
+        <span className="connection-label">
+          ChatGPT
+          <span className="muted">{codex ? "Signed in" : "Not signed in"}</span>
+        </span>
+        {codex ? (
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={pending}
+            onClick={() => {
+              if (!confirm("Sign out of ChatGPT? Agents can't run until you sign in again."))
+                return;
+
+              void run(async () => {
+                await codexLogin("DELETE");
+                onCodexSignOut();
+              }, "Could not sign out of ChatGPT.");
+            }}
+          >
+            Sign out
+          </button>
+        ) : (
+          <button type="button" className="primary-button" onClick={onCodexSignIn}>
+            Sign in
+          </button>
         )}
+      </div>
+      <div className="connection-row">
+        <span className="status-dot idle" />
+        <span className="connection-label">
+          GitHub App
+          <span className="muted">{github.appSlug}</span>
+        </span>
+        <a className="secondary-button" href={github.installUrl} target="_blank" rel="noreferrer">
+          Add repositories
+        </a>
+      </div>
+      <form onSubmit={saveIngress}>
+        <label htmlFor="settings-ingress">Ingress URL</label>
+        <Input
+          id="settings-ingress"
+          name="ingress"
+          type="url"
+          required
+          value={ingress}
+          onChange={(event) => {
+            setIngress(event.target.value);
+            setSaved("");
+          }}
+          aria-describedby="settings-ingress-help"
+        />
+        <p id="settings-ingress-help" className="field-help">
+          {saved === "ingress"
+            ? "Saved. GitHub now sends comments to this URL."
+            : "Where GitHub sends issue and pull request comments."}
+        </p>
         <div className="modal-actions">
-          {connected && (
-            <button type="button" className="secondary-button" onClick={onDisconnect}>
-              Disconnect
-            </button>
-          )}
           <button type="submit" className="primary-button" disabled={pending}>
-            {pending ? "Connecting…" : "Connect"}
+            Save
           </button>
         </div>
       </form>
+      <form onSubmit={saveAccess}>
+        <label htmlFor="settings-accounts">Accounts pi-hard can work in</label>
+        <Input
+          id="settings-accounts"
+          name="accounts"
+          placeholder={github.owner}
+          value={accounts}
+          onChange={(event) => {
+            setAccounts(event.target.value);
+            setSaved("");
+          }}
+          aria-describedby="settings-accounts-help"
+        />
+        <p id="settings-accounts-help" className="field-help">
+          GitHub users and organizations whose repositories agents may use, separated by commas.
+        </p>
+        <label htmlFor="settings-senders">Who can run /pi commands</label>
+        <Input
+          id="settings-senders"
+          name="senders"
+          placeholder={login}
+          value={senders}
+          onChange={(event) => {
+            setSenders(event.target.value);
+            setSaved("");
+          }}
+          aria-describedby="settings-senders-help"
+        />
+        <p id="settings-senders-help" className="field-help">
+          {saved === "access"
+            ? "Saved."
+            : "GitHub users whose /pi comments on pull requests start an agent."}
+        </p>
+        <div className="modal-actions">
+          <button type="submit" className="primary-button" disabled={pending}>
+            Save
+          </button>
+        </div>
+      </form>
+      {error && (
+        <p role="alert" className="error-text">
+          {error}
+        </p>
+      )}
     </Modal>
   );
 }
 
 function SessionModal({
   mode,
-  token,
   onClose,
   onMode,
   onCreated,
 }: {
   mode: "new" | "import";
-  token: string;
   onClose: () => void;
   onMode: (mode: "new" | "import") => void;
   onCreated: (session: SavedSession) => void;
@@ -572,7 +784,7 @@ function SessionModal({
       let result: typeof Session.Type;
 
       if (mode === "import") {
-        const text = await request(`/sessions/${encodeURIComponent(id.trim())}`, token);
+        const text = await request(`/sessions/${encodeURIComponent(id.trim())}`);
         Schema.decodeUnknownSync(Schema.fromJsonString(Snapshot))(text);
         result = { id: id.trim(), model: "Existing session" };
       } else {
@@ -581,7 +793,7 @@ function SessionModal({
         if (model) body.model = model;
 
         if (repository.trim()) body.workspace = { repository: repository.trim() };
-        const text = await request("/sessions", token, body);
+        const text = await request("/sessions", body);
         result = Schema.decodeUnknownSync(Schema.fromJsonString(Session))(text);
       }
 

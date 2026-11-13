@@ -1,7 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { expect, it } from "vitest";
 
-it("requires Cloudflare Access for the page, assets, and API even with a valid bearer token", async () => {
+it("requires Cloudflare Access for the page, assets, and API even with a session cookie", async () => {
   for (const path of [
     "/",
     "/assets/missing.js",
@@ -11,7 +11,7 @@ it("requires Cloudflare Access for the page, assets, and API even with a valid b
     `/api/setup/github/${"a".repeat(43)}`,
   ]) {
     const response = await SELF.fetch(`https://worker${path}`, {
-      headers: { Authorization: "Bearer test-token-with-at-least-32-characters" },
+      headers: { Cookie: "__Host-pi-hard-session=test-session-token" },
     });
 
     expect(response.status).toBe(401);

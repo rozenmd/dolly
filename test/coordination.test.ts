@@ -4,10 +4,10 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
+import { headers, signIn } from "./session";
 
 let roots: string[] = [];
 
-const headers = { Authorization: "Bearer test-token-with-at-least-32-characters" };
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
 const Created = Schema.Struct({ id: Schema.String, model: Schema.String, taskId: Schema.String });
 
@@ -104,6 +104,7 @@ async function receipt(parent: string, taskId: string) {
 
 beforeEach(async () => {
   await reset();
+  await signIn();
   roots = [];
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("credential:openai-codex", {

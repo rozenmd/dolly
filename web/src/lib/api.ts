@@ -258,6 +258,12 @@ export type ApiBody = {
   requestId?: string;
   model?: string;
   workspace?: { repository: string };
+  owner?: string;
+  ownerType?: "personal" | "organization";
+  ingress?: string;
+  url?: string;
+  accounts?: readonly string[];
+  senders?: readonly string[];
 };
 
 export const CodexStatus = Schema.Union([
@@ -274,20 +280,76 @@ export const CodexStatus = Schema.Union([
 export type CodexStatus = typeof CodexStatus.Type;
 
 /** Reads, starts (POST) or cancels and signs out of (DELETE) the ChatGPT device login. */
-export async function codexLogin(token: string, method: "GET" | "POST" | "DELETE" = "GET") {
-  const text = await request("/auth/codex", token, undefined, undefined, method);
+export async function codexLogin(method: "GET" | "POST" | "DELETE" = "GET") {
+  const text = await request("/auth/codex", undefined, undefined, method);
 
   return Schema.decodeUnknownSync(Schema.fromJsonString(CodexStatus))(text);
 }
 
+const GitHubApp = Schema.Union([
+  Schema.Struct({ connected: Schema.Literal(false) }),
+  Schema.Struct({
+    connected: Schema.Literal(true),
+    owner: Schema.String,
+    appSlug: Schema.String,
+    installUrl: Schema.String,
+    settingsUrl: Schema.String,
+    ingress: Schema.NullOr(Schema.String),
+    senders: Schema.Array(Schema.String),
+  }),
+]);
+
+export const AuthState = Schema.Struct({
+  github: GitHubApp,
+  ownerClaimed: Schema.Boolean,
+  user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+});
+
+export type AuthState = typeof AuthState.Type;
+
+/** Whether a GitHub App exists, whether pi-hard has an owner, and who this browser is signed in as. */
+export async function authState() {
+  return Schema.decodeUnknownSync(Schema.fromJsonString(AuthState))(await request("/auth"));
+}
+
+export const GitHubSignIn = Schema.Union([
+  Schema.Struct({
+    state: Schema.Literal("awaiting_code"),
+    verificationUri: Schema.String,
+    userCode: Schema.String,
+    expiresAt: Schema.Number,
+    pollAfterSeconds: Schema.Number,
+  }),
+  Schema.Struct({ state: Schema.Literal("expired") }),
+  Schema.Struct({ state: Schema.Literal("signed_in"), login: Schema.String }),
+]);
+
+export type GitHubSignIn = typeof GitHubSignIn.Type;
+
+/** Starts (POST) or checks (GET) this browser's GitHub device sign-in. */
+export async function githubSignIn(method: "GET" | "POST" = "GET") {
+  const text = await request("/auth/github", undefined, undefined, method);
+
+  return Schema.decodeUnknownSync(Schema.fromJsonString(GitHubSignIn))(text);
+}
+
+/** A failed API call, keeping the HTTP status so callers can tell a refusal from an outage. */
+export class RequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 export async function request(
   path: string,
-  token: string,
   body?: ApiBody,
   signal?: AbortSignal,
-  method: "GET" | "POST" | "DELETE" = body ? "POST" : "GET",
+  method: "GET" | "POST" | "PUT" | "DELETE" = body ? "POST" : "GET",
 ) {
-  const headers = new Headers({ Authorization: `Bearer ${token}` });
+  const headers = new Headers();
 
   if (body) headers.set("Content-Type", "application/json");
 
@@ -311,13 +373,17 @@ export async function request(
 
   if (!response.ok) {
     const error = Schema.decodeUnknownOption(
-      Schema.fromJsonString(Schema.Struct({ error: Schema.String })),
-    )(text);
+      Schema.fromJsonString(
+        Schema.Union([
+          Schema.Struct({ error: Schema.String }),
+          Schema.Struct({ message: Schema.String }),
+        ]),
+      ),
+    )(text).pipe(Option.map((value) => ("error" in value ? value.error : value.message)));
 
-    throw new Error(
-      Option.isSome(error)
-        ? error.value.error
-        : `Request failed (${response.status}). Check your connection and API token.`,
+    throw new RequestError(
+      Option.getOrElse(error, () => `Request failed (${response.status}). Check your connection.`),
+      response.status,
     );
   }
 

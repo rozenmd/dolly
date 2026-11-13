@@ -27,7 +27,6 @@ test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", ()
   assert.deepEqual(worker.assets, { runWorkerFirst: true });
   assert.equal(worker.env.ASSETS.type, "assets");
   assert.deepEqual(worker.compatibilityFlags, ["nodejs_compat"]);
-  assert.equal(worker.env.API_TOKEN.type, "secret");
   assert.equal(worker.env.WORKSPACES.type, "artifacts");
   assert.equal(worker.exports.WorkspaceOutbound.type, "worker");
   assert.equal(worker.previewUrls, false);
@@ -82,5 +81,4 @@ test("public ingress binds only the private webhook entrypoint and has no creden
     exportName: "GitHubIngress",
   });
   assert.equal(config.worker.exports.GitHubIngress.type, "worker");
-  assert.equal(config.worker.env.GITHUB_WEBHOOK_URL.value, "");
 });

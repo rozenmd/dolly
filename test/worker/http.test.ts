@@ -1,5 +1,6 @@
-import { SELF } from "cloudflare:test";
+import { SELF, reset } from "cloudflare:test";
 import { expect, it } from "vitest";
+import { headers, signIn } from "../session";
 
 it("serves the rendered workspace at the Worker root and its real bundled assets", async () => {
   const response = await SELF.fetch("https://worker/");
@@ -20,18 +21,19 @@ it("serves the rendered workspace at the Worker root and its real bundled assets
 it("keeps API authentication and JSON responses separate from frontend routing", async () => {
   const denied = await SELF.fetch("https://worker/api/auth/codex");
   expect(denied.status).toBe(401);
+  expect(await denied.json()).toEqual({ error: "Sign in with GitHub" });
+
+  await signIn();
 
   const authorized = await SELF.fetch("https://worker/api/sessions", {
     method: "POST",
-    headers: { Authorization: "Bearer test-token-with-at-least-32-characters" },
+    headers,
   });
 
   expect(authorized.status).toBe(409);
   expect(await authorized.json()).toEqual({ error: "Connect your Codex subscription first" });
 
-  const unknown = await SELF.fetch("https://worker/api/missing", {
-    headers: { Authorization: "Bearer test-token-with-at-least-32-characters" },
-  });
+  const unknown = await SELF.fetch("https://worker/api/missing", { headers });
 
   expect(unknown.status).toBe(404);
   expect(await unknown.text()).not.toContain("<html");
@@ -45,10 +47,17 @@ it("preserves the public health endpoint and missing asset status", async () => 
 });
 
 it("routes GitHub App setup links and callbacks through Hono without a bearer token", async () => {
+  await reset();
+
+  // Before anyone owns this pi-hard, Cloudflare Access alone may start GitHub App setup.
   const started = await SELF.fetch("https://worker/api/integrations/github/setup", {
     method: "POST",
-    headers: { Authorization: "Bearer test-token-with-at-least-32-characters" },
-    body: JSON.stringify({ owner: "example", ownerType: "personal" }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      owner: "example",
+      ownerType: "personal",
+      ingress: "https://ingress.example/hooks/github",
+    }),
   });
 
   expect(started.status).toBe(200);
@@ -62,6 +71,8 @@ it("routes GitHub App setup links and callbacks through Hono without a bearer to
   const html = await setup.text();
   expect(html).toContain("Create GitHub App");
   expect(html).toContain("https://worker/api/setup/github/callback");
+
+  expect(html).toContain("https://ingress.example/hooks/github");
 
   const callback = await SELF.fetch("https://worker/api/setup/github/callback");
   expect(callback.status).toBe(400);
