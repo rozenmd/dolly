@@ -247,7 +247,7 @@ mkdir -p remotes/another-owner
     expect(results).toHaveLength(calls.length);
 
     for (const result of results) {
-      expect(result.isError).toBe(false);
+      expect(result.isError, JSON.stringify(result.content)).toBe(false);
 
       for (const part of result.content)
         if (part.type === "text") {
