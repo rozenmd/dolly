@@ -13,7 +13,8 @@ export const WebhookUrl = Schema.String.check(
 );
 
 export const WebhookSetup = Schema.Struct({
-  senders: Schema.Array(Login).check(Schema.isMinLength(1)),
+  /** Who may run /pi commands. An empty list stops every command. */
+  senders: Schema.Array(Login),
   secret: Schema.optional(Schema.String.check(Schema.isMinLength(32), Schema.isMaxLength(256))),
 });
 

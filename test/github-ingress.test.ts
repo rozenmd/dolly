@@ -12,6 +12,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { GitHubThreads } from "../src/github-inbox";
 import { GitHubIngress } from "../src/github-ingress";
 import { ingress } from "../src/ingress";
+import { headers, signIn } from "./session";
 
 const pair = await crypto.subtle.generateKey(
   {
@@ -101,6 +102,7 @@ beforeEach(async () => {
     return harness;
   });
   await reset();
+  await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("github:webhook", profile);
     await state.storage.put("github:accounts", ["example", "other"]);
@@ -282,7 +284,6 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
 
     return Response.json({ id: 999 });
   });
-  const headers = { Authorization: "Bearer test-token-with-at-least-32-characters" };
 
   async function threads() {
     return (await SELF.fetch("https://worker/api/integrations/github/threads", { headers })).json<

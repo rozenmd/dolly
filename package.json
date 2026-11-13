@@ -15,7 +15,6 @@
     "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm check:web",
     "test": "node --test scripts/*.test.mjs && pnpm --dir infra test && vitest run",
     "build": "vite build && cf deploy --prebuilt --dry-run && pnpm --dir ingress run build && pnpm --dir ingress exec cf deploy --prebuilt --dry-run",
-    "login": "node --env-file-if-exists=.dev.vars --env-file-if-exists=.env.access scripts/connect.mjs",
     "test:sandbox": "bash scripts/test-sandbox.sh",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",

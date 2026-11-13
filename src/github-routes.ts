@@ -132,6 +132,26 @@ githubRoutes.get("/api/integrations/github/threads", async (c) =>
   ),
 );
 
+githubRoutes.put("/api/integrations/github/ingress", async (c) => {
+  const parsed = await Effect.runPromise(
+    Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(Schema.Struct({ url: Schema.String }))),
+      Effect.option,
+    ),
+  );
+
+  if (Option.isNone(parsed)) return c.json({ error: "Expected the ingress Worker's URL" }, 400);
+
+  const result = await Effect.runPromise(
+    rpc(
+      "github.ingress",
+      async () => await c.env.AGENT.getByName("owner").githubConfigureIngress(parsed.value.url),
+    ),
+  );
+
+  return c.json(result, "error" in result ? 409 : 200);
+});
+
 githubRoutes.put("/api/integrations/github/webhook", async (c) => {
   const parsed = await Effect.runPromise(
     Effect.tryPromise(() => c.req.json<unknown>()).pipe(
@@ -165,14 +185,15 @@ githubSetupRoutes.get("/api/setup/github/callback", async (c) => {
   if (!state || !/^[A-Za-z0-9_-]{43}$/.test(state) || !code || code.length > 512)
     return c.json({ error: "Invalid GitHub callback" }, 400);
 
-  return c.json(
-    await Effect.runPromise(
-      rpc(
-        "github.callback",
-        async () => await c.env.AGENT.getByName("owner").githubComplete(state, code),
-      ),
+  const result = await Effect.runPromise(
+    rpc(
+      "github.callback",
+      async () => await c.env.AGENT.getByName("owner").githubComplete(state, code),
     ),
   );
+
+  // Back to the app, which continues with GitHub sign-in or shows the error.
+  return c.redirect("error" in result ? `/?github=${encodeURIComponent(result.error)}` : "/", 303);
 });
 
 githubSetupRoutes.get("/api/setup/github/:state", async (c) => {

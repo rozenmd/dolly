@@ -3,12 +3,13 @@ import { zstdDecompressSync } from "node:zlib";
 import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Schema from "effect/Schema";
+import { headers, signIn } from "./session";
 
-const headers = { Authorization: "Bearer test-token-with-at-least-32-characters" };
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
 
 beforeEach(async () => {
   await reset();
+  await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("credential:openai-codex", {
       type: "oauth",

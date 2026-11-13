@@ -15,7 +15,6 @@ export default defineConfig({
           env: {
             ...config.worker.env,
             ACCESS_LOCAL_DEV: { type: "text", value: "true" },
-            API_TOKEN: { type: "text", value: "test-token-with-at-least-32-characters" },
             WORKSPACES: {
               type: "artifacts",
               namespace: "test-web-workspaces",

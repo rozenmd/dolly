@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowTopRightOnSquareIcon, CheckIcon } from "@heroicons/react/16/solid";
-import { DocumentDuplicateIcon } from "@heroicons/react/24/outline";
+import { ArrowTopRightOnSquareIcon } from "@heroicons/react/16/solid";
 import { codexLogin, type CodexStatus } from "../lib/api";
 import { duration } from "../lib/time";
+import { DeviceCode } from "./ui";
 
 /** Consecutive failed status checks before polling stops and asks the person to retry. */
 const maxPollFailures = 5;
@@ -13,11 +13,9 @@ const maxPollFailures = 5;
  * dialog resumes a code that is still valid instead of issuing a new one.
  */
 export function CodexLogin({
-  token,
   onConnected,
   onCancel,
 }: {
-  token: string;
   onConnected: () => void;
   onCancel: () => void;
 }) {
@@ -47,7 +45,7 @@ export function CodexLogin({
     setPaused(false);
 
     try {
-      apply(await codexLogin(token, "POST"));
+      apply(await codexLogin("POST"));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not start ChatGPT sign-in.");
     } finally {
@@ -61,7 +59,7 @@ export function CodexLogin({
     setPending(true);
 
     try {
-      await codexLogin(token, "DELETE");
+      await codexLogin("DELETE");
     } catch {
       // The pending code expires on its own; closing the dialog is what matters here.
     } finally {
@@ -73,7 +71,7 @@ export function CodexLogin({
   useEffect(() => {
     let active = true;
 
-    codexLogin(token).then(
+    codexLogin().then(
       (next) => active && apply(next),
       (cause) =>
         active &&
@@ -83,7 +81,7 @@ export function CodexLogin({
     return () => {
       active = false;
     };
-  }, [token]);
+  }, []);
 
   const awaiting = status?.state === "awaiting_code" ? status : null;
 
@@ -94,7 +92,7 @@ export function CodexLogin({
     const delay = Math.min(30, Math.max(1, awaiting.pollAfterSeconds)) * 1000;
 
     const timer = setTimeout(() => {
-      codexLogin(token).then(
+      codexLogin().then(
         (next) => active && apply(next),
         (cause) => {
           if (!active || cancelled.current) return;
@@ -113,7 +111,7 @@ export function CodexLogin({
       active = false;
       clearTimeout(timer);
     };
-  }, [awaiting, paused, token]);
+  }, [awaiting, paused]);
 
   if (!status)
     return (
@@ -209,27 +207,5 @@ export function CodexLogin({
         </button>
       </div>
     </div>
-  );
-}
-
-function DeviceCode({ code }: { code: string }) {
-  const [copied, setCopied] = useState(false);
-
-  return (
-    <button
-      type="button"
-      className="device-code"
-      aria-label={copied ? `Copied code ${code}` : `Copy code ${code}`}
-      title={copied ? "Copied" : "Copy code"}
-      onClick={() =>
-        void navigator.clipboard.writeText(code).then(
-          () => setCopied(true),
-          () => setCopied(false),
-        )
-      }
-    >
-      <span>{code}</span>
-      {copied ? <CheckIcon /> : <DocumentDuplicateIcon />}
-    </button>
   );
 }

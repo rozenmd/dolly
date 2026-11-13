@@ -22,6 +22,10 @@ export const GitHubAccounts = Schema.Struct({ accounts: Schema.Array(Name) });
 
 export const GitHubSetup = Schema.Struct({
   owner: Name,
+  /** The public ingress Worker's webhook URL, ending in /hooks/github. */
+  ingress: Schema.String.check(
+    Schema.isPattern(/^https:\/\/[a-zA-Z0-9.-]+(?::443)?\/hooks\/github$/),
+  ),
   ownerType: Schema.Literals(["personal", "organization"]),
   repositories: Schema.optional(Schema.Array(Repository).check(Schema.isMinLength(1))),
 });
