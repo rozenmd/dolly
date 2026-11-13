@@ -15,6 +15,7 @@ import { OperationError } from "./operations";
 import { exceptionDetails } from "./diagnostics";
 import { AnthropicSetup, AnthropicProbe } from "./anthropic";
 import type { Env } from "./env";
+import { PromptImage, MAX_IMAGES, MAX_PROMPT_BYTES } from "./images";
 
 export { Agent } from "./agent";
 
@@ -29,18 +30,9 @@ const Message = Schema.Struct({
   requestId: Schema.String.check(Schema.isUUID()),
 });
 
-/** Base64 screenshots attached to a prompt; 5 MB decoded matches Anthropic's per-image cap. */
-const PromptImage = Schema.Struct({
-  mimeType: Schema.Literals(["image/png", "image/jpeg", "image/gif", "image/webp"]),
-  data: Schema.String.check(
-    Schema.isMaxLength(Math.ceil((5 * 1024 * 1024 * 4) / 3) + 4),
-    Schema.isPattern(/^[A-Za-z0-9+/]+={0,2}$/),
-  ),
-});
-
 const PromptMessage = Schema.Struct({
   ...Message.fields,
-  images: Schema.optional(Schema.Array(PromptImage).check(Schema.isMaxLength(4))),
+  images: Schema.optional(Schema.Array(PromptImage).check(Schema.isMaxLength(MAX_IMAGES))),
 });
 
 /** Hono owns HTTP; Effect programs run once at the request boundary. */
@@ -121,16 +113,17 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
-const limitBody = bodyLimit({
-  maxSize: 65_536,
-  onError: (c) => c.json({ error: "Body exceeds 64 KiB" }, 413),
-});
-
 app.use("/api/*", (c, next) => {
   // File writes are bounded by GitHub and platform request limits, not the general API cap.
   if (c.req.path === "/api/integrations/github/execute") return next();
 
-  return limitBody(c, next);
+  const prompt = c.req.method === "POST" && /^\/api\/sessions\/[^/]+\/messages$/.test(c.req.path);
+
+  return bodyLimit({
+    maxSize: prompt ? MAX_PROMPT_BYTES : 65_536,
+    onError: (context) =>
+      context.json({ error: prompt ? "Prompt body is too large" : "Body exceeds 64 KiB" }, 413),
+  })(c, next);
 });
 
 const SESSION_COOKIE = "__Host-dolly-session";

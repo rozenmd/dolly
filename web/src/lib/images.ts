@@ -34,8 +34,8 @@ export async function readAttachments(
       continue;
     }
 
-    if (file.size > MAX_IMAGE_BYTES) {
-      error = `${file.name || "Image"} is larger than 5 MB.`;
+    if (!file.size || file.size > MAX_IMAGE_BYTES) {
+      error = `${file.name || "Image"} must be non-empty and no larger than 5 MB.`;
       continue;
     }
 

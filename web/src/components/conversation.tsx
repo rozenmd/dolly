@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import {
   ArrowUpIcon,
   CheckIcon,
@@ -34,7 +34,16 @@ export function Conversation({
 }) {
   const scroll = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
-  const now = Date.now();
+  const [now, setNow] = useState(Date.now);
+  const running = turns.some((turn) => turn.running);
+
+  useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+
+    return () => clearInterval(timer);
+  }, [running, sessionId]);
 
   useLayoutEffect(() => {
     pinned.current = true;
@@ -115,7 +124,10 @@ function TurnView({ turn, now }: { turn: Turn; now: number }) {
       {turn.running && (
         <p className="running-footer" role="status">
           <span className="status-dot working" />
-          Working{started !== undefined && <> · {duration(Math.max(0, now - started))}</>}
+          {turn.activity ?? "Working"}
+          {started !== undefined && (
+            <span aria-live="off"> · {duration(Math.max(0, now - started))}</span>
+          )}
         </p>
       )}
     </section>
@@ -176,7 +188,7 @@ function StepGroup({ steps }: { steps: readonly Step[] }) {
   const failed = steps.some((step) => step.status === "error");
 
   return (
-    <details className="step-group">
+    <details className="step-group" open={running || failed}>
       <summary>
         <Square2StackIcon />
         <span>{stepCount(steps.length)}</span>
@@ -186,18 +198,29 @@ function StepGroup({ steps }: { steps: readonly Step[] }) {
       <ol>
         {steps.map((step) => (
           <li key={step.id}>
-            <details className="step">
+            <details className="step" open={step.status === "running" || step.status === "error"}>
               <summary>
                 <span className={`step-name step-${step.status}`}>{step.name}</span>
                 {step.detail && <code>{step.detail}</code>}
               </summary>
-              <pre>{step.output || (step.status === "running" ? "Running…" : "No output")}</pre>
+              <pre>{step.output || stepPlaceholder(step.status)}</pre>
             </details>
           </li>
         ))}
       </ol>
     </details>
   );
+}
+
+function stepPlaceholder(status: Step["status"]) {
+  switch (status) {
+    case "running":
+      return "Running…";
+    case "pending":
+      return "Queued";
+    default:
+      return "No output";
+  }
 }
 
 function Answer({ id, text, at, now }: { id: string; text: string; at?: number; now: number }) {
@@ -272,15 +295,18 @@ export function Composer({
   const setAttachments = (next: Attachment[]) =>
     setImages((values) => ({ ...values, [draftKey]: next }));
 
-  const input = useAttachmentInput(attachments, setAttachments, setAttachError);
+  const input = useAttachmentInput(attachments, setAttachments, setAttachError, pending);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
 
-    if (!content.trim() || pending) return;
+    if (!content.trim() || pending || input.reading) return;
 
     const requestId =
-      retry?.content === content && retry.session === draftKey && retry.attachments === attachments
+      retry?.content === content &&
+      retry.session === draftKey &&
+      retry.attachments.length === attachments.length &&
+      retry.attachments.every((image, index) => image.id === attachments[index]?.id)
         ? retry.requestId
         : crypto.randomUUID();
 
@@ -330,7 +356,7 @@ export function Composer({
       >
         <AttachmentTray
           attachments={attachments}
-          disabled={pending}
+          disabled={pending || input.reading}
           onRemove={(id) => setAttachments(attachments.filter((item) => item.id !== id))}
         />
         <label className="sr-only" htmlFor="prompt">
@@ -355,7 +381,7 @@ export function Composer({
         />
         <div className="composer-toolbar">
           <AttachButton
-            disabled={pending}
+            disabled={pending || input.reading}
             count={attachments.length}
             onFiles={(files) => void input.add(files)}
           />
@@ -374,7 +400,7 @@ export function Composer({
             <button
               type="submit"
               className="round-button send"
-              disabled={!content.trim() || pending}
+              disabled={!content.trim() || pending || input.reading}
               aria-label={running ? "Queue message" : "Send message"}
             >
               <ArrowUpIcon />

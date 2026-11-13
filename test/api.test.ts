@@ -1,6 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { headers, signIn } from "./session";
+import { MAX_PROMPT_BYTES } from "../src/images";
 
 beforeEach(signIn);
 
@@ -130,9 +131,43 @@ describe("Hono Worker in workerd", () => {
         await SELF.fetch("https://worker/api/sessions/missing/messages", {
           method: "POST",
           headers,
-          body: "x".repeat(65_537),
+          body: "x".repeat(MAX_PROMPT_BYTES + 1),
         })
       ).status,
     ).toBe(413);
+  });
+  it("retains the 64 KiB limit on other API routes", async () => {
+    const response = await SELF.fetch("https://worker/api/sessions", {
+      method: "POST",
+      headers,
+      body: "x".repeat(65_537),
+    });
+
+    expect(response.status).toBe(413);
+  });
+  it("accepts screenshots above 64 KiB and validates MIME, count, decoded size and base64", async () => {
+    const image = { mimeType: "image/png", data: btoa("x".repeat(70_000)) };
+
+    const send = (images: readonly { mimeType: string; data: string }[]) =>
+      SELF.fetch("https://worker/api/sessions/missing/messages", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ content: "Review this", requestId: crypto.randomUUID(), images }),
+      });
+
+    expect((await send([image])).status).toBe(404);
+
+    for (const images of [
+      Array.from({ length: 5 }, () => image),
+      [{ ...image, mimeType: "image/svg+xml" }],
+      [{ ...image, data: "A" }],
+      [{ ...image, data: "====" }],
+      [{ ...image, data: "YQ=" }],
+      [{ ...image, data: "YR==" }],
+      [{ ...image, data: "" }],
+      [{ ...image, data: btoa("x".repeat(5 * 1024 * 1024 + 1)) }],
+    ]) {
+      expect((await send(images)).status).toBe(400);
+    }
   });
 });
