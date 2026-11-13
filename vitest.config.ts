@@ -13,6 +13,7 @@ export default defineConfig({
           CODEX_MODEL: "gpt-6-luna",
         },
         artifacts: { WORKSPACES: { namespace: "test-workspaces" } },
+        r2Buckets: ["SCREENSHOTS"],
         durableObjects: {
           AGENT: { className: "Agent", useSQLite: true },
           SANDBOX: { className: "Sandbox", useSQLite: true },

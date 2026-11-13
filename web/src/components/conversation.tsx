@@ -264,19 +264,22 @@ export function Composer({
   const [attachError, setAttachError] = useState("");
   const content = drafts[draftKey] ?? "";
   const attachments = images[draftKey] ?? [];
+
   const setAttachments = (next: Attachment[]) =>
     setImages((values) => ({ ...values, [draftKey]: next }));
-  const input = useAttachmentInput(attachments, setAttachments, setAttachError);
+
+  const input = useAttachmentInput(attachments, setAttachments, setAttachError, pending);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
 
-    if (!content.trim() || pending) return;
+    if (!content.trim() || pending || input.reading) return;
 
     const requestId =
       retry?.content === content &&
       retry.session === draftKey &&
-      retry.attachments === attachments
+      retry.attachments.length === attachments.length &&
+      retry.attachments.every((image, index) => image.id === attachments[index]?.id)
         ? retry.requestId
         : crypto.randomUUID();
 
@@ -300,7 +303,7 @@ export function Composer({
       >
         <AttachmentTray
           attachments={attachments}
-          disabled={pending}
+          disabled={pending || input.reading}
           onRemove={(id) => setAttachments(attachments.filter((item) => item.id !== id))}
         />
         <label className="sr-only" htmlFor="prompt">
@@ -325,7 +328,7 @@ export function Composer({
         />
         <div className="composer-toolbar">
           <AttachButton
-            disabled={pending}
+            disabled={pending || input.reading}
             count={attachments.length}
             onFiles={(files) => void input.add(files)}
           />
@@ -344,7 +347,7 @@ export function Composer({
             <button
               type="submit"
               className="round-button send"
-              disabled={!content.trim() || pending}
+              disabled={!content.trim() || pending || input.reading}
               aria-label={running ? "Queue message" : "Send message"}
             >
               <ArrowUpIcon />

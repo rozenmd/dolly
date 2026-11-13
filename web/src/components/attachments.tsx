@@ -1,4 +1,4 @@
-import { useRef, type ClipboardEvent, type DragEvent } from "react";
+import { useRef, useState, type ClipboardEvent, type DragEvent } from "react";
 import { MAX_IMAGES, readAttachments, type Attachment } from "../lib/images";
 
 /** Paste, drop and file-picker handlers that append screenshots to a composer. */
@@ -6,19 +6,44 @@ export function useAttachmentInput(
   attachments: readonly Attachment[],
   onChange: (next: Attachment[]) => void,
   onError: (message: string) => void,
+  disabled = false,
 ) {
+  const busy = useRef(false);
+  const [reading, setReading] = useState(false);
+
   async function add(files: Iterable<File>) {
-    const { attachments: added, error } = await readAttachments(files, attachments.length);
-    onError(error);
-    if (added.length) onChange([...attachments, ...added]);
+    if (disabled) return;
+
+    if (busy.current) {
+      onError("Wait for the current screenshots to finish loading.");
+
+      return;
+    }
+
+    busy.current = true;
+    setReading(true);
+
+    try {
+      const { attachments: added, error } = await readAttachments(files, attachments.length);
+      onError(error);
+
+      if (added.length) onChange([...attachments, ...added]);
+    } catch {
+      onError("Could not read screenshot. Please try again.");
+    } finally {
+      busy.current = false;
+      setReading(false);
+    }
   }
 
   return {
     add,
+    reading,
     onPaste(event: ClipboardEvent) {
       const files = Array.from(event.clipboardData.files).filter((file) =>
         file.type.startsWith("image/"),
       );
+
       if (!files.length) return;
       event.preventDefault();
       void add(files);

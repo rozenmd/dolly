@@ -33,14 +33,17 @@ export async function readAttachments(
       error = "Only PNG, JPEG, GIF and WebP images can be attached.";
       continue;
     }
-    if (file.size > MAX_IMAGE_BYTES) {
-      error = `${file.name || "Image"} is larger than 5 MB.`;
+
+    if (!file.size || file.size > MAX_IMAGE_BYTES) {
+      error = `${file.name || "Image"} must be non-empty and no larger than 5 MB.`;
       continue;
     }
+
     if (existing + attachments.length >= MAX_IMAGES) {
       error = `You can attach up to ${MAX_IMAGES} images.`;
       break;
     }
+
     const data = await base64(file);
     attachments.push({
       id: crypto.randomUUID(),

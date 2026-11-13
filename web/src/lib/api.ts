@@ -146,15 +146,20 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 
   function add(message: typeof Message.Type, id: string) {
     if (message.role === "user") {
+      const prompt: NonNullable<Turn["prompt"]> = {
+        text: messageText(message),
+        at: message.timestamp,
+      };
+
+      const images = Schema.is(Schema.String)(message.content)
+        ? 0
+        : message.content.filter((block) => block.type === "image").length;
+
+      if (images) prompt.images = images;
+
       turns.push({
         id,
-        prompt: {
-          text: messageText(message),
-          at: message.timestamp,
-          images: Schema.is(Schema.String)(message.content)
-            ? 0
-            : message.content.filter((block) => block.type === "image").length,
-        },
+        prompt,
         items: [],
         steps: 0,
         running: false,
