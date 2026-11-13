@@ -20,10 +20,14 @@ export function RepositoryPicker({
   value,
   onChange,
   manage = false,
+  compact = false,
+  disabled = false,
 }: {
   value?: string;
   onChange?: (repository: string, ref: string) => void;
   manage?: boolean;
+  compact?: boolean;
+  disabled?: boolean;
 }) {
   const [repositories, setRepositories] = useState<typeof Catalog.Type.repositories>([]);
   const [enrolling, setEnrolling] = useState(manage);
@@ -90,22 +94,38 @@ export function RepositoryPicker({
             id="repository"
             name="repository"
             value={value}
-            disabled={loading}
+            disabled={loading || disabled}
             onChange={(event) => {
+              if (event.target.value === "__enroll__") return setEnrolling(true);
+
+              if (event.target.value === "__refresh__")
+                return setRevision((current) => current + 1);
               const repo = repositories.find((item) => item.fullName === event.target.value);
               onChange?.(repo?.fullName ?? "", repo?.defaultBranch ?? "");
             }}
           >
-            <option value="">{loading ? "Loading repositories…" : "No repository"}</option>
+            <option value="">{loading ? "Loading repositories…" : "No repo"}</option>
+            {value && !repositories.some((repo) => repo.fullName === value) && (
+              <option value={value}>{value}</option>
+            )}
             {repositories.map((repo) => (
               <option key={repo.fullName} value={repo.fullName}>
                 {repo.fullName}
               </option>
             ))}
+            {compact && <option value="__enroll__">New repository…</option>}
+            {compact && <option value="__refresh__">Refresh repositories</option>}
           </Select>
-          <button type="button" className="ghost-button" onClick={() => setEnrolling(true)}>
-            Enroll a repository
-          </button>
+          {!compact && (
+            <button
+              type="button"
+              className="ghost-button"
+              disabled={disabled}
+              onClick={() => setEnrolling(true)}
+            >
+              Enroll a repository
+            </button>
+          )}
         </>
       ) : (
         <>
@@ -159,14 +179,16 @@ export function RepositoryPicker({
           )}
         </>
       )}
-      <button
-        type="button"
-        className="ghost-button"
-        disabled={loading || pending}
-        onClick={() => setRevision((current) => current + 1)}
-      >
-        Refresh repositories
-      </button>
+      {(!compact || enrolling || error) && (
+        <button
+          type="button"
+          className="ghost-button"
+          disabled={loading || pending}
+          onClick={() => setRevision((current) => current + 1)}
+        >
+          Refresh repositories
+        </button>
+      )}
       {error && (
         <p role="alert" className="error-text">
           {error}

@@ -102,7 +102,7 @@ export function Sidebar({
           >
             <MagnifyingGlassIcon />
           </IconButton>
-          <IconButton label="New workspace" onClick={onNew}>
+          <IconButton label="New session" onClick={onNew}>
             <PlusIcon />
           </IconButton>
         </div>

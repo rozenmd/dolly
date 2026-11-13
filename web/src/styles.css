@@ -859,6 +859,51 @@ select.input {
   padding-top: 14px;
 }
 
+.new-session-modal {
+  max-width: 780px;
+}
+.new-session-modal::backdrop {
+  backdrop-filter: blur(5px);
+}
+.new-session-fields {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+.new-session-fields > .repository-picker {
+  max-width: 100%;
+  justify-self: start;
+}
+.new-session-fields textarea {
+  min-height: 180px;
+  resize: vertical;
+  background: transparent;
+  border: 0;
+  padding: 4px;
+  font-size: 16px;
+  line-height: 1.6;
+}
+.new-session-fields textarea:focus-visible {
+  outline: none;
+}
+.new-session-modal:has(textarea:focus-visible) {
+  border-color: var(--blue);
+}
+.new-session-modal .modal-actions {
+  flex-wrap: wrap;
+}
+.new-session-modal .modal-actions > .ghost-button {
+  margin-left: 0;
+  margin-right: auto;
+}
+.new-session-modal .modal-actions > select {
+  width: auto;
+  max-width: 100%;
+}
+
 .mobile-only {
   display: none;
 }

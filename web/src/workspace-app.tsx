@@ -4,10 +4,11 @@ import { Bars3Icon, CheckIcon, ChevronRightIcon, LinkIcon } from "@heroicons/rea
 import { DocumentDuplicateIcon, ListBulletIcon, PlusIcon } from "@heroicons/react/24/outline";
 import { Sidebar } from "./components/sidebar";
 import { Composer, Conversation } from "./components/conversation";
-import { IconButton, Input, Modal, RepoBadge, Select } from "./components/ui";
+import { IconButton, Input, Modal, RepoBadge } from "./components/ui";
 import { CodexLogin } from "./components/codex-login";
 import { GitHubSetup, GitHubSignIn, ingressHook } from "./components/github";
 import { RepositoryPicker } from "./components/repositories";
+import { NewSessionComposer } from "./components/new-session";
 import {
   authState,
   codexLogin,
@@ -16,10 +17,9 @@ import {
   readSessions,
   request,
   SavedSession,
-  Session,
   Snapshot,
   turnsFromSnapshot,
-  type ApiBody,
+  sessionBody,
 } from "./lib/api";
 import { ago } from "./lib/time";
 
@@ -50,7 +50,7 @@ export function WorkspaceApp() {
   const rows = connected
     ? sessions.map((item) => ({
         id: item.id,
-        title: item.title || "Untitled workspace",
+        title: item.title || "Untitled session",
         repository: item.repository,
         updatedAt: item.updatedAt,
         running: item.id === selected && running,
@@ -176,7 +176,7 @@ export function WorkspaceApp() {
     setPollError("");
   }
 
-  function newWorkspace() {
+  function newSession() {
     setMobileOpen(false);
     setModal(codex === false ? "codex" : "new");
   }
@@ -276,7 +276,7 @@ export function WorkspaceApp() {
         open={mobileOpen}
         feed={feed}
         onSelect={select}
-        onNew={newWorkspace}
+        onNew={newSession}
         onSettings={() => {
           setMobileOpen(false);
           setModal("settings");
@@ -306,10 +306,10 @@ export function WorkspaceApp() {
                 <ChevronRightIcon className="breadcrumb-chevron" />
               </>
             )}
-            <h1>{feed ? "Feed" : session ? session.title || "Untitled workspace" : "dolly"}</h1>
+            <h1>{feed ? "Feed" : session ? session.title || "Untitled session" : "dolly"}</h1>
           </div>
           <div className="header-actions">
-            <IconButton label="New workspace" onClick={newWorkspace}>
+            <IconButton label="New session" onClick={newSession}>
               <PlusIcon />
             </IconButton>
             {session && !feed && (
@@ -354,8 +354,8 @@ export function WorkspaceApp() {
                   D
                 </span>
                 <h2>{codex === false ? "Sign in to ChatGPT" : "No workspace selected"}</h2>
-                <button type="button" className="primary-button" onClick={newWorkspace}>
-                  {codex === false ? "Sign in with ChatGPT" : "New workspace"}
+                <button type="button" className="primary-button" onClick={newSession}>
+                  {codex === false ? "Sign in with ChatGPT" : "New session"}
                 </button>
               </div>
             )}
@@ -406,11 +406,23 @@ export function WorkspaceApp() {
           />
         </Modal>
       )}
-      {(modal === "new" || modal === "import") && (
-        <SessionModal
-          mode={modal}
+      {modal === "new" && (
+        <NewSessionComposer
+          initial={session ? sessionBody(session, snapshot) : {}}
           onClose={() => setModal(null)}
-          onMode={setModal}
+          onImport={() => setModal("import")}
+          onSaved={(value) => save([value, ...sessions.filter((item) => item.id !== value.id)])}
+          onCreated={(value) => {
+            save([value, ...sessions.filter((item) => item.id !== value.id)]);
+            select(value.id);
+            setModal(null);
+          }}
+        />
+      )}
+      {modal === "import" && (
+        <SessionModal
+          onClose={() => setModal(null)}
+          onNew={() => setModal("new")}
           onCreated={(value) => {
             save([value, ...sessions.filter((item) => item.id !== value.id)]);
             select(value.id);
@@ -761,20 +773,15 @@ function SettingsModal({
 }
 
 function SessionModal({
-  mode,
   onClose,
-  onMode,
+  onNew,
   onCreated,
 }: {
-  mode: "new" | "import";
   onClose: () => void;
-  onMode: (mode: "new" | "import") => void;
+  onNew: () => void;
   onCreated: (session: SavedSession) => void;
 }) {
   const [title, setTitle] = useState("");
-  const [repository, setRepository] = useState("");
-  const [ref, setRef] = useState("");
-  const [model, setModel] = useState("");
   const [id, setId] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
@@ -785,31 +792,14 @@ function SessionModal({
     setError("");
 
     try {
-      let result: typeof Session.Type;
-
-      if (mode === "import") {
-        const text = await request(`/sessions/${encodeURIComponent(id.trim())}`);
-        Schema.decodeUnknownSync(Schema.fromJsonString(Snapshot))(text);
-        result = { id: id.trim(), model: "Existing session" };
-      } else {
-        const body: ApiBody = {};
-
-        if (model) body.model = model;
-
-        if (repository.trim()) {
-          body.workspace = { repository: repository.trim() };
-
-          if (ref) body.workspace.ref = ref;
-        }
-
-        const text = await request("/sessions", body);
-        result = Schema.decodeUnknownSync(Schema.fromJsonString(Session))(text);
-      }
+      const text = await request(`/sessions/${encodeURIComponent(id.trim())}`);
+      Schema.decodeUnknownSync(Schema.fromJsonString(Snapshot))(text);
 
       onCreated({
-        ...result,
+        id: id.trim(),
+        model: "Existing session",
         title: title.trim(),
-        repository: repository.trim(),
+        repository: "",
         updatedAt: Date.now(),
       });
     } catch (cause) {
@@ -820,9 +810,9 @@ function SessionModal({
   }
 
   return (
-    <Modal title={mode === "new" ? "New workspace" : "Open an existing session"} onClose={onClose}>
+    <Modal title="Open an existing session" onClose={onClose}>
       <form onSubmit={(event) => void submit(event)}>
-        <label htmlFor="workspace-title">Workspace name</label>
+        <label htmlFor="workspace-title">Session name</label>
         <Input
           id="workspace-title"
           name="title"
@@ -832,43 +822,14 @@ function SessionModal({
           required
           maxLength={120}
         />
-        {mode === "import" ? (
-          <>
-            <label htmlFor="session-id">Session ID</label>
-            <Input
-              id="session-id"
-              name="sessionId"
-              value={id}
-              onChange={(event) => setId(event.target.value)}
-              required
-            />
-          </>
-        ) : (
-          <>
-            <label htmlFor="repository">
-              GitHub repository <span className="muted">(optional)</span>
-            </label>
-            <RepositoryPicker
-              value={repository}
-              onChange={(name, branch) => {
-                setRepository(name);
-                setRef(branch);
-              }}
-            />
-            <label htmlFor="model">Model</label>
-            <Select
-              id="model"
-              name="model"
-              value={model}
-              onChange={(event) => setModel(event.target.value)}
-            >
-              <option value="">Server default</option>
-              <option value="gpt-6-sol">GPT-6 Sol</option>
-              <option value="gpt-6-luna">GPT-6 Luna</option>
-              <option value="gpt-6.1-terra">GPT-6.1 Terra</option>
-            </Select>
-          </>
-        )}
+        <label htmlFor="session-id">Session ID</label>
+        <Input
+          id="session-id"
+          name="sessionId"
+          value={id}
+          onChange={(event) => setId(event.target.value)}
+          required
+        />
         {error && (
           <p role="alert" className="error-text">
             {error}
@@ -879,15 +840,15 @@ function SessionModal({
             type="button"
             className="secondary-button"
             onClick={() => {
-              onMode(mode === "new" ? "import" : "new");
+              onNew();
               setError("");
             }}
           >
             <LinkIcon />
-            {mode === "new" ? "Open existing" : "Create new"}
+            New session
           </button>
           <button type="submit" className="primary-button" disabled={pending}>
-            {pending ? "Opening…" : mode === "new" ? "Create workspace" : "Open session"}
+            {pending ? "Opening…" : "Open session"}
           </button>
         </div>
       </form>

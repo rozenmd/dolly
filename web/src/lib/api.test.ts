@@ -1,6 +1,53 @@
 import { describe, expect, it } from "vitest";
 import * as Schema from "effect/Schema";
-import { readSessions, Snapshot, turnsFromSnapshot } from "./api";
+import { readSessions, Snapshot, turnsFromSnapshot, sessionBody } from "./api";
+
+describe("new session context", () => {
+  const source = {
+    id: "session",
+    model: "gpt-6-sol",
+    title: "Task",
+    repository: "org/primary",
+    updatedAt: 1,
+  };
+
+  it("inherits the primary repo and policy, never the active attachment", () => {
+    expect(
+      sessionBody(source, {
+        entries: [],
+        docs: {
+          "app.workspace": {
+            config: {
+              repository: "org/primary",
+              ref: "develop",
+              networkHosts: ["registry.npmjs.org"],
+              branch: "dolly/old",
+            },
+            activeRepository: "org/secondary",
+          },
+        },
+      }),
+    ).toEqual({
+      model: source.model,
+      workspace: {
+        repository: "org/primary",
+        ref: "develop",
+        networkHosts: ["registry.npmjs.org"],
+      },
+    });
+  });
+
+  it("preserves repo-less context and can initialize before the first poll", () => {
+    expect(
+      sessionBody(source, { entries: [], docs: { "app.workspace": { config: null } } }),
+    ).toEqual({ model: source.model });
+    expect(sessionBody(source, null)).toEqual({
+      model: source.model,
+      workspace: { repository: source.repository },
+    });
+    expect(sessionBody({ ...source, model: "Existing session", repository: "" }, null)).toEqual({});
+  });
+});
 
 describe("session transcript", () => {
   it("groups each prompt with its tool steps and final answer", () => {

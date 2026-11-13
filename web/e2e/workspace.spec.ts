@@ -12,6 +12,111 @@ const app = {
 
 const signedIn = { github: app, ownerClaimed: true, user: { login: "octocat" } };
 
+for (const repository of ["octocat/project", ""]) {
+  test(`plus opens a task composer in the current ${repository ? "repository" : "repo-less"} context and retries without duplicating sessions`, async ({
+    page,
+  }) => {
+    const source = {
+      id: "current",
+      model: "gpt-6.1-terra",
+      title: "Current task",
+      repository,
+      updatedAt: 1,
+    };
+
+    await page.addInitScript(
+      (session) => localStorage.setItem("dolly.sessions.v1", JSON.stringify([session])),
+      source,
+    );
+    const creates: unknown[] = [];
+    const messages: { content: string; requestId: string }[] = [];
+
+    const config = repository
+      ? { repository, ref: "develop", networkHosts: ["registry.npmjs.org"] }
+      : null;
+
+    await page.route("**/api/**", (route) => {
+      const path = new URL(route.request().url()).pathname;
+
+      if (path === "/api/auth") return route.fulfill({ json: signedIn });
+
+      if (path === "/api/integrations/github/repositories")
+        return route.fulfill({
+          json: {
+            repositories: [
+              {
+                fullName: "octocat/project",
+                defaultBranch: "main",
+                private: true,
+                description: null,
+              },
+            ],
+          },
+        });
+
+      if (path === "/api/sessions/current")
+        return route.fulfill({
+          json: {
+            entries: [],
+            docs: { "app.workspace": { config, activeRepository: "octocat/other" } },
+          },
+        });
+
+      if (path === "/api/sessions") {
+        creates.push(route.request().postDataJSON());
+
+        return route.fulfill({ json: { id: "created", model: source.model } });
+      }
+
+      if (path === "/api/sessions/created/messages") {
+        messages.push(route.request().postDataJSON());
+
+        return route.fulfill(
+          messages.length === 1
+            ? { status: 502, json: { error: "Temporary failure" } }
+            : { status: 202, json: {} },
+        );
+      }
+
+      if (path === "/api/sessions/created")
+        return route.fulfill({ json: { entries: [], docs: {} } });
+
+      return route.fulfill({ json: { state: "connected" } });
+    });
+
+    if (!repository) await page.setViewportSize({ width: 320, height: 740 });
+    await page.goto("/", { waitUntil: "networkidle" });
+
+    const navigation = repository
+      ? page.getByRole("complementary", { name: "Workspace navigation" })
+      : page.locator(".header-actions");
+
+    await navigation.getByRole("button", { name: "New session" }).click();
+    const dialog = page.getByRole("dialog", { name: "New session" });
+    await expect(dialog.getByLabel("Repository", { exact: true })).toHaveValue(repository);
+    await expect(dialog.getByLabel("Model", { exact: true })).toHaveValue(source.model);
+    await expect(dialog.getByLabel("Workspace name")).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
+    expect(creates).toHaveLength(0);
+    await dialog.getByLabel("Task", { exact: true }).fill("Fix the failing tests");
+    await page.screenshot({ path: test.info().outputPath("new-session-composer.png") });
+    await dialog.getByRole("button", { name: "Create", exact: true }).click();
+    await expect(dialog.getByRole("alert")).toContainText("Temporary failure");
+    await expect(dialog.getByLabel("Task", { exact: true })).toHaveValue("Fix the failing tests");
+    await dialog.getByRole("button", { name: "Retry", exact: true }).click();
+    await expect(dialog).not.toBeVisible();
+    expect(creates).toEqual([
+      config ? { model: source.model, workspace: config } : { model: source.model },
+    ]);
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toEqual(messages[1]);
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("Fix the failing tests");
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+  });
+}
+
 test("enrolls an App repository and anchors a new workspace to its default branch", async ({
   page,
 }) => {
@@ -61,14 +166,14 @@ test("enrolls an App repository and anchors a new workspace to its default branc
     return route.fulfill({ json: { state: "connected" } });
   });
   await page.goto("/", { waitUntil: "networkidle" });
-  const dialog = page.getByRole("dialog", { name: "New workspace" });
-  await dialog.getByLabel("Workspace name").fill("Cross-repo task");
-  await dialog.getByRole("button", { name: "Enroll a repository", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "New session" });
+  await dialog.getByLabel("Task").fill("Cross-repo task");
+  await dialog.getByLabel("Repository", { exact: true }).selectOption("__enroll__");
   await dialog.getByLabel("Find a repository").fill("project");
   await expect(dialog).toContainText("Private · develop · Our project");
   await dialog.getByRole("button", { name: "Enroll", exact: true }).click();
-  await expect(dialog.getByLabel("GitHub repository")).toHaveValue("octocat/project");
-  await dialog.getByRole("button", { name: "Create workspace", exact: true }).click();
+  await expect(dialog.getByLabel("Repository", { exact: true })).toHaveValue("octocat/project");
+  await dialog.getByRole("button", { name: "Create", exact: true }).click();
   await expect(dialog).not.toBeVisible();
   expect(created).toEqual({ workspace: { repository: "octocat/project", ref: "develop" } });
 });
@@ -345,21 +450,22 @@ test("authenticated create, send, stop, reload, and error recovery", async ({ pa
 
     if (path.endsWith("/messages")) {
       const body = route.request().postDataJSON();
-      requestIds.push(body.requestId);
 
-      if (failMessage) {
+      if (body.content === "Run tests") requestIds.push(body.requestId);
+
+      if (failMessage && body.content === "Run tests") {
         failMessage = false;
 
         return route.fulfill({ status: 502, json: { error: "Temporary failure. Try again." } });
       }
 
       entries.push({
-        id: 1,
+        id: entries.length + 1,
         kind: "pi.input",
         model: [{ role: "user", content: body.content }],
       });
 
-      working = true;
+      working = body.content === "Run tests";
 
       return route.fulfill({ status: 202, json: { submissionId: "submission-1" } });
     }
@@ -373,8 +479,8 @@ test("authenticated create, send, stop, reload, and error recovery", async ({ pa
     return route.fulfill({ json: { entries, docs: working ? { "pi.live": { run: {} } } : {} } });
   });
   await page.goto("/", { waitUntil: "networkidle" });
-  await page.getByLabel("Workspace name").fill("Fix flaky tests");
-  await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+  await page.getByLabel("Task").fill("Fix flaky tests");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Fix flaky tests");
   await page.getByLabel("Message your agent").fill("Run tests");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
@@ -384,7 +490,9 @@ test("authenticated create, send, stop, reload, and error recovery", async ({ pa
   await expect(page.getByLabel("Message your agent")).toHaveValue("");
   expect(requestIds).toHaveLength(2);
   expect(requestIds[0]).toBe(requestIds[1]);
-  await expect(page.getByRole("article", { name: "user message" })).toContainText("Run tests");
+  await expect(page.getByRole("article", { name: "user message" }).last()).toContainText(
+    "Run tests",
+  );
   await page.getByRole("button", { name: "Stop agent" }).click();
   await expect.poll(() => stopped).toBe(true);
   await page.reload();
@@ -435,7 +543,7 @@ test("ChatGPT device sign-in shows the code, polls until approved, then opens a 
     "href",
     "https://auth.openai.com/codex/device",
   );
-  await expect(page.getByRole("dialog", { name: "New workspace" })).toBeVisible({
+  await expect(page.getByRole("dialog", { name: "New session" })).toBeVisible({
     timeout: 10_000,
   });
   expect(polls).toBe(3);

@@ -31,9 +31,43 @@ export const SavedSession = Schema.Struct({
   title: Schema.String,
   repository: Schema.String,
   updatedAt: Schema.Number,
+  ref: Schema.optional(Schema.String),
 });
 
 export type SavedSession = typeof SavedSession.Type;
+
+const WorkspaceSelection = Schema.Struct({
+  repository: Schema.String,
+  ref: Schema.optional(Schema.String),
+  networkHosts: Schema.optional(Schema.Array(Schema.String)),
+});
+
+export function sessionBody(source: SavedSession, snapshot: typeof Snapshot.Type | null): ApiBody {
+  const body: ApiBody = {};
+
+  if (source.model !== "Existing session") body.model = source.model;
+  const state = snapshot?.docs["app.workspace"];
+
+  if (state !== undefined) {
+    const context = Schema.decodeUnknownOption(
+      Schema.Struct({ config: Schema.NullOr(WorkspaceSelection) }),
+    )(state);
+
+    if (Option.isSome(context)) {
+      if (context.value.config) body.workspace = context.value.config;
+
+      return body;
+    }
+  }
+
+  if (source.repository) {
+    body.workspace = { repository: source.repository };
+
+    if (source.ref) body.workspace.ref = source.ref;
+  }
+
+  return body;
+}
 
 export type Step = {
   id: string;
@@ -230,7 +264,7 @@ export type ApiBody = {
   content?: string;
   requestId?: string;
   model?: string;
-  workspace?: { repository: string; ref?: string };
+  workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] };
   repository?: string;
   owner?: string;
   ownerType?: "personal" | "organization";
