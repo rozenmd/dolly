@@ -95,6 +95,59 @@ async function execute(operation: typeof GitHubRequest.Type.operation) {
   return post("/api/integrations/github/execute", { operation });
 }
 
+it("explains an unset account policy without contacting GitHub or granting any accounts", async () => {
+  await connect();
+  await setAccounts([]);
+
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockRejectedValue(new Error("GitHub must not be contacted"));
+
+  const response = await (await execute({ action: "repositories" })).json();
+  expect(response).toMatchObject({ ok: false, code: "accounts_unconfigured" });
+  expect(JSON.stringify(response)).toContain("Accounts dolly can work in");
+  expect(fetch).not.toHaveBeenCalled();
+  expect(
+    await (await SELF.fetch("https://worker/api/integrations/github/accounts", { headers })).json(),
+  ).toEqual({ accounts: [] });
+});
+
+it("does not treat empty installation discovery as an access denial for a known repository", async () => {
+  await connect();
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const path = new URL(String(input)).pathname;
+
+    if (path === "/app/installations") return Response.json([]);
+
+    if (path === `/repos/${repository}/installation`) return Response.json({ id: 7 });
+
+    if (path === "/app/installations/7/access_tokens")
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+    if (path === `/repos/${repository}/contents/README.md`)
+      return Response.json({
+        type: "file",
+        path: "README.md",
+        sha,
+        encoding: "base64",
+        content: btoa("Repository is readable"),
+        size: 22,
+      });
+    throw new Error(`Unexpected GitHub request: ${path}`);
+  });
+  const discovered = await (await execute({ action: "repositories" })).json();
+  expect(discovered).toMatchObject({ ok: false, code: "no_repositories_discovered" });
+  expect(JSON.stringify(discovered)).toContain("workspace checkout");
+  expect(
+    await (
+      await execute({ action: "read_file", repository, path: "README.md", ref: "main" })
+    ).json(),
+  ).toMatchObject({ ok: true, result: { kind: "file", content: "Repository is readable" } });
+});
+
 beforeEach(async () => {
   await reset();
   await signIn();
@@ -1000,7 +1053,8 @@ it("blocks revoked accounts before cached tokens, direct operations, or Git tran
   ]) {
     expect(await (await execute(op)).json()).toMatchObject({
       ok: false,
-      message: "GitHub repository owner is not allowed",
+      message:
+        "GitHub repository owner is not allowed. Add example to Settings → Accounts dolly can work in. Installing the GitHub App alone does not set this allowlist.",
     });
   }
 

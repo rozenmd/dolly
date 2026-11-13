@@ -115,6 +115,34 @@ export function activeWorkspace(state: WorkspaceState | null | undefined, id: st
   return { config, sandboxId };
 }
 
+/** Configuration is context for the model, not an access grant or a claim that checkout succeeded. */
+export function workspacePrompt(state: WorkspaceState | null | undefined) {
+  const active = activeWorkspace(state, "context")?.config;
+
+  const selection = {
+    primary: state?.config?.repository ?? null,
+    active: active?.repository ?? null,
+    ref: active?.ref ?? null,
+    branch: active?.branch ?? null,
+    attached: (state?.attached ?? []).map((repo) => ({
+      repository: repo.repository,
+      ref: repo.ref,
+      branch: repo.branch,
+    })),
+  };
+
+  return [
+    "Repository selection for this session (configuration, not proof of GitHub access or a completed checkout):",
+    JSON.stringify(selection),
+    state?.config
+      ? "When the user refers to this project or its short name, use the configured primary repository above; do not ask them which owner/repository it is. For a coding task, use workspace checkout with that full owner/repository to verify access and prepare or reuse its checkout. This does not reset existing changes."
+      : "This session has no primary repository. Use workspace repositories to discover enrolled repos, then attach the one the user names. Ask only if the repository name is unknown or ambiguous.",
+    "Shell and relative read_file operations use the active repo's /workspace/repo. Each attachment has its own sandbox. Use workspace attach to activate another repo without replacing the primary or losing changes.",
+    "An empty repository discovery/enrolment list does not establish that a known selected repo is inaccessible. Try the selected repo directly with workspace checkout and report the actual authorization or checkout error. Do not treat repository selection as an authorization grant.",
+    "If GitHub access is denied, explain the concrete configuration step from the tool result. Never claim that no repository access is available merely because discovery returned an empty list.",
+  ].join("\n");
+}
+
 /** Values are passed as shell arguments, never interpreted as source. */
 export const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
 

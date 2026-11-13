@@ -1,4 +1,5 @@
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import * as Schema from "effect/Schema";
 import { WorkspaceInput } from "./workspace";
 
@@ -9,8 +10,21 @@ export const CodexModel = Schema.Literals(
     .map((model) => model.id),
 );
 
+export const AnthropicModel = Schema.Literals(
+  anthropicProvider()
+    .getModels()
+    .map((model) => model.id),
+);
+
+export const SessionModel = Schema.Union([CodexModel, AnthropicModel]);
+export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6";
+
+/** Call only after validating against SessionModel. Existing Codex IDs keep their provider. */
+export const modelProvider = (model: string) =>
+  model.startsWith("claude-") ? "anthropic" : "openai-codex";
+
 export const NewSession = Schema.Struct({
-  model: Schema.optional(CodexModel),
+  model: Schema.optional(SessionModel),
   workspace: Schema.optional(WorkspaceInput),
 });
 
@@ -21,5 +35,5 @@ export const ChildMessage = Schema.Struct({
 
 export const ChildRequest = Schema.Struct({
   ...ChildMessage.fields,
-  model: Schema.optional(CodexModel),
+  model: Schema.optional(SessionModel),
 });

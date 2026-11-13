@@ -70,7 +70,7 @@ describe("Hono Worker in workerd", () => {
 
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({
-        error: "Expected an optional model from the Codex catalog",
+        error: "Expected an optional model from the Codex or Anthropic catalog",
       });
     }
   });

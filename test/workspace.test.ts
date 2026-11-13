@@ -12,8 +12,32 @@ import {
   checkoutScript,
   shellQuote,
   workspaceConfig,
+  workspacePrompt,
   type WorkspaceState,
 } from "../src/workspace";
+
+it("gives the model authoritative primary/active repository context without inventing access", () => {
+  const primary = workspaceConfig({ repository: "rozenmd/dolly", ref: "main" }, "42");
+  const state: WorkspaceState = { config: primary };
+  expect(workspacePrompt(state)).toContain('"primary":"rozenmd/dolly"');
+  expect(workspacePrompt(state)).toContain("do not ask them which owner/repository");
+  expect(workspacePrompt(state)).toContain("not proof of GitHub access");
+  expect(workspacePrompt(state)).toContain("workspace checkout");
+  selectRepository(state, { action: "attach", repository: "org/secondary", ref: "develop" }, "42");
+  const prompt = workspacePrompt(state);
+  expect(prompt).toContain('"primary":"rozenmd/dolly"');
+  expect(prompt).toContain('"active":"org/secondary"');
+  expect(prompt).toContain('"ref":"develop"');
+  expect(prompt).toContain('"branch":"dolly/session-42"');
+  expect(prompt).toContain("empty repository discovery");
+});
+
+it("describes repo-less sessions without assuming that Dolly means this codebase", () => {
+  for (const state of [undefined, { config: null }]) {
+    expect(workspacePrompt(state)).toContain('"primary":null');
+    expect(workspacePrompt(state)).toContain("no primary repository");
+  }
+});
 
 it("keeps the primary repo anchored while attaching and switching isolated checkouts", () => {
   const primary = workspaceConfig(

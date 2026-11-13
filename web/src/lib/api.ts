@@ -289,7 +289,14 @@ export type ApiBody = {
   url?: string;
   accounts?: readonly string[];
   senders?: readonly string[];
+  token?: string;
 };
+
+export async function anthropicStatus() {
+  return Schema.decodeUnknownSync(
+    Schema.fromJsonString(Schema.Struct({ connected: Schema.Boolean })),
+  )(await request("/auth/anthropic"));
+}
 
 export const CodexStatus = Schema.Union([
   Schema.Struct({ state: Schema.Literals(["connected", "not_connected", "expired"]) }),

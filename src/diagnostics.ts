@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 /** Preserve exception details while removing OAuth credentials from provider response errors. */
 export function redact(text: string, secrets: readonly string[] = []): string {
   let safe = text
+    .replace(/sk-ant-[A-Za-z0-9_-]+/g, "[redacted Anthropic token]")
     .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted JWT]")
     .replace(
       /((?:access_token|refresh_token|id_token|code_verifier|device_auth_id|user_code|authorization_code)["'\\\s]*[:=]["'\\\s]*)([^"'\\\s,}]+)/gi,
