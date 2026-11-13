@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { SELF, runInDurableObject } from "cloudflare:test";
 import { expect, it, vi } from "vitest";
 import { headers, signIn } from "../session";
+import { workspaceConfig } from "../../src/workspace";
 
 it("runs the registered coding tools on another owner's repository, pushes a tested commit, opens a PR, and restores dirty work", async () => {
   const remoteName = crypto.randomUUID();
@@ -281,6 +282,17 @@ mkdir -p remotes/another-owner
 
     const sandbox = env.SANDBOX.getByName(id);
 
+    const config = workspaceConfig({ repository: "another-owner/project", ref: "main" }, id);
+
+    const checkpoint = () =>
+      runInDurableObject(sandbox, async (_, state) => state.storage.get("artifact:checkpoint"));
+
+    const beforePrepare = await checkpoint();
+
+    await sandbox.prepare(config);
+    await sandbox.readFile("/workspace/repo/answer.mjs");
+    expect(await checkpoint()).toEqual(beforePrepare);
+
     const dirty = await sandbox.run(`set -eu
 mountpoint /workspace/mounts/repo
 printf 'staged work' > staged.txt
@@ -305,6 +317,10 @@ ln -s dirty.txt dirty-link`);
     expect(restored.exitCode, restored.stderr).toBe(0);
     expect(restored.stdout).toContain("staged workunstaged workignored workunsaved work");
     expect(restored.stdout).toContain("AM staged.txt");
+    const afterRestore = await checkpoint();
+
+    await sandbox.prepare(config);
+    expect(await checkpoint()).toEqual(afterRestore);
 
     failCheckpoint = true;
     // Await RPC directly: Vitest's .rejects leaves an unhandled RPC rejection.
@@ -347,6 +363,22 @@ ln -s dirty.txt dirty-link`);
       (await remote.run("git --git-dir=remotes/another-owner/project.git show main:answer.mjs"))
         .stdout,
     ).toContain("answer = 1");
+
+    const updated = await remote.run(`set -eu
+cd seed
+printf 'latest main\\n' > latest.txt
+git add latest.txt
+git commit -m 'Advance main'
+git push ../remotes/another-owner/project.git HEAD:main`);
+
+    expect(updated.exitCode, updated.stderr).toBe(0);
+    const freshId = crypto.randomUUID();
+    const fresh = env.SANDBOX.getByName(freshId);
+
+    await fresh.prepare(workspaceConfig({ repository: config.repository }, freshId));
+    expect(await fresh.readFile("/workspace/repo/latest.txt")).toBe("latest main\n");
+    await sandbox.prepare(config);
+    expect(await sandbox.readFile("/workspace/repo/dirty.txt")).toBe("unsaved work");
     expect((await env.WORKSPACES.list()).repos.length).toBeGreaterThan(0);
   } finally {
     mocked.mockRestore();

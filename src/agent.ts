@@ -39,6 +39,7 @@ import {
   selectRepository,
   workspacePrompt,
   WorkspaceRequest,
+  WorkspaceToolInput,
   shellQuote,
   type WorkspaceConfig,
 } from "./workspace";
@@ -209,7 +210,7 @@ export class Agent extends DurableObject<Env> {
         ),
     } satisfies ToolRegistration;
 
-    const workspaceSchema = Schema.toJsonSchemaDocument(WorkspaceRequest).schema;
+    const workspaceSchema = Schema.toJsonSchemaDocument(WorkspaceToolInput).schema;
 
     if (!Predicate.isObject(workspaceSchema))
       return yield* Effect.die("Workspace schema must be an object");
@@ -217,7 +218,7 @@ export class Agent extends DurableObject<Env> {
     const workspaceTool = {
       name: "workspace",
       description:
-        "Work across repositories in this conversation. When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or losing changes. Shell, read_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. Mutations are not automatically replayed; inspect state after interruption.",
+        "Work across repositories in this conversation. Always supply action. checkout/attach require repository (optional ref), commit requires message, and open_pull_request requires title and body. When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or losing changes. Shell, read_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. Mutations are not automatically replayed; inspect state after interruption.",
       parameters: workspaceSchema,
       replay: "unsafe",
       executionMode: "sequential",
