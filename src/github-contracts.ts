@@ -21,7 +21,7 @@ const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
 export const GitHubSetup = Schema.Struct({
   owner: Name,
   ownerType: Schema.Literals(["personal", "organization"]),
-  repositories: Schema.Array(Repository).check(Schema.isMinLength(1), Schema.isMaxLength(16)),
+  repositories: Schema.Array(Repository).check(Schema.isMinLength(1)),
 });
 
 export const GitHubRequest = Schema.Struct({

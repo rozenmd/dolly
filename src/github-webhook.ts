@@ -13,7 +13,7 @@ export const WebhookUrl = Schema.String.check(
 );
 
 export const WebhookSetup = Schema.Struct({
-  senders: Schema.Array(Login).check(Schema.isMinLength(1), Schema.isMaxLength(16)),
+  senders: Schema.Array(Login).check(Schema.isMinLength(1)),
   secret: Schema.optional(Schema.String.check(Schema.isMinLength(32), Schema.isMaxLength(256))),
 });
 

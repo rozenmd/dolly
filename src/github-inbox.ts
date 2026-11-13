@@ -161,12 +161,6 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
           duplicate: true,
         };
 
-      if (
-        (!thread && Object.keys(state.threads).length >= 64) ||
-        (thread && Object.keys(thread.events).length >= 128)
-      )
-        return { status: 429 as const };
-
       if (!thread) {
         const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
         thread = { id: conversation.id, events: {} };

@@ -551,7 +551,9 @@ it("enables ingress in the manifest and configures allowed senders without repla
     SELF.fetch("https://worker/api/integrations/github/webhook", {
       method: "PUT",
       headers,
-      body: JSON.stringify({ senders: ["trusted"] }),
+      body: JSON.stringify({
+        senders: ["trusted", ...Array.from({ length: 16 }, (_, i) => `trusted-${i}`)],
+      }),
     });
 
   expect((await configure()).status).toBe(200);
@@ -600,4 +602,23 @@ it("enables ingress in the manifest and configures allowed senders without repla
       })
     ).status,
   ).toBe(401);
+});
+
+it("accepts more than sixteen explicitly approved repositories", async () => {
+  const repositories = Array.from({ length: 17 }, (_, i) => `example/project-${i}`);
+  const response = await post("/api/integrations/github/setup", { ...setup, repositories });
+  expect(response.status).toBe(200);
+  const result = await response.json<{ setupUrl: string }>();
+  const form = await SELF.fetch(result.setupUrl);
+  expect(form.status).toBe(200);
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const pending = await state.storage.get<{ setup: { repositories: string[] } }>(
+      "github:pending",
+    );
+
+    expect(pending?.setup.repositories).toEqual(repositories);
+  });
+  expect(
+    (await post("/api/integrations/github/setup", { ...setup, repositories: [] })).status,
+  ).toBe(400);
 });

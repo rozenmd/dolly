@@ -255,7 +255,10 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
         token: "private-installation-token",
         expires_at: new Date(Date.now() + 3_600_000).toISOString(),
       });
-    expect(parsed.pathname).toBe("/repos/example/project/issues/3/comments");
+    expect([
+      "/repos/example/project/issues/3/comments",
+      "/repos/example/project/issues/4/comments",
+    ]).toContain(parsed.pathname);
 
     if (init?.method === "GET")
       return Response.json(posted.map((body) => ({ body, user: { login: "pi-hard-test[bot]" } })));
@@ -327,9 +330,23 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
       const taskId = Object.values(thread.events)[0];
 
       for (let i = 0; i < 128; i++) thread.events[String(1000 + i)] = taskId;
+
+      for (let i = 0; i < 64; i++)
+        state.threads[`example/project#${1000 + i}`] = { id: thread.id, events: {} };
     }, BACKGROUND_CONTEXT);
   });
-  expect((await hook({ ...payload, comment: { ...payload.comment, id: 125 } })).status).toBe(429);
+  expect((await hook({ ...payload, comment: { ...payload.comment, id: 125 } })).status).toBe(202);
+  expect(
+    (
+      await hook({
+        ...payload,
+        issue: { ...payload.issue, number: 4 },
+        comment: { ...payload.comment, id: 126 },
+      })
+    ).status,
+  ).toBe(202);
+  await expect.poll(() => posted.length).toBe(4);
+  expect((await threads()).filter((thread) => thread.id !== admitted[0].id)).toHaveLength(1);
   expect((await hook(payload)).status).toBe(202);
   await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
     await agent.abort(admitted[0].id);

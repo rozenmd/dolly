@@ -80,7 +80,7 @@ curl -sS "$API_URL/api/integrations/github/setup" \
   -d '{"owner":"your-account","ownerType":"personal","repositories":["your-account/your-repo"]}'
 ```
 
-For an organization, use `"ownerType":"organization"`. This version connects one private App for one account, with up to 16 explicitly approved repositories. Open `setupUrl` in a browser signed into your Cloudflare Access application. Create the App, then open the returned `installUrl` and install it on **only selected repositories**, choosing those you approved. The browser setup and callback routes require Access; the API additionally requires the bearer token. No public callback bypass is needed.
+For an organization, use `"ownerType":"organization"`. This version connects one private App for one account, with an explicitly approved repository list. Open `setupUrl` in a browser signed into your Cloudflare Access application. Create the App, then open the returned `installUrl` and install it on **only selected repositories**, choosing those you approved. The browser setup and callback routes require Access; the API additionally requires the bearer token. No public callback bypass is needed.
 
 Setup links expire after one hour and survive Worker eviction. Repeating setup preserves an existing connection and returns its installation link without asking for credentials again. A consumed callback cannot be replayed. If conversion fails, request a fresh setup link; if GitHub created an unused App, remove it in GitHub settings before creating another. App private keys remain in Durable Object storage. The webhook signing secret stays server-side; unused OAuth credentials are discarded, and short-lived installation tokens stay in Worker memory.
 
@@ -129,7 +129,7 @@ Intake stores the conversation mapping, comment-ID receipt, and Pi delivery task
 
 `GET /api/integrations/github/threads`, with the normal API authentication, lists conversation IDs and delivery status/outcomes. Open a conversation through the existing session API or abort it with the existing session abort route. Reply failures retain a failed task outcome after five attempts and diagnostic details in Worker logs.
 
-Payloads are capped at 256 KiB and command text at 16,384 characters. Intake permits 64 lifetime PR threads per deployment and 128 commands per thread; it returns `429` instead of deleting deduplication receipts when full. Unconfigured intake or a missing Codex connection returns `503`; invalid signatures return `401` and disallowed identities/repositories/installations return `403`. GitHub does not automatically retry failed deliveries: use **Redeliver** in the App's recent deliveries after fixing configuration or availability. An accepted task remains durable even if GitHub misses the acknowledgement.
+Payloads are capped at 256 KiB and command text at 16,384 characters. There are no application-imposed counts for approved repositories, allowed senders, PR threads, or commands per thread. Deduplication receipts are retained; storage grows with usage. Unconfigured intake or a missing Codex connection returns `503`; invalid signatures return `401` and disallowed identities/repositories/installations return `403`. GitHub does not automatically retry failed deliveries: use **Redeliver** in the App's recent deliveries after fixing configuration or availability. An accepted task remains durable even if GitHub misses the acknowledgement.
 
 ## Use the API
 
