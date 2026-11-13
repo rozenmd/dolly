@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createPrivateKey } from "node:crypto";
 import { flow } from "effect/Function";
 import * as Context from "effect/Context";
@@ -708,14 +709,7 @@ function makeGitHub(storage: DurableObjectStorage) {
             message: "Workflow changes are not allowed through agent tools",
           };
 
-        const bytes = new TextEncoder().encode(op.content);
-
-        if (bytes.byteLength > 32_768)
-          return { ok: false, code: "file_too_large", message: "File exceeds 32 KiB" };
-
-        const content = base64url(bytes).replace(/-/g, "+").replace(/_/g, "/");
-
-        const padded = content.padEnd(Math.ceil(content.length / 4) * 4, "=");
+        const content = Buffer.from(op.content, "utf8").toString("base64");
 
         const commit = yield* api(
           `${root}/contents/${op.path.split("/").map(encodeURIComponent).join("/")}`,
@@ -723,7 +717,7 @@ function makeGitHub(storage: DurableObjectStorage) {
           {
             message: op.message,
             branch: op.branch,
-            content: padded,
+            content,
             sha: op.sha,
           },
           "PUT",

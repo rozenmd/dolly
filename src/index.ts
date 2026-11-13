@@ -107,10 +107,17 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
-app.use(
-  "/api/*",
-  bodyLimit({ maxSize: 65_536, onError: (c) => c.json({ error: "Body exceeds 64 KiB" }, 413) }),
-);
+const limitBody = bodyLimit({
+  maxSize: 65_536,
+  onError: (c) => c.json({ error: "Body exceeds 64 KiB" }, 413),
+});
+
+app.use("/api/*", (c, next) => {
+  // File writes are bounded by GitHub and platform request limits, not the general API cap.
+  if (c.req.path === "/api/integrations/github/execute") return next();
+
+  return limitBody(c, next);
+});
 
 const SESSION_COOKIE = "__Host-dolly-session";
 
