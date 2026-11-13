@@ -14,6 +14,7 @@ export default defineConfig({
           GITHUB_WEBHOOK_URL: "https://ingress.example/hooks/github",
           CODEX_MODEL: "gpt-6-luna",
         },
+        r2Buckets: ["WORKSPACES"],
         durableObjects: {
           AGENT: { className: "Agent", useSQLite: true },
           SANDBOX: { className: "Sandbox", useSQLite: true },

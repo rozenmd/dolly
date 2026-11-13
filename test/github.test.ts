@@ -3,6 +3,7 @@ import api from "../src/index";
 import { env } from "cloudflare:workers";
 import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { GITHUB_APP_READ_PERMISSIONS } from "../src/github-permissions";
 import { GitHubRequest } from "../src/github-contracts";
 
 const headers = { Authorization: "Bearer test-token-with-at-least-32-characters" };
@@ -222,7 +223,7 @@ it("mints repository-scoped tokens with a valid App signature and reads UTF-8 fi
     if (path.endsWith("/access_tokens")) {
       expect(JSON.parse(String(init?.body))).toEqual({
         repositories: ["project"],
-        permissions: { contents: "read", pull_requests: "read", metadata: "read" },
+        permissions: GITHUB_APP_READ_PERMISSIONS,
       });
 
       return Response.json({
@@ -254,10 +255,11 @@ it("mints repository-scoped tokens with a valid App signature and reads UTF-8 fi
   });
   expect(await (await execute(operation)).json()).toEqual(result);
   expect(fetch).toHaveBeenCalledTimes(4);
-  expect(await (await execute({ ...operation, repository: "other/project" })).json()).toMatchObject(
-    { ok: false, code: "repository_denied" },
+  fetch.mockImplementation(async () => Response.json({ message: "Not Found" }, { status: 404 }));
+  expect(await (await execute({ ...operation, repository: "other/project" })).text()).toContain(
+    "HTTP 404",
   );
-  expect(fetch).toHaveBeenCalledTimes(4);
+  expect(fetch).toHaveBeenCalledTimes(5);
 });
 
 it("creates only feature branches, preserves optimistic file writes, and opens but never merges PRs", async () => {
@@ -420,6 +422,16 @@ it("runs the registered github tool through Pi and persists its result without A
   });
   let requests = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    if (new URL(String(url)).pathname === "/app/installations") return Response.json([{ id: 7 }]);
+
+    if (new URL(String(url)).pathname.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+
+    if (new URL(String(url)).pathname === "/installation/repositories")
+      return Response.json({ repositories: [{ full_name: repository }] });
     expect(String(url)).toContain("chatgpt.com");
 
     const item =
@@ -538,7 +550,7 @@ it("enables ingress in the manifest and configures allowed senders without repla
   let subscribed = true;
 
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
-    expect(String(url)).toBe("https://api.github.com/repos/example/project/installation");
+    expect(String(url)).toBe("https://api.github.com/app");
 
     return Response.json({
       id: 7,
@@ -568,11 +580,11 @@ it("enables ingress in the manifest and configures allowed senders without repla
 
     const profile = await state.storage.get<{
       secret: string;
-      installations: { repository: string; id: number }[];
+      senders: string[];
     }>("github:webhook");
 
     expect(profile?.secret).toBe(app.webhook_secret);
-    expect(profile?.installations).toEqual([{ repository, id: 7 }]);
+    expect(profile?.senders).toHaveLength(17);
   });
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("github:connected", {
@@ -621,4 +633,96 @@ it("accepts more than sixteen explicitly approved repositories", async () => {
   expect(
     (await post("/api/integrations/github/setup", { ...setup, repositories: [] })).status,
   ).toBe(400);
+});
+
+it("discovers repositories across App installations and paginates GitHub's repository list", async () => {
+  await connect();
+
+  const first = Array.from({ length: 100 }, (_, i) => ({
+    full_name: `another-owner/project-${i}`,
+  }));
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = new URL(String(input));
+
+    if (url.pathname === "/app/installations") return Response.json([{ id: 7 }, { id: 8 }]);
+
+    if (url.pathname.endsWith("/access_tokens"))
+      return Response.json({
+        token: url.pathname.includes("/7/") ? "installation-seven" : "installation-eight",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+    expect(url.pathname).toBe("/installation/repositories");
+
+    if (url.searchParams.get("page") === "2")
+      return Response.json({ repositories: [{ full_name: "third-owner/newly-granted" }] });
+
+    return Response.json({ repositories: first });
+  });
+
+  const result = await (
+    await execute({ action: "repositories" })
+  ).json<{ ok: boolean; result: { repositories: string[] } }>();
+
+  expect(result.ok).toBe(true);
+  expect(result.result.repositories).toContain("another-owner/project-99");
+  expect(result.result.repositories).toContain("third-owner/newly-granted");
+});
+
+it("brokers real Worker RPC Git requests without exposing credentials or allowing other branch updates", async () => {
+  await connect();
+  const { workspaceConfig } = await import("../src/workspace");
+  const config = workspaceConfig({ repository: "another-owner/project" }, "42");
+  let upstream = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = new URL(String(input));
+
+    if (url.hostname === "github.com") {
+      upstream++;
+      expect(new Headers(init?.headers).get("Authorization")).toBe(
+        `Basic ${btoa("x-access-token:private-installation-token")}`,
+      );
+      expect(init?.redirect).toBe("manual");
+
+      return new Response("Git response without credentials");
+    }
+
+    if (url.pathname.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (url.pathname.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+
+    return Response.json({ default_branch: "main" });
+  });
+  const agent = env.AGENT.getByName("owner");
+
+  const read = await agent.gitTransport(
+    new Request(
+      "http://github.workspace/another-owner/project.git/info/refs?service=git-upload-pack",
+    ),
+    config,
+  );
+
+  expect(await read.text()).toBe("Git response without credentials");
+
+  for (const branch of ["main", "pi-hard/someone-else", config.branch]) {
+    const command = `${"a".repeat(40)} ${"b".repeat(40)} refs/heads/${branch}\0report-status\n`;
+    const body = (command.length + 4).toString(16).padStart(4, "0") + command + "0000PACK";
+
+    const response = await agent.gitTransport(
+      new Request("http://github.workspace/another-owner/project.git/git-receive-pack", {
+        method: "POST",
+        body,
+      }),
+      config,
+    );
+
+    expect(response.status).toBe(branch === config.branch ? 200 : 403);
+    await response.body?.cancel();
+  }
+
+  expect(upstream).toBe(2);
 });

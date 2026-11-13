@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Option from "effect/Option";
 import { exceptionDetails, redact } from "./diagnostics";
 import { OperationError, attempt } from "./operations";
 
@@ -86,7 +87,15 @@ export const integrationJson = Effect.fn("Integration.request")(function* (
         ? new OperationError({
             operation: cause.operation,
             message: redact(cause.message, secrets),
-            details: exceptionDetails(cause, secrets),
+            details: {
+              ...exceptionDetails(cause, secrets),
+              status: Schema.decodeUnknownOption(Schema.Struct({ status: Schema.Number }))(
+                cause.details,
+              ).pipe(
+                Option.map((value) => value.status),
+                Option.getOrUndefined,
+              ),
+            },
           })
         : new OperationError({
             operation: "integration.timeout",

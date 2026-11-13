@@ -10,6 +10,7 @@ import {
 import * as Result from "effect/Result";
 import * as Effect from "effect/Effect";
 import { exceptionDetails } from "./diagnostics";
+import { ConversationWorkspace, workspaceConfig } from "./workspace";
 import { GitHubEvent } from "./github-webhook";
 import { attempt, OperationError } from "./operations";
 
@@ -163,6 +164,11 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
 
       if (!thread) {
         const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
+        const workspace = await tx.doc(ConversationWorkspace, conversation.id);
+        workspace.config = workspaceConfig(
+          { repository: event.repository, ref: `refs/pull/${event.number}/head` },
+          String(conversation.id),
+        );
         thread = { id: conversation.id, events: {} };
       }
 

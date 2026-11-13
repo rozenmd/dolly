@@ -13,6 +13,25 @@ import { GitHubThreads } from "../src/github-inbox";
 import { GitHubIngress } from "../src/github-ingress";
 import { ingress } from "../src/ingress";
 
+const pair = await crypto.subtle.generateKey(
+  {
+    name: "RSASSA-PKCS1-v1_5",
+    modulusLength: 2048,
+    publicExponent: new Uint8Array([1, 0, 1]),
+    hash: "SHA-256",
+  },
+  true,
+  ["sign", "verify"],
+);
+
+if (!("privateKey" in pair)) throw new Error("Expected RSA pair");
+
+const exported = await crypto.subtle.exportKey("pkcs8", pair.privateKey);
+
+if (!(exported instanceof ArrayBuffer)) throw new Error("Expected PKCS8 bytes");
+
+const pem = `-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...new Uint8Array(exported)))}\n-----END PRIVATE KEY-----`;
+
 const secret = "test-webhook-secret-at-least-32-characters";
 
 const payload = {
@@ -84,8 +103,16 @@ beforeEach(async () => {
   await reset();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("github:webhook", profile);
+    await state.storage.put("github:connected", {
+      app: { id: 42, slug: "pi-hard-test", pem, owner: { login: "example" } },
+    });
     await state.storage.delete("credential:openai-codex");
   });
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url) =>
+    String(url).includes("/repos/other/")
+      ? Response.json({}, { status: 404 })
+      : Response.json({ id: 7 }),
+  );
 });
 
 afterEach(async () => {
@@ -170,22 +197,6 @@ it("validates signatures over raw bytes and rejects unauthorized installations a
 });
 
 it("durably admits and deduplicates commands, resumes after eviction, and replies once per comment", async () => {
-  const pair = await crypto.subtle.generateKey(
-    {
-      name: "RSASSA-PKCS1-v1_5",
-      modulusLength: 2048,
-      publicExponent: new Uint8Array([1, 0, 1]),
-      hash: "SHA-256",
-    },
-    true,
-    ["sign", "verify"],
-  );
-
-  if (!("privateKey" in pair)) throw new Error("Expected RSA pair");
-  const exported = await crypto.subtle.exportKey("pkcs8", pair.privateKey);
-
-  if (!(exported instanceof ArrayBuffer)) throw new Error("Expected PKCS8 bytes");
-  const pem = `-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...new Uint8Array(exported)))}\n-----END PRIVATE KEY-----`;
   const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("github:connected", {

@@ -54,7 +54,7 @@ githubRoutes.post("/api/integrations/github/setup", async (c) => {
 
   if (Option.isNone(parsed))
     return c.json(
-      { error: "Expected owner, ownerType and 1–16 repositories owned by that account" },
+      { error: "Expected the GitHub App owner and ownerType (personal or organization)" },
       400,
     );
   const origin = new URL(c.req.url).origin;
@@ -154,6 +154,6 @@ githubRoutes.get("/setup/github/:state", async (c) => {
   if ("error" in result) return c.json(result, 400);
 
   return c.html(
-    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect GitHub</title><main><h1>Connect GitHub</h1><p>Create a private GitHub App, then install it on the repositories you approved.</p><form action="${escapeHtml(result.action)}" method="post"><input type="hidden" name="manifest" value="${escapeHtml(JSON.stringify(result.manifest))}"><button type="submit">Create GitHub App</button></form></main></html>`,
+    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect GitHub</title><main><h1>Connect GitHub</h1><p>Create a GitHub App, then install it on any accounts and repositories you want to work on.</p><form action="${escapeHtml(result.action)}" method="post"><input type="hidden" name="manifest" value="${escapeHtml(JSON.stringify(result.manifest))}"><button type="submit">Create GitHub App</button></form></main></html>`,
   );
 });

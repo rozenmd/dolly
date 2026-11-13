@@ -5,6 +5,8 @@ import { bodyLimit } from "hono/body-limit";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { WorkspaceRequest } from "./workspace";
+import { rpc } from "./operations";
 import { githubRoutes } from "./github-routes";
 import { authorizeAccess } from "./access";
 import { AgentApi } from "./api";
@@ -140,9 +142,27 @@ app.post("/api/sessions", (c) =>
       );
 
       const agent = yield* AgentApi;
-      const result = yield* agent.createSession(parsed.model);
+      const result = yield* agent.createSession(parsed.model, parsed.workspace);
 
       return c.json(result, "error" in result ? 409 : 201);
+    }),
+  ),
+);
+
+app.post("/api/sessions/:id/workspace", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const input = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(WorkspaceRequest)),
+        Effect.mapError(() => new InvalidInput({ message: "Expected a workspace action" })),
+      );
+
+      const result = yield* rpc("workspace.execute", async () =>
+        c.env.AGENT.getByName("owner").workspace(c.req.param("id"), input),
+      );
+
+      return c.json(result, "error" in result ? 409 : 200);
     }),
   ),
 );
@@ -285,3 +305,7 @@ app.route("/", githubRoutes);
 export default app;
 
 export { GitHubIngress } from "./github-ingress";
+
+export { WorkspaceOutbound } from "./git-transport";
+
+export { DirectoryBackupGateway } from "@cloudflare/sandbox";

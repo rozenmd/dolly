@@ -18,7 +18,12 @@ import { exceptionDetails } from "./diagnostics";
 import { integrationJson } from "./integration-http";
 import { attempt, OperationError } from "./operations";
 
-const Permissions = { contents: "write", pull_requests: "write", metadata: "read" } as const;
+import {
+  GITHUB_APP_GRANT_PERMISSIONS,
+  GITHUB_APP_READ_PERMISSIONS,
+  GITHUB_APP_WRITE_PERMISSIONS,
+  GITHUB_APP_CODE_PERMISSIONS,
+} from "./github-permissions";
 
 const App = Schema.Struct({
   id: Schema.Number,
@@ -28,7 +33,7 @@ const App = Schema.Struct({
   owner: Schema.Struct({ login: Schema.String }),
 });
 
-const Connected = Schema.Struct({ app: App, repositories: Schema.Array(Repository) });
+const Connected = Schema.Struct({ app: App });
 
 const Pending = Schema.Struct({
   state: Schema.String,
@@ -104,8 +109,8 @@ const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) =>
 
 type GitHubBody =
   | {
-      repositories: readonly string[];
-      permissions: { contents: string; pull_requests: string; metadata: string };
+      repositories?: readonly string[];
+      permissions: Readonly<Record<string, string>>;
     }
   | { body: string }
   | { ref: string; sha: string }
@@ -154,9 +159,9 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
   const tokenFor = Effect.fn("GitHub.token")(function* (
     connected: typeof Connected.Type,
     repository: string,
-    write: boolean,
+    scope: "read" | "write" | "code",
   ) {
-    const key = `${repository}:${write}`;
+    const key = `${repository}:${scope}`;
     const cached = tokens.get(key);
 
     if (cached && cached.expires > Date.now() + 300_000) return cached.value;
@@ -171,10 +176,10 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
     const result = yield* api(`/app/installations/${installation.id}/access_tokens`, appToken, {
       repositories: [name],
       permissions: {
-        contents: write ? "write" : "read",
-        pull_requests: write ? "write" : "read",
-        metadata: "read",
-      },
+        read: GITHUB_APP_READ_PERMISSIONS,
+        write: GITHUB_APP_WRITE_PERMISSIONS,
+        code: GITHUB_APP_CODE_PERMISSIONS,
+      }[scope],
     }).pipe(Effect.flatMap(decode(Token)));
 
     const expires = yield* decode(Schema.Finite)(Date.parse(result.expires_at));
@@ -190,6 +195,48 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
     return result.token;
   });
 
+  const repositories = Effect.fn("GitHub.repositories")(function* () {
+    const connected = yield* read();
+    const appToken = yield* jwt(connected.app);
+    const names: string[] = [];
+
+    for (let page = 1; ; page++) {
+      const installations = yield* api(
+        `/app/installations?per_page=100&page=${page}`,
+        appToken,
+      ).pipe(Effect.flatMap(decode(Schema.Array(Schema.Struct({ id: Schema.Number })))));
+
+      for (const installation of installations) {
+        const token = yield* api(`/app/installations/${installation.id}/access_tokens`, appToken, {
+          permissions: GITHUB_APP_READ_PERMISSIONS,
+        }).pipe(Effect.flatMap(decode(Token)));
+
+        for (let repositoryPage = 1; ; repositoryPage++) {
+          const result = yield* api(
+            `/installation/repositories?per_page=100&page=${repositoryPage}`,
+            token.token,
+          ).pipe(
+            Effect.flatMap(
+              decode(
+                Schema.Struct({
+                  repositories: Schema.Array(Schema.Struct({ full_name: Repository })),
+                }),
+              ),
+            ),
+          );
+
+          names.push(...result.repositories.map((repository) => repository.full_name));
+
+          if (result.repositories.length < 100) break;
+        }
+      }
+
+      if (installations.length < 100) break;
+    }
+
+    return names;
+  });
+
   const status = Effect.gen(function* () {
     const raw = yield* attempt("github.status", () => storage.get("github:connected"));
 
@@ -200,7 +247,6 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
       connected: true,
       owner: value.app.owner.login,
       appSlug: value.app.slug,
-      repositories: value.repositories,
       installUrl: `https://github.com/apps/${encodeURIComponent(value.app.slug)}/installations/new`,
     };
   });
@@ -212,13 +258,6 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
 
         if (existing.connected) return { ...existing, setupUrl: null };
 
-        for (const repository of setup.repositories)
-          if (repository.split("/")[0].toLowerCase() !== setup.owner.toLowerCase())
-            return yield* new OperationError({
-              operation: "github.setup",
-              message: "Every repository must belong to the selected owner",
-              details: null,
-            });
         const previous = yield* attempt("github.pending", () => storage.get("github:pending"));
 
         const pending =
@@ -287,9 +326,9 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
       manifest: {
         name: `Pi Hard ${state.slice(0, 8)}`,
         url: value.origin,
-        public: false,
+        public: true,
         redirect_url: `${value.origin}/setup/github/callback`,
-        default_permissions: webhookUrl ? { ...Permissions, issues: "read" } : Permissions,
+        default_permissions: GITHUB_APP_GRANT_PERMISSIONS,
         default_events: webhookUrl ? ["issue_comment"] : [],
         hook_attributes: {
           url: webhookUrl || `${value.origin}/hooks/github`,
@@ -321,9 +360,7 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
             details: null,
           });
         yield* jwt(app);
-        yield* attempt("github.save", () =>
-          storage.put({ "github:connected": { app, repositories: value.setup.repositories } }),
-        );
+        yield* attempt("github.save", () => storage.put({ "github:connected": { app } }));
         yield* attempt("github.pending.delete", () => storage.delete("github:pending"));
 
         return yield* status;
@@ -338,20 +375,11 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
     const op = input.operation;
 
     if (op.action === "repositories")
-      return { ok: true, result: { kind: "repositories", repositories: connected.repositories } };
+      return { ok: true, result: { kind: "repositories", repositories: yield* repositories() } };
 
-    const repository = connected.repositories.find(
-      (name) => name.toLowerCase() === op.repository.toLowerCase(),
-    );
-
-    if (!repository)
-      return {
-        ok: false,
-        code: "repository_denied",
-        message: "Repository is not approved for this installation",
-      };
+    const repository = op.repository;
     const write = op.action !== "read_file";
-    const token = yield* tokenFor(connected, repository, write);
+    const token = yield* tokenFor(connected, repository, write ? "write" : "read");
     const root = `/repos/${repository}`;
 
     if (write) {
@@ -460,37 +488,33 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
             details: null,
           });
         yield* decode(WebhookUrl)(webhookUrl);
-        const installations: { repository: string; id: number }[] = [];
+
         const token = yield* jwt(connected.app);
 
-        for (const repository of connected.repositories) {
-          const installation = yield* api(`/repos/${repository}/installation`, token).pipe(
-            Effect.flatMap(
-              decode(
-                Schema.Struct({
-                  id: Schema.Number,
-                  permissions: Schema.Struct({ issues: Schema.optional(Schema.String) }),
-                  events: Schema.Array(Schema.String),
-                }),
-              ),
+        const app = yield* api("/app", token).pipe(
+          Effect.flatMap(
+            decode(
+              Schema.Struct({
+                permissions: Schema.Struct({ issues: Schema.optional(Schema.String) }),
+                events: Schema.Array(Schema.String),
+              }),
             ),
-          );
+          ),
+        );
 
-          if (
-            !["read", "write"].includes(installation.permissions.issues ?? "") ||
-            !installation.events.includes("issue_comment")
-          )
-            return yield* new OperationError({
-              operation: "github.webhook.permissions",
-              message:
-                "Enable Issues read permission and Issue comments events in GitHub App settings, then approve installation changes",
-              details: { repository },
-            });
-          installations.push({ repository, id: installation.id });
-        }
+        if (
+          !["read", "write"].includes(app.permissions.issues ?? "") ||
+          !app.events.includes("issue_comment")
+        )
+          return yield* new OperationError({
+            operation: "github.webhook.permissions",
+            message:
+              "Enable Issues read permission and Issue comments events in GitHub App settings, then approve installation changes",
+            details: null,
+          });
 
         yield* attempt("github.webhook.save", () =>
-          storage.put("github:webhook", { secret, senders: input.senders, installations }),
+          storage.put("github:webhook", { secret, senders: input.senders }),
         );
 
         return { configured: true, url: webhookUrl, senders: input.senders };
@@ -508,25 +532,41 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
     if (raw === undefined) return { status: 503 as const };
     const profile = yield* decode(WebhookProfile)(raw);
 
-    return yield* verifyWebhook(profile, body, signature, event);
+    const verified = yield* verifyWebhook(profile, body, signature, event);
+
+    if (verified.status !== 202) return verified;
+    const connected = yield* read();
+
+    const installation = yield* api(
+      `/repos/${verified.event.repository}/installation`,
+      yield* jwt(connected.app),
+    ).pipe(
+      Effect.flatMap(decode(Schema.Struct({ id: Schema.Number }))),
+      Effect.catchTag("OperationError", (error) => {
+        const status = Schema.decodeUnknownOption(Schema.Struct({ status: Schema.Number }))(
+          error.details,
+        );
+
+        if (Option.isSome(status) && status.value.status === 404) return Effect.succeed(null);
+
+        return Effect.fail(error);
+      }),
+    );
+
+    if (!installation || installation.id !== verified.event.installationId)
+      return { status: 403 as const };
+
+    return verified;
   });
 
   const reply = Effect.fn("GitHub.reply")(function* (event: typeof GitHubEvent.Type, text: string) {
     const connected = yield* read();
 
-    if (
-      !connected.repositories.some((name) => name.toLowerCase() === event.repository.toLowerCase())
-    )
-      return yield* new OperationError({
-        operation: "github.reply",
-        message: "Repository is no longer approved",
-        details: null,
-      });
-    const token = yield* tokenFor(connected, event.repository, true);
+    const token = yield* tokenFor(connected, event.repository, "write");
     const root = `/repos/${event.repository}/issues/${event.number}/comments`;
     const marker = `<!-- pi-hard:comment:${event.commentId} -->`;
 
-    for (let page = 1; page <= 10; page++) {
+    for (let page = 1; ; page++) {
       const comments = yield* api(`${root}?per_page=100&page=${page}`, token).pipe(
         Effect.flatMap(
           decode(
@@ -551,15 +591,30 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
         return;
       }
     }
-
-    return yield* new OperationError({
-      operation: "github.reply",
-      message: "Reply history exceeds safe deduplication limit (1000 comments)",
-      details: null,
-    });
   });
 
-  return { status, start, manifest, complete, execute, configureWebhook, receiveWebhook, reply };
+  const authorize = Effect.fn("GitHub.authorize")(function* (repository: string, write: boolean) {
+    const connected = yield* read();
+    const token = yield* tokenFor(connected, repository, write ? "code" : "read");
+
+    const info = yield* api(`/repos/${repository}`, token).pipe(
+      Effect.flatMap(decode(RepoResponse)),
+    );
+
+    return { token, defaultBranch: info.default_branch };
+  });
+
+  return {
+    status,
+    start,
+    manifest,
+    complete,
+    execute,
+    configureWebhook,
+    receiveWebhook,
+    reply,
+    authorize,
+  };
 }
 
 export class GitHub extends Context.Service<GitHub, ReturnType<typeof makeGitHub>>()(

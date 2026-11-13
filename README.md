@@ -4,7 +4,7 @@ A Cloudflare Access-protected personal coding-agent API on Cloudflare Workers, u
 
 ## Deploy to Cloudflare
 
-Use Node.js 24.22.2 and pnpm 12.18.0 (pinned in `.node-version` and `package.json`), a running Docker engine to build the container image, and a paid Cloudflare Workers account.
+Use Node.js 24.22.2 and pnpm 12.18.0 (pinned in `.node-version` and `package.json`), a running Docker engine to build the container image, and a paid Cloudflare Workers account with R2 enabled. The typed configuration provisions the private `pi-hard-workspaces` bucket for repository checkpoints.
 
 Install pnpm using the [official instructions](https://pnpm.io/installation). With Node.js already installed:
 
@@ -67,7 +67,7 @@ For later deployments, run `pnpm run deploy` without `--secrets-file` to preserv
 
 ## Connect GitHub
 
-GitHub operations run in the Worker. The Linux sandbox stays offline and never receives App keys or installation tokens.
+GitHub authentication runs in the Worker. Each coding conversation can clone any GitHub.com repository accessible to the connected App installations, including repositories owned by other users and organizations. Containers never receive App keys or installation tokens.
 
 After deployment and Access setup, load your existing client credentials as shown below, then request a setup link:
 
@@ -77,14 +77,16 @@ curl -sS "$API_URL/api/integrations/github/setup" \
   -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
   -H 'Content-Type: application/json' \
-  -d '{"owner":"your-account","ownerType":"personal","repositories":["your-account/your-repo"]}'
+  -d '{"owner":"your-account","ownerType":"personal"}'
 ```
 
-For an organization, use `"ownerType":"organization"`. This version connects one private App for one account, with an explicitly approved repository list. Open `setupUrl` in a browser signed into your Cloudflare Access application. Create the App, then open the returned `installUrl` and install it on **only selected repositories**, choosing those you approved. The browser setup and callback routes require Access; the API additionally requires the bearer token. No public callback bypass is needed.
+For an organization, use `"ownerType":"organization"`. Connect one App, then install it on the accounts and repositories you want to use. New Apps support installation on other accounts; if you previously created a private App, enable installation on other accounts in GitHub App settings without replacing its credentials. Open `setupUrl` in a browser signed into your Cloudflare Access application. Create the App, then open the returned `installUrl` and choose **selected repositories** or **all repositories** for each installation. GitHub owns that access list; Pi Hard does not keep a second allowlist. The browser setup and callback routes require Access; the API additionally requires the bearer token. No public callback bypass is needed.
+
+The App grant and read/write/code token permission maps match [Open Session's public permission definitions](https://github.com/tellahq/opensession/blob/main/packages/core/opensession-server/src/shared/github-app-permissions.ts), retained in `src/github-permissions.ts`. The grant includes Actions, Checks, Contents, Pull requests, Issues and Deployments write, plus Statuses, Members and Metadata read. Installation tokens are narrowed by operation and repository. Existing Apps must accept these permission updates in GitHub settings; no replacement App key is needed. This grants no Administration or Workflows permission. The copied definitions retain their MIT notice in `third_party/opensession/LICENSE`.
 
 Setup links expire after one hour and survive Worker eviction. Repeating setup preserves an existing connection and returns its installation link without asking for credentials again. A consumed callback cannot be replayed. If conversion fails, request a fresh setup link; if GitHub created an unused App, remove it in GitHub settings before creating another. App private keys remain in Durable Object storage. The webhook signing secret stays server-side; unused OAuth credentials are discarded, and short-lived installation tokens stay in Worker memory.
 
-New agent sessions have a `github` tool. It lists approved repositories, reads UTF-8 files up to 32 KiB, creates `pi-hard/*` branches, writes files up to 32 KiB with an expected file SHA, and opens pull requests. It cannot merge, write the default branch, or edit `.github/workflows/`. Use a new path without `sha` only when creating a file. Mutations are not automatically replayed after interruption; inspect GitHub before retrying an uncertain write.
+New agent sessions have a `github` tool. It discovers repositories across App installations, reads UTF-8 files up to 32 KiB, creates `pi-hard/*` branches, writes files up to 32 KiB with an expected file SHA, and opens pull requests. It cannot merge, write the default branch, or edit `.github/workflows/`. Use a new path without `sha` only when creating a file. Mutations are not automatically replayed after interruption; inspect GitHub before retrying an uncertain write.
 
 The same operations are available through `POST /api/integrations/github/execute`, with an `operation` object. For example:
 
@@ -101,7 +103,41 @@ The same operations are available through `POST /api/integrations/github/execute
 
 Other actions are `repositories`, `create_branch`, `write_file`, and `open_pull_request`; their shared contracts are in `src/github-contracts.ts`. `GET /api/integrations/github` returns connection metadata and the installation link, never credentials. Provider requests reject redirects, time out after 15 seconds, and cap response bodies at 1 MiB.
 
-App commits act as the App bot, not the person who installed it. With this repository's `rozenmd`-only CI policy, App-authored pushes do not start CI. Connected-user authorization is not included.
+Pushes authenticate as the App installation, not the person who installed it. Local commit author metadata is configured as Pi Hard. With this repository's `rozenmd`-only CI policy, App-authored pushes do not start CI. Connected-user authorization is not included.
+
+### Work on a repository
+
+Create a conversation with a repository and optional ref. The App owner does not have to own the repository:
+
+```json
+{
+  "workspace": {
+    "repository": "another-owner/project",
+    "ref": "main",
+    "networkHosts": ["registry.npmjs.org"]
+  }
+}
+```
+
+Send that JSON to `POST /api/sessions` with the normal API authentication, then submit a task through its messages route. The agent has a `workspace` tool to check out, inspect status/diff, commit, push, and open a PR. Its `shell` tool runs in `/workspace/repo`, with Git, Node.js, Corepack, Python 3, curl and CA certificates installed. Use shell commands for edits and the repository's test suite. Other toolchains can be installed through hosts explicitly enabled for the session; not every repository uses the image's built-in tools.
+
+You can also create a blank conversation and let the agent select a repository using `workspace` with `{"action":"checkout","repository":"another-owner/project","ref":"main"}`. Dependency network hosts are supplied by the API client when creating a repository session, not granted by the model. An omitted host list permits only brokered Git traffic. The HTTPS intercept trusts the Containers CA through the provided certificate environment settings; tools with their own certificate store may need configuration.
+
+Each conversation owns one checkout and a `pi-hard/session-<conversation-id>` branch. Repository selection cannot be changed in place. Children inherit the repository/ref and network policy but get separate checkouts and branches. PR webhook conversations start at `refs/pull/<number>/head` and push their own branch, not the original PR branch.
+
+For direct control, `POST /api/sessions/:id/workspace` accepts the same actions:
+
+```json
+{"action":"status"}
+{"action":"diff"}
+{"action":"commit","message":"Fix the failing test"}
+{"action":"push"}
+{"action":"open_pull_request","title":"Fix the failing test","body":"Tests passed"}
+```
+
+Commit and push are separate, explicit operations. Opening a PR targets the repository's default branch. Pushing uses ordinary Git fast-forward checks; failed writes are not automatically retried. The App does not request workflow-writing permission, so GitHub may reject pushes changing workflows. No merge operation is provided.
+
+Checkpoints include the full repository directory, including dependencies and untracked files. This favors recovery over transfer cost: large workspaces make commands slower and incur R2 usage. Stop background writers before commands complete; backups do not freeze concurrent processes. A successful checkpoint replaces the previous one; failed cleanup is logged. R2 and Durable Object storage remain private and grow with usage.
 
 ### Receive GitHub PR commands
 
@@ -110,7 +146,7 @@ The public webhook Worker is separate from the Access-protected API. Its only ro
 1. Deploy the updated main Worker with `pnpm run deploy`, preserving existing credentials. Then deploy the public receiver with `pnpm --dir ingress exec cf deploy`. Keep the main hostname protected by Access; the separate ingress hostname must accept GitHub requests without Access. Preview URLs remain disabled for both Workers.
 2. Set `GITHUB_WEBHOOK_URL` in `cloudflare.config.ts` to the ingress Worker's HTTPS URL ending in `/hooks/github`, then redeploy the main Worker. Do not put webhook secrets in configuration files or the public receiver.
 3. For a new GitHub App, the setup manifest enables the `issue_comment` event and the public webhook URL. For an existing App, update its webhook URL in GitHub App settings, enable webhooks, grant **Issues: Read-only**, and subscribe to **Issue comments**. Approve the updated permissions for the existing installation. Keep the existing App key and installation. If this deployment predates webhook-secret storage, set a new random secret of at least 32 characters in GitHub's webhook settings and supply that same secret once when configuring intake.
-4. Install the App on the approved repositories and connect Codex before enabling command intake. Configure the allowed GitHub users through the protected API:
+4. Install the App on the repositories you want to use and connect Codex before enabling command intake. Configure the allowed GitHub users through the protected API:
 
 ```sh
 curl -sS -X PUT "$API_URL/api/integrations/github/webhook" \
@@ -121,15 +157,15 @@ curl -sS -X PUT "$API_URL/api/integrations/github/webhook" \
   -d '{"senders":["your-github-login"]}'
 ```
 
-Only add `"secret":"your-webhook-secret"` to that JSON when no signing secret is stored yet, or when deliberately rotating it. Existing App credentials and an already-configured signing secret are preserved. Configuration verifies each approved repository's installation ID; repeat it after reinstalling the App to refresh those IDs.
+Only add `"secret":"your-webhook-secret"` to that JSON when no signing secret is stored yet, or when deliberately rotating it. Existing App credentials and an already-configured signing secret are preserved. Configuration checks the App event subscription and permission. Every command checks the current repository installation against the signed installation ID; new grants and reinstalls do not require rebuilding a Pi Hard repository list.
 
-An allowed user can post `/pi Read README.md and explain the project` as a new comment on a PR in an approved repository. The command must start the comment. Issue comments without a PR, edits, bot comments, other events, and comments without `/pi` do not trigger agents. Repository, installation, and both comment-author and sender identity are checked after HMAC-SHA256 verification over the exact request bytes.
+An allowed user can post `/pi Read README.md and explain the project` as a new comment on a PR in a repository available to an App installation. The command must start the comment. Issue comments without a PR, edits, bot comments, other events, and comments without `/pi` do not trigger agents. Repository, installation, and both comment-author and sender identity are checked after HMAC-SHA256 verification over the exact request bytes.
 
 Intake stores the conversation mapping, comment-ID receipt, and Pi delivery task together before returning `202`. It uses the signed comment ID rather than trusting the unsigned delivery header. Repeated deliveries resume the same task; additional commands on the same PR use the same conversation. Pi owns restart recovery and reply retries. Replies check the App bot's existing comment marker before posting, including after a lost response. GitHub comment visibility and deletion prevent a strict exactly-once guarantee.
 
 `GET /api/integrations/github/threads`, with the normal API authentication, lists conversation IDs and delivery status/outcomes. Open a conversation through the existing session API or abort it with the existing session abort route. Reply failures retain a failed task outcome after five attempts and diagnostic details in Worker logs.
 
-Payloads are capped at 256 KiB and command text at 16,384 characters. There are no application-imposed counts for approved repositories, allowed senders, PR threads, or commands per thread. Deduplication receipts are retained; storage grows with usage. Unconfigured intake or a missing Codex connection returns `503`; invalid signatures return `401` and disallowed identities/repositories/installations return `403`. GitHub does not automatically retry failed deliveries: use **Redeliver** in the App's recent deliveries after fixing configuration or availability. An accepted task remains durable even if GitHub misses the acknowledgement.
+Payloads are capped at 256 KiB and command text at 16,384 characters. There are no application-imposed counts for repositories, allowed senders, PR threads, or commands per thread. Deduplication receipts are retained; storage grows with usage. Unconfigured intake or a missing Codex connection returns `503`; invalid signatures return `401` and disallowed identities/repositories/installations return `403`. GitHub does not automatically retry failed deliveries: use **Redeliver** in the App's recent deliveries after fixing configuration or availability. An accepted task remains durable even if GitHub misses the acknowledgement.
 
 ## Use the API
 
@@ -252,8 +288,8 @@ Hono and Cloudflare Durable Objects remain native hosts. They run Effects at HTT
 
 - One `Agent` Durable Object owns the account credentials and Pi SQLite storage. Credential writes, refresh and logout share one serialized queue. Login grants survive object restarts; alarms resume pending Pi work.
 - Each conversation gets a separate `Sandbox` Durable Object and native Linux container. The agent has `shell` and Sandbox 1.0 `Files`-backed `read_file` tools. Commands run as an unprivileged user.
-- Subscription credentials and the API token never enter the container. Container internet access is disabled. The Worker can still reach OpenAI. Installing dependencies or cloning repositories from inside the sandbox needs an explicit network policy change.
-- Conversation history is durable. Sandbox files are **ephemeral** and disappear when the container is replaced. Containers stop after five minutes of inactivity; add R2 directory backups before relying on files across restarts.
+- Subscription credentials and the API token never enter the container. Direct container internet access is disabled. Git traffic uses a private per-session Worker broker; it can read only the selected repository and push only the session branch, never the default branch or a deletion. Dependency downloads use an optional per-session HTTPS hostname list, without injected credentials.
+- Conversation history and repository selection are durable. Repository workspaces, including `.git` and uncommitted files, are backed up to private R2 after foreground shell commands, including failed commands. The last completed checkpoint is restored after container replacement. A crash during a command can lose changes since that checkpoint; interrupted commands are never automatically rerun. Blank sessions without a repository remain ephemeral. Containers stop after five minutes of inactivity.
 - Shell calls have a 60-second deadline and keep at most 32 KiB per output stream. File reads allow 64 KiB. Runs stop after 20 tool rounds. Interrupted shell calls are marked unsafe to replay because commands may have side effects.
 - This is single-owner software. Anyone allowed by your Access policy who also has `API_TOKEN` can use your subscription, run sandbox commands, and read conversations. There is no multi-user authorization, rate limiter, browser UI, or public sandbox preview.
 - Worker storage holds OAuth secrets. Protect access to the Cloudflare account and local `.wrangler` data. Logs and transcript responses redact known tokens and OAuth fields while retaining diagnostic messages.

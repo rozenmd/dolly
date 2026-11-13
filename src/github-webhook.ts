@@ -20,7 +20,6 @@ export const WebhookSetup = Schema.Struct({
 export const WebhookProfile = Schema.Struct({
   secret: Schema.String.check(Schema.isMinLength(32), Schema.isMaxLength(256)),
   senders: Schema.Array(Login),
-  installations: Schema.Array(Schema.Struct({ repository: Repository, id: Id })),
 });
 
 const CommentEvent = Schema.Struct({
@@ -33,6 +32,7 @@ const CommentEvent = Schema.Struct({
 });
 
 export const GitHubEvent = Schema.Struct({
+  installationId: Id,
   repository: Repository,
   number: Id,
   commentId: Id,
@@ -79,14 +79,7 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
   if (Option.isNone(parsed)) return { status: 204 as const };
   const value = parsed.value;
 
-  const approved = profile.installations.some(
-    (entry) =>
-      entry.repository.toLowerCase() === value.repository.full_name.toLowerCase() &&
-      entry.id === value.installation.id,
-  );
-
   if (
-    !approved ||
     !profile.senders.some((login) => login.toLowerCase() === value.sender.login.toLowerCase()) ||
     value.sender.login.toLowerCase() !== value.comment.user.login.toLowerCase()
   )
@@ -101,6 +94,7 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
   return {
     status: 202 as const,
     event: {
+      installationId: value.installation.id,
       repository: value.repository.full_name.toLowerCase(),
       number: value.issue.number,
       commentId: value.comment.id,

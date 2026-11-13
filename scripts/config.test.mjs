@@ -10,6 +10,9 @@ test("typed Cloudflare config keeps SQLite namespaces and the native sandbox ima
   assert.equal(worker.entrypoint, "./src/index.ts");
   assert.deepEqual(worker.compatibilityFlags, ["nodejs_compat"]);
   assert.equal(worker.env.API_TOKEN.type, "secret");
+  assert.equal(worker.env.WORKSPACES.type, "r2");
+  assert.equal(worker.exports.WorkspaceOutbound.type, "worker");
+  assert.equal(worker.exports.DirectoryBackupGateway.type, "worker");
   assert.equal(worker.previewUrls, false);
   assert.equal(worker.env.ACCESS_LOCAL_DEV.value, "false");
   assert.equal(worker.env.ACCESS_TEAM_DOMAIN.type, "text");

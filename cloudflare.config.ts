@@ -17,6 +17,7 @@ export default defineConfig({
     compatibilityFlags: ["nodejs_compat"],
     env: {
       API_TOKEN: bindings.secret(),
+      WORKSPACES: bindings.r2({ name: "pi-hard-workspaces" }),
       ACCESS_TEAM_DOMAIN: bindings.text(""),
       ACCESS_AUD: bindings.text(""),
       ACCESS_LOCAL_DEV: bindings.text("false"),
@@ -27,6 +28,8 @@ export default defineConfig({
     },
     exports: {
       GitHubIngress: exports.worker(),
+      WorkspaceOutbound: exports.worker(),
+      DirectoryBackupGateway: exports.worker(),
       Agent: exports.durableObject({ storage: "sqlite" }),
       Sandbox: exports.durableObject({ storage: "sqlite", container: sandbox }),
     },
