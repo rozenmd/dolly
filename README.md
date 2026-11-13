@@ -90,15 +90,9 @@ The first deployment refuses web and API requests until Access is configured. Th
 
 `access:deploy` exports resolved, validated non-secret settings to ignored `infra/access.generated.json` **only after a successful Access deployment**. The root `cloudflare.config.ts` reads that file; `pnpm run deploy` then publishes those settings. Use `pnpm access:export` to repeat the export without changing cloud resources. Missing generated settings leave the Worker unconfigured (503); malformed settings fail the build/deploy rather than silently disabling authentication. Keep `ACCESS_LOCAL_DEV` set to `"false"` in deployed configuration.
 
-If `cf deploy` fails with multiple-framework autodetection, build the production Vite configuration explicitly, then deploy its output:
+`pnpm run deploy` explicitly builds the root production Vite configuration before running `cf deploy --prebuilt`, avoiding framework autodetection in this multi-package workspace. `pnpm build` builds and dry-runs both the main Worker and ingress without deploying either. The ingress has its own Vite configuration and output directory; deploy it with `pnpm --dir ingress run deploy`.
 
-```sh
-pnpm exec vite build
-pnpm exec cf deploy --prebuilt --dry-run
-pnpm exec cf deploy --prebuilt
-```
-
-Always rebuild with the root production configuration immediately before using `--prebuilt`. Do not deploy output left by `pnpm run test:worker`: its test configuration enables the local Access bypass and replaces production bindings.
+If invoking `cf deploy --prebuilt` directly, always rebuild the intended production configuration immediately beforehand. Do not deploy output left by `pnpm run test:worker`: its test configuration enables the local Access bypass and replaces production bindings.
 
 Alchemy is pinned separately with its compatible Effect version in `infra/package.json`; the application's Effect version is unchanged. Deployment ownership is persisted in ignored **`infra/.alchemy/`** using Alchemy's local state backend. Back this directory up securely and restore it on the deployment machine before planning. Do not run concurrent deploys, delete state, or switch state backends casually. The application and PIN identity provider are retained on destroy; no destroy shortcut is provided. Export reads the pinned Alchemy version's local stack-output format, covered by the export tests; recheck it when upgrading Alchemy. Neither plan nor tests export settings or deploy resources.
 
@@ -231,7 +225,7 @@ This replaces the earlier R2 checkpoint format. Existing R2 checkpoints fail clo
 
 The public webhook Worker is separate from the Access-protected API. Its only route is `POST /hooks/github`. It holds no credentials and calls the main Worker's named `GitHubIngress` entrypoint through a private service binding. The main hostname has no public webhook route.
 
-1. Deploy the updated main Worker with `pnpm run deploy`, preserving existing credentials. Then deploy the public receiver with `pnpm --dir ingress exec cf deploy`. Keep the main hostname protected by Access; the separate ingress hostname must accept GitHub requests without Access. Preview URLs remain disabled for both Workers.
+1. Deploy the updated main Worker with `pnpm run deploy`, preserving existing credentials. Then deploy the public receiver with `pnpm --dir ingress run deploy`. Keep the main hostname protected by Access; the separate ingress hostname must accept GitHub requests without Access. Preview URLs remain disabled for both Workers.
 2. Set `GITHUB_WEBHOOK_URL` in `cloudflare.config.ts` to the ingress Worker's HTTPS URL ending in `/hooks/github`, then redeploy the main Worker. Do not put webhook secrets in configuration files or the public receiver.
 3. For a new GitHub App, the setup manifest enables the `issue_comment` event and the public webhook URL. For an existing App, update its webhook URL in GitHub App settings, enable webhooks, grant **Issues: Read-only**, and subscribe to **Issue comments**. Approve the updated permissions for the existing installation. Keep the existing App key and installation. If this deployment predates webhook-secret storage, set a new random secret of at least 32 characters in GitHub's webhook settings and supply that same secret once when configuring intake.
 4. Install the App on the repositories you want to use and connect Codex before enabling command intake. Configure the allowed GitHub users through the protected API:

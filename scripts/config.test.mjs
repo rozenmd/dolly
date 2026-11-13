@@ -4,6 +4,22 @@ import { readFile } from "node:fs/promises";
 import { sandboxTestConfig } from "./sandbox-config.ts";
 import config from "../cloudflare.config.ts";
 
+test("builds production Workers explicitly before prebuilt deployment or dry runs", async () => {
+  const root = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+
+  const ingress = JSON.parse(
+    await readFile(new URL("../ingress/package.json", import.meta.url), "utf8"),
+  );
+
+  assert.equal(root.scripts.deploy, "vite build && cf deploy --prebuilt");
+  assert.equal(
+    root.scripts.build,
+    "vite build && cf deploy --prebuilt --dry-run && pnpm --dir ingress run build && pnpm --dir ingress exec cf deploy --prebuilt --dry-run",
+  );
+  assert.equal(ingress.scripts.build, "vite build");
+  assert.equal(ingress.scripts.deploy, "pnpm run build && cf deploy --prebuilt");
+});
+
 test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", () => {
   const { worker, containers } = config;
   assert.equal(worker.name, "pi-hard");
