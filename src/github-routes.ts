@@ -4,7 +4,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { authorizeAccess } from "./access";
 import { WebhookSetup } from "./github-webhook";
-import { GitHubRequest, GitHubSetup } from "./github-contracts";
+import { GitHubRequest, GitHubSetup, GitHubAccounts } from "./github-contracts";
 import { rpc } from "./operations";
 import type { Env } from "./env";
 
@@ -43,6 +43,38 @@ githubRoutes.get("/api/integrations/github", async (c) =>
     ),
   ),
 );
+
+githubRoutes.get("/api/integrations/github/accounts", async (c) =>
+  c.json(
+    await Effect.runPromise(
+      rpc("github.accounts", async () => await c.env.AGENT.getByName("owner").githubAccounts()),
+    ),
+  ),
+);
+
+githubRoutes.put("/api/integrations/github/accounts", async (c) => {
+  const parsed = await Effect.runPromise(
+    Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(GitHubAccounts)),
+      Effect.option,
+    ),
+  );
+
+  if (Option.isNone(parsed))
+    return c.json(
+      { error: "Expected accounts: an array of GitHub user or organization names" },
+      400,
+    );
+
+  const result = await Effect.runPromise(
+    rpc(
+      "github.accounts.configure",
+      async () => await c.env.AGENT.getByName("owner").githubConfigureAccounts(parsed.value),
+    ),
+  );
+
+  return c.json(result, "error" in result ? 409 : 200);
+});
 
 githubRoutes.post("/api/integrations/github/setup", async (c) => {
   const parsed = await Effect.runPromise(

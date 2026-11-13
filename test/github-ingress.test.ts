@@ -103,6 +103,7 @@ beforeEach(async () => {
   await reset();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("github:webhook", profile);
+    await state.storage.put("github:accounts", ["example", "other"]);
     await state.storage.put("github:connected", {
       app: { id: 42, slug: "pi-hard-test", pem, owner: { login: "example" } },
     });
@@ -363,3 +364,13 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
     await agent.abort(admitted[0].id);
   });
 }, 25_000);
+
+it("rejects an otherwise valid webhook from an account that is not allowed before GitHub lookup", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("github:accounts", []);
+  });
+  const fetch = vi.mocked(globalThis.fetch);
+  fetch.mockClear();
+  expect((await hook(payload)).status).toBe(403);
+  expect(fetch).not.toHaveBeenCalled();
+});
