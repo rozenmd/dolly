@@ -1,7 +1,34 @@
 import { describe, expect, it } from "vitest";
 import * as Schema from "effect/Schema";
 import type { Live } from "../../../src/transcript";
-import { readSessions, Snapshot, turnsFromSnapshot, sessionBody } from "./api";
+import { readSessions, Snapshot, turnsFromSnapshot, sessionBody, queueFromSnapshot } from "./api";
+
+describe("queued messages", () => {
+  it("reads durable inputs in order, including steering state, but not queued writes", () => {
+    expect(
+      queueFromSnapshot({
+        entries: [],
+        docs: {
+          "pi.inbox": {
+            items: [
+              { id: 2, mode: "followUp", content: "Next task" },
+              { id: 3, mode: "write", entry: { kind: "note" } },
+              { id: 4, mode: "steer", content: [{ type: "text", text: "Correction" }] },
+            ],
+          },
+        },
+      }),
+    ).toEqual([
+      { id: 2, text: "Next task", steering: false },
+      { id: 4, text: "Correction", steering: true },
+    ]);
+  });
+
+  it("handles absent inboxes and removes consumed inputs on the next snapshot", () => {
+    expect(queueFromSnapshot({ entries: [], docs: {} })).toEqual([]);
+    expect(queueFromSnapshot({ entries: [], docs: { "pi.inbox": { items: [] } } })).toEqual([]);
+  });
+});
 
 describe("new session context", () => {
   const source = {

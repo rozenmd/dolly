@@ -41,6 +41,9 @@ function makeAgentApi(env: Env) {
     abort: Effect.fn("AgentApi.abort")((id: string) =>
       rpc("agent.abort", async () => await agent.abort(id)),
     ),
+    steerQueued: Effect.fn("AgentApi.steerQueued")((id: string, submissionId: number) =>
+      rpc("agent.queue.steer", async () => await agent.steerQueued(id, submissionId)),
+    ),
   };
 }
 

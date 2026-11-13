@@ -15,6 +15,7 @@ import {
   codexLogin,
   type AuthState,
   liveFromSnapshot,
+  queueFromSnapshot,
   readSessions,
   request,
   SavedSession,
@@ -52,6 +53,7 @@ export function WorkspaceApp() {
   const session = connected ? sessions.find((item) => item.id === selected) : undefined;
   const running = Boolean(snapshot && liveFromSnapshot(snapshot)?.run);
   const turns = snapshot ? turnsFromSnapshot(snapshot) : [];
+  const queued = snapshot ? queueFromSnapshot(snapshot) : [];
 
   const rows = connected
     ? sessions.map((item) => ({
@@ -199,6 +201,19 @@ export function WorkspaceApp() {
     }
   }
 
+  async function steerQueued(submissionId: number) {
+    setPending(true);
+    setError("");
+
+    try {
+      await request(`/sessions/${encodeURIComponent(selected)}/queue/${submissionId}/steer`, {});
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not send the queued message now.");
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function stop() {
     setPending(true);
 
@@ -336,6 +351,8 @@ export function WorkspaceApp() {
                   onStop={() => void stop()}
                   pending={pending}
                   running={running}
+                  queued={queued}
+                  onSteerQueued={(id) => void steerQueued(id)}
                   model={session.model}
                 />
               </>

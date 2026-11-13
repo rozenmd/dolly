@@ -9,7 +9,7 @@ import {
 import { DocumentDuplicateIcon, Square2StackIcon } from "@heroicons/react/24/outline";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Step, Turn } from "../lib/api";
+import type { QueuedMessage, Step, Turn } from "../lib/api";
 import { ago, duration } from "../lib/time";
 import { IconButton, Textarea } from "./ui";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
@@ -262,6 +262,8 @@ export function Composer({
   running,
   model,
   draftKey,
+  queued,
+  onSteerQueued,
 }: {
   onSend: (
     content: string,
@@ -273,6 +275,8 @@ export function Composer({
   running: boolean;
   model: string;
   draftKey: string;
+  queued: readonly QueuedMessage[];
+  onSteerQueued: (id: number) => void;
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
@@ -318,6 +322,32 @@ export function Composer({
 
   return (
     <div className="composer-area">
+      {queued.length > 0 && (
+        <section className="message-queue" aria-label="Queued messages">
+          <h2>Queued messages</h2>
+          <ul>
+            {queued.map((item) => (
+              <li key={item.id}>
+                <p>{item.text}</p>
+                {item.steering ? (
+                  <span role="status">Sending after the current step…</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={pending}
+                    title="Deliver after the current step instead of waiting for the answer"
+                    onClick={() => onSteerQueued(item.id)}
+                  >
+                    <ArrowUpIcon />
+                    Send now
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <form
         className="composer"
         onSubmit={(event) => void submit(event)}
