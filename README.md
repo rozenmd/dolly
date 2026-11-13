@@ -24,6 +24,8 @@ The transcript displays assistant replies, provider retry/backoff status, and ta
 
 Only session IDs, titles, repository labels, models, and update times are saved in local storage. There is no server session-list endpoint yet, so the feed lists only sessions created or imported in this browser, not all sessions on the Worker. Repository sessions use the server's restricted default network policy; the UI does not grant dependency network hosts.
 
+Attach screenshots by pasting, dropping files, or using the paperclip in either composer. Each prompt accepts up to four non-empty PNG, JPEG, GIF or WebP images, at most 5 MiB each, alongside text. The transcript shows an attachment count. Image bytes are stored in the private `dolly-screenshots` R2 bucket; Pi persists only content-addressed references and loads bytes transiently for model requests. Browser drafts remain in memory, not local storage. Existing inline-image history is still readable but is not automatically migrated. Screenshot objects are retained; automatic garbage collection is not implemented.
+
 ```sh
 pnpm check
 pnpm test
@@ -59,7 +61,7 @@ pnpm install --frozen-lockfile
 pnpm exec cf auth login
 ```
 
-Deploy the main Worker and the public webhook receiver:
+First provision Access and R2 using the next section (choose the intended main Worker hostname as the Access input). Then deploy the main Worker and the public webhook receiver:
 
 ```sh
 pnpm run deploy
@@ -68,10 +70,10 @@ pnpm --dir ingress run deploy
 
 ### Require Cloudflare Access
 
-The first deployment refuses web and API requests until Access is configured. The Alchemy 2 stack in `infra/` manages Access independently of `cf deploy`, following Rat Stack's typed infrastructure and plan-before-deploy approach. It does not own the Workers, containers, DNS, or your account-wide Zero Trust settings.
+The first deployment refuses web and API requests until Access is configured. The Alchemy 2 stack in `infra/` manages Access and the private screenshot R2 bucket independently of `cf deploy`, following Rat Stack's typed infrastructure and plan-before-deploy approach. The bucket uses the `weur` location hint (Western Europe, not a residency guarantee), disables public access and is retained on stack removal. It does not own the Workers, containers, DNS, or your account-wide Zero Trust settings. Provision the bucket with the stack before deploying a Worker that binds it; existing installations also need to run the plan and deployment below.
 
 1. Enable Zero Trust in your Cloudflare account if needed, and note its existing team domain (`your-team.cloudflareaccess.com`, without `https://` or a path). Create or reuse an Access service token; the stack only needs its **token UUID**, not its client ID or secret.
-2. Configure an Alchemy authentication profile with `pnpm --dir infra exec alchemy profile create dolly`, then `pnpm --dir infra exec alchemy profile edit --profile dolly`. Select the same Cloudflare account as the Worker deployment and run `export ALCHEMY_PROFILE=dolly` for subsequent commands. The credentials need Access application/policy and identity-provider edit permissions. Keep provider credentials in the profile, not Worker bindings or committed files.
+2. Configure an Alchemy authentication profile with `pnpm --dir infra exec alchemy profile create dolly`, then `pnpm --dir infra exec alchemy profile edit --profile dolly`. Select the same Cloudflare account as the Worker deployment and run `export ALCHEMY_PROFILE=dolly` for subsequent commands. The credentials need Access application/policy, identity-provider edit, and R2 storage edit permissions. Keep provider credentials in the profile, not Worker bindings or committed files.
 3. Create local stack inputs, then edit `infra/.env`:
 
    ```sh

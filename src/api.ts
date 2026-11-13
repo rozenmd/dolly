@@ -4,7 +4,7 @@ import * as Layer from "effect/Layer";
 import { rpc } from "./operations";
 import type { ChildRequest, ChildMessage } from "./models";
 import type { WorkspaceInput } from "./workspace";
-import type { PromptImage } from "./agent";
+import type { PromptImage } from "./images";
 import type { Env } from "./env";
 
 function makeAgentApi(env: Env) {

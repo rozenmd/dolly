@@ -23,6 +23,88 @@ beforeEach(async () => {
 
 afterEach(() => vi.restoreAllMocks());
 
+it.each(["gpt-6-luna", "claude-haiku-4-5"])(
+  "hydrates R2 screenshots for %s after restart without persisting image bytes in Pi",
+  async (model) => {
+    await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+      await state.storage.put("credential:anthropic", { type: "api_key", key: "test-claude-key" });
+    });
+    const requests: string[] = [];
+    const data = btoa("screenshot payload ".repeat(4000));
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+      const encoded = await new Response(init?.body).arrayBuffer();
+
+      const bytes =
+        new Headers(init?.headers).get("content-encoding") === "zstd"
+          ? zstdDecompressSync(new Uint8Array(encoded))
+          : new Uint8Array(encoded);
+
+      requests.push(new TextDecoder().decode(bytes));
+
+      return Response.json({ error: { message: "Model unavailable" } }, { status: 400 });
+    });
+
+    const created = await SELF.fetch("https://worker/api/sessions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model }),
+    });
+
+    expect(created.status).toBe(201);
+    const { id } = await created.json<{ id: string }>();
+
+    const body = JSON.stringify({
+      content: "Review the screenshot",
+      requestId: crypto.randomUUID(),
+      images: [{ mimeType: "image/png", data }],
+    });
+
+    const submit = () =>
+      SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+        method: "POST",
+        headers,
+        body,
+      });
+
+    const first = await submit();
+
+    expect(first.status).toBe(202);
+    expect(await (await submit()).json()).toEqual(await first.json());
+
+    const read = async () =>
+      await (await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })).text();
+
+    await expect.poll(read).toContain("model_error");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toContain(data);
+    expect(requests[0]).not.toContain("r2://");
+    expect(await read()).toContain("r2://screenshots/png/");
+    expect(await read()).not.toContain(data);
+    expect((await env.SCREENSHOTS.list()).objects).toHaveLength(1);
+    await abortAllDurableObjects();
+
+    const next = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content: "Look again", requestId: crypto.randomUUID() }),
+    });
+
+    expect(next.status).toBe(202);
+    await expect.poll(() => requests.length).toBe(2);
+    await expect.poll(read).toContain("model_error");
+    expect(requests[1]).toContain(data);
+    expect(requests[1]).not.toContain("r2://");
+    await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+      for (const table of ["entries", "submissions", "tasks", "documents", "document_revisions"]) {
+        const rows = [...state.storage.sql.exec(`SELECT * FROM ${table}`)];
+
+        expect(JSON.stringify(rows)).not.toContain(data);
+      }
+    });
+  },
+);
+
 it("pushes an initial snapshot and redacted live updates over an authenticated WebSocket", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
     Response.json({ error: { message: "Model unavailable" } }, { status: 400 }),
