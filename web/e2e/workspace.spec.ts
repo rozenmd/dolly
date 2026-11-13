@@ -13,6 +13,87 @@ const app = {
 
 const signedIn = { github: app, ownerClaimed: true, user: { login: "octocat" } };
 
+for (const width of [1280, 320]) {
+  test(`shows live progress and a ticking timer at ${width}px without manual expansion`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await page.addInitScript(() =>
+      localStorage.setItem(
+        "dolly.sessions.v1",
+        JSON.stringify([
+          { id: "progress", model: "gpt-6-sol", title: "Run tests", repository: "", updatedAt: 1 },
+        ]),
+      ),
+    );
+    await page.route("**/api/**", (route) => {
+      if (new URL(route.request().url()).pathname === "/api/auth")
+        return route.fulfill({ json: signedIn });
+
+      return route.fulfill({ json: { state: "connected" } });
+    });
+    let push: (live: typeof Live.Type, done?: boolean) => void = () => {};
+
+    await page.routeWebSocket("**/api/sessions/progress/events", (socket) => {
+      push = (live, done = false) =>
+        socket.send(
+          JSON.stringify({
+            entries: [
+              {
+                id: 1,
+                kind: "pi.user",
+                model: [{ role: "user", content: "Run tests", timestamp: Date.now() - 5000 }],
+              },
+              ...(done
+                ? [
+                    {
+                      id: 2,
+                      kind: "pi.assistant",
+                      model: [{ role: "assistant", content: "All passed." }],
+                    },
+                  ]
+                : []),
+            ],
+            docs: { "pi.live": live },
+          }),
+        );
+      push({
+        run: {},
+        generation: {
+          message: {
+            role: "assistant",
+            content: [{ type: "thinking", thinking: "Private reasoning" }],
+          },
+        },
+      });
+    });
+    await page.goto("/", { waitUntil: "networkidle" });
+    const status = page.locator(".running-footer");
+    await expect(status).toContainText("Thinking");
+    await expect(page.getByText("Private reasoning")).toHaveCount(0);
+    const initial = await status.textContent();
+    await expect.poll(() => status.textContent()).not.toBe(initial);
+    push({
+      run: {},
+      tools: [{ callId: "test", name: "shell", status: "running", output: "Tests 3/10 passed" }],
+    });
+    await expect(status).toContainText("Running shell");
+    await expect(page.getByText("Tests 3/10 passed")).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath(`live-progress-${width}.png`) });
+    push({
+      run: {},
+      generation: { message: { role: "assistant", content: "All passed" } },
+    });
+    await expect(status).toContainText("Responding");
+    await expect(page.getByText("All passed", { exact: true })).toBeVisible();
+    push({}, true);
+    await expect(status).toHaveCount(0);
+    await expect(page.getByRole("article", { name: "assistant message" })).toContainText(
+      "All passed.",
+    );
+  });
+}
+
 // Main now streams transcripts over WebSockets. Reuse each test's HTTP snapshot fixture
 // for the initial socket snapshot and push another only after a message/abort mutation.
 test.beforeEach(async ({ page }) => {

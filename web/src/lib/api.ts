@@ -59,7 +59,7 @@ export type Step = {
   name: string;
   detail: string;
   output: string;
-  status: "running" | "done" | "error";
+  status: "pending" | "running" | "done" | "error";
 };
 
 export type TurnItem =
@@ -75,6 +75,7 @@ export type Turn = {
   startedAt?: number;
   endedAt?: number;
   running: boolean;
+  activity?: string;
   failure?: typeof RunFailure.Type;
   retry?: { readonly at: number; readonly error: string };
 };
@@ -230,7 +231,9 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     const step = calls.get(tool.callId);
 
     const status: Step["status"] =
-      tool.status === "done" || tool.status === "error" ? tool.status : "running";
+      tool.status === "done" || tool.status === "error" || tool.status === "pending"
+        ? tool.status
+        : "running";
 
     if (step) Object.assign(step, { status, output: tool.output ?? step.output });
     else if (status !== "done")
@@ -248,6 +251,16 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
   if (last && live?.run) {
     last.running = true;
     delete last.failure;
+
+    const activeTool = live.tools?.find((tool) => tool.status === "running");
+    const message = live.generation?.message;
+    last.activity = activeTool
+      ? `Running ${activeTool.name}`
+      : message && messageText(message)
+        ? "Responding"
+        : live.generation
+          ? "Thinking"
+          : "Working";
   }
 
   if (last && live?.generation?.retry) last.retry = live.generation.retry;
@@ -271,7 +284,8 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     if (!turn.running)
       for (const item of turn.items)
         if (item.kind === "steps")
-          for (const step of item.steps) if (step.status === "running") step.status = "done";
+          for (const step of item.steps)
+            if (step.status === "running" || step.status === "pending") step.status = "done";
   }
 
   return turns;
