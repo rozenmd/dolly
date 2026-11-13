@@ -39,6 +39,16 @@ if [[ ${GITHUB_ACTIONS:-} == true && $(uname -s) == Linux ]]; then
     printf 'DOCKER_HOST=%s\n' "$DOCKER_HOST" >> "$GITHUB_ENV"
     docker info
   fi
+  # Ubuntu's fusermount3 profile otherwise rejects this container mount path.
+  # Permit only ArtifactFS mounts in the checkout mount directory on this runner.
+  profile=/etc/apparmor.d/fusermount3
+  if [[ -f $profile ]]; then
+    grep -q 'local/fusermount3' "$profile"
+    sudo mkdir -p /etc/apparmor.d/local
+    printf 'mount fstype=fuse.artifact-fs -> /workspace/mounts/*/,\numount /workspace/mounts/*/,\n' \
+      | sudo tee -a /etc/apparmor.d/local/fusermount3 >/dev/null
+    sudo apparmor_parser --replace "$profile"
+  fi
   test -c /dev/fuse
   docker info --format '{{json .SecurityOptions}}' | grep -q rootless
 fi
