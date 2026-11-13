@@ -46,6 +46,7 @@ export const SavedSession = Schema.Struct({
   title: Schema.String,
   repository: Schema.String,
   updatedAt: Schema.Number,
+  archived: Schema.optional(Schema.Boolean),
   ref: Schema.optional(Schema.String),
 });
 

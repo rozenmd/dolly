@@ -7,6 +7,7 @@ import {
   SignalIcon,
 } from "@heroicons/react/24/outline";
 import { ago } from "../lib/time";
+import { sessionList } from "../lib/session-list";
 import { IconButton, Input, RepoBadge } from "./ui";
 
 export type WorkspaceRow = {
@@ -15,6 +16,7 @@ export type WorkspaceRow = {
   repository: string;
   updatedAt: number;
   running: boolean;
+  archived?: boolean;
 };
 
 export function Sidebar({
@@ -42,9 +44,18 @@ export function Sidebar({
 }) {
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
+  const [archived, setArchived] = useState(false);
+  const [showOlder, setShowOlder] = useState(false);
   const now = Date.now();
+  const lists = sessionList(rows, selected, now);
 
-  const filtered = rows.filter((row) =>
+  const visible = archived
+    ? lists.archived
+    : showOlder || query.trim()
+      ? lists.active
+      : lists.recent;
+
+  const filtered = visible.filter((row) =>
     `${row.title} ${row.repository}`.toLowerCase().includes(query.trim().toLowerCase()),
   );
 
@@ -126,7 +137,7 @@ export function Sidebar({
         )}
         {rows.length > 0 && (
           <p className="sidebar-group">
-            Recent <span>{filtered.length}</span>
+            {archived ? "Archived" : "Recent"} <span>{filtered.length}</span>
           </p>
         )}
         <nav className="workspace-list" aria-label="Workspaces">
@@ -156,7 +167,23 @@ export function Sidebar({
             <p className="sidebar-empty">No matching workspaces.</p>
           )}
           {connected && rows.length === 0 && <p className="sidebar-empty">No workspaces yet.</p>}
+          {archived && !query && filtered.length === 0 && (
+            <p className="sidebar-empty">No archived sessions.</p>
+          )}
         </nav>
+        {!archived && lists.older > 0 && !query.trim() && (
+          <button type="button" className="nav-row" onClick={() => setShowOlder(!showOlder)}>
+            {showOlder ? "Hide older" : `Show older (${lists.older})`}
+          </button>
+        )}
+        <button
+          type="button"
+          className={`nav-row ${archived ? "active" : ""}`}
+          aria-pressed={archived}
+          onClick={() => setArchived(!archived)}
+        >
+          {archived ? "Back to recent" : `Archived sessions (${lists.archived.length})`}
+        </button>
       </aside>
     </>
   );
