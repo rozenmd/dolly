@@ -20,6 +20,8 @@ The **+** buttons open a task-first **New session** composer: choose an enrolled
 
 Mention another enrolled repository by name during a conversation and the agent can attach it and work there without replacing the primary repo. The frontend polls the recent transcript and live progress every 2.5 seconds. **Stop agent** aborts the selected session and its descendants. Each new session still has its own checkout and conversation; the composer does not share another session's uncommitted files or transcript.
 
+The transcript displays assistant replies, provider retry/backoff status, and tasks that end without an answer. Failed requests show their error details rather than an empty response; session details show **Failed** or **Stopped** instead of **Idle**. System/context messages are not rendered as assistant replies. No model request is automatically re-submitted by the UI after failure; send another message to try again.
+
 Only session IDs, titles, repository labels, models, and update times are saved in local storage. There is no server session-list endpoint yet, so the feed lists only sessions created or imported in this browser, not all sessions on the Worker. Repository sessions use the server's restricted default network policy; the UI does not grant dependency network hosts.
 
 ```sh

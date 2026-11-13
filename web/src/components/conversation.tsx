@@ -91,6 +91,20 @@ function TurnView({ turn, now }: { turn: Turn; now: number }) {
       {turn.answer && (
         <Answer id={turn.answer.id} text={turn.answer.text} at={turn.endedAt} now={now} />
       )}
+      {turn.failure && (
+        <div className="run-failure" role={turn.failure.reason === "aborted" ? "status" : "alert"}>
+          <strong>
+            {turn.failure.reason === "aborted" ? "Agent stopped" : "Task ended without an answer"}
+          </strong>
+          <p>{turn.failure.detail || failureReason(turn.failure.reason)}</p>
+        </div>
+      )}
+      {turn.running && turn.retry && (
+        <p className="retry-status" role="status">
+          Retrying {turn.retry.at > now ? `in ${duration(turn.retry.at - now)}` : "now"}…{" "}
+          {turn.retry.error}
+        </p>
+      )}
       {turn.running && (
         <p className="running-footer" role="status">
           <span className="status-dot working" />
@@ -101,6 +115,23 @@ function TurnView({ turn, now }: { turn: Turn; now: number }) {
   );
 }
 
+function failureReason(reason: string) {
+  switch (reason) {
+    case "model_error":
+      return "The model request failed. Send another message to try again.";
+    case "no_model":
+      return "The selected model is unavailable.";
+    case "aborted":
+      return "This task was stopped before the agent answered.";
+    case "turn_limit":
+      return "The agent reached its tool-round limit. Send another message to continue.";
+    case "nothing_to_answer":
+      return "The run ended with no message to answer.";
+    default:
+      return `The agent could not complete this task (${reason}). Send another message to try again.`;
+  }
+}
+
 function WorkLog({ turn }: { turn: Turn }) {
   const started = turn.prompt?.at ?? turn.startedAt;
 
@@ -108,7 +139,7 @@ function WorkLog({ turn }: { turn: Turn }) {
     started !== undefined && turn.endedAt !== undefined ? duration(turn.endedAt - started) : "";
 
   return (
-    <details className="work-log" open={turn.running}>
+    <details className="work-log" open={turn.running || Boolean(turn.failure)}>
       <summary>
         <ChevronRightIcon className="disclosure" />
         <span className="work-label">{turn.running ? "Working" : "Worked"}</span>

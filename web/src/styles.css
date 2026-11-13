@@ -1192,3 +1192,22 @@ select.input {
 .repository-row > button {
   flex-shrink: 0;
 }
+.run-failure {
+  margin: 16px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--red);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.run-failure > p {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.retry-status {
+  color: var(--amber);
+  overflow-wrap: anywhere;
+}
+.status-dot.failed {
+  background: var(--red);
+}
