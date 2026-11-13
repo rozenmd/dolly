@@ -90,6 +90,16 @@ The first deployment refuses web and API requests until Access is configured. Th
 
 `access:deploy` exports resolved, validated non-secret settings to ignored `infra/access.generated.json` **only after a successful Access deployment**. The root `cloudflare.config.ts` reads that file; `pnpm run deploy` then publishes those settings. Use `pnpm access:export` to repeat the export without changing cloud resources. Missing generated settings leave the Worker unconfigured (503); malformed settings fail the build/deploy rather than silently disabling authentication. Keep `ACCESS_LOCAL_DEV` set to `"false"` in deployed configuration.
 
+If `cf deploy` fails with multiple-framework autodetection, build the production Vite configuration explicitly, then deploy its output:
+
+```sh
+pnpm exec vite build
+pnpm exec cf deploy --prebuilt --dry-run
+pnpm exec cf deploy --prebuilt
+```
+
+Always rebuild with the root production configuration immediately before using `--prebuilt`. Do not deploy output left by `pnpm run test:worker`: its test configuration enables the local Access bypass and replaces production bindings.
+
 Alchemy is pinned separately with its compatible Effect version in `infra/package.json`; the application's Effect version is unchanged. Deployment ownership is persisted in ignored **`infra/.alchemy/`** using Alchemy's local state backend. Back this directory up securely and restore it on the deployment machine before planning. Do not run concurrent deploys, delete state, or switch state backends casually. The application and PIN identity provider are retained on destroy; no destroy shortcut is provided. Export reads the pinned Alchemy version's local stack-output format, covered by the export tests; recheck it when upgrading Alchemy. Neither plan nor tests export settings or deploy resources.
 
 The Worker still independently verifies the Access JWT's RS256 signature, issuer, audience, and expiration, in addition to requiring `API_TOKEN` for API calls. Missing configuration, missing/forged tokens and failed certificate lookups cannot authorize access. After deployment, confirm an anonymous browser is redirected to Access, your approved email can load the app, an unapproved identity cannot, and your existing service credentials still work with `pnpm run login`. Check GitHub ingress remains public (it should reject unsigned webhook requests, not redirect to Access).

@@ -10,7 +10,7 @@
     "check:web": "pnpm --dir web typecheck && pnpm --dir web test",
     "deploy": "cf deploy",
     "access:plan": "pnpm --dir infra plan",
-    "access:deploy": "pnpm --dir infra deploy && pnpm access:export",
+    "access:deploy": "pnpm --dir infra run deploy && pnpm access:export",
     "access:export": "node scripts/export-access.mjs",
     "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm check:web",
     "test": "node --test scripts/*.test.mjs && pnpm --dir infra test && vitest run",

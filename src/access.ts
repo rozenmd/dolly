@@ -14,7 +14,7 @@ const AccessConfig = Schema.Struct({
 const AccessClaims = Schema.Struct({
   exp: Schema.Finite,
   iss: Schema.String,
-  aud: Schema.Array(Schema.String),
+  aud: Schema.Union([Schema.String, Schema.Array(Schema.String)]),
 });
 
 /** API_TOKEN alone never grants deployed access. Missing Access configuration fails closed. */
@@ -45,7 +45,7 @@ export const authorizeAccess = Effect.fn("Access.authorize")(function* (
         allowedAlgorithms: ["RS256"],
         verification: { iss: `https://${team}`, aud: audience },
       },
-      { signal, redirect: "error" },
+      { signal, redirect: "manual" },
     ),
   ).pipe(
     Effect.flatMap(Schema.decodeUnknownEffect(AccessClaims)),
