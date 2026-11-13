@@ -1,37 +1,28 @@
 import { useEffect, useState, type FormEvent } from "react";
 import * as Schema from "effect/Schema";
-import {
-  Bars3Icon,
-  CheckCircleIcon,
-  ChevronRightIcon,
-  CodeBracketIcon,
-  CommandLineIcon,
-  LinkIcon,
-  PlusIcon,
-  RectangleGroupIcon,
-  SignalIcon,
-} from "@heroicons/react/16/solid";
+import { Bars3Icon, CheckIcon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
+import { DocumentDuplicateIcon, ListBulletIcon, PlusIcon } from "@heroicons/react/24/outline";
 import { Sidebar } from "./components/sidebar";
 import { Composer, Conversation } from "./components/conversation";
-import { IconButton, Input, Modal, Select } from "./components/ui";
+import { IconButton, Input, Modal, RepoBadge, Select } from "./components/ui";
 import {
-  messagesFromSnapshot,
   liveFromSnapshot,
   readSessions,
   request,
   SavedSession,
   Session,
   Snapshot,
+  turnsFromSnapshot,
   type ApiBody,
 } from "./lib/api";
-import { previewMessages, previewSessions } from "./lib/preview";
+import { ago } from "./lib/time";
 
 const storageKey = "pi-hard.sessions.v1";
 
 export function WorkspaceApp() {
   const [token, setToken] = useState("");
   const [sessions, setSessions] = useState<readonly SavedSession[]>([]);
-  const [selected, setSelected] = useState("presence");
+  const [selected, setSelected] = useState("");
   const [snapshot, setSnapshot] = useState<typeof Snapshot.Type | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [feed, setFeed] = useState(false);
@@ -43,25 +34,23 @@ export function WorkspaceApp() {
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(false);
   const connected = Boolean(token);
-  const session = sessions.find((item) => item.id === selected);
-  const example = previewSessions.find((item) => item.id === selected) ?? previewSessions[0];
-  const title = connected ? (session?.title ?? "Your coding workspace") : example.title;
-  const repository = connected ? session?.repository || "No repository" : example.repository;
-  const model = connected ? (session?.model ?? "Default model") : "gpt-6-sol";
+  const session = connected ? sessions.find((item) => item.id === selected) : undefined;
+  const running = Boolean(snapshot && liveFromSnapshot(snapshot)?.run);
+  const turns = snapshot ? turnsFromSnapshot(snapshot) : [];
 
   const rows = connected
-    ? sessions.map((item) => ({ ...item, status: "Saved", time: "" }))
-    : previewSessions;
-
-  const messages = connected
-    ? snapshot
-      ? messagesFromSnapshot(snapshot)
-      : []
-    : selected === "presence"
-      ? previewMessages
-      : [];
+    ? sessions.map((item) => ({
+        id: item.id,
+        title: item.title || "Untitled workspace",
+        repository: item.repository,
+        updatedAt: item.updatedAt,
+        running: item.id === selected && running,
+      }))
+    : [];
 
   useEffect(() => {
+    setDetails(window.matchMedia("(min-width: 1180px)").matches);
+
     try {
       setSessions(readSessions(localStorage.getItem(storageKey) ?? "[]"));
     } catch {
@@ -133,13 +122,12 @@ export function WorkspaceApp() {
     setPollError("");
   }
 
+  function newWorkspace() {
+    setMobileOpen(false);
+    setModal(connected ? "new" : "connect");
+  }
+
   async function send(content: string, requestId: string) {
-    if (!session) {
-      setModal("new");
-
-      return false;
-    }
-
     setPending(true);
     setError("");
 
@@ -151,7 +139,6 @@ export function WorkspaceApp() {
       save(
         sessions.map((item) => (item.id === selected ? { ...item, updatedAt: Date.now() } : item)),
       );
-      setNotice("Message queued. The transcript refreshes automatically.");
 
       return true;
     } catch (cause) {
@@ -172,13 +159,14 @@ export function WorkspaceApp() {
 
     try {
       await request(`/sessions/${encodeURIComponent(selected)}/abort`, token, {});
-      setNotice("Stop requested for this session and its child agents.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not stop the agent.");
     } finally {
       setPending(false);
     }
   }
+
+  const feedback = error || pollError || notice;
 
   return (
     <div className="app-shell">
@@ -192,8 +180,11 @@ export function WorkspaceApp() {
         open={mobileOpen}
         feed={feed}
         onSelect={select}
-        onNew={() => setModal(connected ? "new" : "connect")}
-        onSettings={() => setModal("connect")}
+        onNew={newWorkspace}
+        onSettings={() => {
+          setMobileOpen(false);
+          setModal("connect");
+        }}
         onClose={() => setMobileOpen(false)}
         onFeed={() => {
           setFeed(true);
@@ -212,139 +203,68 @@ export function WorkspaceApp() {
             >
               <Bars3Icon />
             </IconButton>
-            <span className="repo-icon">
-              <CodeBracketIcon />
-            </span>
-            <span className="breadcrumb-repo">{repository}</span>
-            <ChevronRightIcon className="breadcrumb-chevron" />
-            <h1>{feed ? "Activity feed" : title}</h1>
+            {session && !feed && session.repository && (
+              <>
+                <RepoBadge repository={session.repository} />
+                <span className="breadcrumb-repo">{session.repository}</span>
+                <ChevronRightIcon className="breadcrumb-chevron" />
+              </>
+            )}
+            <h1>{feed ? "Feed" : session ? session.title || "Untitled workspace" : "pi-hard"}</h1>
           </div>
           <div className="header-actions">
-            <span className="connection-badge">
-              <span className={`tiny-dot ${connected ? "green" : ""}`} />
-              {connected ? "Connected" : "Preview"}
-            </span>
-            <IconButton
-              label="New workspace"
-              onClick={() => setModal(connected ? "new" : "connect")}
-            >
+            <IconButton label="New workspace" onClick={newWorkspace}>
               <PlusIcon />
             </IconButton>
-            <IconButton
-              label="Toggle session details"
-              aria-pressed={details}
-              onClick={() => setDetails(!details)}
-            >
-              <RectangleGroupIcon />
-            </IconButton>
+            {session && !feed && (
+              <IconButton
+                label="Toggle session details"
+                aria-pressed={details}
+                className={details ? "pressed" : ""}
+                onClick={() => setDetails(!details)}
+              >
+                <ListBulletIcon />
+              </IconButton>
+            )}
           </div>
         </header>
-        <div className="session-strip">
-          <span>
-            <span className="tiny-dot green" />
-            {connected ? "Personal workspace" : "A little less setup. A lot more shipping."}
-          </span>
-          <button type="button" onClick={() => setModal(connected ? "import" : "connect")}>
-            {connected ? "Open a session" : "Connect your API"}
-            <ChevronRightIcon />
-          </button>
-        </div>
         <div className="content-layout">
           <div className="conversation-panel">
             {feed ? (
-              <div className="feed-view">
-                <div className="feed-heading">
-                  <p className="eyebrow">Your workspace</p>
-                  <h2>Pick up where you left off.</h2>
-                  <p>
-                    {connected
-                      ? "Sessions saved in this browser."
-                      : "A preview of your agents’ work, all in one place."}
-                  </p>
-                </div>
-                <div className="feed-list">
-                  {rows.map((row) => (
-                    <button key={row.id} type="button" onClick={() => select(row.id)}>
-                      <span className="feed-status">
-                        <CheckCircleIcon />
-                      </span>
-                      <span>
-                        <strong>{row.title}</strong>
-                        <span>
-                          {row.repository} · {row.status}
-                        </span>
-                      </span>
-                      <ChevronRightIcon />
-                    </button>
-                  ))}
-                  {rows.length === 0 && <p>No sessions yet. Create a workspace to get started.</p>}
-                </div>
-              </div>
-            ) : (
+              <FeedView rows={rows} onSelect={select} />
+            ) : session ? (
               <>
-                <Conversation
-                  messages={messages}
-                  preview={!connected}
-                  previewPrimary={!connected && selected === "presence"}
-                  title={title}
-                  loading={loading}
-                />
-                <div className="feedback" aria-live="polite">
-                  {error || pollError ? (
-                    <p className="error-text" role="alert">
-                      {error || pollError}
-                    </p>
-                  ) : snapshot && liveFromSnapshot(snapshot)?.run ? (
-                    <p>Agent is working…</p>
-                  ) : notice ? (
-                    <p>{notice}</p>
-                  ) : null}
-                </div>
+                <Conversation turns={turns} sessionId={session.id} loading={loading} />
+                {feedback && (
+                  <p
+                    className={`feedback ${error || pollError ? "error-text" : ""}`}
+                    role={error || pollError ? "alert" : "status"}
+                  >
+                    {feedback}
+                  </p>
+                )}
                 <Composer
-                  key={connected ? "live" : "preview"}
                   draftKey={selected}
                   onSend={send}
                   onStop={() => void stop()}
                   pending={pending}
-                  preview={!connected}
-                  onConnect={() => setModal("connect")}
-                  model={model}
+                  running={running}
+                  model={session.model}
                 />
               </>
+            ) : (
+              <div className="empty-state">
+                <span className="brand-mark large" aria-hidden="true">
+                  π
+                </span>
+                <h2>{connected ? "No workspace selected" : "Connect to pi-hard"}</h2>
+                <button type="button" className="primary-button" onClick={newWorkspace}>
+                  {connected ? "New workspace" : "Connect"}
+                </button>
+              </div>
             )}
           </div>
-          {details && (
-            <aside className="details-panel" aria-label="Session details">
-              <p className="eyebrow">Workspace details</p>
-              <h2>{title}</h2>
-              <dl>
-                <dt>Repository</dt>
-                <dd>{repository}</dd>
-                <dt>Model</dt>
-                <dd>{model}</dd>
-                <dt>Session</dt>
-                <dd>{connected ? (session?.id ?? "No session selected") : "Example session"}</dd>
-                <dt>Connection</dt>
-                <dd>{connected ? "Authenticated API" : "Preview · no live requests"}</dd>
-              </dl>
-              {snapshot?.before && (
-                <p className="muted">Showing the most recent transcript window.</p>
-              )}
-              {snapshot && (
-                <details>
-                  <summary>Raw session snapshot</summary>
-                  <pre>{JSON.stringify(snapshot, null, 2)}</pre>
-                </details>
-              )}
-              <div className="details-note">
-                <SignalIcon />
-                <p>
-                  Real sessions survive Worker restarts. Your session list is saved only in this
-                  browser.
-                </p>
-              </div>
-            </aside>
-          )}
+          {session && !feed && details && <SessionDetails session={session} running={running} />}
         </div>
       </main>
       {modal === "connect" && (
@@ -361,7 +281,7 @@ export function WorkspaceApp() {
           }}
           onDisconnect={() => {
             setToken("");
-            select("presence");
+            select("");
             setModal(null);
             setNotice("");
           }}
@@ -381,6 +301,94 @@ export function WorkspaceApp() {
         />
       )}
     </div>
+  );
+}
+
+function FeedView({
+  rows,
+  onSelect,
+}: {
+  rows: readonly { id: string; title: string; repository: string; updatedAt: number }[];
+  onSelect: (id: string) => void;
+}) {
+  const now = Date.now();
+
+  return (
+    <div className="feed-view">
+      {rows.length === 0 ? (
+        <p className="conversation-status">No activity yet.</p>
+      ) : (
+        <ul className="feed-list">
+          {[...rows]
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .map((row) => (
+              <li key={row.id}>
+                <button type="button" onClick={() => onSelect(row.id)}>
+                  <RepoBadge repository={row.repository} />
+                  <span className="feed-title">{row.title}</span>
+                  <span className="feed-repo">{row.repository}</span>
+                  <span className="feed-time">{ago(row.updatedAt, now)}</span>
+                </button>
+              </li>
+            ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function SessionDetails({ session, running }: { session: SavedSession; running: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const github = /^[\w.-]+\/[\w.-]+$/.test(session.repository);
+
+  return (
+    <aside className="details-card" aria-label="Session details">
+      <section>
+        <h2>Status</h2>
+        <p>
+          <span className={`status-dot ${running ? "working" : "idle"}`} />
+          {running ? "Working" : "Idle"}
+        </p>
+      </section>
+      <section>
+        <h2>Repository</h2>
+        {session.repository ? (
+          <p>
+            <RepoBadge repository={session.repository} />
+            {github ? (
+              <a href={`https://github.com/${session.repository}`} target="_blank" rel="noreferrer">
+                {session.repository}
+              </a>
+            ) : (
+              session.repository
+            )}
+          </p>
+        ) : (
+          <p className="muted">None</p>
+        )}
+      </section>
+      <section>
+        <h2>Model</h2>
+        <p>{session.model}</p>
+      </section>
+      <section>
+        <h2>Session</h2>
+        <p>
+          <code>{session.id}</code>
+          <IconButton
+            label={copied ? "Session ID copied" : "Copy session ID"}
+            onClick={() =>
+              void navigator.clipboard.writeText(session.id).then(
+                () => setCopied(true),
+                () => setCopied(false),
+              )
+            }
+          >
+            {copied ? <CheckIcon /> : <DocumentDuplicateIcon />}
+          </IconButton>
+        </p>
+      </section>
+    </aside>
   );
 }
 
@@ -415,11 +423,7 @@ function ConnectModal({
   }
 
   return (
-    <Modal title="Connect your workspace" onClose={onClose}>
-      <div className="modal-intro">
-        <CommandLineIcon />
-        <p>Use your pi-hard API token to start real coding sessions.</p>
-      </div>
+    <Modal title={connected ? "Connection" : "Connect"} onClose={onClose}>
       <form onSubmit={(event) => void submit(event)}>
         <label htmlFor="api-token">API token</label>
         <Input
@@ -434,8 +438,7 @@ function ConnectModal({
           aria-describedby="token-help"
         />
         <p id="token-help" className="field-help">
-          Kept in memory only, never saved in browser storage. Cloudflare Access must also authorize
-          your browser.
+          Kept in this tab only.
         </p>
         {error && (
           <p role="alert" className="error-text">
@@ -449,14 +452,10 @@ function ConnectModal({
             </button>
           )}
           <button type="submit" className="primary-button" disabled={pending}>
-            {pending ? "Connecting…" : "Connect API"}
+            {pending ? "Connecting…" : "Connect"}
           </button>
         </div>
       </form>
-      <p className="modal-footnote">
-        Local development proxies /api to localhost:8787. Production must serve the UI and protected
-        API on the same origin.
-      </p>
     </Modal>
   );
 }
@@ -518,11 +517,6 @@ function SessionModal({
 
   return (
     <Modal title={mode === "new" ? "New workspace" : "Open an existing session"} onClose={onClose}>
-      <p className="modal-description">
-        {mode === "new"
-          ? "One task, one agent, a workspace of its own."
-          : "Add a known session to this browser’s workspace list."}
-      </p>
       <form onSubmit={(event) => void submit(event)}>
         <label htmlFor="workspace-title">Workspace name</label>
         <Input
@@ -570,10 +564,6 @@ function SessionModal({
               <option value="gpt-6-luna">GPT-6 Luna</option>
               <option value="gpt-6.1-terra">GPT-6.1 Terra</option>
             </Select>
-            <p className="field-help">
-              Uses your connected Codex subscription and GitHub App. No extra network hosts are
-              granted.
-            </p>
           </>
         )}
         {error && (
