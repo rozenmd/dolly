@@ -1,7 +1,13 @@
 import { useEffect, useState, type FormEvent } from "react";
 import * as Schema from "effect/Schema";
 import { Bars3Icon, CheckIcon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
-import { DocumentDuplicateIcon, ListBulletIcon, PlusIcon } from "@heroicons/react/24/outline";
+import {
+  ArchiveBoxIcon,
+  ArrowUturnLeftIcon,
+  DocumentDuplicateIcon,
+  ListBulletIcon,
+  PlusIcon,
+} from "@heroicons/react/24/outline";
 import { Sidebar } from "./components/sidebar";
 import { Composer, Conversation } from "./components/conversation";
 import { IconButton, Input, Modal, RepoBadge } from "./components/ui";
@@ -27,6 +33,7 @@ import {
 import { ago } from "./lib/time";
 import { watchSession } from "./lib/session-stream";
 import { imagesBody, type Attachment } from "./lib/images";
+import { sessionList } from "./lib/session-list";
 
 const storageKey = "dolly.sessions.v1";
 
@@ -61,6 +68,7 @@ export function WorkspaceApp() {
         title: item.title || "Untitled session",
         repository: item.repository,
         updatedAt: item.updatedAt,
+        archived: item.archived,
         running: item.id === selected && running,
       }))
     : [];
@@ -112,7 +120,9 @@ export function WorkspaceApp() {
         const signedIn = status?.state === "connected";
         setCodex(signedIn);
         setAnthropic(claude.connected);
-        setSelected((current) => current || sessions[0]?.id || "");
+        setSelected(
+          (current) => current || sessionList(sessions, "", Date.now()).active[0]?.id || "",
+        );
 
         setModal(!signedIn && !claude.connected ? "codex" : sessions.length ? null : "new");
       },
@@ -142,6 +152,24 @@ export function WorkspaceApp() {
         setSnapshot(value);
         setStreamError("");
         setLoading(false);
+
+        const activity = turnsFromSnapshot(value).flatMap((turn) => [
+          turn.prompt?.at ?? 0,
+          turn.startedAt ?? 0,
+          turn.endedAt ?? 0,
+        ]);
+
+        const updatedAt = activity.reduce((latest, at) => Math.max(latest, at), 0);
+        updateSessions((current) => {
+          if (!current.some((item) => item.id === selected && updatedAt > item.updatedAt))
+            return current;
+
+          return current.map((item) =>
+            item.id === selected
+              ? { ...item, updatedAt: Math.max(updatedAt, item.updatedAt) }
+              : item,
+          );
+        });
       },
       (message) => {
         setStreamError(message);
@@ -151,13 +179,25 @@ export function WorkspaceApp() {
   }, [selected, connected, session?.id]);
 
   function save(next: readonly SavedSession[]) {
-    setSessions(next);
+    updateSessions(() => next);
+  }
 
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(next));
-    } catch {
-      setNotice("Could not save the session list in this browser. Keep a copy of your session ID.");
-    }
+  function updateSessions(update: (current: readonly SavedSession[]) => readonly SavedSession[]) {
+    setSessions((current) => {
+      const next = update(current);
+
+      if (next === current) return current;
+
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(next));
+      } catch {
+        setNotice(
+          "Could not save the session list in this browser. Keep a copy of your session ID.",
+        );
+      }
+
+      return next;
+    });
   }
 
   function select(id: string) {
@@ -166,6 +206,26 @@ export function WorkspaceApp() {
     setMobileOpen(false);
     setError("");
     setStreamError("");
+  }
+
+  function toggleArchive() {
+    if (!session) return;
+
+    updateSessions((current) =>
+      current.map((item) =>
+        item.id === session.id ? { ...item, archived: !item.archived } : item,
+      ),
+    );
+
+    if (!session.archived) {
+      select(
+        sessionList(
+          sessions.filter((item) => item.id !== session.id),
+          "",
+          Date.now(),
+        ).active[0]?.id || "",
+      );
+    }
   }
 
   function newSession() {
@@ -183,8 +243,10 @@ export function WorkspaceApp() {
         requestId,
         ...imagesBody(attachments),
       });
-      save(
-        sessions.map((item) => (item.id === selected ? { ...item, updatedAt: Date.now() } : item)),
+      updateSessions((current) =>
+        current.map((item) =>
+          item.id === selected ? { ...item, updatedAt: Date.now(), archived: false } : item,
+        ),
       );
 
       return true;
@@ -315,6 +377,14 @@ export function WorkspaceApp() {
             <h1>{feed ? "Feed" : session ? session.title || "Untitled session" : "dolly"}</h1>
           </div>
           <div className="header-actions">
+            {session && !feed && (
+              <IconButton
+                label={session.archived ? "Restore session" : "Archive session"}
+                onClick={toggleArchive}
+              >
+                {session.archived ? <ArrowUturnLeftIcon /> : <ArchiveBoxIcon />}
+              </IconButton>
+            )}
             <IconButton label="New session" onClick={newSession}>
               <PlusIcon />
             </IconButton>
@@ -333,7 +403,7 @@ export function WorkspaceApp() {
         <div className="content-layout">
           <div className="conversation-panel">
             {feed ? (
-              <FeedView rows={rows} onSelect={select} />
+              <FeedView rows={rows.filter((row) => !row.archived)} onSelect={select} />
             ) : session ? (
               <>
                 <Conversation turns={turns} sessionId={session.id} loading={loading} />
