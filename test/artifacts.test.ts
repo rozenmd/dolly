@@ -3,9 +3,12 @@ import { expect, it, vi } from "vitest";
 import { artifactTransport } from "../src/git-transport";
 
 it("brokers only the session Artifact repository with scoped, short-lived credentials and rejects redirects", async () => {
+  const artifacts = env.WORKSPACES;
+
+  if (!artifacts) throw new Error("Missing legacy test binding");
   const name = `session-${crypto.randomUUID()}`;
-  await env.WORKSPACES.create(name);
-  using repo = await env.WORKSPACES.get(name);
+  await artifacts.create(name);
+  using repo = await artifacts.get(name);
   const info = await repo.info();
   let seenToken = "";
   let response: "ok" | "redirect" | "failure" = "ok";
@@ -70,16 +73,31 @@ it("brokers only the session Artifact repository with scoped, short-lived creden
         )
       ).status,
     ).toBe(403);
+    expect(
+      (
+        await artifactTransport(
+          new Request(`http://artifacts.workspace/${name}.git/git-receive-pack`, {
+            method: "POST",
+          }),
+          env,
+          name,
+        )
+      ).status,
+    ).toBe(403);
     expect(mocked).toHaveBeenCalledTimes(3);
   } finally {
     mocked.mockRestore();
-    await env.WORKSPACES.delete(name);
+    await artifacts.delete(name);
   }
 });
 
 it("preserves the Artifacts missing-repository discriminator across its binding", async () => {
+  const artifacts = env.WORKSPACES;
+
+  if (!artifacts) throw new Error("Missing legacy test binding");
+
   try {
-    using repo = await env.WORKSPACES.get(`missing-${crypto.randomUUID()}`);
+    using repo = await artifacts.get(`missing-${crypto.randomUUID()}`);
     await repo.info();
     throw new Error("Expected a missing repository");
   } catch (error) {

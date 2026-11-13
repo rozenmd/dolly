@@ -18,6 +18,7 @@ it("prepares a warm workspace only once without repeating checkout or checkpoint
     let checkpoints = 0;
     Object.assign(instance, {
       container: () => Effect.void,
+      installDependencies: () => Effect.succeed(undefined),
       execute: () =>
         Effect.sync(() => {
           checkouts++;
@@ -49,6 +50,7 @@ it("exposes checkout stderr and permits retry after a failed setup", async () =>
     let diagnostics = 0;
     Object.assign(instance, {
       container: () => Effect.void,
+      installDependencies: () => Effect.succeed(undefined),
       execute: (command: string) =>
         Effect.sync(() => {
           if (command === checkoutDiagnosticsScript) {
@@ -96,6 +98,7 @@ it("collects bounded diagnostics after a checkout timeout without masking the ti
     let checkpoints = 0;
     Object.assign(instance, {
       container: () => Effect.void,
+      installDependencies: () => Effect.succeed(undefined),
       execute: (command: string, _cwd: string, timeout: number) => {
         calls.push({ command, timeout });
 
@@ -121,6 +124,7 @@ it("preserves checkout errors even when the diagnostic probe defects", async () 
   await runInDurableObject(sandbox, async (instance) => {
     Object.assign(instance, {
       container: () => Effect.void,
+      installDependencies: () => Effect.succeed(undefined),
       execute: (command: string) =>
         command === checkoutDiagnosticsScript
           ? Effect.die("Diagnostic process crashed")
@@ -143,6 +147,7 @@ it("does not cache preparation until its initial checkpoint succeeds", async () 
     let checkpoints = 0;
     Object.assign(instance, {
       container: () => Effect.void,
+      installDependencies: () => Effect.succeed(undefined),
       execute: () => Effect.succeed({ stdout: "", stderr: "", exitCode: 0 }),
       checkpoint: () =>
         Effect.suspend(() =>
@@ -186,4 +191,160 @@ it("propagates rejected workspace calls without unhandled RPC rejections", async
   }
 
   expect(failure).toMatchObject({ operation: "workspace.configure" });
+});
+
+it("starts setup asynchronously and makes concurrent tools join one checkout/install", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance, state) => {
+    const gate = Promise.withResolvers<void>();
+    let checkouts = 0;
+    let installs = 0;
+    let toolDone = false;
+    Object.assign(instance, {
+      container: () => Effect.void,
+      execute: () =>
+        Effect.sync(() => {
+          checkouts++;
+
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }),
+      installDependencies: () =>
+        Effect.tryPromise(async () => {
+          installs++;
+          await gate.promise;
+        }),
+      checkpoint: () => Effect.void,
+    });
+    expect(await instance.warm(config)).toEqual({ queued: true });
+
+    const tool = instance.prepare(config).then(() => {
+      toolDone = true;
+    });
+
+    try {
+      await expect
+        .poll(() => state.storage.get("workspace:setup"))
+        .toMatchObject({ state: "installing" });
+      expect(toolDone).toBe(false);
+      expect(await instance.diagnostics()).toMatchObject({
+        setup: { state: "installing" },
+      });
+    } finally {
+      gate.resolve();
+      await tool;
+    }
+
+    expect(checkouts).toBe(1);
+    expect(installs).toBe(1);
+    expect(toolDone).toBe(true);
+    await instance.alarm();
+    expect(checkouts).toBe(1);
+  });
+});
+
+it("confirmed restart cancels in-flight setup instead of waiting for the install deadline", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance, state) => {
+    Object.assign(instance, {
+      container: () => Effect.void,
+      execute: () => Effect.succeed({ stdout: "", stderr: "", exitCode: 0 }),
+      installDependencies: () => Effect.never,
+      checkpoint: () => Effect.void,
+    });
+    await instance.warm(config);
+    await expect
+      .poll(() => state.storage.get("workspace:setup"))
+      .toMatchObject({ state: "installing" });
+    await instance.restart();
+    expect(await state.storage.get("snapshot:checkpoint")).toBeUndefined();
+  });
+});
+
+it("reports dependency setup warnings without blocking checkout or repeating setup", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance) => {
+    let installs = 0;
+    Object.assign(instance, {
+      container: () => Effect.void,
+      execute: () => Effect.succeed({ stdout: "", stderr: "", exitCode: 0 }),
+      installDependencies: () =>
+        Effect.sync(() => {
+          installs++;
+
+          return "Package registry is unavailable";
+        }),
+      checkpoint: () => Effect.void,
+    });
+    expect(await instance.prepare(config)).toMatchObject({
+      setup: { state: "warning", error: "Package registry is unavailable" },
+    });
+    await instance.prepare(config);
+    expect(installs).toBe(1);
+  });
+});
+
+it("restores the ordinary outbound policy when a dependency setup is cancelled", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance) => {
+    let httpPolicies = 0;
+    let httpsPolicies = 0;
+    Object.assign(instance, {
+      container: () =>
+        Effect.succeed({
+          interceptAllOutboundHttp: async () => {
+            httpPolicies++;
+          },
+          interceptOutboundHttps: async () => {
+            httpsPolicies++;
+          },
+        }),
+      execute: (command: string) =>
+        command === "python3 /usr/local/lib/dolly-setup.py"
+          ? Effect.never
+          : Effect.succeed({ stdout: "", stderr: "", exitCode: 0 }),
+      checkpoint: () => Effect.void,
+    });
+    await instance.warm(config);
+    await expect.poll(() => httpPolicies).toBe(1);
+    await instance.restart();
+    expect(httpPolicies).toBe(2);
+    expect(httpsPolicies).toBe(2);
+  });
+});
+
+it("keeps the old snapshot pointer if native capture fails", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance, state) => {
+    await state.storage.put("snapshot:checkpoint", { id: "last-acknowledged" });
+    let fail = true;
+    Object.assign(instance, {
+      container: () =>
+        Effect.succeed({
+          snapshotContainer: async () => {
+            if (fail) throw new Error("Snapshot capture unavailable");
+
+            return { id: "next-snapshot", size: 42 };
+          },
+        }),
+      execute: () => Effect.succeed({ stdout: "", stderr: "", exitCode: 0 }),
+      installDependencies: () => Effect.succeed(undefined),
+    });
+    await expect(instance.prepare(config)).rejects.toMatchObject({
+      operation: "workspace.checkpoint",
+    });
+    expect(await state.storage.get("snapshot:checkpoint")).toEqual({ id: "last-acknowledged" });
+    fail = false;
+    await instance.prepare(config);
+    expect(await state.storage.get("snapshot:checkpoint")).toEqual({ id: "next-snapshot" });
+  });
+});
+
+it("can inspect an unstarted sandbox without invoking preparation or starting a container", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance) => {
+    Object.assign(instance, {
+      container: () => Effect.die("Diagnostics must not initialize a container"),
+    });
+    expect(await instance.diagnostics()).toMatchObject({ running: false });
+  });
 });

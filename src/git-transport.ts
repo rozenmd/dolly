@@ -10,58 +10,71 @@ export async function checkedPush(body: ReadableStream<Uint8Array> | null, branc
   if (!body) return null;
   const reader = body.getReader();
   let prefix = new Uint8Array(0);
+  let offset = 0;
 
   try {
     while (true) {
-      if (prefix.length >= 4) {
-        const header = new TextDecoder().decode(prefix.subarray(0, 4));
+      if (prefix.length >= offset + 4) {
+        const header = new TextDecoder().decode(prefix.subarray(offset, offset + 4));
 
         if (!/^[0-9a-f]{4}$/.test(header)) break;
         const length = Number.parseInt(header, 16);
 
         if (length < 5) break;
 
-        if (prefix.length >= length + 4) {
-          const command = new TextDecoder()
-            .decode(prefix.subarray(4, length))
-            .split("\0")[0]
+        if (prefix.length >= offset + length) {
+          const packet = new TextDecoder()
+            .decode(prefix.subarray(offset + 4, offset + length))
             .trimEnd();
 
-          const match = /^([0-9a-f]{40}) ([0-9a-f]{40}) (refs\/heads\/[^\s]+)$/.exec(command);
+          // Shallow clones announce their boundary commits before ref updates.
+          // These are not writes; still validate every subsequent update.
+          if (/^shallow [0-9a-f]{40}$/.test(packet)) {
+            offset += length;
 
-          if (
-            !match ||
-            /^0+$/.test(match[2]) ||
-            match[3] !== `refs/heads/${branch}` ||
-            new TextDecoder().decode(prefix.subarray(length, length + 4)) !== "0000"
-          )
-            break;
+            if (offset > 65_536) break;
+            continue;
+          }
 
-          return new ReadableStream<Uint8Array>({
-            start(controller) {
-              controller.enqueue(prefix);
-            },
-            async pull(controller) {
-              try {
-                const value = await reader.read();
+          if (prefix.length >= offset + length + 4) {
+            const command = packet.split("\0")[0];
+            const match = /^([0-9a-f]{40}) ([0-9a-f]{40}) (refs\/heads\/[^\s]+)$/.exec(command);
 
-                if (value.done) {
+            if (
+              !match ||
+              /^0+$/.test(match[2]) ||
+              match[3] !== `refs/heads/${branch}` ||
+              new TextDecoder().decode(prefix.subarray(offset + length, offset + length + 4)) !==
+                "0000"
+            )
+              break;
+
+            return new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(prefix);
+              },
+              async pull(controller) {
+                try {
+                  const value = await reader.read();
+
+                  if (value.done) {
+                    reader.releaseLock();
+                    controller.close();
+                  } else controller.enqueue(value.value);
+                } catch (error) {
                   reader.releaseLock();
-                  controller.close();
-                } else controller.enqueue(value.value);
-              } catch (error) {
-                reader.releaseLock();
-                controller.error(error);
-              }
-            },
-            async cancel(reason) {
-              try {
-                await reader.cancel(reason);
-              } finally {
-                reader.releaseLock();
-              }
-            },
-          });
+                  controller.error(error);
+                }
+              },
+              async cancel(reason) {
+                try {
+                  await reader.cancel(reason);
+                } finally {
+                  reader.releaseLock();
+                }
+              },
+            });
+          }
         }
       }
 
@@ -89,7 +102,7 @@ export async function checkedPush(body: ReadableStream<Uint8Array> | null, branc
   }
 }
 
-export type WorkspaceOutboundProps = WorkspaceConfig & { artifactRepository: string };
+export type WorkspaceOutboundProps = WorkspaceConfig & { artifactRepository?: string };
 
 /** Only a Sandbox can mint this per-conversation capability through ctx.exports. */
 export class WorkspaceOutbound extends WorkerEntrypoint<Env, WorkspaceOutboundProps> {
@@ -100,7 +113,9 @@ export class WorkspaceOutbound extends WorkerEntrypoint<Env, WorkspaceOutboundPr
       return this.env.AGENT.getByName("owner").gitTransport(request, this.ctx.props);
 
     if (url.hostname === "artifacts.workspace")
-      return artifactTransport(request, this.env, this.ctx.props.artifactRepository);
+      return this.ctx.props.artifactRepository
+        ? artifactTransport(request, this.env, this.ctx.props.artifactRepository)
+        : new Response("Legacy workspace transport is disabled", { status: 403 });
 
     if (
       url.protocol !== "https:" ||
@@ -157,10 +172,14 @@ export function gitRoute(request: Request, repository: string, hostname = "githu
 export async function artifactTransport(request: Request, env: Env, repository: string) {
   const route = gitRoute(request, repository, "artifacts.workspace");
 
-  if (!route) return new Response("Artifact Git route denied", { status: 403 });
+  if (!route || route.write)
+    return new Response("Legacy Artifact read route denied", { status: 403 });
+
+  if (!env.WORKSPACES)
+    return new Response("Legacy workspace migration is not enabled", { status: 403 });
   using repo = await env.WORKSPACES.get(repository);
   const info = await repo.info();
-  const credential = await repo.createToken(route.write ? "write" : "read", 300);
+  const credential = await repo.createToken("read", 300);
   const headers = new Headers();
 
   for (const name of ["Content-Type", "Accept", "Git-Protocol", "Content-Encoding"]) {

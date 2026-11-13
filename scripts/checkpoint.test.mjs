@@ -6,10 +6,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-const script = fileURLToPath(new URL("../container/checkpoint.py", import.meta.url));
+const script = fileURLToPath(new URL("../test/fixtures/legacy-checkpoint.py", import.meta.url));
+const restore = fileURLToPath(new URL("../container/restore-legacy.py", import.meta.url));
+
+const modernPython =
+  spawnSync("python3", ["-c", "import tarfile; assert hasattr(tarfile, 'data_filter')"]).status ===
+  0;
 
 for (const symlinked of [false, true])
-  test(`checkpoints dirty, staged, ignored, nested-repository and binary files without changing user history or index (symlinked root=${symlinked})`, (t) => {
+  test(`checkpoints dirty, staged, ignored, nested-repository and binary files without changing user history or index (symlinked root=${symlinked})`, async (t) => {
     const root = mkdtempSync(join(tmpdir(), "dolly-checkpoint-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const repo = join(root, "repo");
@@ -103,5 +108,51 @@ for (const symlinked of [false, true])
         encoding: "utf8",
       }).trim(),
       first,
+    );
+    await t.test(
+      "imports the acknowledged legacy checkpoint without FUSE",
+      { skip: !modernPython },
+      () => {
+        const workspace = join(root, "local-workspace");
+        mkdirSync(workspace);
+
+        const wrong = spawnSync(
+          "python3",
+          [restore, remote, "checkpoint-first", "0".repeat(40), workspace],
+          { encoding: "utf8" },
+        );
+
+        assert.notEqual(wrong.status, 0);
+
+        const imported = spawnSync(
+          "python3",
+          [restore, remote, "checkpoint-first", first, workspace],
+          {
+            encoding: "utf8",
+          },
+        );
+
+        assert.equal(imported.status, 0, imported.stdout + imported.stderr);
+        const local = join(workspace, "repo");
+
+        const restoredGit = (...args) =>
+          execFileSync("git", ["-C", local, ...args], { encoding: "utf8" });
+
+        assert.equal(restoredGit("rev-parse", "HEAD").trim(), head);
+        assert.equal(restoredGit("show", ":tracked"), "staged");
+        assert.equal(readFileSync(join(local, "tracked"), "utf8"), "unstaged");
+        assert.equal(readFileSync(join(local, "ignored"), "utf8"), "keep me");
+        assert.equal(readFileSync(join(local, "link"), "utf8"), "unstaged");
+        assert.deepEqual(readFileSync(join(local, ".git/index")), index);
+        assert.deepEqual(readFileSync(join(local, "binary\nname")), Buffer.from([0, 255, 1, 0]));
+        assert.equal(
+          execFileSync("git", ["-C", join(local, "nested"), "rev-parse", "--is-inside-work-tree"], {
+            encoding: "utf8",
+          }).trim(),
+          "true",
+        );
+        assert.equal(execFileSync("test", ["-d", join(local, "empty")], { encoding: "utf8" }), "");
+        readFileSync(join(workspace, "ready"));
+      },
     );
   });

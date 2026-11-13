@@ -1,4 +1,4 @@
-"""Write a filesystem checkpoint to a separate Git repository, never the user's index."""
+"""Legacy format fixture producer. New runtime checkpoints use native snapshots."""
 import os
 import shutil
 import stat

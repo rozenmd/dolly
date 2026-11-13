@@ -27,8 +27,10 @@ test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", ()
   assert.deepEqual(worker.assets, { runWorkerFirst: true });
   assert.equal(worker.env.ASSETS.type, "assets");
   assert.deepEqual(worker.compatibilityFlags, ["nodejs_compat"]);
-  assert.equal(worker.env.WORKSPACES.type, "artifacts");
-  assert.equal(worker.env.WORKSPACES.namespace, "dolly-workspaces");
+  assert.equal(
+    worker.env.WORKSPACES?.type,
+    process.env.DOLLY_LEGACY_ARTIFACTS === "true" ? "artifacts" : undefined,
+  );
   assert.equal(worker.exports.WorkspaceOutbound.type, "worker");
   assert.equal(worker.previewUrls, false);
   assert.equal(worker.env.ACCESS_LOCAL_DEV.value, "false");

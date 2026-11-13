@@ -54,6 +54,11 @@ export const ConversationWorkspace = defineDoc<WorkspaceState>({
 
 export const WorkspaceRequest = Schema.Union([
   Schema.Struct({ action: Schema.Literal("repositories") }),
+  Schema.Struct({ action: Schema.Literal("diagnostics") }),
+  Schema.Struct({
+    action: Schema.Literal("restart"),
+    discardUncheckpointed: Schema.Literal(true),
+  }),
   Schema.Struct({
     action: Schema.Literals(["checkout", "attach"]),
     repository: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(201)),
@@ -78,6 +83,8 @@ export const WorkspaceRequest = Schema.Union([
 export const WorkspaceToolInput = Schema.Struct({
   action: Schema.Literals([
     "repositories",
+    "diagnostics",
+    "restart",
     "checkout",
     "attach",
     "status",
@@ -91,6 +98,7 @@ export const WorkspaceToolInput = Schema.Struct({
   message: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1000))),
   title: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200))),
   body: Schema.optional(Schema.String.check(Schema.isMaxLength(32768))),
+  discardUncheckpointed: Schema.optional(Schema.Boolean),
 });
 
 /** Selecting a repository never reuses another repository's sandbox or resets a checkout. */
@@ -168,89 +176,33 @@ export const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") 
 
 export type WorkspaceCheckpoint = { branch: string; commit: string };
 
+export type WorkspaceSnapshot = { id: string };
+
+export type WorkspaceSetup = {
+  state: "queued" | "checkout" | "installing" | "ready" | "warning" | "failed";
+  updatedAt: number;
+  error?: string;
+};
+
 /** Fixed, read-only diagnostics: never print environment, process arguments or user file contents. */
 export const checkoutDiagnosticsScript = `set +e
 printf '\\ncheckout phase\\n'
 cat /workspace/checkout-phase
-printf '\\nmounts\\n'
-findmnt -t fuse.artifact-fs -o TARGET,FSTYPE,OPTIONS
 printf '\\nprocesses (no arguments)\\n'
 ps -eo pid,ppid,stat,etime,comm
 printf '\\nlock metadata (no contents)\\n'
-stat /workspace/artifact-fs/repos/repo/git/index.lock
-printf '\\nFUSE permissions\\n'
-id
-stat /usr/bin/fusermount3 /dev/fuse /workspace/mounts/repo
-grep -E '^(Cap|NoNewPrivs)' /proc/self/status
-printf '\\nArtifactFS log tail (last 12 KiB)\\n'
-tail -c 12288 /workspace/artifact-fs.log
+stat /workspace/repo/.git/index.lock
+printf '\\nworkspace metadata\\n'
+stat /workspace/ready /workspace/repo /workspace/repo/.git
 exit 0`;
 
 export function checkoutScript(config: WorkspaceConfig) {
   const remote = shellQuote(`http://github.workspace/${config.repository}.git`);
 
-  return `set -eu
-if test -f /workspace/ready; then exit 0; fi
-phase() { printf '%s\\n' "$1" > /workspace/checkout-phase; }
-phase resolve_ref
-remote=${remote}
-ref=${shellQuote(config.ref)}
-# Resolve HEAD, short branch names and tags without changing their meaning.
-advertisement=$(git ls-remote --symref "$remote" "$ref" "refs/heads/$ref" "refs/tags/$ref")
-canonical=$(printf '%s\\n' "$advertisement" | awk -v ref="$ref" '
-  $1 == "ref:" { symbolic = $2 }
-  $2 == ref { exact = $2 }
-  $2 == "refs/heads/" ref { branch = $2 }
-  $2 == "refs/tags/" ref { tag = $2 }
-  END { if (symbolic) print symbolic; else if (exact) print exact; else if (branch) print branch; else print tag }
-')
-if test -n "$canonical" && test "$canonical" != HEAD; then
-  phase artifactfs_mount
-  dolly-mount repo "$remote" "$canonical"
-  ln -sfn /workspace/mounts/repo /workspace/repo
-else
-  phase exact_revision_checkout
-  # Unadvertised commit IDs have no named ref for ArtifactFS. Retain exact-revision checkout.
-  rm -rf /workspace/checkout
-  mkdir -p /workspace/checkout
-  git -C /workspace/checkout init
-  git -C /workspace/checkout remote add origin "$remote"
-  git -C /workspace/checkout -c protocol.file.allow=never fetch --no-tags -- origin "$ref"
-  git -C /workspace/checkout checkout --detach FETCH_HEAD
-  mv /workspace/checkout /workspace/repo
-fi
-phase git_config
-cd /workspace/repo
-git config user.name 'Dolly'
-git config user.email 'dolly@users.noreply.github.com'
-phase git_checkout_branch
-# The mount (or exact-revision checkout) already has the right tree and index.
-# checkout -B refreshes the index through FUSE and eagerly hydrates the whole tree.
-dolly-branch ${shellQuote(config.branch)}
-phase ready
-touch /workspace/ready`;
+  return `sh /usr/local/lib/dolly-checkout.sh ${remote} ${shellQuote(config.ref)} ${shellQuote(config.branch)}`;
 }
 
+/** One-time, read-only import of the last acknowledged legacy checkpoint. */
 export function restoreScript(repository: string, checkpoint: WorkspaceCheckpoint) {
-  return `set -eu
-if test -f /workspace/ready; then exit 0; fi
-dolly-mount state ${shellQuote(`http://artifacts.workspace/${repository}.git`)} ${shellQuote(`refs/heads/${checkpoint.branch}`)}
-test "$(git -C /workspace/mounts/state rev-parse HEAD)" = ${shellQuote(checkpoint.commit)}
-mkdir -p /workspace/git /workspace/mounts/state/files
-python3 -c 'import os, tarfile; tarfile.open("/workspace/mounts/state/git.tar").extractall("/workspace/git", filter="data"); tarfile.open("/workspace/mounts/state/nested.tar").extractall("/workspace/mounts/state", filter="data"); [os.makedirs(b"/workspace/mounts/state/" + path, exist_ok=True) for path in open("/workspace/mounts/state/directories", "rb").read().split(b"\\0") if path]'
-# The user's index, refs, reflogs and dirty files are separate from the checkpoint repository.
-printf 'gitdir: /workspace/git\\n' > /workspace/mounts/state/files/.git
-ln -sfn /workspace/mounts/state/files /workspace/repo
-git -C /workspace/repo config core.worktree /workspace/repo
-git -C /workspace/repo config --unset core.fsmonitor || test "$?" = 5
-git -C /workspace/repo config --unset core.untrackedCache || test "$?" = 5
-touch /workspace/ready`;
-}
-
-export function checkpointScript(
-  repository: string,
-  branch: string,
-  previous?: WorkspaceCheckpoint,
-) {
-  return `python3 /usr/local/lib/dolly-checkpoint.py ${shellQuote(`http://artifacts.workspace/${repository}.git`)} ${shellQuote(branch)} ${shellQuote(previous ? `refs/heads/${previous.branch}` : "")}`;
+  return `python3 /usr/local/lib/dolly-restore-legacy.py ${shellQuote(`http://artifacts.workspace/${repository}.git`)} ${shellQuote(checkpoint.branch)} ${shellQuote(checkpoint.commit)}`;
 }

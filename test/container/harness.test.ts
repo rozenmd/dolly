@@ -4,6 +4,8 @@ import { SELF, runInDurableObject } from "cloudflare:test";
 import { expect, it, vi } from "vitest";
 import { headers, signIn } from "../session";
 import { workspaceConfig } from "../../src/workspace";
+import * as Effect from "effect/Effect";
+import { attempt, OperationError } from "../../src/operations";
 
 it("runs the registered coding tools on another owner's repository, pushes a tested commit, opens a PR, and restores dirty work", async () => {
   const remoteName = crypto.randomUUID();
@@ -78,7 +80,6 @@ mkdir -p remotes/another-owner
 
   let generation = 0;
   let opened = false;
-  let failCheckpoint = false;
 
   const originalFetch = globalThis.fetch;
 
@@ -154,16 +155,7 @@ mkdir -p remotes/another-owner
       return Response.json({ default_branch: "main" });
     }
 
-    if (url.hostname !== "github.com") {
-      if (failCheckpoint && url.pathname.endsWith("/git-receive-pack")) {
-        const saved = await originalFetch(input, init);
-        await saved.arrayBuffer();
-
-        return new Response("Checkpoint saved but acknowledgement lost", { status: 503 });
-      }
-
-      return originalFetch(input, init);
-    }
+    if (url.hostname !== "github.com") return originalFetch(input, init);
 
     expect(new Headers(init?.headers).get("Authorization")).toBe(
       `Basic ${btoa("x-access-token:private-installation-token")}`,
@@ -272,7 +264,7 @@ mkdir -p remotes/another-owner
           const value = JSON.parse(part.text);
           expect(value.error).toBeUndefined();
 
-          if ("exitCode" in value) expect(value.exitCode).toBe(0);
+          if ("exitCode" in value) expect(value.exitCode, JSON.stringify(value)).toBe(0);
         }
     }
 
@@ -285,7 +277,7 @@ mkdir -p remotes/another-owner
     const config = workspaceConfig({ repository: "another-owner/project", ref: "main" }, id);
 
     const checkpoint = () =>
-      runInDurableObject(sandbox, async (_, state) => state.storage.get("artifact:checkpoint"));
+      runInDurableObject(sandbox, async (_, state) => state.storage.get("snapshot:checkpoint"));
 
     const beforePrepare = await checkpoint();
 
@@ -294,7 +286,9 @@ mkdir -p remotes/another-owner
     expect(await checkpoint()).toEqual(beforePrepare);
 
     const dirty = await sandbox.run(`set -eu
-mountpoint /workspace/mounts/repo
+test ! -L /workspace/repo
+test -d .git
+test "$(git rev-parse --is-shallow-repository)" = true
 printf 'staged work' > staged.txt
 git add staged.txt
 printf 'unstaged work' > staged.txt
@@ -311,7 +305,7 @@ ln -s dirty.txt dirty-link`);
     );
 
     const restored = await sandbox.run(
-      "mountpoint /workspace/mounts/state; git show :staged.txt; cat staged.txt ignored.txt dirty-link; test -d empty-directory; git status --porcelain",
+      "test ! -L /workspace/repo; git show :staged.txt; cat staged.txt ignored.txt dirty-link; test -d empty-directory; git status --porcelain",
     );
 
     expect(restored.exitCode, restored.stderr).toBe(0);
@@ -322,7 +316,29 @@ ln -s dirty.txt dirty-link`);
     await sandbox.prepare(config);
     expect(await checkpoint()).toEqual(afterRestore);
 
-    failCheckpoint = true;
+    await runInDurableObject(sandbox, async (instance, state) => {
+      let fail = true;
+      Object.assign(instance, {
+        publishSnapshot: (snapshot: { id: string }) =>
+          Effect.suspend(() => {
+            if (fail) {
+              fail = false;
+
+              return Effect.fail(
+                new OperationError({
+                  operation: "workspace.checkpoint.save",
+                  message: "Snapshot acknowledgement unavailable",
+                  details: null,
+                }),
+              );
+            }
+
+            return attempt("workspace.checkpoint.save", () =>
+              state.storage.put("snapshot:checkpoint", snapshot),
+            );
+          }),
+      });
+    });
     // Await RPC directly: Vitest's .rejects leaves an unhandled RPC rejection.
     let checkpointError: unknown;
 
@@ -333,11 +349,10 @@ ln -s dirty.txt dirty-link`);
     }
 
     expect(checkpointError).toMatchObject({
-      operation: "workspace.checkpoint",
-      message: "Artifact checkpoint failed",
-      details: { exitCode: 1 },
+      operation: "workspace.checkpoint.save",
+      message: "Snapshot acknowledgement unavailable",
     });
-    failCheckpoint = false;
+    expect(await checkpoint()).toEqual(afterRestore);
     await sandbox.restart();
 
     const recovered = await sandbox.run(
@@ -353,6 +368,13 @@ ln -s dirty.txt dirty-link`);
 
     expect(denied.exitCode).toBe(22);
     expect(denied.stdout).toContain("Network destination not enabled for this session");
+
+    const registryAfterSetup = await sandbox.run(
+      "curl --silent --show-error --fail-with-body --max-time 5 https://registry.npmjs.org",
+    );
+
+    expect(registryAfterSetup.exitCode).toBe(22);
+    expect(registryAfterSetup.stdout).toContain("Network destination not enabled for this session");
 
     const verification = await remote.run(
       "git --git-dir=remotes/another-owner/project.git for-each-ref --format='%(refname)' refs/heads/",
@@ -379,7 +401,7 @@ git push ../remotes/another-owner/project.git HEAD:main`);
     expect(await fresh.readFile("/workspace/repo/latest.txt")).toBe("latest main\n");
     await sandbox.prepare(config);
     expect(await sandbox.readFile("/workspace/repo/dirty.txt")).toBe("unsaved work");
-    expect((await env.WORKSPACES.list()).repos.length).toBeGreaterThan(0);
+    expect(env.WORKSPACES).toBeUndefined();
   } finally {
     mocked.mockRestore();
     await remote.restart();

@@ -11,6 +11,13 @@ const sandbox = defineContainer({
   images: { sandbox: { dockerfile: "./Dockerfile" } },
 });
 
+type LegacyBindings = { WORKSPACES?: ReturnType<typeof bindings.artifacts> };
+
+const legacyBindings: LegacyBindings = {};
+
+if (process.env.DOLLY_LEGACY_ARTIFACTS === "true")
+  legacyBindings.WORKSPACES = bindings.artifacts({ namespace: "dolly-workspaces" });
+
 export default defineConfig({
   worker: {
     name: workerName,
@@ -21,7 +28,8 @@ export default defineConfig({
     compatibilityFlags: ["nodejs_compat"],
     env: {
       ASSETS: bindings.assets(),
-      WORKSPACES: bindings.artifacts({ namespace: "dolly-workspaces" }),
+      // Opt in only while importing an older deployment's checkpoints.
+      ...legacyBindings,
       SCREENSHOTS: bindings.r2({ name: screenshotsBucket.name }),
       ACCESS_TEAM_DOMAIN: bindings.text(access.ACCESS_TEAM_DOMAIN),
       ACCESS_AUD: bindings.text(access.ACCESS_AUD),
