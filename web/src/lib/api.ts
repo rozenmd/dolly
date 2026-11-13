@@ -260,13 +260,39 @@ export type ApiBody = {
   workspace?: { repository: string };
 };
 
-export async function request(path: string, token: string, body?: ApiBody, signal?: AbortSignal) {
+export const CodexStatus = Schema.Union([
+  Schema.Struct({ state: Schema.Literals(["connected", "not_connected", "expired"]) }),
+  Schema.Struct({
+    state: Schema.Literal("awaiting_code"),
+    verificationUri: Schema.String,
+    userCode: Schema.String,
+    expiresAt: Schema.Number,
+    pollAfterSeconds: Schema.Number,
+  }),
+]);
+
+export type CodexStatus = typeof CodexStatus.Type;
+
+/** Reads, starts (POST) or cancels and signs out of (DELETE) the ChatGPT device login. */
+export async function codexLogin(token: string, method: "GET" | "POST" | "DELETE" = "GET") {
+  const text = await request("/auth/codex", token, undefined, undefined, method);
+
+  return Schema.decodeUnknownSync(Schema.fromJsonString(CodexStatus))(text);
+}
+
+export async function request(
+  path: string,
+  token: string,
+  body?: ApiBody,
+  signal?: AbortSignal,
+  method: "GET" | "POST" | "DELETE" = body ? "POST" : "GET",
+) {
   const headers = new Headers({ Authorization: `Bearer ${token}` });
 
   if (body) headers.set("Content-Type", "application/json");
 
   const response = await fetch(`/api${path}`, {
-    method: body ? "POST" : "GET",
+    method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
     signal,

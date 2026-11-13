@@ -5,7 +5,9 @@ import { DocumentDuplicateIcon, ListBulletIcon, PlusIcon } from "@heroicons/reac
 import { Sidebar } from "./components/sidebar";
 import { Composer, Conversation } from "./components/conversation";
 import { IconButton, Input, Modal, RepoBadge, Select } from "./components/ui";
+import { CodexLogin } from "./components/codex-login";
 import {
+  codexLogin,
   liveFromSnapshot,
   readSessions,
   request,
@@ -27,7 +29,8 @@ export function WorkspaceApp() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [feed, setFeed] = useState(false);
   const [details, setDetails] = useState(false);
-  const [modal, setModal] = useState<"connect" | "new" | "import" | null>(null);
+  const [modal, setModal] = useState<"connect" | "codex" | "new" | "import" | null>(null);
+  const [codex, setCodex] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [pollError, setPollError] = useState("");
   const [notice, setNotice] = useState("");
@@ -124,7 +127,7 @@ export function WorkspaceApp() {
 
   function newWorkspace() {
     setMobileOpen(false);
-    setModal(connected ? "new" : "connect");
+    setModal(!connected ? "connect" : codex === false ? "codex" : "new");
   }
 
   async function send(content: string, requestId: string) {
@@ -257,9 +260,19 @@ export function WorkspaceApp() {
                 <span className="brand-mark large" aria-hidden="true">
                   π
                 </span>
-                <h2>{connected ? "No workspace selected" : "Connect to pi-hard"}</h2>
+                <h2>
+                  {!connected
+                    ? "Connect to pi-hard"
+                    : codex === false
+                      ? "Sign in to ChatGPT"
+                      : "No workspace selected"}
+                </h2>
                 <button type="button" className="primary-button" onClick={newWorkspace}>
-                  {connected ? "New workspace" : "Connect"}
+                  {!connected
+                    ? "Connect"
+                    : codex === false
+                      ? "Sign in with ChatGPT"
+                      : "New workspace"}
                 </button>
               </div>
             )}
@@ -270,22 +283,40 @@ export function WorkspaceApp() {
       {modal === "connect" && (
         <ConnectModal
           connected={connected}
+          token={token}
+          codex={codex}
           onClose={() => setModal(null)}
-          onConnect={(value) => {
+          onConnect={(value, signedIn) => {
             setToken(value);
+            setCodex(signedIn);
             setSelected(sessions[0]?.id ?? "");
             setSnapshot(null);
-            setModal(sessions.length ? null : "new");
+            setModal(!signedIn ? "codex" : sessions.length ? null : "new");
             setNotice("");
             setError("");
           }}
+          onCodexSignIn={() => setModal("codex")}
+          onCodexSignOut={() => setCodex(false)}
           onDisconnect={() => {
             setToken("");
+            setCodex(null);
             select("");
             setModal(null);
             setNotice("");
           }}
         />
+      )}
+      {modal === "codex" && (
+        <Modal title="Sign in to ChatGPT" onClose={() => setModal(null)}>
+          <CodexLogin
+            token={token}
+            onConnected={() => {
+              setCodex(true);
+              setModal(sessions.length ? null : "new");
+            }}
+            onCancel={() => setModal(null)}
+          />
+        </Modal>
       )}
       {(modal === "new" || modal === "import") && (
         <SessionModal
@@ -394,18 +425,42 @@ function SessionDetails({ session, running }: { session: SavedSession; running: 
 
 function ConnectModal({
   connected,
+  token,
+  codex,
   onClose,
   onConnect,
+  onCodexSignIn,
+  onCodexSignOut,
   onDisconnect,
 }: {
   connected: boolean;
+  token: string;
+  codex: boolean | null;
   onClose: () => void;
-  onConnect: (token: string) => void;
+  onConnect: (token: string, codexSignedIn: boolean) => void;
+  onCodexSignIn: () => void;
+  onCodexSignOut: () => void;
   onDisconnect: () => void;
 }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+
+  async function signOut() {
+    if (!confirm("Sign out of ChatGPT? Agents can't run until you sign in again.")) return;
+
+    setPending(true);
+    setError("");
+
+    try {
+      await codexLogin(token, "DELETE");
+      onCodexSignOut();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not sign out of ChatGPT.");
+    } finally {
+      setPending(false);
+    }
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -413,8 +468,10 @@ function ConnectModal({
     setError("");
 
     try {
-      await request("/integrations/github", value.trim());
-      onConnect(value.trim());
+      const next = value.trim();
+      await request("/integrations/github", next);
+      const status = await codexLogin(next);
+      onConnect(next, status.state === "connected");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not connect to your API.");
     } finally {
@@ -424,6 +481,29 @@ function ConnectModal({
 
   return (
     <Modal title={connected ? "Connection" : "Connect"} onClose={onClose}>
+      {connected && (
+        <div className="connection-row">
+          <span className={`status-dot ${codex ? "idle" : ""}`} />
+          <span className="connection-label">
+            ChatGPT
+            <span className="muted">{codex ? "Signed in" : "Not signed in"}</span>
+          </span>
+          {codex ? (
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={pending}
+              onClick={() => void signOut()}
+            >
+              Sign out
+            </button>
+          ) : (
+            <button type="button" className="primary-button" onClick={onCodexSignIn}>
+              Sign in
+            </button>
+          )}
+        </div>
+      )}
       <form onSubmit={(event) => void submit(event)}>
         <label htmlFor="api-token">API token</label>
         <Input

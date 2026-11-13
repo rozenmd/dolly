@@ -48,6 +48,8 @@ test("authenticated create, send, stop, reload, and error recovery", async ({ pa
 
     if (path === "/api/integrations/github") return route.fulfill({ json: { connected: true } });
 
+    if (path === "/api/auth/codex") return route.fulfill({ json: { state: "connected" } });
+
     if (path === "/api/sessions")
       return route.fulfill({ status: 201, json: { id: "test-session", model: "gpt-6-sol" } });
 
@@ -101,4 +103,58 @@ test("authenticated create, send, stop, reload, and error recovery", async ({ pa
   expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(token);
   await page.reload();
   await expect(page.getByRole("heading", { name: "Connect to pi-hard" })).toBeVisible();
+});
+
+test("ChatGPT device sign-in shows the code, polls until approved, then opens a new workspace", async ({
+  page,
+}) => {
+  const token = "test-token-with-at-least-32-characters";
+  const calls: string[] = [];
+  let polls = 0;
+
+  const awaiting = {
+    state: "awaiting_code",
+    verificationUri: "https://auth.openai.com/codex/device",
+    userCode: "ABCD-1234",
+    expiresAt: Date.now() + 900_000,
+    pollAfterSeconds: 1,
+  };
+
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+
+    if (path === "/api/integrations/github") return route.fulfill({ json: { connected: true } });
+
+    if (path !== "/api/auth/codex") return route.fulfill({ status: 404, json: { error: "x" } });
+
+    calls.push(method);
+
+    if (method === "POST") return route.fulfill({ json: awaiting });
+
+    if (calls.filter((call) => call === "POST").length === 0)
+      return route.fulfill({ json: { state: "not_connected" } });
+
+    polls += 1;
+
+    if (polls === 2) return route.fulfill({ status: 502, json: { error: "Temporary failure" } });
+
+    return route.fulfill({ json: polls < 3 ? awaiting : { state: "connected" } });
+  });
+  await page.goto("/", { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await page.getByLabel("API token", { exact: true }).fill(token);
+  await page.getByRole("dialog").getByRole("button", { name: "Connect", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Sign in to ChatGPT" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Sign in with ChatGPT" }).click();
+  await expect(page.getByRole("button", { name: "Copy code ABCD-1234" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open ChatGPT" })).toHaveAttribute(
+    "href",
+    "https://auth.openai.com/codex/device",
+  );
+  await expect(page.getByRole("dialog", { name: "New workspace" })).toBeVisible({
+    timeout: 10_000,
+  });
+  expect(polls).toBe(3);
 });
