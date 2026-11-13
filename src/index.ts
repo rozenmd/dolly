@@ -321,6 +321,21 @@ app.get("/api/sessions/:id/tasks/:taskId", (c) =>
   ),
 );
 
+app.get("/api/sessions/:id/events", async (c) => {
+  const origin = c.req.header("Origin");
+
+  if (origin && origin !== new URL(c.req.url).origin)
+    return c.json({ error: "Cross-origin WebSocket connections are forbidden" }, 403);
+
+  if (c.req.header("Upgrade")?.toLowerCase() !== "websocket")
+    return c.json({ error: "Expected a WebSocket upgrade" }, 426);
+
+  const url = new URL("https://agent/");
+  url.searchParams.set("session", c.req.param("id"));
+
+  return owner(c).fetch(new Request(url, { headers: { Upgrade: "websocket" } }));
+});
+
 app.get("/api/sessions/:id", (c) =>
   handle(
     c,

@@ -22,6 +22,7 @@ import {
   sessionBody,
 } from "./lib/api";
 import { ago } from "./lib/time";
+import { watchSession } from "./lib/session-stream";
 
 const storageKey = "dolly.sessions.v1";
 
@@ -38,7 +39,7 @@ export function WorkspaceApp() {
   const [modal, setModal] = useState<"settings" | "codex" | "new" | "import" | null>(null);
   const [codex, setCodex] = useState<boolean | null>(null);
   const [error, setError] = useState("");
-  const [pollError, setPollError] = useState("");
+  const [streamError, setStreamError] = useState("");
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -120,42 +121,22 @@ export function WorkspaceApp() {
       return;
     }
 
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
     setSnapshot(null);
     setLoading(true);
+    setStreamError("");
 
-    async function poll() {
-      try {
-        const text = await request(
-          `/sessions/${encodeURIComponent(selected)}`,
-          undefined,
-          controller.signal,
-        );
-
-        const value = Schema.decodeUnknownSync(Schema.fromJsonString(Snapshot))(text);
-
-        if (!controller.signal.aborted) {
-          setSnapshot(value);
-          setPollError("");
-        }
-      } catch (cause) {
-        if (!controller.signal.aborted)
-          setPollError(cause instanceof Error ? cause.message : "Could not load the session.");
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-          timer = setTimeout(() => void poll(), 2500);
-        }
-      }
-    }
-
-    void poll();
-
-    return () => {
-      controller.abort();
-      clearTimeout(timer);
-    };
+    return watchSession(
+      selected,
+      (value) => {
+        setSnapshot(value);
+        setStreamError("");
+        setLoading(false);
+      },
+      (message) => {
+        setStreamError(message);
+        setLoading(false);
+      },
+    );
   }, [selected, connected, session?.id]);
 
   function save(next: readonly SavedSession[]) {
@@ -173,7 +154,7 @@ export function WorkspaceApp() {
     setFeed(false);
     setMobileOpen(false);
     setError("");
-    setPollError("");
+    setStreamError("");
   }
 
   function newSession() {
@@ -220,7 +201,7 @@ export function WorkspaceApp() {
     }
   }
 
-  const feedback = error || pollError || notice;
+  const feedback = error || streamError || notice;
 
   if (!auth?.user)
     return (
@@ -333,8 +314,8 @@ export function WorkspaceApp() {
                 <Conversation turns={turns} sessionId={session.id} loading={loading} />
                 {feedback && (
                   <p
-                    className={`feedback ${error || pollError ? "error-text" : ""}`}
-                    role={error || pollError ? "alert" : "status"}
+                    className={`feedback ${error || streamError ? "error-text" : ""}`}
+                    role={error || streamError ? "alert" : "status"}
                   >
                     {feedback}
                   </p>

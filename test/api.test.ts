@@ -18,6 +18,7 @@ describe("Hono Worker in workerd", () => {
       ["auth/codex", "DELETE"],
       ["sessions", "POST"],
       ["sessions/missing", "GET"],
+      ["sessions/missing/events", "GET"],
       ["sessions/missing/messages", "POST"],
       ["sessions/missing/abort", "POST"],
       ["sessions/missing/children", "GET"],
@@ -32,6 +33,24 @@ describe("Hono Worker in workerd", () => {
     const response = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({ error: "Connect your Codex subscription first" });
+  });
+  it("checks WebSocket upgrades, origins and missing sessions", async () => {
+    const url = "https://worker/api/sessions/missing/events";
+    expect((await SELF.fetch(url, { headers })).status).toBe(426);
+    expect(
+      (
+        await SELF.fetch(url, {
+          headers: { ...headers, Upgrade: "websocket", Origin: "https://evil.example" },
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await SELF.fetch(url, {
+          headers: { ...headers, Upgrade: "websocket", Origin: "https://worker" },
+        })
+      ).status,
+    ).toBe(404);
   });
   it("rejects malformed session requests and unknown Codex models before creating a session", async () => {
     for (const body of [

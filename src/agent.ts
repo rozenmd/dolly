@@ -11,6 +11,7 @@ import {
   Harness,
   section,
   type ConversationId,
+  type ConversationView,
   type ToolRegistration,
   type Wake,
 } from "@earendil-works/pi-durable";
@@ -787,6 +788,88 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
+  private serializeTranscript(value: ConversationView) {
+    return this.credentials.get("openai-codex").pipe(
+      Effect.map((credential) => {
+        const grant = Option.getOrUndefined(credential);
+        const secrets = grant?.type === "oauth" ? [grant.access, grant.refresh] : [];
+
+        return JSON.stringify(value, (key, item) => {
+          if (!Predicate.isString(item)) return item;
+
+          if (
+            /^(?:access_token|refresh_token|id_token|code_verifier|device_auth_id|user_code|authorization_code)$/i.test(
+              key,
+            )
+          )
+            return "[redacted]";
+
+          return redact(item, secrets);
+        });
+      }),
+    );
+  }
+
+  /** Internal fetch: the Worker authenticates and checks Origin before forwarding here. */
+  override async fetch(request: Request) {
+    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket")
+      return new Response("Expected a WebSocket upgrade", { status: 426 });
+
+    const id = new URL(request.url).searchParams.get("session") ?? "";
+    const conversation = await Effect.runPromise(this.conversation(id));
+
+    if (Option.isNone(conversation)) return new Response("Session not found", { status: 404 });
+
+    const view = await conversation.value.watch(BACKGROUND_CONTEXT);
+    const { 0: client, 1: server } = new WebSocketPair();
+    server.accept();
+    let stopped = false;
+
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      this.ctx.waitUntil(view.stop());
+    };
+
+    const fail = () => {
+      if (stopped) return;
+      stop();
+      server.close(1011, "Session stream ended");
+    };
+
+    const send = async (value: ConversationView) => {
+      const text = await Effect.runPromise(this.serializeTranscript(value));
+
+      if (!stopped) server.send(text);
+    };
+
+    server.addEventListener("close", stop);
+    server.addEventListener("error", stop);
+    void view.closed.then(fail);
+
+    try {
+      await send(view.value);
+      view.start(async (change) => {
+        if (change.kind !== "value") {
+          fail();
+
+          return;
+        }
+
+        try {
+          await send(change.value);
+        } catch {
+          fail();
+        }
+      });
+    } catch (error) {
+      fail();
+      throw error;
+    }
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
   transcript(id: string) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
@@ -796,28 +879,7 @@ export class Agent extends DurableObject<Env> {
 
         return yield* Effect.acquireUseRelease(
           attempt("pi.watch", () => conversation.value.watch(BACKGROUND_CONTEXT)),
-          (view) =>
-            this.credentials.get("openai-codex").pipe(
-              Effect.map((credential) => {
-                const value = Option.getOrUndefined(credential);
-
-                const secrets = value?.type === "oauth" ? [value.access, value.refresh] : [];
-
-                return JSON.stringify(view.value, (key, item) => {
-                  if (!Predicate.isString(item)) return item;
-
-                  // Preserve field-based redaction for credentials other than the current grant.
-                  if (
-                    /^(?:access_token|refresh_token|id_token|code_verifier|device_auth_id|user_code|authorization_code)$/i.test(
-                      key,
-                    )
-                  )
-                    return "[redacted]";
-
-                  return redact(item, secrets);
-                });
-              }),
-            ),
+          (view) => this.serializeTranscript(view.value),
           (view) => attempt("pi.watch.stop", () => view.stop()).pipe(Effect.orDie),
         );
       }),
