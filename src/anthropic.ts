@@ -75,7 +75,7 @@ export const testAnthropic = (credentials: Credentials, input: typeof AnthropicP
 
     const model = provider
       .getModels()
-      .find((candidate) => candidate.id === (input.model ?? "claude-haiku-4-5"));
+      .find((candidate) => candidate.id === (input.model ?? "claude-haiku-5-5"));
 
     if (!model) return { error: "Unknown Claude model" };
     const upstream: ProbeObservation = { value: null };

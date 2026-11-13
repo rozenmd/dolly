@@ -1,5 +1,4 @@
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
-import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import * as Schema from "effect/Schema";
 import { WorkspaceInput } from "./workspace";
 
@@ -10,27 +9,18 @@ export const CodexModel = Schema.Literals(
     .map((model) => model.id),
 );
 
-const catalogAnthropicIds = anthropicProvider()
-  .getModels()
-  .map((model) => model.id);
-
-/** Extend the catalog with models not yet in the pinned @earendil-works/pi-ai release. */
-const extraAnthropicIds: string[] = [
+/** Only the newest Claude models are offered; older catalog models are intentionally excluded. */
+const anthropicIds = [
   "claude-opus-5-5",
   "claude-fable-5-2",
   "claude-sonnet-5-5",
   "claude-haiku-5-5",
 ];
 
-const allAnthropicIds = [
-  ...catalogAnthropicIds,
-  ...extraAnthropicIds.filter((id) => !catalogAnthropicIds.includes(id)),
-];
-
-export const AnthropicModel = Schema.Literals(allAnthropicIds);
+export const AnthropicModel = Schema.Literals(anthropicIds);
 
 export const SessionModel = Schema.Union([CodexModel, AnthropicModel]);
-export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6";
+export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5";
 
 /** Call only after validating against SessionModel. Existing Codex IDs keep their provider. */
 export const modelProvider = (model: string) =>
