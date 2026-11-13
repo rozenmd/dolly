@@ -35,8 +35,14 @@ export function workspaceConfig(input: typeof WorkspaceInput.Type, id: string): 
   };
 }
 
-/** Pi owns the immutable repository selection and each conversation's branch. */
-export const ConversationWorkspace = defineDoc<{ config: WorkspaceConfig | null }>({
+/** The primary repository stays fixed; additional repositories have isolated checkouts. */
+export type WorkspaceState = {
+  config: WorkspaceConfig | null;
+  attached?: WorkspaceConfig[];
+  activeRepository?: string;
+};
+
+export const ConversationWorkspace = defineDoc<WorkspaceState>({
   kind: "app.workspace",
   version: 1,
   scope: "conversation",
@@ -47,9 +53,10 @@ export const ConversationWorkspace = defineDoc<{ config: WorkspaceConfig | null 
 });
 
 export const WorkspaceRequest = Schema.Union([
+  Schema.Struct({ action: Schema.Literal("repositories") }),
   Schema.Struct({
-    action: Schema.Literal("checkout"),
-    repository: Repository,
+    action: Schema.Literals(["checkout", "attach"]),
+    repository: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(201)),
     ref: WorkspaceInput.fields.ref,
   }),
   Schema.Struct({ action: Schema.Literal("status") }),
@@ -65,6 +72,48 @@ export const WorkspaceRequest = Schema.Union([
     body: Schema.String.check(Schema.isMaxLength(32768)),
   }),
 ]);
+
+/** Selecting a repository never reuses another repository's sandbox or resets a checkout. */
+export function selectRepository(
+  state: WorkspaceState,
+  input: { action: "checkout" | "attach"; repository: string; ref?: string },
+  id: string,
+) {
+  const existing = [state.config, ...(state.attached ?? [])].find(
+    (item) => item?.repository.toLowerCase() === input.repository.toLowerCase(),
+  );
+
+  if (existing && input.ref && existing.ref !== input.ref)
+    throw new Error(
+      "This repository already has a checkout at another ref; switch without a ref to preserve its changes",
+    );
+
+  if (!existing) {
+    const config = workspaceConfig(
+      { ...input, networkHosts: state.config?.networkHosts ?? [] },
+      id,
+    );
+
+    if (!state.config && input.action === "checkout") state.config = config;
+    else (state.attached ??= []).push(config);
+  }
+
+  state.activeRepository = existing?.repository ?? input.repository;
+}
+
+export function activeWorkspace(state: WorkspaceState | null | undefined, id: string) {
+  const config =
+    state?.attached?.find((item) => item.repository === state.activeRepository) ?? state?.config;
+
+  if (!config) return null;
+
+  const sandboxId =
+    config.repository === state?.config?.repository
+      ? id
+      : `${id}:repo:${config.repository.toLowerCase()}`;
+
+  return { config, sandboxId };
+}
 
 /** Values are passed as shell arguments, never interpreted as source. */
 export const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";

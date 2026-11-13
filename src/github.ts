@@ -12,6 +12,7 @@ import {
   GitHubRequest,
   GitHubReply,
   Repository,
+  EnrolledRepository,
 } from "./github-contracts";
 import {
   WebhookSetup,
@@ -265,7 +266,7 @@ function makeGitHub(storage: DurableObjectStorage) {
   const repositories = Effect.fn("GitHub.repositories")(function* () {
     const connected = yield* read();
     const appToken = yield* jwt(connected.app);
-    const names: string[] = [];
+    const found = new Map<string, typeof EnrolledRepository.Type>();
 
     for (let page = 1; ; page++) {
       const installations = yield* api(
@@ -299,7 +300,14 @@ function makeGitHub(storage: DurableObjectStorage) {
             Effect.flatMap(
               decode(
                 Schema.Struct({
-                  repositories: Schema.Array(Schema.Struct({ full_name: Repository })),
+                  repositories: Schema.Array(
+                    Schema.Struct({
+                      full_name: Repository,
+                      default_branch: Schema.optional(Schema.String),
+                      private: Schema.optional(Schema.Boolean),
+                      description: Schema.optional(Schema.NullOr(Schema.String)),
+                    }),
+                  ),
                 }),
               ),
             ),
@@ -307,7 +315,12 @@ function makeGitHub(storage: DurableObjectStorage) {
 
           for (const repository of result.repositories) {
             if (yield* accountAllowed(repository.full_name.split("/")[0]))
-              names.push(repository.full_name);
+              found.set(repository.full_name.toLowerCase(), {
+                fullName: repository.full_name,
+                defaultBranch: repository.default_branch ?? "main",
+                private: repository.private ?? false,
+                description: repository.description ?? null,
+              });
           }
 
           if (result.repositories.length < 100) break;
@@ -317,8 +330,104 @@ function makeGitHub(storage: DurableObjectStorage) {
       if (installations.length < 100) break;
     }
 
-    return names;
+    return [...found.values()].sort((a, b) => a.fullName.localeCompare(b.fullName));
   });
+
+  const enrolled = Effect.gen(function* () {
+    const raw = yield* attempt("github.repositories.read", () =>
+      storage.get("github:repositories"),
+    );
+
+    return raw === undefined ? [] : yield* decode(Schema.Array(EnrolledRepository))(raw);
+  });
+
+  const enrolledRepositories = Effect.gen(function* () {
+    const allowed = new Set((yield* accounts).map((account) => account.toLowerCase()));
+
+    return (yield* enrolled).filter((repo) =>
+      allowed.has(repo.fullName.split("/")[0].toLowerCase()),
+    );
+  });
+
+  const availableRepositories = Effect.gen(function* () {
+    const registered = new Set((yield* enrolled).map((repo) => repo.fullName.toLowerCase()));
+
+    return (yield* repositories()).map((repo) => ({
+      ...repo,
+      registered: registered.has(repo.fullName.toLowerCase()),
+    }));
+  });
+
+  const resolveRepository = Effect.fn("GitHub.resolveRepository")(function* (name: string) {
+    const fullName = Schema.decodeUnknownOption(Repository)(name);
+
+    if (Option.isSome(fullName)) return fullName.value;
+
+    const matches = (yield* enrolledRepositories).filter(
+      (repo) => repo.fullName.split("/")[1].toLowerCase() === name.toLowerCase(),
+    );
+
+    if (matches.length !== 1)
+      return yield* Effect.fail(
+        new OperationError({
+          operation: "github.repositories.resolve",
+          message: matches.length
+            ? `Repository name is ambiguous: ${matches.map((repo) => repo.fullName).join(", ")}. Ask which owner/repository to use.`
+            : "No enrolled repository matches that name. List repositories or ask for owner/repository.",
+          details: {},
+        }),
+      );
+
+    return matches[0].fullName;
+  });
+
+  const enrollRepository = Effect.fn("GitHub.enrollRepository")((repository: string) =>
+    setupPermit.withPermit(
+      Effect.gen(function* () {
+        const available = yield* repositories();
+
+        const selected = available.find(
+          (repo) => repo.fullName.toLowerCase() === repository.toLowerCase(),
+        );
+
+        if (!selected)
+          return yield* Effect.fail(
+            new OperationError({
+              operation: "github.repositories.enroll",
+              message: "Repository is not available to the GitHub App in an allowed account",
+              details: {},
+            }),
+          );
+
+        const current = (yield* enrolled).filter(
+          (repo) => repo.fullName.toLowerCase() !== repository.toLowerCase(),
+        );
+
+        current.push(selected);
+        yield* attempt("github.repositories.save", () =>
+          storage.put("github:repositories", current),
+        );
+
+        return { repository: selected };
+      }),
+    ),
+  );
+
+  const removeRepository = Effect.fn("GitHub.removeRepository")((repository: string) =>
+    setupPermit.withPermit(
+      Effect.gen(function* () {
+        const current = (yield* enrolled).filter(
+          (repo) => repo.fullName.toLowerCase() !== repository.toLowerCase(),
+        );
+
+        yield* attempt("github.repositories.save", () =>
+          storage.put("github:repositories", current),
+        );
+
+        return { removed: true };
+      }),
+    ),
+  );
 
   const status = Effect.gen(function* () {
     const raw = yield* attempt("github.status", () => storage.get("github:connected"));
@@ -517,7 +626,13 @@ function makeGitHub(storage: DurableObjectStorage) {
     const op = input.operation;
 
     if (op.action === "repositories")
-      return { ok: true, result: { kind: "repositories", repositories: yield* repositories() } };
+      return {
+        ok: true,
+        result: {
+          kind: "repositories",
+          repositories: (yield* repositories()).map((repo) => repo.fullName),
+        },
+      };
 
     const repository = op.repository;
     const write = op.action !== "read_file";
@@ -755,6 +870,11 @@ function makeGitHub(storage: DurableObjectStorage) {
     configureIngress,
     accounts,
     configureAccounts,
+    enrolledRepositories,
+    availableRepositories,
+    enrollRepository,
+    removeRepository,
+    resolveRepository,
     start,
     manifest,
     complete,

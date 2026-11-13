@@ -20,6 +20,15 @@ const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
 
 export const GitHubAccounts = Schema.Struct({ accounts: Schema.Array(Name) });
 
+export const EnrollRepository = Schema.Struct({ repository: Repository });
+
+export const EnrolledRepository = Schema.Struct({
+  fullName: Repository,
+  defaultBranch: Schema.String,
+  private: Schema.Boolean,
+  description: Schema.NullOr(Schema.String),
+});
+
 export const GitHubSetup = Schema.Struct({
   owner: Name,
   /** The public ingress Worker's webhook URL, ending in /hooks/github. */

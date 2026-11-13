@@ -5,6 +5,8 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { GITHUB_APP_READ_PERMISSIONS } from "../src/github-permissions";
 import { GitHubRequest } from "../src/github-contracts";
+import { GitHub } from "../src/github";
+import * as Effect from "effect/Effect";
 import { headers, signIn } from "./session";
 
 const repository = "example/project";
@@ -107,6 +109,127 @@ beforeEach(async () => {
 afterEach(async () => {
   await abortAllDurableObjects();
   vi.restoreAllMocks();
+});
+
+it("discovers App repositories and durably enrolls them without changing GitHub grants", async () => {
+  await connect();
+
+  const info = {
+    fullName: repository,
+    defaultBranch: "develop",
+    private: true,
+    description: "Example project",
+  };
+
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const path = new URL(String(url)).pathname;
+
+    if (path === "/app/installations")
+      return Response.json([
+        { id: 7, account: { login: "example" } },
+        { id: 8, account: { login: "denied" } },
+      ]);
+
+    if (path === "/app/installations/7/access_tokens") {
+      expect(JSON.parse(String(init?.body))).toEqual({ permissions: GITHUB_APP_READ_PERMISSIONS });
+
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+    }
+
+    if (path === "/installation/repositories")
+      return Response.json({
+        repositories: [
+          {
+            full_name: repository,
+            default_branch: info.defaultBranch,
+            private: true,
+            description: info.description,
+          },
+          { full_name: "denied/project" },
+        ],
+      });
+    throw new Error(`Unexpected GitHub request: ${path}`);
+  });
+
+  const list = async (available = false) =>
+    (
+      await SELF.fetch(
+        `https://worker/api/integrations/github/repositories${available ? "?available=true" : ""}`,
+        { headers },
+      )
+    ).json();
+
+  expect(await list()).toEqual({ repositories: [] });
+  expect(fetch).not.toHaveBeenCalled();
+  expect(await list(true)).toEqual({ repositories: [{ ...info, registered: false }] });
+  expect(
+    await (
+      await post("/api/integrations/github/repositories", { repository: "EXAMPLE/PROJECT" })
+    ).json(),
+  ).toEqual({ repository: info });
+  expect((await post("/api/integrations/github/repositories", { repository })).status).toBe(200);
+  await abortAllDurableObjects();
+  expect(await list()).toEqual({ repositories: [info] });
+  expect(await list(true)).toEqual({ repositories: [{ ...info, registered: true }] });
+  expect(
+    (await post("/api/integrations/github/repositories", { repository: "denied/project" })).status,
+  ).toBe(409);
+  expect(
+    (await post("/api/integrations/github/repositories", { repository: "../invalid" })).status,
+  ).toBe(400);
+  expect((await SELF.fetch("https://worker/api/integrations/github/repositories")).status).toBe(
+    401,
+  );
+
+  await SELF.fetch("https://worker/api/integrations/github/accounts", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ accounts: [] }),
+  });
+  expect(await list()).toEqual({ repositories: [] });
+
+  const removed = await SELF.fetch("https://worker/api/integrations/github/repositories", {
+    method: "DELETE",
+    headers,
+    body: JSON.stringify({ repository }),
+  });
+
+  expect(removed.status).toBe(200);
+  await SELF.fetch("https://worker/api/integrations/github/accounts", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ accounts: ["example"] }),
+  });
+  expect(await list()).toEqual({ repositories: [] });
+});
+
+it("resolves enrolled short names case-insensitively and asks instead of guessing on ambiguity", async () => {
+  await connect();
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const entry = { defaultBranch: "main", private: true, description: null };
+    await state.storage.put("github:repositories", [
+      { ...entry, fullName: repository },
+      { ...entry, fullName: "another-owner/project" },
+      { ...entry, fullName: "example/unique" },
+      { ...entry, fullName: "denied/hidden" },
+    ]);
+
+    const resolve = (name: string) =>
+      Effect.runPromise(
+        Effect.flatMap(GitHub, (github) => github.resolveRepository(name)).pipe(
+          Effect.provide(GitHub.layer(state.storage)),
+          Effect.catchTag("OperationError", (error) => Effect.succeed(error.message)),
+        ),
+      );
+
+    expect(await resolve("UNIQUE")).toBe("example/unique");
+    expect(await resolve("project")).toContain("ambiguous: example/project, another-owner/project");
+    expect(await resolve("hidden")).toContain("No enrolled repository matches");
+    expect(await resolve("example/project")).toBe(repository);
+  });
 });
 
 it("requires both existing API authentication gates and validates operation contracts", async () => {

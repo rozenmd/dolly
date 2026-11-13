@@ -28,6 +28,8 @@ import {
   ConversationWorkspace,
   WorkspaceInput,
   workspaceConfig,
+  activeWorkspace,
+  selectRepository,
   WorkspaceRequest,
   shellQuote,
   type WorkspaceConfig,
@@ -115,16 +117,18 @@ export class Agent extends DurableObject<Env> {
     const shell = {
       name: "shell",
       description:
-        "Run a shell command in this conversation's Linux checkout (or /workspace if no repository is selected). Git authentication stays outside the container. Only configured network hosts are reachable. Output is capped at 32 KiB per stream and time at 60 seconds. Repository workspaces are checkpointed after commands.",
+        "Run a shell command in the active repository's isolated Linux checkout (or /workspace if none). Use workspace checkout to switch repositories in this same conversation; other checkouts and changes are preserved. Git credentials stay outside the container. Only configured network hosts are reachable. Output is capped at 32 KiB per stream and time at 60 seconds. Repository checkouts are checkpointed after commands.",
       parameters: obj({ command: str() }),
       replay: "unsafe",
       executionMode: "sequential",
       execute: ({ command }: { command: string }, api) =>
         Effect.runPromise(
           rpc("sandbox.shell", async () => {
-            await this.prepareWorkspace(api.conversationId);
+            const workspace = await this.prepareWorkspace(api.conversationId);
 
-            return this.env.SANDBOX.getByName(String(api.conversationId)).run(command);
+            return this.env.SANDBOX.getByName(
+              workspace?.sandboxId ?? String(api.conversationId),
+            ).run(command);
           }).pipe(
             Effect.map((result) => ({ output: [{ type: "text", text: JSON.stringify(result) }] })),
           ),
@@ -134,7 +138,7 @@ export class Agent extends DurableObject<Env> {
     const readFile = {
       name: "read_file",
       description:
-        "Read a UTF-8 file in this conversation's sandbox, maximum 64 KiB. Relative paths use /workspace.",
+        "Read a UTF-8 file in the active repository's sandbox, maximum 64 KiB. Relative paths use /workspace/repo, or /workspace when no repo is selected. Use workspace attach to work in another repo.",
       parameters: obj({ path: str() }),
       replay: "safe",
       execute: ({ path }: { path: string }, api) =>
@@ -142,7 +146,9 @@ export class Agent extends DurableObject<Env> {
           rpc("sandbox.readFile", async () => {
             const workspace = await this.prepareWorkspace(api.conversationId);
 
-            return this.env.SANDBOX.getByName(String(api.conversationId)).readFile(
+            return this.env.SANDBOX.getByName(
+              workspace?.sandboxId ?? String(api.conversationId),
+            ).readFile(
               path.startsWith("/")
                 ? path
                 : `${workspace ? "/workspace/repo" : "/workspace"}/${path}`,
@@ -184,7 +190,7 @@ export class Agent extends DurableObject<Env> {
     const workspaceTool = {
       name: "workspace",
       description:
-        "Select any GitHub repository available to the App and clone it into this conversation's private Linux workspace. Then use shell to edit files and run tests. Inspect status/diff, commit changes, push this session's branch, and open a PR. A checkout is immutable for the conversation; use a new conversation for another repository. Commits and pushes are not automatically replayed after interruption; inspect state before retrying.",
+        "Work across repositories in this conversation. When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or losing changes. Shell, read_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. Mutations are not automatically replayed; inspect state after interruption.",
       parameters: workspaceSchema,
       replay: "unsafe",
       executionMode: "sequential",
@@ -344,6 +350,26 @@ export class Agent extends DurableObject<Env> {
   githubStatus() {
     return this.githubRun(Effect.flatMap(GitHub, (github) => github.status));
   }
+
+  githubRepositories(available: boolean) {
+    return this.githubRun(
+      Effect.flatMap(GitHub, (github) =>
+        Effect.map(
+          available ? github.availableRepositories : github.enrolledRepositories,
+          (repositories) => ({ repositories }),
+        ),
+      ),
+    );
+  }
+
+  githubEnrollRepository(repository: string, remove: boolean) {
+    if (remove)
+      return this.githubRun(
+        Effect.flatMap(GitHub, (github) => github.removeRepository(repository)),
+      );
+
+    return this.githubRun(Effect.flatMap(GitHub, (github) => github.enrollRepository(repository)));
+  }
   /** What the browser needs before sign-in: whether a GitHub App exists and has an owner. */
   authState() {
     return this.githubRun(
@@ -491,40 +517,51 @@ export class Agent extends DurableObject<Env> {
 
   private async prepareWorkspace(id: ConversationId) {
     const state = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
+    const active = activeWorkspace(state, String(id));
 
-    if (!state?.config) return null;
-    await this.env.SANDBOX.getByName(String(id)).prepare(state.config);
+    if (!active) return null;
+    await this.env.SANDBOX.getByName(active.sandboxId).prepare(active.config);
 
-    return state.config;
+    return { ...active.config, sandboxId: active.sandboxId };
   }
 
   private async runWorkspace(id: ConversationId, input: typeof WorkspaceRequest.Type) {
-    if (input.action === "checkout") {
-      await Effect.runPromise(
-        Effect.flatMap(GitHub, (github) => github.authorize(input.repository, false)).pipe(
-          Effect.provide(this.services),
-        ),
+    if (input.action === "repositories") {
+      const state = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
+      const enrolled = await this.githubRepositories(false);
+
+      return {
+        ...enrolled,
+        primary: state?.config?.repository ?? null,
+        active: state?.activeRepository ?? state?.config?.repository ?? null,
+        attached: state?.attached ?? [],
+      };
+    }
+
+    if (input.action === "checkout" || input.action === "attach") {
+      const repository = await Effect.runPromise(
+        Effect.flatMap(GitHub, (github) =>
+          github
+            .resolveRepository(input.repository)
+            .pipe(Effect.tap((name) => github.authorize(name, false))),
+        ).pipe(Effect.provide(this.services)),
       );
+
       await this.harness.commit(async (tx) => {
         const state = await tx.doc(ConversationWorkspace, id);
 
-        if (state.config) {
-          if (
-            state.config.repository !== input.repository ||
-            (input.ref && state.config.ref !== input.ref)
-          )
-            throw new Error("This conversation already owns a different workspace");
-        } else state.config = workspaceConfig(input, String(id));
+        selectRepository(state, { ...input, repository }, String(id));
       }, BACKGROUND_CONTEXT);
     }
 
     const workspace = await this.prepareWorkspace(id);
 
     if (!workspace) return { error: "Select a repository using workspace checkout first" };
-    const sandbox = this.env.SANDBOX.getByName(String(id));
+    const sandbox = this.env.SANDBOX.getByName(workspace.sandboxId);
 
     switch (input.action) {
       case "checkout":
+      case "attach":
         return workspace;
       case "status":
         return sandbox.run("git status --short --branch");

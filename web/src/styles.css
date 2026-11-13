@@ -1126,3 +1126,24 @@ select.input {
     font-size: 16px;
   }
 }
+.repository-list {
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+.repository-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+}
+
+.repository-row > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.repository-row > button {
+  flex-shrink: 0;
+}
