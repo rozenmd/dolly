@@ -7,6 +7,7 @@ import { Composer, Conversation } from "./components/conversation";
 import { IconButton, Input, Modal, RepoBadge, Select } from "./components/ui";
 import { CodexLogin } from "./components/codex-login";
 import { GitHubSetup, GitHubSignIn, ingressHook } from "./components/github";
+import { RepositoryPicker } from "./components/repositories";
 import {
   authState,
   codexLogin,
@@ -684,6 +685,8 @@ function SettingsModal({
           Add repositories
         </a>
       </div>
+      <h3>Repositories</h3>
+      <RepositoryPicker manage />
       <form onSubmit={saveIngress}>
         <label htmlFor="settings-ingress">Ingress URL</label>
         <Input
@@ -770,6 +773,7 @@ function SessionModal({
 }) {
   const [title, setTitle] = useState("");
   const [repository, setRepository] = useState("");
+  const [ref, setRef] = useState("");
   const [model, setModel] = useState("");
   const [id, setId] = useState("");
   const [error, setError] = useState("");
@@ -792,7 +796,12 @@ function SessionModal({
 
         if (model) body.model = model;
 
-        if (repository.trim()) body.workspace = { repository: repository.trim() };
+        if (repository.trim()) {
+          body.workspace = { repository: repository.trim() };
+
+          if (ref) body.workspace.ref = ref;
+        }
+
         const text = await request("/sessions", body);
         result = Schema.decodeUnknownSync(Schema.fromJsonString(Session))(text);
       }
@@ -839,13 +848,12 @@ function SessionModal({
             <label htmlFor="repository">
               GitHub repository <span className="muted">(optional)</span>
             </label>
-            <Input
-              id="repository"
-              name="repository"
-              placeholder="owner/repository"
+            <RepositoryPicker
               value={repository}
-              onChange={(event) => setRepository(event.target.value)}
-              pattern="[^/\s]+/[^/\s]+"
+              onChange={(name, branch) => {
+                setRepository(name);
+                setRef(branch);
+              }}
             />
             <label htmlFor="model">Model</label>
             <Select

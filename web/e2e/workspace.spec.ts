@@ -12,6 +12,67 @@ const app = {
 
 const signedIn = { github: app, ownerClaimed: true, user: { login: "octocat" } };
 
+test("enrolls an App repository and anchors a new workspace to its default branch", async ({
+  page,
+}) => {
+  let enrolled = false;
+  let created: unknown;
+
+  const repository = {
+    fullName: "octocat/project",
+    defaultBranch: "develop",
+    private: true,
+    description: "Our project",
+  };
+
+  await page.route("**/api/**", (route) => {
+    const url = new URL(route.request().url());
+
+    if (url.pathname === "/api/auth") return route.fulfill({ json: signedIn });
+
+    if (url.pathname === "/api/integrations/github/repositories") {
+      if (route.request().method() === "POST") {
+        expect(route.request().postDataJSON()).toEqual({ repository: repository.fullName });
+        enrolled = true;
+
+        return route.fulfill({ json: { repository } });
+      }
+
+      return route.fulfill({
+        json: {
+          repositories: url.searchParams.has("available")
+            ? [{ ...repository, registered: enrolled }]
+            : enrolled
+              ? [repository]
+              : [],
+        },
+      });
+    }
+
+    if (url.pathname === "/api/sessions") {
+      created = route.request().postDataJSON();
+
+      return route.fulfill({ json: { id: "new-session", model: "gpt-6-sol" } });
+    }
+
+    if (url.pathname === "/api/sessions/new-session")
+      return route.fulfill({ json: { entries: [], docs: {} } });
+
+    return route.fulfill({ json: { state: "connected" } });
+  });
+  await page.goto("/", { waitUntil: "networkidle" });
+  const dialog = page.getByRole("dialog", { name: "New workspace" });
+  await dialog.getByLabel("Workspace name").fill("Cross-repo task");
+  await dialog.getByRole("button", { name: "Enroll a repository", exact: true }).click();
+  await dialog.getByLabel("Find a repository").fill("project");
+  await expect(dialog).toContainText("Private · develop · Our project");
+  await dialog.getByRole("button", { name: "Enroll", exact: true }).click();
+  await expect(dialog.getByLabel("GitHub repository")).toHaveValue("octocat/project");
+  await dialog.getByRole("button", { name: "Create workspace", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  expect(created).toEqual({ workspace: { repository: "octocat/project", ref: "develop" } });
+});
+
 /** A browser that is already signed in with GitHub and ChatGPT, with no saved workspaces. */
 async function signedInWorkspace(page: Page) {
   await page.route("**/api/**", (route) => {

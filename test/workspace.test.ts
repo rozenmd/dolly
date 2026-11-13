@@ -6,7 +6,55 @@ import {
   GITHUB_APP_CODE_PERMISSIONS,
 } from "../src/github-permissions";
 import { checkedPush, gitRoute } from "../src/git-transport";
-import { checkoutScript, shellQuote, workspaceConfig } from "../src/workspace";
+import {
+  activeWorkspace,
+  selectRepository,
+  checkoutScript,
+  shellQuote,
+  workspaceConfig,
+  type WorkspaceState,
+} from "../src/workspace";
+
+it("keeps the primary repo anchored while attaching and switching isolated checkouts", () => {
+  const primary = workspaceConfig(
+    { repository: "org/primary", ref: "main", networkHosts: ["registry.npmjs.org"] },
+    "42",
+  );
+
+  const state: WorkspaceState = { config: primary };
+  expect(activeWorkspace(state, "42")).toEqual({ config: primary, sandboxId: "42" });
+  selectRepository(state, { action: "attach", repository: "org/secondary", ref: "develop" }, "42");
+  const secondary = activeWorkspace(state, "42");
+  expect(secondary?.sandboxId).toBe("42:repo:org/secondary");
+  expect(secondary?.config).toMatchObject({
+    repository: "org/secondary",
+    ref: "develop",
+    branch: primary.branch,
+    networkHosts: primary.networkHosts,
+  });
+  expect(state.config).toBe(primary);
+  selectRepository(state, { action: "checkout", repository: "ORG/PRIMARY" }, "42");
+  expect(activeWorkspace(state, "42")?.sandboxId).toBe("42");
+  selectRepository(state, { action: "attach", repository: "org/secondary" }, "42");
+  expect(activeWorkspace(state, "42")).toEqual(secondary);
+  expect(state.attached).toHaveLength(1);
+  expect(() =>
+    selectRepository(state, { action: "checkout", repository: "org/secondary", ref: "main" }, "42"),
+  ).toThrow("preserve its changes");
+  // Durable JSON round-trips preserve selection and sandbox identity.
+  const restored: WorkspaceState = JSON.parse(JSON.stringify(state));
+  expect(activeWorkspace(restored, "42")).toEqual(secondary);
+  expect(activeWorkspace(restored, "other-session")?.sandboxId).not.toBe(secondary?.sandboxId);
+});
+
+it("can attach a repo to a repo-less workspace without anchoring it or reusing its scratch sandbox", () => {
+  const state: WorkspaceState = { config: null };
+  expect(activeWorkspace(state, "42")).toBeNull();
+  selectRepository(state, { action: "attach", repository: "org/secondary" }, "42");
+  expect(state.config).toBeNull();
+  expect(activeWorkspace(state, "42")?.sandboxId).toBe("42:repo:org/secondary");
+  expect(activeWorkspace(state, "42")?.config.networkHosts).toEqual([]);
+});
 
 function packet(command: string) {
   return (new TextEncoder().encode(command).length + 4).toString(16).padStart(4, "0") + command;

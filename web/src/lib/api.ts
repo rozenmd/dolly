@@ -257,7 +257,8 @@ export type ApiBody = {
   content?: string;
   requestId?: string;
   model?: string;
-  workspace?: { repository: string };
+  workspace?: { repository: string; ref?: string };
+  repository?: string;
   owner?: string;
   ownerType?: "personal" | "organization";
   ingress?: string;

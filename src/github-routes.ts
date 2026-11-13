@@ -4,7 +4,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { authorizeAccess } from "./access";
 import { WebhookSetup } from "./github-webhook";
-import { GitHubRequest, GitHubSetup, GitHubAccounts } from "./github-contracts";
+import { GitHubRequest, GitHubSetup, GitHubAccounts, EnrollRepository } from "./github-contracts";
 import { rpc } from "./operations";
 import type { Env } from "./env";
 
@@ -52,6 +52,44 @@ githubRoutes.get("/api/integrations/github/accounts", async (c) =>
     ),
   ),
 );
+
+githubRoutes.get("/api/integrations/github/repositories", async (c) => {
+  const result = await Effect.runPromise(
+    rpc(
+      "github.repositories",
+      async () =>
+        await c.env.AGENT.getByName("owner").githubRepositories(
+          c.req.query("available") === "true",
+        ),
+    ),
+  );
+
+  return c.json(result, "error" in result ? 409 : 200);
+});
+
+githubRoutes.on(["POST", "DELETE"], "/api/integrations/github/repositories", async (c) => {
+  const parsed = await Effect.runPromise(
+    Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(EnrollRepository)),
+      Effect.option,
+    ),
+  );
+
+  if (Option.isNone(parsed)) return c.json({ error: "Expected repository: owner/name" }, 400);
+
+  const result = await Effect.runPromise(
+    rpc(
+      "github.repositories.enroll",
+      async () =>
+        await c.env.AGENT.getByName("owner").githubEnrollRepository(
+          parsed.value.repository,
+          c.req.method === "DELETE",
+        ),
+    ),
+  );
+
+  return c.json(result, "error" in result ? 409 : 200);
+});
 
 githubRoutes.put("/api/integrations/github/accounts", async (c) => {
   const parsed = await Effect.runPromise(
