@@ -18,6 +18,11 @@ until mountpoint -q "/workspace/mounts/$name"; do
   i=$((i + 1))
   if test "$i" -ge 100 || ! kill -0 "$(cat /workspace/artifact-fs.pid)" 2>/dev/null; then
     cat /workspace/artifact-fs.log >&2
+    # Diagnose mount permission failures without dumping environment or credentials.
+    id >&2
+    stat -c '%a %u:%g %n' /usr/bin/fusermount3 /dev/fuse "/workspace/mounts/$name" >&2
+    grep -E '^(Cap|NoNewPrivs)' /proc/self/status >&2
+    cat /proc/self/attr/current >&2
     echo 'ArtifactFS mount failed' >&2
     exit 1
   fi
