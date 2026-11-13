@@ -312,6 +312,9 @@ select.input {
   flex-direction: column;
   gap: 2px;
 }
+.workspace-item {
+  position: relative;
+}
 .workspace-row {
   display: flex;
   align-items: center;
@@ -320,8 +323,9 @@ select.input {
   padding: 6px 8px;
   border-radius: 8px;
   text-align: left;
+  width: 100%;
 }
-.workspace-row:hover {
+.workspace-item:hover .workspace-row {
   background: var(--surface);
 }
 .workspace-row.active {
@@ -341,12 +345,40 @@ select.input {
   white-space: nowrap;
 }
 .workspace-time {
+  min-width: 26px;
+  text-align: right;
   color: var(--faint);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 .workspace-row:has(.working) .workspace-time {
   color: var(--amber);
+}
+.workspace-archive {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+}
+.workspace-item:has(.workspace-archive):hover .workspace-time,
+.workspace-item:has(.workspace-archive):focus-within .workspace-time {
+  opacity: 0;
+}
+.workspace-item:hover .workspace-archive,
+.workspace-item:focus-within .workspace-archive {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .workspace-archive {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .workspace-item:has(.workspace-archive) .workspace-time {
+    opacity: 0;
+  }
 }
 .sidebar-empty {
   padding: 8px;
