@@ -4,6 +4,8 @@ import { request, Session, type ApiBody, type SavedSession } from "../lib/api";
 import { Modal, Textarea } from "./ui";
 import { ModelSelect } from "./model-select";
 import { RepositoryPicker } from "./repositories";
+import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
+import { imagesBody, type Attachment } from "../lib/images";
 
 /** Create the conversation only on submit; retries reuse both its ID and prompt receipt. */
 export function NewSessionComposer({
@@ -27,6 +29,8 @@ export function NewSessionComposer({
   const [error, setError] = useState("");
   const [created, setCreated] = useState<SavedSession | null>(null);
   const requestId = useRef<string | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const input = useAttachmentInput(attachments, setAttachments, setError);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -72,6 +76,7 @@ export function NewSessionComposer({
       await request(`/sessions/${encodeURIComponent(session.id)}/messages`, {
         content: content.trim(),
         requestId: requestId.current,
+        ...imagesBody(attachments),
       });
       onCreated(session);
     } catch (cause) {
@@ -83,7 +88,12 @@ export function NewSessionComposer({
 
   return (
     <Modal title="New session" className="new-session-modal" onClose={onClose}>
-      <form className="new-session-form" onSubmit={(event) => void submit(event)}>
+      <form
+        className="new-session-form"
+        onSubmit={(event) => void submit(event)}
+        onDragOver={input.onDragOver}
+        onDrop={input.onDrop}
+      >
         <fieldset disabled={pending || Boolean(created)} className="new-session-fields">
           <label htmlFor="repository" className="sr-only">
             Repository
@@ -108,6 +118,7 @@ export function NewSessionComposer({
             maxLength={16384}
             value={content}
             onChange={(event) => setContent(event.target.value)}
+            onPaste={input.onPaste}
             onKeyDown={(event) => {
               if (
                 event.key === "Enter" &&
@@ -118,6 +129,10 @@ export function NewSessionComposer({
                 event.currentTarget.form?.requestSubmit();
               }
             }}
+          />
+          <AttachmentTray
+            attachments={attachments}
+            onRemove={(id) => setAttachments(attachments.filter((item) => item.id !== id))}
           />
         </fieldset>
         {error && (
@@ -130,6 +145,11 @@ export function NewSessionComposer({
           <button type="button" className="ghost-button" disabled={pending} onClick={onImport}>
             Open existing
           </button>
+          <AttachButton
+            disabled={pending || Boolean(created)}
+            count={attachments.length}
+            onFiles={(files) => void input.add(files)}
+          />
           <label htmlFor="new-session-model" className="sr-only">
             Model
           </label>
