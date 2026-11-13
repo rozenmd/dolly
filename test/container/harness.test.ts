@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { env } from "cloudflare:workers";
 import { SELF, runInDurableObject } from "cloudflare:test";
 import { expect, it, vi } from "vitest";
+import { headers, signIn } from "../session";
 
 it("runs the registered coding tools on another owner's repository, pushes a tested commit, opens a PR, and restores dirty work", async () => {
   const remoteName = crypto.randomUUID();
@@ -213,7 +214,7 @@ mkdir -p remotes/another-owner
     return new Response(output.subarray(split + 4), { status, headers });
   });
 
-  const headers = { Authorization: "Bearer test-token-with-at-least-32-characters" };
+  await signIn();
 
   try {
     const created = await SELF.fetch("https://worker/api/sessions", {
