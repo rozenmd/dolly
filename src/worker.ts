@@ -10,8 +10,7 @@ export default {
   async fetch(request, env, ctx) {
     const { pathname } = new URL(request.url);
 
-    if (pathname === "/api" || pathname.startsWith("/api/") || pathname === "/health")
-      return api.fetch(request, env, ctx);
+    if (pathname === "/api" || pathname.startsWith("/api/")) return api.fetch(request, env, ctx);
 
     const access = await Effect.runPromise(authorizeAccess(request, env), {
       signal: request.signal,

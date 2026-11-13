@@ -7,7 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { WorkspaceRequest } from "./workspace";
 import { rpc } from "./operations";
-import { githubRoutes } from "./github-routes";
+import { githubRoutes, githubSetupRoutes } from "./github-routes";
 import { authorizeAccess } from "./access";
 import { AgentApi } from "./api";
 import { ChildRequest, NewSession } from "./models";
@@ -68,7 +68,10 @@ app.use("*", async (c, next) => {
   await next();
 });
 
-app.get("/health", (c) => c.json({ ok: true }));
+app.get("/api/health", (c) => c.json({ ok: true }));
+
+// Browser redirects cannot supply a bearer token; these routes enforce Access themselves.
+app.route("/", githubSetupRoutes);
 
 app.use("/api/*", async (c, next) => {
   if (!c.env.API_TOKEN || c.env.API_TOKEN.length < 32)

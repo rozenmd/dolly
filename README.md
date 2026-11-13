@@ -6,7 +6,7 @@ A Cloudflare Access-protected personal coding-agent API on Cloudflare Workers, u
 
 The `web/` workspace is a TanStack Start + React frontend with a dark, responsive workspace sidebar, searchable sessions, an activity feed, Markdown conversations, tool output, and a message composer.
 
-The app is served at the Worker's `/`, with the existing Hono endpoints under `/api/*` on the same origin. `/health` remains available without credentials. Cloudflare Access protects the page and its assets; API calls additionally require the existing bearer token.
+The app is served at the Worker's `/`, with the existing Hono endpoints under `/api/*` on the same origin. `/api/health` remains available without credentials. Cloudflare Access protects the page and its assets; Agent API calls additionally require the existing bearer token; browser setup routes under `/api/setup/github/*` require Access without a bearer token.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -113,7 +113,7 @@ curl -sS "$API_URL/api/integrations/github/setup" \
   -d '{"owner":"your-account","ownerType":"personal"}'
 ```
 
-For an organization, use `"ownerType":"organization"`. Connect one App, then install it on the accounts and repositories you want to use. New Apps support installation on other accounts; if you previously created a private App, enable installation on other accounts in GitHub App settings without replacing its credentials. Open `setupUrl` in a browser signed into your Cloudflare Access application. Create the App, then open the returned `installUrl` and choose **selected repositories** or **all repositories** for each installation. GitHub controls repository access within each installation; Pi Hard separately restricts which installation accounts it will use. The browser setup and callback routes require Access; the API additionally requires the bearer token. No public callback bypass is needed.
+For an organization, use `"ownerType":"organization"`. Connect one App, then install it on the accounts and repositories you want to use. New Apps support installation on other accounts; if you previously created a private App, enable installation on other accounts in GitHub App settings without replacing its credentials. Open `setupUrl` in a browser signed into your Cloudflare Access application. Create the App, then open the returned `installUrl` and choose **selected repositories** or **all repositories** for each installation. GitHub controls repository access within each installation; Pi Hard separately restricts which installation accounts it will use. The browser setup and callback routes at `/api/setup/github/:state` and `/api/setup/github/callback` require Access without a bearer token; agent API operations additionally require the bearer token. No public callback bypass is needed.
 
 Configure the allowed GitHub users and organizations through the protected API:
 
@@ -262,7 +262,7 @@ A prompt returns `202` after durable admission, not after generation. Poll the s
 
 | Route                             | Operation                                                    |
 | --------------------------------- | ------------------------------------------------------------ |
-| `GET /health`                     | Liveness check (Access still protects the deployed hostname) |
+| `GET /api/health`                 | Liveness check (Access still protects the deployed hostname) |
 | `POST /api/auth/codex`            | Start or reuse device login                                  |
 | `GET /api/auth/codex`             | Poll login, respecting `pollAfterSeconds`                    |
 | `DELETE /api/auth/codex`          | Delete the Worker's local credentials and pending login      |

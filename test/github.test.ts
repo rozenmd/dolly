@@ -62,7 +62,7 @@ async function connect() {
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(app));
 
   const response = await SELF.fetch(
-    `https://worker/setup/github/callback?state=${started.state}&code=manifest-code`,
+    `https://worker/api/setup/github/callback?state=${started.state}&code=manifest-code`,
   );
 
   expect((await response.json<{ connected: boolean }>()).connected).toBe(true);
@@ -96,7 +96,7 @@ afterEach(async () => {
 });
 
 it("requires both existing API authentication gates and validates operation contracts", async () => {
-  for (const path of ["/setup/github/callback", `/setup/github/${"a".repeat(43)}`])
+  for (const path of ["/api/setup/github/callback", `/api/setup/github/${"a".repeat(43)}`])
     expect(
       (await api.request(`https://worker${path}`, {}, { ...env, ACCESS_LOCAL_DEV: "false" }))
         .status,
@@ -148,7 +148,7 @@ it("keeps setup state through eviction, consumes it once and never returns crede
     return Response.json(app);
   });
 
-  const callback = `https://worker/setup/github/callback?state=${started.state}&code=manifest-code`;
+  const callback = `https://worker/api/setup/github/callback?state=${started.state}&code=manifest-code`;
   const response = await SELF.fetch(callback);
   const text = await response.text();
   expect(text).toContain('"connected":true');
@@ -173,14 +173,14 @@ it("rejects forged, expired, and wrong-owner setup callbacks without connecting"
 
   expect(
     await (
-      await SELF.fetch(`https://worker/setup/github/callback?state=${"x".repeat(43)}&code=bad`)
+      await SELF.fetch(`https://worker/api/setup/github/callback?state=${"x".repeat(43)}&code=bad`)
     ).text(),
   ).toContain("error");
   expect(fetch).not.toHaveBeenCalled();
   expect(
     await (
       await SELF.fetch(
-        `https://worker/setup/github/callback?state=${started.state}&code=wrong-owner`,
+        `https://worker/api/setup/github/callback?state=${started.state}&code=wrong-owner`,
       )
     ).text(),
   ).toContain("does not match");
@@ -193,7 +193,9 @@ it("rejects forged, expired, and wrong-owner setup callbacks without connecting"
   });
   expect(
     await (
-      await SELF.fetch(`https://worker/setup/github/callback?state=${started.state}&code=expired`)
+      await SELF.fetch(
+        `https://worker/api/setup/github/callback?state=${started.state}&code=expired`,
+      )
     ).text(),
   ).toContain("expired");
   expect(fetch).toHaveBeenCalledTimes(1);
@@ -550,7 +552,7 @@ it("enables ingress in the manifest and configures allowed senders without repla
   expect(form).toContain("issue_comment");
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(app));
   await SELF.fetch(
-    `https://worker/setup/github/callback?state=${started.state}&code=manifest-code`,
+    `https://worker/api/setup/github/callback?state=${started.state}&code=manifest-code`,
   );
   vi.restoreAllMocks();
 

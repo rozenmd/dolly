@@ -336,7 +336,10 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
               details: null,
             });
 
-          return { connected: false, setupUrl: `${origin}/setup/github/${pending.value.state}` };
+          return {
+            connected: false,
+            setupUrl: `${origin}/api/setup/github/${pending.value.state}`,
+          };
         }
 
         const state = base64url(crypto.getRandomValues(new Uint8Array(32)));
@@ -350,7 +353,7 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
           }),
         );
 
-        return { connected: false, setupUrl: `${origin}/setup/github/${state}` };
+        return { connected: false, setupUrl: `${origin}/api/setup/github/${state}` };
       }),
     ),
   );
@@ -385,7 +388,7 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
         name: `Pi Hard ${state.slice(0, 8)}`,
         url: value.origin,
         public: true,
-        redirect_url: `${value.origin}/setup/github/callback`,
+        redirect_url: `${value.origin}/api/setup/github/callback`,
         default_permissions: GITHUB_APP_GRANT_PERMISSIONS,
         default_events: webhookUrl ? ["issue_comment"] : [],
         hook_attributes: {
