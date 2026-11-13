@@ -1,5 +1,6 @@
 import { bindings, defineConfig, defineContainer, exports } from "cf/config";
 import { readAccessSettings } from "./scripts/access-settings.ts";
+import { screenshotsBucket } from "./infra/screenshots.ts";
 
 const workerName = "dolly";
 const access = readAccessSettings();
@@ -21,6 +22,7 @@ export default defineConfig({
     env: {
       ASSETS: bindings.assets(),
       WORKSPACES: bindings.artifacts({ namespace: "dolly-workspaces" }),
+      SCREENSHOTS: bindings.r2({ name: screenshotsBucket.name }),
       ACCESS_TEAM_DOMAIN: bindings.text(access.ACCESS_TEAM_DOMAIN),
       ACCESS_AUD: bindings.text(access.ACCESS_AUD),
       ACCESS_LOCAL_DEV: bindings.text("false"),

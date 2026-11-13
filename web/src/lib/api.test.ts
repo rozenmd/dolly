@@ -289,6 +289,35 @@ describe("session transcript", () => {
     ]);
   });
 
+  it("counts referenced screenshots without exposing their storage references as prompt text", () => {
+    const snapshot = Schema.decodeUnknownSync(Snapshot)({
+      entries: [
+        {
+          id: 1,
+          kind: "pi.user",
+          model: [
+            {
+              role: "user",
+              timestamp: 1000,
+              content: [
+                { type: "text", text: "Review this" },
+                { type: "image", mimeType: "image/png", data: "r2://screenshots/png/one" },
+                { type: "image", mimeType: "image/jpeg", data: "r2://screenshots/jpeg/two" },
+              ],
+            },
+          ],
+        },
+      ],
+      docs: {},
+    });
+
+    expect(turnsFromSnapshot(snapshot)[0]?.prompt).toEqual({
+      text: "Review this",
+      at: 1000,
+      images: 2,
+    });
+  });
+
   it("rejects malformed API snapshots instead of assuming their shape", () => {
     expect(() =>
       Schema.decodeUnknownSync(Snapshot)({ entries: [{ model: "bad" }], docs: {} }),

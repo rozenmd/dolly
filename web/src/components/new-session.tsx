@@ -30,12 +30,18 @@ export function NewSessionComposer({
   const [created, setCreated] = useState<SavedSession | null>(null);
   const requestId = useRef<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const input = useAttachmentInput(attachments, setAttachments, setError);
+
+  const input = useAttachmentInput(
+    attachments,
+    setAttachments,
+    setError,
+    pending || Boolean(created),
+  );
 
   async function submit(event: FormEvent) {
     event.preventDefault();
 
-    if (pending || !content.trim()) return;
+    if (pending || input.reading || !content.trim()) return;
     setPending(true);
     setError("");
 
@@ -94,7 +100,10 @@ export function NewSessionComposer({
         onDragOver={input.onDragOver}
         onDrop={input.onDrop}
       >
-        <fieldset disabled={pending || Boolean(created)} className="new-session-fields">
+        <fieldset
+          disabled={pending || input.reading || Boolean(created)}
+          className="new-session-fields"
+        >
           <label htmlFor="repository" className="sr-only">
             Repository
           </label>
@@ -146,7 +155,7 @@ export function NewSessionComposer({
             Open existing
           </button>
           <AttachButton
-            disabled={pending || Boolean(created)}
+            disabled={pending || input.reading || Boolean(created)}
             count={attachments.length}
             onFiles={(files) => void input.add(files)}
           />
@@ -160,7 +169,11 @@ export function NewSessionComposer({
             disabled={pending || Boolean(created)}
             onChange={(event) => setModel(event.target.value)}
           />
-          <button type="submit" className="primary-button" disabled={pending || !content.trim()}>
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={pending || input.reading || !content.trim()}
+          >
             {pending ? "Starting…" : created ? "Retry" : "Create"}
           </button>
         </div>
