@@ -207,7 +207,7 @@ export class Coordination {
           const childWorkspace = await tx.doc(ConversationWorkspace, child.id);
           childWorkspace.config = {
             ...parentWorkspace.config,
-            branch: `pi-hard/session-${child.id}`,
+            branch: `dolly/session-${child.id}`,
           };
         }
 

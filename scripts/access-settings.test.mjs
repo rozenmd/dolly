@@ -10,12 +10,12 @@ const directories = [];
 
 const settings = {
   ACCESS_AUD: "a".repeat(64),
-  ACCESS_TEAM_DOMAIN: "pi-hard.cloudflareaccess.com",
-  hostname: "pi-hard.example.workers.dev",
+  ACCESS_TEAM_DOMAIN: "dolly.cloudflareaccess.com",
+  hostname: "dolly.example.workers.dev",
 };
 
 function fixture() {
-  const directory = mkdtempSync(join(tmpdir(), "pi-hard-access-"));
+  const directory = mkdtempSync(join(tmpdir(), "dolly-access-"));
   directories.push(directory);
 
   return {
@@ -51,7 +51,7 @@ test("missing or invalid stack output never replaces existing settings", () => {
   for (const invalid of [
     "not JSON",
     JSON.stringify({ ...settings, ACCESS_AUD: "" }),
-    JSON.stringify({ ...settings, ACCESS_TEAM_DOMAIN: "https://pi-hard.cloudflareaccess.com" }),
+    JSON.stringify({ ...settings, ACCESS_TEAM_DOMAIN: "https://dolly.cloudflareaccess.com" }),
     JSON.stringify({ ...settings, hostname: "*.workers.dev" }),
     JSON.stringify({ ACCESS_AUD: { expression: "unresolved" } }),
   ]) {

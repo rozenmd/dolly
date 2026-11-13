@@ -8,7 +8,7 @@ it("propagates rejected workspace calls without unhandled RPC rejections", async
   const config = {
     repository: "owner/project",
     ref: "main",
-    branch: "pi-hard/test",
+    branch: "dolly/test",
     networkHosts: [],
   };
 

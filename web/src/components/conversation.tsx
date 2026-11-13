@@ -247,7 +247,7 @@ export function Composer({
           id="prompt"
           name="prompt"
           rows={1}
-          placeholder={running ? "Queue for when it finishes…" : "Ask pi-hard…"}
+          placeholder={running ? "Queue for when it finishes…" : "Ask dolly…"}
           value={content}
           maxLength={32768}
           disabled={pending}

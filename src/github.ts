@@ -203,7 +203,7 @@ function makeGitHub(storage: DurableObjectStorage) {
     const headers = new Headers({
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "pi-hard",
+      "User-Agent": "dolly",
       "Content-Type": "application/json",
     });
 
@@ -368,7 +368,7 @@ function makeGitHub(storage: DurableObjectStorage) {
         if (Option.isNone(hook))
           return {
             error:
-              "Enter the ingress Worker's HTTPS URL, such as https://pi-hard-ingress.example.workers.dev",
+              "Enter the ingress Worker's HTTPS URL, such as https://dolly-ingress.example.workers.dev",
           };
 
         const connected = yield* read();
@@ -467,7 +467,7 @@ function makeGitHub(storage: DurableObjectStorage) {
     return {
       action: `${action}?state=${encodeURIComponent(state)}`,
       manifest: {
-        name: `Pi Hard ${state.slice(0, 8)}`,
+        name: `Dolly ${state.slice(0, 8)}`,
         url: value.origin,
         public: true,
         redirect_url: `${value.origin}/api/setup/github/callback`,
@@ -709,7 +709,7 @@ function makeGitHub(storage: DurableObjectStorage) {
 
     const token = yield* tokenFor(connected, event.repository, "write");
     const root = `/repos/${event.repository}/issues/${event.number}/comments`;
-    const marker = `<!-- pi-hard:comment:${event.commentId} -->`;
+    const marker = `<!-- dolly:comment:${event.commentId} -->`;
 
     for (let page = 1; ; page++) {
       const comments = yield* api(`${root}?per_page=100&page=${page}`, token).pipe(
@@ -767,7 +767,7 @@ function makeGitHub(storage: DurableObjectStorage) {
 }
 
 export class GitHub extends Context.Service<GitHub, ReturnType<typeof makeGitHub>>()(
-  "pi-hard/GitHub",
+  "dolly/GitHub",
 ) {
   static readonly layer = (storage: DurableObjectStorage) =>
     Layer.succeed(GitHub, makeGitHub(storage));

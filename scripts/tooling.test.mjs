@@ -9,7 +9,7 @@ import { test } from "node:test";
 const root = fileURLToPath(new URL("../", import.meta.url));
 
 function fixture(t, source) {
-  const directory = mkdtempSync(join(tmpdir(), "pi-hard-tooling-"));
+  const directory = mkdtempSync(join(tmpdir(), "dolly-tooling-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const path = join(directory, "fixture.ts");
   writeFileSync(path, source);

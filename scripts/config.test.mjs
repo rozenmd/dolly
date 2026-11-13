@@ -22,12 +22,13 @@ test("builds production Workers explicitly before prebuilt deployment or dry run
 
 test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", () => {
   const { worker, containers } = config;
-  assert.equal(worker.name, "pi-hard");
+  assert.equal(worker.name, "dolly");
   assert.equal(worker.entrypoint, "./src/worker.ts");
   assert.deepEqual(worker.assets, { runWorkerFirst: true });
   assert.equal(worker.env.ASSETS.type, "assets");
   assert.deepEqual(worker.compatibilityFlags, ["nodejs_compat"]);
   assert.equal(worker.env.WORKSPACES.type, "artifacts");
+  assert.equal(worker.env.WORKSPACES.namespace, "dolly-workspaces");
   assert.equal(worker.exports.WorkspaceOutbound.type, "worker");
   assert.equal(worker.previewUrls, false);
   assert.equal(worker.env.ACCESS_LOCAL_DEV.value, "false");
@@ -47,6 +48,7 @@ test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", ()
   assert.equal(worker.exports.Agent.storage, "sqlite");
   assert.equal(worker.exports.Sandbox.storage, "sqlite");
   assert.equal(containers.length, 1);
+  assert.equal(containers[0].name, "dolly-sandbox");
   assert.equal(worker.exports.Sandbox.container, containers[0]);
   assert.equal(containers[0].schedulingPolicy, "durable-object");
   assert.deepEqual(containers[0].images, { sandbox: { dockerfile: "./Dockerfile" } });
@@ -71,7 +73,7 @@ test("the sandbox test adapter retains the typed config's container link and ima
 
 test("public ingress binds only the private webhook entrypoint and has no credentials or Durable Object binding", async () => {
   const { default: ingress } = await import("../ingress/cloudflare.config.ts");
-  assert.equal(ingress.worker.name, "pi-hard-ingress");
+  assert.equal(ingress.worker.name, "dolly-ingress");
   assert.equal(ingress.worker.entrypoint, "../src/ingress.ts");
   assert.equal(ingress.worker.previewUrls, false);
   assert.deepEqual(Object.keys(ingress.worker.env), ["INGRESS"]);

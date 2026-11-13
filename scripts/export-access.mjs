@@ -1,7 +1,7 @@
 import { exportAccessSettings } from "./access-settings.ts";
 
 const outputPath = new URL(
-  "../infra/.alchemy/state/PiHardAccess/prod/__stack_output__.json",
+  "../infra/.alchemy/state/DollyAccess/prod/__stack_output__.json",
   import.meta.url,
 );
 

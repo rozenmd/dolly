@@ -4,7 +4,7 @@ import * as Schema from "effect/Schema";
 import { AccessConfig, applicationPolicies } from "./config.ts";
 
 const config = {
-  hostname: "pi-hard.example.workers.dev",
+  hostname: "dolly.example.workers.dev",
   teamDomain: "example.cloudflareaccess.com",
   emails: ["owner@example.com"],
   serviceTokenId: "00000000-0000-4000-8000-000000000000",
@@ -25,8 +25,8 @@ test("rejects wildcard users, empty allowlists, URLs, paths, and missing team co
     { ...config, emails: [] },
     { ...config, emails: ["*@example.com"] },
     { ...config, emails: [""] },
-    { ...config, hostname: "https://pi-hard.example.workers.dev" },
-    { ...config, hostname: "pi-hard.example.workers.dev/api" },
+    { ...config, hostname: "https://dolly.example.workers.dev" },
+    { ...config, hostname: "dolly.example.workers.dev/api" },
     { ...config, hostname: "*.workers.dev" },
     { ...config, teamDomain: "" },
     { ...config, teamDomain: "example.com" },

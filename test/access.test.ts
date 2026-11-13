@@ -107,7 +107,7 @@ it("verifies the signature, issuer, audience and expiration before reaching the 
   certificates();
   const jwt = await sign(claims(), privateKey, "RS256");
   expect((await request(jwt)).status).toBe(404);
-  expect((await request(jwt, {}, "__Host-pi-hard-session=incorrect")).status).toBe(401);
+  expect((await request(jwt, {}, "__Host-dolly-session=incorrect")).status).toBe(401);
 
   for (const payload of [
     { ...claims(), iss: "https://other.cloudflareaccess.com" },

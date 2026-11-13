@@ -111,9 +111,9 @@ app.use(
   bodyLimit({ maxSize: 65_536, onError: (c) => c.json({ error: "Body exceeds 64 KiB" }, 413) }),
 );
 
-const SESSION_COOKIE = "__Host-pi-hard-session";
+const SESSION_COOKIE = "__Host-dolly-session";
 
-const DEVICE_COOKIE = "__Host-pi-hard-github-device";
+const DEVICE_COOKIE = "__Host-dolly-github-device";
 
 const cookie = { path: "/", secure: true, httpOnly: true, sameSite: "Lax" } as const;
 

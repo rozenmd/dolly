@@ -9,7 +9,7 @@ import { attempt } from "./operations";
 export class Account extends Context.Service<
   Account,
   Pick<Credentials, "storage" | "get" | "put" | "remove" | "locked">
->()("pi-hard/Account") {}
+>()("dolly/Account") {}
 
 export class Credentials implements CredentialStore {
   private readonly permit = Semaphore.makeUnsafe(1);

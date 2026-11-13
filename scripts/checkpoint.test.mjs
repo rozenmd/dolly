@@ -10,7 +10,7 @@ const script = fileURLToPath(new URL("../container/checkpoint.py", import.meta.u
 
 for (const symlinked of [false, true])
   test(`checkpoints dirty, staged, ignored, nested-repository and binary files without changing user history or index (symlinked root=${symlinked})`, (t) => {
-    const root = mkdtempSync(join(tmpdir(), "pi-hard-checkpoint-"));
+    const root = mkdtempSync(join(tmpdir(), "dolly-checkpoint-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const repo = join(root, "repo");
 

@@ -9,7 +9,7 @@ import * as Schema from "effect/Schema";
 import { AccessConfig, applicationPolicies } from "./config.ts";
 
 export default Alchemy.Stack(
-  "PiHardAccess",
+  "DollyAccess",
   { providers: Cloudflare.providers(), state: localState() },
   Effect.gen(function* () {
     const stage = yield* Alchemy.Stage;
@@ -17,13 +17,11 @@ export default Alchemy.Stack(
     if (stage !== "prod") return yield* Effect.die(new Error("Access must use --stage prod"));
 
     const config = yield* Schema.decodeUnknownEffect(AccessConfig)({
-      hostname: yield* Config.String("PI_HARD_ACCESS_HOSTNAME"),
-      teamDomain: yield* Config.String("PI_HARD_ACCESS_TEAM_DOMAIN"),
-      emails: (yield* Config.String("PI_HARD_ACCESS_EMAILS"))
-        .split(",")
-        .map((email) => email.trim()),
-      serviceTokenId: yield* Config.String("PI_HARD_ACCESS_SERVICE_TOKEN_ID"),
-      applicationId: yield* Config.String("PI_HARD_ACCESS_APPLICATION_ID").pipe(
+      hostname: yield* Config.String("DOLLY_ACCESS_HOSTNAME"),
+      teamDomain: yield* Config.String("DOLLY_ACCESS_TEAM_DOMAIN"),
+      emails: (yield* Config.String("DOLLY_ACCESS_EMAILS")).split(",").map((email) => email.trim()),
+      serviceTokenId: yield* Config.String("DOLLY_ACCESS_SERVICE_TOKEN_ID"),
+      applicationId: yield* Config.String("DOLLY_ACCESS_APPLICATION_ID").pipe(
         Config.withDefault(undefined),
       ),
     }).pipe(Effect.orDie);
@@ -32,10 +30,10 @@ export default Alchemy.Stack(
       type: "onetimepin",
     }).pipe(adopt(true), retain());
 
-    const application = yield* Cloudflare.Access.Application("PiHard", {
+    const application = yield* Cloudflare.Access.Application("Dolly", {
       applicationId: config.applicationId,
       type: "self_hosted",
-      name: "Pi Hard",
+      name: "Dolly",
       domain: config.hostname,
       sessionDuration: "24h",
       allowedIdps: [pin.identityProviderId],

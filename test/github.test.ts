@@ -40,7 +40,7 @@ const pem = createPrivateKey(pkcs8).export({ type: "pkcs1", format: "pem" }).toS
 
 const app = {
   id: 42,
-  slug: "pi-hard-test",
+  slug: "dolly-test",
   pem,
   client_id: "client-id",
   client_secret: "private-client-secret",
@@ -296,7 +296,7 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
 
     if (path.includes("/contents/")) {
       expect(JSON.parse(String(init?.body))).toMatchObject({
-        branch: "pi-hard/fix",
+        branch: "dolly/fix",
         sha,
         content: btoa("changed"),
       });
@@ -310,7 +310,7 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
   });
   expect(
     await (
-      await execute({ action: "create_branch", repository, base: "main", branch: "pi-hard/fix" })
+      await execute({ action: "create_branch", repository, base: "main", branch: "dolly/fix" })
     ).json(),
   ).toMatchObject({ ok: true, result: { kind: "branch" } });
   expect(
@@ -318,7 +318,7 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
       await execute({
         action: "write_file",
         repository,
-        branch: "pi-hard/fix",
+        branch: "dolly/fix",
         path: "src/main.ts",
         sha,
         content: "changed",
@@ -331,7 +331,7 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
       await execute({
         action: "open_pull_request",
         repository,
-        branch: "pi-hard/fix",
+        branch: "dolly/fix",
         base: "main",
         title: "Fix",
         body: "Details",
@@ -343,7 +343,7 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
       await execute({
         action: "write_file",
         repository,
-        branch: "pi-hard/fix",
+        branch: "dolly/fix",
         path: ".github/workflows/check.yml",
         sha,
         content: "changed",
@@ -356,7 +356,7 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
       await execute({
         action: "write_file",
         repository,
-        branch: "pi-hard/fix",
+        branch: "dolly/fix",
         path: "a.ts",
         sha,
         content: "漢".repeat(16_384),
@@ -364,13 +364,13 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
       })
     ).json(),
   ).toMatchObject({ ok: false, code: "file_too_large" });
-  defaultBranch = "pi-hard/fix";
+  defaultBranch = "dolly/fix";
   expect(
     await (
       await execute({
         action: "write_file",
         repository,
-        branch: "pi-hard/fix",
+        branch: "dolly/fix",
         path: "a.ts",
         sha,
         content: "change",
@@ -737,7 +737,7 @@ it("brokers real Worker RPC Git requests without exposing credentials or allowin
 
   expect(await read.text()).toBe("Git response without credentials");
 
-  for (const branch of ["main", "pi-hard/someone-else", config.branch]) {
+  for (const branch of ["main", "dolly/someone-else", config.branch]) {
     const command = `${"a".repeat(40)} ${"b".repeat(40)} refs/heads/${branch}\0report-status\n`;
     const body = (command.length + 4).toString(16).padStart(4, "0") + command + "0000PACK";
 
@@ -851,7 +851,7 @@ it("blocks revoked accounts before cached tokens, direct operations, or Git tran
 
   for (const op of [
     operation,
-    { action: "create_branch" as const, repository, branch: "pi-hard/test", base: "main" },
+    { action: "create_branch" as const, repository, branch: "dolly/test", base: "main" },
   ]) {
     expect(await (await execute(op)).json()).toMatchObject({
       ok: false,

@@ -53,8 +53,8 @@ export function GitHubSetup({ initialError }: { initialError: string }) {
   return (
     <form className="gate-form" onSubmit={(event) => void submit(event)}>
       <p className="muted">
-        pi-hard signs you in and works on your repositories through a GitHub App that you own.
-        GitHub creates it with everything filled in.
+        dolly signs you in and works on your repositories through a GitHub App that you own. GitHub
+        creates it with everything filled in.
       </p>
       <fieldset className="segmented">
         <legend className="sr-only">Who owns the GitHub App</legend>
@@ -95,14 +95,14 @@ export function GitHubSetup({ initialError }: { initialError: string }) {
         name="ingress"
         type="url"
         required
-        placeholder="https://pi-hard-ingress.example.workers.dev"
+        placeholder="https://dolly-ingress.example.workers.dev"
         value={ingress}
         onChange={(event) => setIngress(event.target.value)}
         aria-describedby="github-ingress-help"
       />
       <p id="github-ingress-help" className="field-help">
-        The URL of your deployed pi-hard-ingress Worker. GitHub sends issue and pull request
-        comments there.
+        The URL of your deployed dolly-ingress Worker. GitHub sends issue and pull request comments
+        there.
       </p>
       {error && (
         <p role="alert" className="error-text">
@@ -261,10 +261,10 @@ export function GitHubSignIn({
           <a href={settingsUrl} target="_blank" rel="noreferrer">
             its settings
           </a>
-          , then sign in. The first account to sign in owns this pi-hard.
+          , then sign in. The first account to sign in owns this dolly.
         </p>
       ) : (
-        <p className="muted">Sign in with the GitHub account that owns this pi-hard.</p>
+        <p className="muted">Sign in with the GitHub account that owns this dolly.</p>
       )}
       {error && (
         <p role="alert" className="error-text">

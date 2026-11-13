@@ -71,10 +71,10 @@ export function Sidebar({
             aria-label="Settings"
           >
             <span className="brand-mark" aria-hidden="true">
-              π
+              D
               <span className={`brand-presence ${connected ? "online" : ""}`} />
             </span>
-            <span className="account-name">pi-hard</span>
+            <span className="account-name">dolly</span>
             <ChevronDownIcon />
           </button>
           <IconButton label="Close navigation" className="mobile-only" onClick={onClose}>

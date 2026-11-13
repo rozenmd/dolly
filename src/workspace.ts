@@ -31,7 +31,7 @@ export function workspaceConfig(input: typeof WorkspaceInput.Type, id: string): 
     repository: input.repository,
     ref: input.ref ?? "HEAD",
     networkHosts: Array.from(input.networkHosts ?? []),
-    branch: `pi-hard/session-${id}`,
+    branch: `dolly/session-${id}`,
   };
 }
 
@@ -88,7 +88,7 @@ canonical=$(printf '%s\\n' "$advertisement" | awk -v ref="$ref" '
   END { if (symbolic) print symbolic; else if (exact) print exact; else if (branch) print branch; else print tag }
 ')
 if test -n "$canonical" && test "$canonical" != HEAD; then
-  pi-hard-mount repo "$remote" "$canonical"
+  dolly-mount repo "$remote" "$canonical"
   ln -sfn /workspace/mounts/repo /workspace/repo
 else
   # Unadvertised commit IDs have no named ref for ArtifactFS. Retain exact-revision checkout.
@@ -101,8 +101,8 @@ else
   mv /workspace/checkout /workspace/repo
 fi
 cd /workspace/repo
-git config user.name 'Pi Hard'
-git config user.email 'pi-hard@users.noreply.github.com'
+git config user.name 'Dolly'
+git config user.email 'dolly@users.noreply.github.com'
 git checkout -B ${shellQuote(config.branch)} HEAD
 touch /workspace/ready`;
 }
@@ -110,7 +110,7 @@ touch /workspace/ready`;
 export function restoreScript(repository: string, checkpoint: WorkspaceCheckpoint) {
   return `set -eu
 if test -f /workspace/ready; then exit 0; fi
-pi-hard-mount state ${shellQuote(`http://artifacts.workspace/${repository}.git`)} ${shellQuote(`refs/heads/${checkpoint.branch}`)}
+dolly-mount state ${shellQuote(`http://artifacts.workspace/${repository}.git`)} ${shellQuote(`refs/heads/${checkpoint.branch}`)}
 test "$(git -C /workspace/mounts/state rev-parse HEAD)" = ${shellQuote(checkpoint.commit)}
 mkdir -p /workspace/git /workspace/mounts/state/files
 python3 -c 'import os, tarfile; tarfile.open("/workspace/mounts/state/git.tar").extractall("/workspace/git", filter="data"); tarfile.open("/workspace/mounts/state/nested.tar").extractall("/workspace/mounts/state", filter="data"); [os.makedirs(b"/workspace/mounts/state/" + path, exist_ok=True) for path in open("/workspace/mounts/state/directories", "rb").read().split(b"\\0") if path]'
@@ -128,5 +128,5 @@ export function checkpointScript(
   branch: string,
   previous?: WorkspaceCheckpoint,
 ) {
-  return `python3 /usr/local/lib/pi-hard-checkpoint.py ${shellQuote(`http://artifacts.workspace/${repository}.git`)} ${shellQuote(branch)} ${shellQuote(previous ? `refs/heads/${previous.branch}` : "")}`;
+  return `python3 /usr/local/lib/dolly-checkpoint.py ${shellQuote(`http://artifacts.workspace/${repository}.git`)} ${shellQuote(branch)} ${shellQuote(previous ? `refs/heads/${previous.branch}` : "")}`;
 }

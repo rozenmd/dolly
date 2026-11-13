@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory(dir=root) as temporary:
 
     try:
         line("commit refs/heads/" + branch)
-        line("committer Pi Hard <pi-hard@users.noreply.github.com> " + str(int(time.time())) + " +0000")
+        line("committer Dolly <dolly@users.noreply.github.com> " + str(int(time.time())) + " +0000")
         line("data 20")
         line("Workspace checkpoint")
         if parent:
