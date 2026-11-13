@@ -295,7 +295,7 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
   await page.screenshot({ path: test.info().outputPath("claude-connection-mobile.png") });
   await connect.getByRole("button", { name: "Continue with Claude" }).click();
   const composer = page.getByRole("dialog", { name: "New session" });
-  await expect(composer.getByLabel("Model", { exact: true })).toHaveValue("claude-sonnet-4-6");
+  await expect(composer.getByLabel("Model", { exact: true })).toHaveValue("claude-sonnet-5-5");
   await composer.getByLabel("Model", { exact: true }).selectOption("claude-haiku-4-5");
   await composer.getByLabel("Task", { exact: true }).fill("Say hello");
   await composer.getByRole("button", { name: "Create", exact: true }).click();

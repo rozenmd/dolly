@@ -1,15 +1,23 @@
 name: Check
 on:
   push:
+    branches: [main]
   pull_request_target:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
-  check:
+  verify:
     # Evaluate the PR gate from the base branch, before checking out PR code.
     if: github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, worker, sandbox]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -21,9 +29,25 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm run check
-      - run: pnpm test
-      - run: pnpm --dir web exec playwright install --with-deps chromium
-      - run: pnpm run test:worker
-      - run: pnpm run test:sandbox
-      - run: pnpm run build
+      - if: matrix.suite == 'unit'
+        run: pnpm run check && pnpm test
+      - if: matrix.suite == 'worker'
+        run: pnpm --dir web exec playwright install --with-deps chromium
+      - if: matrix.suite == 'worker'
+        run: pnpm run test:worker
+      # Keep these on the same runner: build reuses the rootless Docker daemon.
+      - if: matrix.suite == 'sandbox'
+        run: pnpm run test:sandbox
+      - if: matrix.suite == 'sandbox'
+        run: pnpm run build
+  # Preserve the existing required status while waiting for every suite.
+  check:
+    if: always() && github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd'
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require all suites to pass
+        env:
+          RESULT: ${{ needs.verify.result }}
+        run: test "$RESULT" = success
