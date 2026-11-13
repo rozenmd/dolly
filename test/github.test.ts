@@ -157,6 +157,7 @@ it("keeps setup state through eviction, consumes it once and never returns crede
 
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     expect(String(url)).toBe("https://api.github.com/app-manifests/manifest-code/conversions");
+    expect(init?.redirect).toBe("manual");
     expect(new Headers(init?.headers).has("Authorization")).toBe(false);
 
     return Response.json(app);
@@ -180,6 +181,27 @@ it("keeps setup state through eviction, consumes it once and never returns crede
     connected: true,
     setupUrl: null,
   });
+});
+
+it("rejects redirected manifest exchanges without connecting or following the redirect", async () => {
+  const started = await start();
+
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    expect(String(url)).toBe("https://api.github.com/app-manifests/manifest-code/conversions");
+    expect(init?.redirect).toBe("manual");
+
+    return Response.json(app, {
+      status: 302,
+      headers: { Location: "https://attacker.example/conversions" },
+    });
+  });
+
+  const result = await callback(`state=${started.state}&code=manifest-code`);
+  expect(result).toContain("Provider returned HTTP 302");
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(
+    await (await SELF.fetch("https://worker/api/integrations/github", { headers })).json(),
+  ).toEqual({ connected: false });
 });
 
 it("rejects forged, expired, and wrong-owner setup callbacks without connecting", async () => {
