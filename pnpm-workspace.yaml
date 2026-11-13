@@ -21,4 +21,5 @@ minimumReleaseAgeExclude:
 packages:
   - .
   - ingress
+  - infra
   - web

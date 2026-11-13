@@ -1,0 +1,21 @@
+{
+  "name": "pi-hard-access",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "plan": "alchemy plan --stage prod",
+    "deploy": "alchemy deploy --stage prod",
+    "test": "node --test *.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@alchemy.run/cloudflare": "2.0.0-beta.85",
+    "@effect/platform-node": "4.1.4",
+    "alchemy": "2.0.0-beta.85",
+    "effect": "4.1.4"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}

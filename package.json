@@ -9,8 +9,11 @@
     "build:web": "pnpm --dir web build",
     "check:web": "pnpm --dir web typecheck && pnpm --dir web test",
     "deploy": "cf deploy",
+    "access:plan": "pnpm --dir infra plan",
+    "access:deploy": "pnpm --dir infra deploy && pnpm access:export",
+    "access:export": "node scripts/export-access.mjs",
     "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm check:web",
-    "test": "node --test scripts/*.test.mjs && vitest run",
+    "test": "node --test scripts/*.test.mjs && pnpm --dir infra test && vitest run",
     "build": "cf deploy --dry-run && pnpm --dir ingress exec cf deploy --dry-run",
     "login": "node --env-file-if-exists=.dev.vars --env-file-if-exists=.env.access scripts/connect.mjs",
     "test:sandbox": "bash scripts/test-sandbox.sh",
@@ -18,7 +21,7 @@
     "format:check": "oxfmt --check .",
     "lint": "oxlint --deny-warnings",
     "lint:fix": "oxlint --fix --deny-warnings",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && pnpm --dir infra typecheck",
     "test:worker": "vite build --config test/worker/vite.config.ts && vitest run --config vitest.worker.config.ts && WEB_TEST_ACCESS=required vitest run --config vitest.worker.config.ts && pnpm --dir web exec playwright test --config playwright.worker.config.ts"
   },
   "dependencies": {
