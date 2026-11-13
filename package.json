@@ -4,12 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "cf dev",
+    "dev": "vite --host 127.0.0.1 --port 8787",
     "dev:web": "pnpm --dir web dev",
     "build:web": "pnpm --dir web build",
     "check:web": "pnpm --dir web typecheck && pnpm --dir web test",
     "deploy": "cf deploy",
-    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck",
+    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm check:web",
     "test": "node --test scripts/*.test.mjs && vitest run",
     "build": "cf deploy --dry-run && pnpm --dir ingress exec cf deploy --dry-run",
     "login": "node --env-file-if-exists=.dev.vars --env-file-if-exists=.env.access scripts/connect.mjs",
@@ -18,7 +18,8 @@
     "format:check": "oxfmt --check .",
     "lint": "oxlint --deny-warnings",
     "lint:fix": "oxlint --fix --deny-warnings",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:worker": "vite build --config test/worker/vite.config.ts && vitest run --config vitest.worker.config.ts && WEB_TEST_ACCESS=required vitest run --config vitest.worker.config.ts && pnpm --dir web exec playwright test --config playwright.worker.config.ts"
   },
   "dependencies": {
     "@cloudflare/sandbox": "1.0.3",
@@ -31,6 +32,7 @@
   },
   "devDependencies": {
     "@cloudflare/config": "0.31.1",
+    "@cloudflare/vite-plugin": "2.0.0-beta.v.13",
     "@cloudflare/vitest-plugin": "1.7.0",
     "@cloudflare/workers-types": "5.20261110.1",
     "@oxlint/plugins": "1.93.0",
@@ -38,6 +40,7 @@
     "oxfmt": "0.78.0",
     "oxlint": "1.93.0",
     "typescript": "7.0.2",
+    "vite": "8.3.8",
     "vitest": "5.1.0",
     "wrangler": "4.160.0"
   },

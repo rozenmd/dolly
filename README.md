@@ -6,28 +6,34 @@ A Cloudflare Access-protected personal coding-agent API on Cloudflare Workers, u
 
 The `web/` workspace is a TanStack Start + React frontend with a dark, responsive workspace sidebar, searchable sessions, an activity feed, Markdown conversations, tool output, and a message composer.
 
+The app is served at the Worker's `/`, with the existing Hono endpoints under `/api/*` on the same origin. `/health` remains available without credentials. Cloudflare Access protects the page and its assets; API calls additionally require the existing bearer token.
+
 ```sh
 pnpm install --frozen-lockfile
-pnpm dev:web
+# Set ACCESS_LOCAL_DEV=true in .dev.vars for local development only.
+pnpm dev
 ```
 
-Open `http://localhost:3000`. It starts in a labeled preview with example content; preview actions never submit work to the agent. To use real sessions:
+Open `http://localhost:8787`. Docker and `.dev.vars` are required. It starts in a labeled preview with example content; preview actions never submit work to the agent. To use real sessions:
 
-1. Start the local Worker in another terminal with `pnpm dev --var ACCESS_LOCAL_DEV:true` (Docker and `.dev.vars` are required).
-2. Connect the local Worker's Codex subscription using the login instructions below, and connect GitHub if you want repository checkouts.
-3. Choose **Connect your API** and enter the existing `API_TOKEN` from `.dev.vars`. The frontend's local development server proxies `/api` to `http://localhost:8787`; it does not inject credentials or bypass the Worker's bearer authentication.
-4. Create a workspace with an optional `owner/repository`, or open a known session ID. Send a task; the frontend polls the recent transcript and live progress every 2.5 seconds. **Stop agent** aborts the selected session and its descendants.
+1. Connect the local Worker's Codex subscription using the login instructions below, and connect GitHub if you want repository checkouts.
+2. Choose **Connect your API** and enter the existing `API_TOKEN` from `.dev.vars`. Requests go directly to the same Worker's `/api`; the frontend does not inject credentials or bypass bearer authentication.
+3. Create a workspace with an optional `owner/repository`, or open a known session ID. Send a task; the frontend polls the recent transcript and live progress every 2.5 seconds. **Stop agent** aborts the selected session and its descendants.
 
 The token stays in memory and must be entered again after reloading. Only session IDs, titles, repository labels, models, and update times are saved in local storage. There is no server session-list endpoint yet, so the activity feed lists only sessions created or imported in this browser, not all sessions on the Worker. Imported sessions use manually entered display labels. Repository sessions use the server's restricted default network policy; the UI does not grant dependency network hosts.
 
 ```sh
-pnpm build:web
-pnpm check:web
+pnpm check
+pnpm test
 pnpm --dir web exec playwright install chromium
-pnpm --dir web test:e2e
+pnpm test:worker
+pnpm build   # deployment dry runs, including the frontend and sandbox image
+pnpm deploy  # publish the combined Worker and frontend
 ```
 
-The frontend build produces `web/dist/client` and `web/dist/server`. Existing `pnpm deploy` and `pnpm build` remain backend-only; this change does not deploy or reconfigure the Worker. Production hosting needs a TanStack Start-compatible server adapter and same-origin routing: `/api/*` to the existing Worker, and frontend/assets to the web app. Protect the **entire hostname** with Cloudflare Access, preserving the existing Worker's JWT and bearer-token checks. A browser's Access cookie supplies the JWT through Cloudflare; never put Access service credentials or `API_TOKEN` in a `VITE_*` variable or a client bundle. The development proxy targets only the local Worker and is not a production proxy.
+The root Vite configuration uses the Cloudflare adapter to bundle the TanStack Start server, the Hono API, Durable Objects, and frontend assets into one Worker build. `pnpm build` and `pnpm deploy` include the UI; no separate frontend host or production proxy is needed. `pnpm dev:web` and `pnpm build:web` remain available for frontend-only development, with the development server on port 3000 proxying `/api` to the Worker on port 8787.
+
+Protect the **entire hostname** with Cloudflare Access, preserving the Worker's JWT and bearer-token checks. A browser's Access cookie supplies the JWT through Cloudflare; never put Access service credentials or `API_TOKEN` in a `VITE_*` variable or a client bundle. `ACCESS_LOCAL_DEV` must remain false in production. The HTTP/browser test build disables containers and uses local storage simulation; the production build and sandbox integration tests retain real containers.
 
 ## Deploy to Cloudflare
 
@@ -312,10 +318,11 @@ Aborting a parent also stops all descendants and pending deliveries. Aborting do
 To develop locally after installing dependencies and configuring `.dev.vars`, start the Worker with Docker running:
 
 ```sh
-pnpm run dev --var ACCESS_LOCAL_DEV:true
+# Set ACCESS_LOCAL_DEV=true in .dev.vars for local development only.
+pnpm run dev
 ```
 
-This command bypasses JWT verification only for this local development invocation; the API bearer token is still required. Never deploy with `ACCESS_LOCAL_DEV` enabled or put that override in `.dev.vars`. The automated Worker tests use the same explicit bypass except for the Access authentication tests.
+The local `.dev.vars` setting bypasses JWT verification; the API bearer token is still required. `.dev.vars` is ignored by Git and is only for local development. Never enable `ACCESS_LOCAL_DEV` in deployed configuration. The automated Worker tests use the same explicit bypass except for the Access authentication tests.
 
 In another terminal, explicitly select the local Worker and connect its Codex login:
 

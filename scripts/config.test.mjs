@@ -7,7 +7,9 @@ import config from "../cloudflare.config.ts";
 test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", () => {
   const { worker, containers } = config;
   assert.equal(worker.name, "pi-hard");
-  assert.equal(worker.entrypoint, "./src/index.ts");
+  assert.equal(worker.entrypoint, "./src/worker.ts");
+  assert.deepEqual(worker.assets, { runWorkerFirst: true });
+  assert.equal(worker.env.ASSETS.type, "assets");
   assert.deepEqual(worker.compatibilityFlags, ["nodejs_compat"]);
   assert.equal(worker.env.API_TOKEN.type, "secret");
   assert.equal(worker.env.WORKSPACES.type, "artifacts");
@@ -38,7 +40,7 @@ test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", ()
 test("the sandbox test adapter retains the typed config's container link and image", async () => {
   const path = await sandboxTestConfig();
   const generated = JSON.parse(await readFile(path, "utf8"));
-  assert.equal(generated.main, config.worker.entrypoint);
+  assert.equal(generated.main, "./src/index.ts");
   assert.equal(generated.exports.Sandbox.container, config.containers[0].name);
   assert.equal(generated.exports.Sandbox.storage, "sqlite");
   assert.equal(generated.containers[0].scheduling_policy, "durable_object");
