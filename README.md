@@ -63,12 +63,36 @@ pnpm run deploy --secrets-file .dev.vars
 
 ### Require Cloudflare Access
 
-The first deployment refuses API calls until Access is configured. Before connecting Codex:
+The first deployment refuses web and API requests until Access is configured. The Alchemy 2 stack in `infra/` manages Access independently of `cf deploy`, following Rat Stack's typed infrastructure and plan-before-deploy approach. It does not own the Workers, containers, DNS, or your account-wide Zero Trust settings.
 
-1. In Cloudflare, enable [Access protection for this Worker's production `workers.dev` URL](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/#manage-access-to-workersdev). Protect the entire hostname, not just one API path. In Zero Trust, restrict the application's Allow policy to your identity or approved users; do not use an Everyone or Bypass policy.
-2. For the login script and `curl`, create or reuse an Access service token. Add a **Service Auth** policy to this application that includes only that token. A service token is a machine credential, separate from your Codex subscription and the Worker's `API_TOKEN`.
-3. Copy the Access application's audience (AUD) tag and your team domain into `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` in `cloudflare.config.ts`. The team domain is a hostname such as `your-team.cloudflareaccess.com`, without `https://` or a path. Keep `ACCESS_LOCAL_DEV` set to `"false"` for deployments.
-4. Redeploy with `pnpm run deploy`. The Worker verifies the Access JWT's RS256 signature, issuer, audience and expiration on every `/api/*` request, in addition to requiring `API_TOKEN`. Missing configuration, missing/forged tokens and failed certificate lookups cannot authorize API access.
+1. Enable Zero Trust in your Cloudflare account if needed, and note its existing team domain (`your-team.cloudflareaccess.com`, without `https://` or a path). Create or reuse an Access service token for the login script and `curl`. Keep its client ID/secret in `.env.access` as described below; the stack only needs its **token UUID**, not either credential.
+2. Configure an Alchemy authentication profile with `pnpm --dir infra exec alchemy profile create pi-hard`, then `pnpm --dir infra exec alchemy profile edit --profile pi-hard`. Select the same Cloudflare account as the Worker deployment and run `export ALCHEMY_PROFILE=pi-hard` for subsequent commands. The credentials need Access application/policy and identity-provider edit permissions. Keep provider credentials in the profile, not Worker bindings or committed files.
+3. Create local stack inputs, then edit `infra/.env`:
+
+   ```sh
+   # Do not overwrite an existing configuration.
+   test -f infra/.env || cp infra/.env.example infra/.env
+   ```
+
+   Set `PI_HARD_ACCESS_HOSTNAME` to the **main Worker's production hostname**, not the ingress hostname. Set the team domain, comma-separated exact allowed email addresses, and existing service-token UUID. No wildcard users or Everyone/Bypass policies are accepted. If Access already protects this hostname, also set `PI_HARD_ACCESS_APPLICATION_ID` to adopt that application and preserve its AUD. Adoption replaces its inline policies with the declared email and service-token policies: review this carefully.
+
+4. Run checks, inspect the production plan, then explicitly deploy Access:
+
+   ```sh
+   pnpm run check
+   pnpm test
+   pnpm access:plan
+   pnpm access:deploy
+   pnpm run deploy
+   ```
+
+   The stack creates or narrowly adopts the account's one-time-PIN identity provider, and creates/adopts an application protecting the entire main hostname. It restricts browser login to the approved emails and **Service Auth** to the existing token. The public ingress is not included. Check the account, hostname, adoption, and policy changes in the plan before approving deployment. If you use a named Alchemy profile, set `ALCHEMY_PROFILE` consistently for both commands.
+
+`access:deploy` exports resolved, validated non-secret settings to ignored `infra/access.generated.json` **only after a successful Access deployment**. The root `cloudflare.config.ts` reads that file; `pnpm run deploy` then publishes those settings. Use `pnpm access:export` to repeat the export without changing cloud resources. Missing generated settings leave the Worker unconfigured (503); malformed settings fail the build/deploy rather than silently disabling authentication. Keep `ACCESS_LOCAL_DEV` set to `"false"` in deployed configuration.
+
+Alchemy is pinned separately with its compatible Effect version in `infra/package.json`; the application's Effect version is unchanged. Deployment ownership is persisted in ignored **`infra/.alchemy/`** using Alchemy's local state backend. Back this directory up securely and restore it on the deployment machine before planning. Do not run concurrent deploys, delete state, or switch state backends casually. The application and PIN identity provider are retained on destroy; no destroy shortcut is provided. Export reads the pinned Alchemy version's local stack-output format, covered by the export tests; recheck it when upgrading Alchemy. Neither plan nor tests export settings or deploy resources.
+
+The Worker still independently verifies the Access JWT's RS256 signature, issuer, audience, and expiration, in addition to requiring `API_TOKEN` for API calls. Missing configuration, missing/forged tokens and failed certificate lookups cannot authorize access. After deployment, confirm an anonymous browser is redirected to Access, your approved email can load the app, an unapproved identity cannot, and your existing service credentials still work with `pnpm run login`. Check GitHub ingress remains public (it should reject unsigned webhook requests, not redirect to Access).
 
 Preview URLs are disabled in the configuration. If you add a custom domain, protect that entire hostname with Access too, and either protect or disable the alternate `workers.dev` route (`workersDev: false`). Never leave an alternate public hostname or preview unprotected. The Worker-side JWT check also prevents those routes from accepting requests with only the API token.
 

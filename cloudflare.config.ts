@@ -1,6 +1,8 @@
 import { bindings, defineConfig, defineContainer, exports } from "cf/config";
+import { readAccessSettings } from "./scripts/access-settings.ts";
 
 const workerName = "pi-hard";
+const access = readAccessSettings();
 
 const sandbox = defineContainer({
   name: "pi-hard-sandbox",
@@ -20,8 +22,8 @@ export default defineConfig({
       API_TOKEN: bindings.secret(),
       ASSETS: bindings.assets(),
       WORKSPACES: bindings.artifacts({ namespace: "pi-hard-workspaces" }),
-      ACCESS_TEAM_DOMAIN: bindings.text(""),
-      ACCESS_AUD: bindings.text(""),
+      ACCESS_TEAM_DOMAIN: bindings.text(access.ACCESS_TEAM_DOMAIN),
+      ACCESS_AUD: bindings.text(access.ACCESS_AUD),
       ACCESS_LOCAL_DEV: bindings.text("false"),
       GITHUB_WEBHOOK_URL: bindings.text(""),
       CODEX_MODEL: bindings.text("gpt-6-luna"),
