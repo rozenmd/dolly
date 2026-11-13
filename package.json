@@ -10,7 +10,7 @@
     "test": "node --test scripts/*.test.mjs && vitest run",
     "build": "cf deploy --dry-run && pnpm --dir ingress exec cf deploy --dry-run",
     "login": "node --env-file-if-exists=.dev.vars --env-file-if-exists=.env.access scripts/connect.mjs",
-    "test:sandbox": "vitest run --config vitest.sandbox.config.ts",
+    "test:sandbox": "bash scripts/test-sandbox.sh",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint --deny-warnings",
