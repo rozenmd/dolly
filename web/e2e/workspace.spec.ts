@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { Live } from "../../src/transcript";
 
 const app = {
   connected: true,
@@ -11,6 +12,121 @@ const app = {
 };
 
 const signedIn = { github: app, ownerClaimed: true, user: { login: "octocat" } };
+
+for (const outcome of ["answered", "failed", "retrying"] as const) {
+  test(`renders an actual-shaped ${outcome} model response instead of a silent user-only transcript`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() =>
+      localStorage.setItem(
+        "dolly.sessions.v1",
+        JSON.stringify([
+          {
+            id: "response-session",
+            model: "gpt-6.1-terra",
+            title: "hi",
+            repository: "octocat/project",
+            updatedAt: 1,
+          },
+        ]),
+      ),
+    );
+
+    const message =
+      outcome === "answered"
+        ? {
+            role: "assistant",
+            content: [{ type: "text", text: "Hi! How can I help?" }],
+            stopReason: "stop",
+          }
+        : {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: "The selected model is unavailable for this account",
+          };
+
+    let live: typeof Live.Type = {};
+
+    if (outcome === "failed") {
+      const failure = {
+        first: 22,
+        taskId: 26,
+        inputs: [21],
+        reason: "model_error",
+        detail: message.errorMessage,
+      };
+
+      live = { runFailure: failure };
+    } else if (outcome === "retrying")
+      live = {
+        run: { taskId: 26, inputs: [21], turns: 0 },
+        generation: {
+          attempt: 1,
+          retry: { at: Date.now() + 60_000, error: "Provider is temporarily unavailable" },
+        },
+      };
+
+    await page.route("**/api/**", (route) => {
+      const path = new URL(route.request().url()).pathname;
+
+      if (path === "/api/auth") return route.fulfill({ json: signedIn });
+
+      if (path === "/api/sessions/response-session")
+        return route.fulfill({
+          json: {
+            conversation: { id: 15 },
+            entries: [
+              {
+                id: 22,
+                kind: "pi.user",
+                model: [{ role: "user", content: "hi", timestamp: 1_000 }],
+              },
+              {
+                id: 25,
+                kind: "pi.system",
+                model: [{ role: "system", content: "Hidden internal prompt" }],
+              },
+              { id: 27, kind: "pi.assistant", model: [{ ...message, timestamp: 2_000 }] },
+            ],
+            docs: { "pi.live": live },
+          },
+        });
+
+      return route.fulfill({ json: { state: "connected" } });
+    });
+    await page.goto("/", { waitUntil: "networkidle" });
+    await expect(page.getByRole("article", { name: "user message" })).toContainText("hi");
+    await expect(page.getByText("Hidden internal prompt")).toHaveCount(0);
+
+    if (outcome === "answered") {
+      await expect(page.getByRole("article", { name: "assistant message" })).toContainText(
+        "Hi! How can I help?",
+      );
+      await expect(page.getByRole("alert")).toHaveCount(0);
+    } else if (outcome === "failed") {
+      await expect(page.getByRole("alert")).toContainText(
+        "The selected model is unavailable for this account",
+      );
+      await expect(page.getByRole("complementary", { name: "Session details" })).toContainText(
+        "Failed",
+      );
+      await page.reload();
+      await expect(page.getByRole("alert")).toContainText(
+        "The selected model is unavailable for this account",
+      );
+      await page.screenshot({ path: test.info().outputPath("model-failure.png") });
+    } else {
+      await expect(page.getByText(/Retrying in/)).toContainText(
+        "Provider is temporarily unavailable",
+      );
+      await expect(page.getByRole("alert")).toHaveCount(0);
+      await expect(page.getByRole("complementary", { name: "Session details" })).toContainText(
+        "Working",
+      );
+    }
+  });
+}
 
 for (const repository of ["octocat/project", ""]) {
   test(`plus opens a task composer in the current ${repository ? "repository" : "repo-less"} context and retries without duplicating sessions`, async ({

@@ -50,6 +50,121 @@ describe("new session context", () => {
 });
 
 describe("session transcript", () => {
+  it("shows provider failures with empty assistant content instead of silently dropping them", () => {
+    const snapshot = Schema.decodeUnknownSync(Snapshot)({
+      entries: [
+        { id: 22, kind: "pi.user", model: [{ role: "user", content: "hi" }] },
+        {
+          id: 25,
+          kind: "pi.system",
+          model: [{ role: "system", content: "Internal instructions that must not render" }],
+        },
+        {
+          id: 27,
+          kind: "pi.assistant",
+          model: [
+            {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "Model unavailable",
+            },
+          ],
+        },
+      ],
+      docs: {
+        "pi.live": {
+          runFailure: {
+            taskId: 26,
+            inputs: [21],
+            first: 22,
+            reason: "model_error",
+            detail: "Model unavailable",
+          },
+        },
+      },
+    });
+
+    const [turn] = turnsFromSnapshot(snapshot);
+    expect(turn?.prompt?.text).toBe("hi");
+    expect(turn?.failure).toMatchObject({ reason: "model_error", detail: "Model unavailable" });
+    expect(turn?.running).toBe(false);
+    expect(turn?.answer).toBeUndefined();
+    expect(turn?.items).toEqual([]);
+  });
+
+  it("shows run failures even without an assistant entry or a failure detail", () => {
+    const snapshot = Schema.decodeUnknownSync(Snapshot)({
+      entries: [],
+      docs: { "pi.live": { runFailure: { reason: "no_model" } } },
+    });
+
+    expect(turnsFromSnapshot(snapshot)[0]?.failure?.reason).toBe("no_model");
+  });
+
+  it("clears transient provider errors after recovery and exposes retry backoff while running", () => {
+    const entries = [
+      { id: 1, kind: "pi.user", model: [{ role: "user", content: "hi" }] },
+      {
+        id: 2,
+        kind: "pi.assistant",
+        model: [
+          { role: "assistant", content: [], stopReason: "error", errorMessage: "Rate limited" },
+        ],
+      },
+    ];
+
+    const retry = { at: 5_000, error: "Rate limited" };
+
+    const pending = Schema.decodeUnknownSync(Snapshot)({
+      entries,
+      docs: { "pi.live": { run: {}, generation: { retry } } },
+    });
+
+    const [running] = turnsFromSnapshot(pending);
+    expect(running?.retry).toEqual(retry);
+    expect(running?.running).toBe(true);
+    expect(running?.failure).toBeUndefined();
+
+    const recovered = Schema.decodeUnknownSync(Snapshot)({
+      entries: [
+        ...entries,
+        {
+          id: 3,
+          kind: "pi.assistant",
+          model: [
+            { role: "assistant", content: [{ type: "text", text: "Hello!" }], stopReason: "stop" },
+          ],
+        },
+      ],
+      docs: { "pi.live": {} },
+    });
+
+    const [completed] = turnsFromSnapshot(recovered);
+    expect(completed?.answer?.text).toBe("Hello!");
+    expect(completed?.failure).toBeUndefined();
+  });
+
+  it("attaches a retained failure to its original prompt rather than a newer queued message", () => {
+    const snapshot = Schema.decodeUnknownSync(Snapshot)({
+      entries: [
+        { id: 1, kind: "pi.user", model: [{ role: "user", content: "First task" }] },
+        { id: 2, kind: "pi.user", model: [{ role: "user", content: "Next task" }] },
+      ],
+      docs: {
+        "pi.live": {
+          run: {},
+          runFailure: { first: 1, reason: "model_error", detail: "Failed first task" },
+        },
+      },
+    });
+
+    const turns = turnsFromSnapshot(snapshot);
+    expect(turns[0]?.failure?.detail).toBe("Failed first task");
+    expect(turns[1]?.failure).toBeUndefined();
+    expect(turns[1]?.running).toBe(true);
+  });
+
   it("groups each prompt with its tool steps and final answer", () => {
     const snapshot = Schema.decodeUnknownSync(Snapshot)({
       entries: [

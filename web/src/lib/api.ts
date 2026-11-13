@@ -1,23 +1,8 @@
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
-import { Block, Message, Snapshot } from "../../../src/transcript";
+import { Block, Message, Snapshot, Live, type RunFailure } from "../../../src/transcript";
 
 export { Snapshot } from "../../../src/transcript";
-
-const Live = Schema.Struct({
-  run: Schema.optional(Schema.Struct({})),
-  generation: Schema.optional(Schema.Struct({ message: Schema.optional(Message) })),
-  tools: Schema.optional(
-    Schema.Array(
-      Schema.Struct({
-        callId: Schema.String,
-        name: Schema.String,
-        status: Schema.String,
-        output: Schema.optional(Schema.String),
-      }),
-    ),
-  ),
-});
 
 export function liveFromSnapshot(snapshot: typeof Snapshot.Type) {
   return Option.getOrNull(Schema.decodeUnknownOption(Live)(snapshot.docs["pi.live"]));
@@ -90,6 +75,8 @@ export type Turn = {
   startedAt?: number;
   endedAt?: number;
   running: boolean;
+  failure?: typeof RunFailure.Type;
+  retry?: { readonly at: number; readonly error: string };
 };
 
 function messageText(message: typeof Message.Type) {
@@ -126,6 +113,7 @@ function stepDetail(block: typeof Block.Type) {
 export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
   const turns: Turn[] = [];
   const calls = new Map<string, Step>();
+  const entryTurns = new Map<number, Turn>();
   const live = liveFromSnapshot(snapshot);
 
   function current(id: string) {
@@ -169,8 +157,20 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
       return;
     }
 
+    // System/context entries are model input, not an assistant response.
+    if (message.role !== "assistant" && message.role !== "toolResult") return;
     const turn = current(id);
     touch(turn, message.timestamp);
+
+    if (
+      message.role === "assistant" &&
+      (message.stopReason === "error" || message.stopReason === "aborted" || message.errorMessage)
+    ) {
+      turn.failure = {
+        reason: message.stopReason === "aborted" ? "aborted" : "model_error",
+        detail: message.errorMessage || "The model response ended before completing an answer.",
+      };
+    } else if (message.role === "assistant") delete turn.failure;
 
     if (message.role === "toolResult") {
       const step = message.toolCallId ? calls.get(message.toolCallId) : undefined;
@@ -216,9 +216,13 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     }
   }
 
-  for (const entry of snapshot.entries)
+  for (const entry of snapshot.entries) {
     for (const [index, message] of (entry.model ?? []).entries())
       add(message, `${entry.id}-${index}`);
+    const turn = turns.at(-1);
+
+    if (turn) entryTurns.set(entry.id, turn);
+  }
 
   if (live?.generation?.message) add(live.generation.message, "live");
 
@@ -241,12 +245,25 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 
   const last = turns.at(-1);
 
-  if (last && live?.run) last.running = true;
+  if (last && live?.run) {
+    last.running = true;
+    delete last.failure;
+  }
+
+  if (last && live?.generation?.retry) last.retry = live.generation.retry;
+
+  if (live?.runFailure) {
+    const failure = live.runFailure;
+    const failedTurn = failure.first === undefined ? undefined : entryTurns.get(failure.first);
+    const target = failedTurn ?? (!live.run ? (last ?? current("failure")) : undefined);
+
+    if (target) target.failure = failure;
+  }
 
   for (const turn of turns) {
     const tail = turn.items.at(-1);
 
-    if (!turn.running && tail?.kind === "text") {
+    if (!turn.running && !turn.failure && tail?.kind === "text") {
       turn.items.pop();
       turn.answer = { id: tail.id, text: tail.text };
     }

@@ -360,7 +360,13 @@ export function WorkspaceApp() {
               </div>
             )}
           </div>
-          {session && !feed && details && <SessionDetails session={session} running={running} />}
+          {session && !feed && details && (
+            <SessionDetails
+              session={session}
+              running={running}
+              failure={turns.at(-1)?.failure?.reason}
+            />
+          )}
         </div>
       </main>
       {modal === "settings" && auth?.user && auth.github.connected && (
@@ -467,7 +473,15 @@ function FeedView({
   );
 }
 
-function SessionDetails({ session, running }: { session: SavedSession; running: boolean }) {
+function SessionDetails({
+  session,
+  running,
+  failure,
+}: {
+  session: SavedSession;
+  running: boolean;
+  failure?: string;
+}) {
   const [copied, setCopied] = useState(false);
   const github = /^[\w.-]+\/[\w.-]+$/.test(session.repository);
 
@@ -476,8 +490,8 @@ function SessionDetails({ session, running }: { session: SavedSession; running: 
       <section>
         <h2>Status</h2>
         <p>
-          <span className={`status-dot ${running ? "working" : "idle"}`} />
-          {running ? "Working" : "Idle"}
+          <span className={`status-dot ${running ? "working" : failure ? "failed" : "idle"}`} />
+          {running ? "Working" : failure === "aborted" ? "Stopped" : failure ? "Failed" : "Idle"}
         </p>
       </section>
       <section>

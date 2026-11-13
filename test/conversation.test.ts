@@ -4,7 +4,7 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
-import { Snapshot } from "../src/transcript";
+import { Snapshot, Live } from "../src/transcript";
 
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
 
@@ -22,6 +22,66 @@ beforeEach(async () => {
 });
 
 afterEach(() => vi.restoreAllMocks());
+
+it("retains model failure details in the real transcript and browser live-state contract", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json(
+      {
+        error: {
+          message: "The selected model is unavailable for this account",
+          type: "invalid_request_error",
+          code: "model_not_found",
+        },
+      },
+      { status: 400 },
+    ),
+  );
+
+  const response = await SELF.fetch("https://worker/api/sessions", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ model: "gpt-6.1-terra" }),
+  });
+
+  const { id } = await response.json<{ id: string }>();
+
+  const submitted = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ content: "hi", requestId: crypto.randomUUID() }),
+  });
+
+  expect(submitted.status).toBe(202);
+
+  const read = async () =>
+    Schema.decodeUnknownSync(Snapshot)(
+      await (await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })).json(),
+    );
+
+  await expect
+    .poll(
+      async () => {
+        const snapshot = await read();
+
+        return Schema.decodeUnknownSync(Live)(snapshot.docs["pi.live"]).runFailure?.reason;
+      },
+      { timeout: 4000 },
+    )
+    .toBe("model_error");
+  await abortAllDurableObjects();
+  const snapshot = await read();
+  const live = Schema.decodeUnknownSync(Live)(snapshot.docs["pi.live"]);
+  expect(live.run).toBeUndefined();
+  expect(live.runFailure?.detail).toContain("The selected model is unavailable");
+
+  const assistant = snapshot.entries
+    .flatMap((entry) => entry.model ?? [])
+    .find((message) => message.role === "assistant");
+
+  expect(assistant?.stopReason).toBe("error");
+  expect(assistant?.errorMessage).toContain("The selected model is unavailable");
+  expect(assistant?.content).toEqual([]);
+});
 
 it.each([
   { model: undefined, expectedModel: "gpt-6-luna" },

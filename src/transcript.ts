@@ -16,6 +16,36 @@ export const Message = Schema.Struct({
   toolCallId: Schema.optional(Schema.String),
   isError: Schema.optional(Schema.Boolean),
   timestamp: Schema.optional(Schema.Number),
+  stopReason: Schema.optional(Schema.String),
+  errorMessage: Schema.optional(Schema.String),
+});
+
+export const RunFailure = Schema.Struct({
+  reason: Schema.String,
+  detail: Schema.optional(Schema.String),
+  first: Schema.optional(Schema.Number),
+});
+
+export const Live = Schema.Struct({
+  run: Schema.optional(Schema.Struct({})),
+  runFailure: Schema.optional(RunFailure),
+  generation: Schema.optional(
+    Schema.Struct({
+      attempt: Schema.optional(Schema.Number),
+      message: Schema.optional(Message),
+      retry: Schema.optional(Schema.Struct({ at: Schema.Number, error: Schema.String })),
+    }),
+  ),
+  tools: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        callId: Schema.String,
+        name: Schema.String,
+        status: Schema.String,
+        output: Schema.optional(Schema.String),
+      }),
+    ),
+  ),
 });
 
 /** Pi durable record IDs are numbers; provider message/tool IDs remain strings. */
