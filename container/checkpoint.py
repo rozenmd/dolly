@@ -69,7 +69,7 @@ with tempfile.TemporaryDirectory(dir=root) as temporary:
         if parent:
             line("from " + subprocess.check_output(git + ["rev-parse", "FETCH_HEAD"], text=True).strip())
         line("deleteall")
-        entry(worktree, "files")
+        entry(os.path.realpath(worktree), "files")
         entry(archive, "git.tar")
         nested_archive = os.path.join(temporary, "nested.tar")
         with tarfile.open(nested_archive, "w") as tar:
