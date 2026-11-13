@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ChevronDownIcon, XMarkIcon } from "@heroicons/react/16/solid";
 import {
+  ArchiveBoxIcon,
   CodeBracketIcon,
   MagnifyingGlassIcon,
   PlusIcon,
@@ -26,6 +27,7 @@ export function Sidebar({
   open,
   feed,
   onSelect,
+  onArchive,
   onNew,
   onSettings,
   onClose,
@@ -37,6 +39,7 @@ export function Sidebar({
   open: boolean;
   feed: boolean;
   onSelect: (id: string) => void;
+  onArchive: (id: string) => void;
   onNew: () => void;
   onSettings: () => void;
   onClose: () => void;
@@ -145,22 +148,32 @@ export function Sidebar({
             const active = selected === row.id && !feed;
 
             return (
-              <button
-                type="button"
-                key={row.id}
-                className={`workspace-row ${active ? "active" : ""}`}
-                aria-current={active ? "page" : undefined}
-                onClick={() => onSelect(row.id)}
-              >
-                {row.running ? (
-                  <span className="status-dot working" aria-label="Working" />
-                ) : (
-                  <CodeBracketIcon className="workspace-icon" />
+              <div key={row.id} className="workspace-item">
+                <button
+                  type="button"
+                  className={`workspace-row ${active ? "active" : ""}`}
+                  aria-current={active ? "page" : undefined}
+                  onClick={() => onSelect(row.id)}
+                >
+                  {row.running ? (
+                    <span className="status-dot working" aria-label="Working" />
+                  ) : (
+                    <CodeBracketIcon className="workspace-icon" />
+                  )}
+                  <RepoBadge repository={row.repository} />
+                  <span className="workspace-title">{row.title}</span>
+                  <span className="workspace-time">{ago(row.updatedAt, now)}</span>
+                </button>
+                {!row.archived && (
+                  <IconButton
+                    label={`Archive session: ${row.title}`}
+                    className="workspace-archive"
+                    onClick={() => onArchive(row.id)}
+                  >
+                    <ArchiveBoxIcon />
+                  </IconButton>
                 )}
-                <RepoBadge repository={row.repository} />
-                <span className="workspace-title">{row.title}</span>
-                <span className="workspace-time">{ago(row.updatedAt, now)}</span>
-              </button>
+              </div>
             );
           })}
           {query && filtered.length === 0 && (

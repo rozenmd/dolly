@@ -208,19 +208,19 @@ export function WorkspaceApp() {
     setStreamError("");
   }
 
-  function toggleArchive() {
-    if (!session) return;
+  function toggleArchive(id: string) {
+    const target = sessions.find((item) => item.id === id);
+
+    if (!target) return;
 
     updateSessions((current) =>
-      current.map((item) =>
-        item.id === session.id ? { ...item, archived: !item.archived } : item,
-      ),
+      current.map((item) => (item.id === id ? { ...item, archived: !item.archived } : item)),
     );
 
-    if (!session.archived) {
+    if (!target.archived && selected === id) {
       select(
         sessionList(
-          sessions.filter((item) => item.id !== session.id),
+          sessions.filter((item) => item.id !== id),
           "",
           Date.now(),
         ).active[0]?.id || "",
@@ -344,6 +344,7 @@ export function WorkspaceApp() {
         open={mobileOpen}
         feed={feed}
         onSelect={select}
+        onArchive={toggleArchive}
         onNew={newSession}
         onSettings={() => {
           setMobileOpen(false);
@@ -380,7 +381,7 @@ export function WorkspaceApp() {
             {session && !feed && (
               <IconButton
                 label={session.archived ? "Restore session" : "Archive session"}
-                onClick={toggleArchive}
+                onClick={() => toggleArchive(session.id)}
               >
                 {session.archived ? <ArrowUturnLeftIcon /> : <ArchiveBoxIcon />}
               </IconButton>
