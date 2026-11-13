@@ -10,11 +10,19 @@ export const CodexModel = Schema.Literals(
     .map((model) => model.id),
 );
 
-export const AnthropicModel = Schema.Literals(
-  anthropicProvider()
-    .getModels()
-    .map((model) => model.id),
-);
+const catalogAnthropicIds = anthropicProvider()
+  .getModels()
+  .map((model) => model.id);
+
+/** Extend the catalog with models not yet in the pinned @earendil-works/pi-ai release. */
+const extraAnthropicIds: string[] = ["claude-opus-5-5"];
+
+const allAnthropicIds = [
+  ...catalogAnthropicIds,
+  ...extraAnthropicIds.filter((id) => !catalogAnthropicIds.includes(id)),
+];
+
+export const AnthropicModel = Schema.Literals(allAnthropicIds);
 
 export const SessionModel = Schema.Union([CodexModel, AnthropicModel]);
 export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6";
