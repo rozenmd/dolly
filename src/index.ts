@@ -16,6 +16,7 @@ import { exceptionDetails } from "./diagnostics";
 import { AnthropicSetup, AnthropicProbe } from "./anthropic";
 import type { Env } from "./env";
 import { PromptImage, MAX_IMAGES, MAX_PROMPT_BYTES } from "./images";
+import { SavedSession } from "./session-contracts";
 
 export { Agent } from "./agent";
 
@@ -273,6 +274,53 @@ app.delete("/api/auth/anthropic", (c) =>
     c,
     Effect.gen(function* () {
       return c.json(yield* rpc("anthropic.logout", async () => await owner(c).anthropicLogout()));
+    }),
+  ),
+);
+
+app.get("/api/sessions", (c) =>
+  handle(
+    c,
+    rpc("sessions.list", async () => c.json(await owner(c).sessions())),
+  ),
+);
+
+app.post("/api/sessions/import", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const sessions = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+        Effect.flatMap(
+          Schema.decodeUnknownEffect(
+            Schema.Struct({
+              sessions: Schema.Array(SavedSession).check(Schema.isMaxLength(100)),
+            }),
+          ),
+        ),
+        Effect.mapError(() => new InvalidInput({ message: "Expected up to 100 saved sessions" })),
+      );
+
+      return yield* rpc("sessions.import", async () =>
+        c.json(await owner(c).importSessions(sessions.sessions)),
+      );
+    }),
+  ),
+);
+
+app.put("/api/sessions/:id", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const input = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(Schema.Struct({ archived: Schema.Boolean }))),
+        Effect.mapError(() => new InvalidInput({ message: "Expected an archived boolean" })),
+      );
+
+      const result = yield* rpc("sessions.archive", async () =>
+        owner(c).archiveSession(c.req.param("id"), input.archived),
+      );
+
+      return result ? c.json(result) : c.json({ error: "Session not found" }, 404);
     }),
   ),
 );

@@ -71,6 +71,8 @@ import { Papercuts, PapercutRequest, papercutsPrompt, toolFailure } from "./pape
 import { attempt, rpc, OperationError } from "./operations";
 import type { Env } from "./env";
 import { resolveImages, storeImages, type PromptImage } from "./images";
+import { listSessions } from "./session-list";
+import type { SavedSession } from "./session-contracts";
 
 /** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
 export class Agent extends DurableObject<Env> {
@@ -966,10 +968,51 @@ export class Agent extends DurableObject<Env> {
         yield* attempt("session.write", () =>
           this.ctx.storage.put(`session:${id}`, conversation.id),
         );
+        yield* attempt("session.metadata", () =>
+          this.ctx.storage.put(`session-meta:${conversation.id}`, {
+            createdAt: Date.now(),
+            archived: false,
+          }),
+        );
 
         return { id, model: modelId };
       }),
     );
+  }
+
+  async sessions() {
+    const secrets = await Effect.runPromise(this.credentials.secrets);
+
+    return listSessions(this.harness, this.ctx.storage, secrets);
+  }
+
+  async archiveSession(id: string, archived: boolean) {
+    const conversation = await Effect.runPromise(this.conversation(id));
+
+    if (Option.isNone(conversation)) return undefined;
+    const key = `session-meta:${conversation.value.id}`;
+    await this.ctx.storage.transaction(async (tx) => {
+      const metadata = await tx.get<{ createdAt?: number }>(key);
+      await tx.put(key, { ...metadata, archived });
+    });
+
+    return { archived };
+  }
+
+  /** Import browser-only archive state once, without overwriting later server changes. */
+  async importSessions(sessions: readonly SavedSession[]) {
+    for (const session of sessions) {
+      const conversation = await Effect.runPromise(this.conversation(session.id));
+
+      if (Option.isNone(conversation)) continue;
+      const key = `session-meta:${conversation.value.id}`;
+      await this.ctx.storage.transaction(async (tx) => {
+        if (await tx.get(key)) return;
+        await tx.put(key, { archived: session.archived ?? false, createdAt: session.updatedAt });
+      });
+    }
+
+    return { imported: true };
   }
 
   private conversation = Effect.fn("Agent.conversation")(function* (this: Agent, id: string) {
@@ -1028,6 +1071,8 @@ export class Agent extends DurableObject<Env> {
             BACKGROUND_CONTEXT,
           ),
         );
+
+        yield* attempt("session.restore", () => this.archiveSession(id, false));
 
         return { submissionId: submission.id };
       }),
