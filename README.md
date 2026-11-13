@@ -18,7 +18,7 @@ The first visit walks through setup:
 
 The **+** buttons open a task-first **New session** composer: choose an enrolled repository (or **No repo**), write the task, pick a model and choose **Create**. No workspace-name form is required; the first line of the task becomes the session title. From an existing workspace, the composer defaults to its primary repository, ref, dependency-host policy and model, not the agent's currently active attachment. You can change the repository before creating. New repository selections use their default branch. Nothing is created until you submit. If submitting the first task fails after session creation, the session stays in the browser list and **Retry** reuses its ID and task request ID. **Open existing** still accepts a known session ID.
 
-Mention another enrolled repository by name during a conversation and the agent can attach it and work there without replacing the primary repo. The frontend polls the recent transcript and live progress every 2.5 seconds. **Stop agent** aborts the selected session and its descendants. Each new session still has its own checkout and conversation; the composer does not share another session's uncommitted files or transcript.
+Mention another enrolled repository by name during a conversation and the agent can attach it and work there without replacing the primary repo. The frontend receives the recent transcript and live progress over an authenticated WebSocket, reconnecting with backoff if the connection drops. **Stop agent** aborts the selected session and its descendants. Each new session still has its own checkout and conversation; the composer does not share another session's uncommitted files or transcript.
 
 The transcript displays assistant replies, provider retry/backoff status, and tasks that end without an answer. Failed requests show their error details rather than an empty response; session details show **Failed** or **Stopped** instead of **Idle**. System/context messages are not rendered as assistant replies. No model request is automatically re-submitted by the UI after failure; send another message to try again.
 
@@ -228,6 +228,7 @@ A prompt returns `202` after durable admission, not after generation. Poll the s
 | `DELETE /api/auth/codex`          | Delete the Worker's local credentials and pending login      |
 | `POST /api/sessions`              | Create a conversation                                        |
 | `GET /api/sessions/:id`           | Read the latest conversation view                            |
+| `GET /api/sessions/:id/events`    | WebSocket: initial view followed by redacted live snapshots  |
 | `POST /api/sessions/:id/messages` | Submit `{content, requestId}`                                |
 | `POST /api/sessions/:id/abort`    | Abort current and queued work                                |
 

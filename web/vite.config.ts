@@ -10,6 +10,6 @@ export default defineConfig({
   plugins: webPlugins(),
   server: {
     host: "127.0.0.1",
-    proxy: { "/api": { target: "http://localhost:8787", changeOrigin: true } },
+    proxy: { "/api": { target: "http://localhost:8787", changeOrigin: true, ws: true } },
   },
 });

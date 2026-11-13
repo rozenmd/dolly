@@ -37,7 +37,7 @@ describe("new session context", () => {
     });
   });
 
-  it("preserves repo-less context and can initialize before the first poll", () => {
+  it("preserves repo-less context and can initialize before the first snapshot", () => {
     expect(
       sessionBody(source, { entries: [], docs: { "app.workspace": { config: null } } }),
     ).toEqual({ model: source.model });

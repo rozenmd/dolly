@@ -23,6 +23,66 @@ beforeEach(async () => {
 
 afterEach(() => vi.restoreAllMocks());
 
+it("pushes an initial snapshot and redacted live updates over an authenticated WebSocket", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json({ error: { message: "Model unavailable" } }, { status: 400 }),
+  );
+
+  const created = await SELF.fetch("https://worker/api/sessions", {
+    method: "POST",
+    headers,
+  });
+
+  const { id } = await created.json<{ id: string }>();
+
+  const response = await SELF.fetch(`https://worker/api/sessions/${id}/events`, {
+    headers: { ...headers, Upgrade: "websocket", Origin: "https://worker" },
+  });
+
+  expect(response.status).toBe(101);
+  const socket = response.webSocket!;
+  const snapshots: Array<typeof Snapshot.Type> = [];
+  socket.addEventListener("message", (event) => {
+    expect(String(event.data)).not.toContain("test-refresh");
+    snapshots.push(Schema.decodeUnknownSync(Schema.fromJsonString(Snapshot))(event.data));
+  });
+  socket.accept();
+
+  try {
+    await expect.poll(() => snapshots.length).toBe(1);
+
+    const submitted = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content: "hide test-refresh", requestId: crypto.randomUUID() }),
+    });
+
+    expect(submitted.status).toBe(202);
+    await expect
+      .poll(() =>
+        snapshots
+          .at(-1)
+          ?.entries.some((entry) =>
+            entry.model?.some(
+              (message) => message.role === "user" && message.content === "hide [redacted]",
+            ),
+          ),
+      )
+      .toBe(true);
+    await expect
+      .poll(() => {
+        const snapshot = snapshots.at(-1);
+
+        return (
+          snapshot && Schema.decodeUnknownSync(Live)(snapshot.docs["pi.live"]).runFailure?.reason
+        );
+      })
+      .toBe("model_error");
+  } finally {
+    socket.close();
+  }
+});
+
 it("retains model failure details in the real transcript and browser live-state contract", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
     Response.json(
