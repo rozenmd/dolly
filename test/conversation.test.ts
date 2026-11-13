@@ -4,6 +4,7 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import { Snapshot } from "../src/transcript";
 
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
 
@@ -142,6 +143,14 @@ it.each([
     expect(transcript.status).toBe(200);
     expect(transcript.headers.get("Content-Type")).toContain("application/json");
     const snapshot = await transcript.json();
+    // Decode a real Pi transcript with the browser contract, not a hand-written wire fixture.
+    const browserSnapshot = Schema.decodeUnknownSync(Snapshot)(snapshot);
+    expect(browserSnapshot.entries.length).toBeGreaterThan(0);
+    expect(
+      browserSnapshot.entries.some((entry) =>
+        entry.model?.some((message) => message.role === "assistant"),
+      ),
+    ).toBe(true);
     const text = JSON.stringify(snapshot);
     expect(text).toContain("Use Bearer [redacted]");
     expect(text).not.toContain("Bearer abc");

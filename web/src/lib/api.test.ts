@@ -7,12 +7,12 @@ describe("session transcript", () => {
     const snapshot = Schema.decodeUnknownSync(Snapshot)({
       entries: [
         {
-          id: "1",
+          id: 1,
           kind: "pi.input",
           model: [{ role: "user", content: "Run tests", timestamp: 1_000 }],
         },
         {
-          id: "2",
+          id: 2,
           kind: "pi.message",
           model: [
             {
@@ -43,8 +43,9 @@ describe("session transcript", () => {
             },
           ],
         },
-        { id: "3", kind: "bookkeeping" },
+        { id: 3, kind: "bookkeeping" },
       ],
+      before: 0,
       docs: {},
     });
 
@@ -85,7 +86,7 @@ describe("session transcript", () => {
 
   it("keeps a running turn open with live text and running tools, skipping finished tools", () => {
     const snapshot = Schema.decodeUnknownSync(Snapshot)({
-      entries: [{ id: "1", kind: "pi.input", model: [{ role: "user", content: "Fix it" }] }],
+      entries: [{ id: 1, kind: "pi.input", model: [{ role: "user", content: "Fix it" }] }],
       docs: {
         "pi.live": {
           run: {},
