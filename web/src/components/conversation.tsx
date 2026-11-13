@@ -12,6 +12,8 @@ import remarkGfm from "remark-gfm";
 import type { Step, Turn } from "../lib/api";
 import { ago, duration } from "../lib/time";
 import { IconButton, Textarea } from "./ui";
+import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
+import type { Attachment } from "../lib/images";
 
 function Prose({ text }: { text: string }) {
   return (
@@ -84,6 +86,11 @@ function TurnView({ turn, now }: { turn: Turn; now: number }) {
           )}
           <div className="prompt-bubble">
             <Prose text={turn.prompt.text} />
+            {Boolean(turn.prompt.images) && (
+              <p className="prompt-images">
+                📎 {turn.prompt.images} screenshot{turn.prompt.images === 1 ? "" : "s"} attached
+              </p>
+            )}
           </div>
         </article>
       )}
@@ -233,7 +240,11 @@ export function Composer({
   model,
   draftKey,
 }: {
-  onSend: (content: string, requestId: string) => Promise<boolean>;
+  onSend: (
+    content: string,
+    requestId: string,
+    attachments: readonly Attachment[],
+  ) => Promise<boolean>;
   onStop: () => void;
   pending: boolean;
   running: boolean;
@@ -246,9 +257,16 @@ export function Composer({
     content: string;
     requestId: string;
     session: string;
+    attachments: readonly Attachment[];
   } | null>(null);
 
+  const [images, setImages] = useState<Record<string, Attachment[]>>({});
+  const [attachError, setAttachError] = useState("");
   const content = drafts[draftKey] ?? "";
+  const attachments = images[draftKey] ?? [];
+  const setAttachments = (next: Attachment[]) =>
+    setImages((values) => ({ ...values, [draftKey]: next }));
+  const input = useAttachmentInput(attachments, setAttachments, setAttachError);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -256,21 +274,35 @@ export function Composer({
     if (!content.trim() || pending) return;
 
     const requestId =
-      retry?.content === content && retry.session === draftKey
+      retry?.content === content &&
+      retry.session === draftKey &&
+      retry.attachments === attachments
         ? retry.requestId
         : crypto.randomUUID();
 
-    setRetry({ content, requestId, session: draftKey });
+    setRetry({ content, requestId, session: draftKey, attachments });
 
-    if (await onSend(content, requestId)) {
+    if (await onSend(content, requestId, attachments)) {
       setDrafts((values) => ({ ...values, [draftKey]: "" }));
+      setImages((values) => ({ ...values, [draftKey]: [] }));
+      setAttachError("");
       setRetry(null);
     }
   }
 
   return (
     <div className="composer-area">
-      <form className="composer" onSubmit={(event) => void submit(event)}>
+      <form
+        className="composer"
+        onSubmit={(event) => void submit(event)}
+        onDragOver={input.onDragOver}
+        onDrop={input.onDrop}
+      >
+        <AttachmentTray
+          attachments={attachments}
+          disabled={pending}
+          onRemove={(id) => setAttachments(attachments.filter((item) => item.id !== id))}
+        />
         <label className="sr-only" htmlFor="prompt">
           Message your agent
         </label>
@@ -283,6 +315,7 @@ export function Composer({
           maxLength={32768}
           disabled={pending}
           onChange={(event) => setDrafts({ ...drafts, [draftKey]: event.target.value })}
+          onPaste={input.onPaste}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
@@ -291,6 +324,11 @@ export function Composer({
           }}
         />
         <div className="composer-toolbar">
+          <AttachButton
+            disabled={pending}
+            count={attachments.length}
+            onFiles={(files) => void input.add(files)}
+          />
           <span className="composer-model">{model}</span>
           {running && !content.trim() ? (
             <button
@@ -314,6 +352,11 @@ export function Composer({
           )}
         </div>
       </form>
+      {attachError && (
+        <p role="alert" className="error-text">
+          {attachError}
+        </p>
+      )}
     </div>
   );
 }

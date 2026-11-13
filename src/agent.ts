@@ -63,6 +63,9 @@ import { exceptionDetails, redact } from "./diagnostics";
 import { attempt, rpc, OperationError } from "./operations";
 import type { Env } from "./env";
 
+/** A screenshot attached to a prompt, as a Pi image content block without its type tag. */
+export type PromptImage = { readonly mimeType: string; readonly data: string };
+
 /** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
 export class Agent extends DurableObject<Env> {
   private harness!: Harness;
@@ -812,7 +815,7 @@ export class Agent extends DurableObject<Env> {
     );
   });
 
-  prompt(id: string, content: string, requestId: string) {
+  prompt(id: string, content: string, requestId: string, images: readonly PromptImage[] = []) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
         const conversation = yield* this.conversation(id);
@@ -836,7 +839,18 @@ export class Agent extends DurableObject<Env> {
 
         const submission = yield* attempt("pi.submit", () =>
           conversation.value.submit(
-            { type: "input", content, requestId, whenBusy: "followUp" },
+            {
+              type: "input",
+              // Pi user messages accept text or text+image blocks; keep plain text when no images.
+              content: images.length
+                ? [
+                    { type: "text" as const, text: content },
+                    ...images.map((image) => ({ type: "image" as const, ...image })),
+                  ]
+                : content,
+              requestId,
+              whenBusy: "followUp",
+            },
             BACKGROUND_CONTEXT,
           ),
         );

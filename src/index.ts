@@ -29,6 +29,20 @@ const Message = Schema.Struct({
   requestId: Schema.String.check(Schema.isUUID()),
 });
 
+/** Base64 screenshots attached to a prompt; 5 MB decoded matches Anthropic's per-image cap. */
+const PromptImage = Schema.Struct({
+  mimeType: Schema.Literals(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+  data: Schema.String.check(
+    Schema.isMaxLength(Math.ceil((5 * 1024 * 1024 * 4) / 3) + 4),
+    Schema.isPattern(/^[A-Za-z0-9+/]+={0,2}$/),
+  ),
+});
+
+const PromptMessage = Schema.Struct({
+  ...Message.fields,
+  images: Schema.optional(Schema.Array(PromptImage).check(Schema.isMaxLength(4))),
+});
+
 /** Hono owns HTTP; Effect programs run once at the request boundary. */
 function handle(
   c: Context<{ Bindings: Env }>,
@@ -415,14 +429,23 @@ app.post("/api/sessions/:id/messages", (c) =>
     c,
     Effect.gen(function* () {
       const parsed = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
-        Effect.flatMap(Schema.decodeUnknownEffect(Message)),
+        Effect.flatMap(Schema.decodeUnknownEffect(PromptMessage)),
         Effect.mapError(
-          () => new InvalidInput({ message: "Expected content and a UUID requestId" }),
+          () =>
+            new InvalidInput({
+              message:
+                "Expected content, a UUID requestId and at most 4 PNG, JPEG, GIF or WebP images under 5 MB each",
+            }),
         ),
       );
 
       const agent = yield* AgentApi;
-      const result = yield* agent.prompt(c.req.param("id"), parsed.content, parsed.requestId);
+      const result = yield* agent.prompt(
+        c.req.param("id"),
+        parsed.content,
+        parsed.requestId,
+        parsed.images,
+      );
 
       if (!result) return c.json({ error: "Session not found" }, 404);
 
