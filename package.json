@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "cf dev",
+    "dev:web": "pnpm --dir web dev",
+    "build:web": "pnpm --dir web build",
+    "check:web": "pnpm --dir web typecheck && pnpm --dir web test",
     "deploy": "cf deploy",
     "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck",
     "test": "node --test scripts/*.test.mjs && vitest run",

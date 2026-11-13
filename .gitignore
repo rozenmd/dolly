@@ -7,3 +7,6 @@ dist/
 .env*
 /.sandbox-test.wrangler.json
 !.env.access.example
+web/.tanstack/
+web/test-results/
+web/playwright-report/
