@@ -13,6 +13,76 @@ const app = {
 
 const signedIn = { github: app, ownerClaimed: true, user: { login: "octocat" } };
 
+test("connects Claude without Codex, explicitly tests Worker inference, and starts a Claude conversation", async ({ page }) => {
+  const token = `sk-ant-oat01-${"a".repeat(64)}`;
+  let connected = false;
+  let probes = 0;
+  let selectedModel = "";
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+
+    if (path === "/api/auth") return route.fulfill({ json: signedIn });
+
+    if (path === "/api/auth/codex") return route.fulfill({ json: { state: "not_connected" } });
+
+    if (path === "/api/auth/anthropic") {
+      if (route.request().method() === "PUT") {
+        expect(route.request().postDataJSON()).toEqual({ token });
+        connected = true;
+      }
+
+      return route.fulfill({ json: { connected, experimental: true } });
+    }
+
+    if (path === "/api/auth/anthropic/test") {
+      probes++;
+
+      return route.fulfill({ json: { ok: probes > 1, model: "claude-haiku-4-5", durationMs: 25, message: probes === 1 ? "Anthropic returned HTTP 403 HTML instead of a model response. This may be an upstream edge block." : "Claude returned a live inference response from this Worker.", upstream: { status: probes === 1 ? 403 : 200, contentType: probes === 1 ? "text/html" : "text/event-stream", requestId: "request-test", rayId: "ray-test" } } });
+    }
+
+    if (path === "/api/integrations/github/repositories") return route.fulfill({ json: { repositories: [] } });
+
+    if (path === "/api/sessions") {
+      selectedModel = route.request().postDataJSON().model;
+
+      return route.fulfill({ status: 201, json: { id: "claude-session", model: selectedModel } });
+    }
+
+    if (path === "/api/sessions/claude-session/messages") return route.fulfill({ status: 202, json: {} });
+
+    if (path === "/api/sessions/claude-session") return route.fulfill({ json: { entries: [
+      { id: 1, kind: "pi.user", model: [{ role: "user", content: "Say hello" }] },
+      { id: 2, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "Hello from Claude" }] }] },
+    ], docs: {} } });
+
+    return route.fulfill({ json: {} });
+  });
+  await page.goto("/", { waitUntil: "networkidle" });
+  const connect = page.getByRole("dialog", { name: "Connect a model" });
+  await connect.getByRole("button", { name: "Use Claude instead" }).click();
+  await connect.getByLabel("Claude setup token").fill(token);
+  await connect.getByRole("button", { name: "Save token" }).click();
+  await expect(connect.getByLabel("Claude setup token")).toHaveValue("");
+  expect(probes).toBe(0);
+  await connect.getByRole("button", { name: "Test connection" }).click();
+  await expect(connect.getByRole("alert")).toContainText("upstream edge block");
+  await connect.getByRole("button", { name: "Test connection" }).click();
+  await expect(connect.getByRole("status")).toContainText("live inference response");
+  await page.screenshot({ path: test.info().outputPath("claude-connection.png") });
+  await connect.getByRole("button", { name: "Continue with Claude" }).click();
+  const composer = page.getByRole("dialog", { name: "New session" });
+  await expect(composer.getByLabel("Model", { exact: true })).toHaveValue("claude-sonnet-4-6");
+  await composer.getByLabel("Model", { exact: true }).selectOption("claude-haiku-4-5");
+  await composer.getByLabel("Task", { exact: true }).fill("Say hello");
+  await composer.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(page.getByRole("article", { name: "assistant message" })).toContainText("Hello from Claude");
+  expect(selectedModel).toBe("claude-haiku-4-5");
+  expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.v1"))).not.toContain(token);
+  await page.reload();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("article", { name: "assistant message" })).toContainText("Hello from Claude");
+});
+
 for (const outcome of ["answered", "failed", "retrying"] as const) {
   test(`renders an actual-shaped ${outcome} model response instead of a silent user-only transcript`, async ({
     page,
@@ -395,7 +465,7 @@ test("GitHub device sign-in claims dolly, then continues to ChatGPT", async ({ p
     "href",
     "https://github.com/login/device",
   );
-  await expect(page.getByRole("dialog", { name: "Sign in to ChatGPT" })).toBeVisible({
+  await expect(page.getByRole("dialog", { name: "Connect a model" })).toBeVisible({
     timeout: 10_000,
   });
   expect(polls).toBe(2);
@@ -471,6 +541,8 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
 
     if (path === "/api/auth") return route.fulfill({ json: signedIn });
 
+    if (path === "/api/auth/anthropic") return route.fulfill({ json: { connected: false } });
+
     if (path === "/api/integrations/github/ingress") {
       ingress = route.request().postDataJSON();
 
@@ -507,14 +579,14 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
     app.installUrl,
   );
   await dialog.getByLabel("Ingress URL").fill("https://new-ingress.example");
-  await dialog.getByRole("button", { name: "Save" }).first().click();
+  await dialog.getByRole("button", { name: "Save", exact: true }).first().click();
   await expect(dialog).toContainText("GitHub now sends comments to this URL.");
   expect(ingress).toEqual({ url: "https://new-ingress.example/hooks/github" });
   await expect(dialog.getByLabel("Accounts dolly can work in")).toHaveValue("octocat");
   await expect(dialog.getByLabel("Who can run /pi commands")).toHaveValue("octocat");
   await dialog.getByLabel("Accounts dolly can work in").fill("octocat, @acme");
   await dialog.getByLabel("Who can run /pi commands").fill("octocat hubot");
-  await dialog.getByRole("button", { name: "Save" }).last().click();
+  await dialog.getByRole("button", { name: "Save", exact: true }).last().click();
   await expect(dialog.getByText("Saved.", { exact: true })).toBeVisible();
   expect(accounts).toEqual({ accounts: ["octocat", "acme"] });
   expect(senders).toEqual({ senders: ["octocat", "hubot"] });
@@ -523,7 +595,7 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   await page.getByRole("button", { name: "Settings" }).click();
   await expect(dialog.getByLabel("Who can run /pi commands")).toHaveValue("octocat, hubot");
   await dialog.getByLabel("Who can run /pi commands").fill("");
-  await dialog.getByRole("button", { name: "Save" }).last().click();
+  await dialog.getByRole("button", { name: "Save", exact: true }).last().click();
   await expect(dialog.getByText("Saved.", { exact: true })).toBeVisible();
   expect(senders).toEqual({ senders: [] });
   await dialog.getByRole("button", { name: "Sign out" }).first().click();
@@ -651,7 +723,7 @@ test("ChatGPT device sign-in shows the code, polls until approved, then opens a 
     return route.fulfill({ json: polls < 3 ? awaiting : { state: "connected" } });
   });
   await page.goto("/", { waitUntil: "networkidle" });
-  const dialog = page.getByRole("dialog", { name: "Sign in to ChatGPT" });
+  const dialog = page.getByRole("dialog", { name: "Connect a model" });
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Sign in with ChatGPT" }).click();
   await expect(page.getByRole("button", { name: "Copy code ABCD-1234" })).toBeVisible();
@@ -709,7 +781,7 @@ test("cancelling ChatGPT sign-in ignores an approval that was already in flight"
     return route.fulfill({ json: { state: "connected" } });
   });
   await page.goto("/", { waitUntil: "networkidle" });
-  const dialog = page.getByRole("dialog", { name: "Sign in to ChatGPT" });
+  const dialog = page.getByRole("dialog", { name: "Connect a model" });
   await dialog.getByRole("button", { name: "Sign in with ChatGPT" }).click();
   await expect(dialog.getByRole("button", { name: "Copy code ABCD-1234" })).toBeVisible();
   await page.waitForTimeout(1_500);
@@ -718,5 +790,5 @@ test("cancelling ChatGPT sign-in ignores an approval that was already in flight"
   release();
   await page.waitForTimeout(1_000);
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "Sign in to ChatGPT" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Connect a model" })).toBeVisible();
 });

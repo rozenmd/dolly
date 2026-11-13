@@ -40,16 +40,32 @@ export class Credentials implements CredentialStore {
 
   list() {
     return Effect.runPromise(
-      this.get("openai-codex").pipe(
-        Effect.map(
-          Option.match({
-            onNone: () => [],
-            onSome: (credential) => [{ providerId: "openai-codex", type: credential.type }],
-          }),
-        ),
-      ),
+      Effect.gen({ self: this }, function* () {
+        const entries: { providerId: string; type: Credential["type"] }[] = [];
+
+        for (const providerId of ["openai-codex", "anthropic"]) {
+          const credential = yield* this.get(providerId);
+
+          if (Option.isSome(credential)) entries.push({ providerId, type: credential.value.type });
+        }
+
+        return entries;
+      }),
     );
   }
+
+  secrets = Effect.gen({ self: this }, function* () {
+    const secrets: string[] = [];
+
+    for (const providerId of ["openai-codex", "anthropic"]) {
+      const credential = Option.getOrUndefined(yield* this.get(providerId));
+
+      if (credential?.type === "oauth") secrets.push(credential.access, credential.refresh);
+      else if (credential?.type === "api_key" && credential.key) secrets.push(credential.key);
+    }
+
+    return secrets;
+  });
 
   modify(
     providerId: string,

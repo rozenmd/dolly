@@ -40,7 +40,8 @@ import { WebhookSetup } from "./github-webhook";
 import { admitGitHub, githubDelivery, GitHubThreads } from "./github-inbox";
 import { GitHub } from "./github";
 import { GitHubRequest, GitHubAccounts, GitHubSetup, GitHubReply } from "./github-contracts";
-import { ChildRequest, ChildMessage, CodexModel } from "./models";
+import { ChildRequest, ChildMessage, SessionModel, modelProvider, DEFAULT_CLAUDE_MODEL } from "./models";
+import { claudeProvider, anthropicStatus, saveAnthropic, testAnthropic, AnthropicSetup, AnthropicProbe } from "./anthropic";
 import { Account, Credentials } from "./credentials";
 import { CodexProtocol, startLogin, pollLogin, logout } from "./codex-login";
 import { GitHubAuth } from "./github-auth";
@@ -114,6 +115,7 @@ export class Agent extends DurableObject<Env> {
         },
       }),
     );
+    models.setProvider(claudeProvider());
 
     const shell = {
       name: "shell",
@@ -263,16 +265,14 @@ export class Agent extends DurableObject<Env> {
           },
           onReport: ({ error, ...report }) => {
             void Effect.runPromise(
-              this.credentials.get("openai-codex").pipe(
-                Effect.flatMap((credential) => {
-                  const value = Option.getOrUndefined(credential);
-
+              this.credentials.secrets.pipe(
+                Effect.flatMap((secrets) => {
                   return Effect.logError({
                     event: "agent_failure",
                     ...report,
                     error: exceptionDetails(
                       error,
-                      value?.type === "oauth" ? [value.access, value.refresh] : [],
+                      secrets,
                     ),
                   });
                 }),
@@ -702,30 +702,52 @@ export class Agent extends DurableObject<Env> {
     return Effect.runPromise(Effect.provide(logout, this.services));
   }
 
+  anthropicStatus() {
+    return Effect.runPromise(anthropicStatus(this.credentials));
+  }
+
+  anthropicSave(input: typeof AnthropicSetup.Type) {
+    return Effect.runPromise(saveAnthropic(this.credentials, input));
+  }
+
+  anthropicTest(input: typeof AnthropicProbe.Type) {
+    return Effect.runPromise(testAnthropic(this.credentials, input));
+  }
+
+  anthropicLogout() {
+    return Effect.runPromise(this.credentials.locked(this.credentials.remove("anthropic")).pipe(Effect.as({ connected: false })));
+  }
+
   createSession(model?: string, workspace?: typeof WorkspaceInput.Type) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
-        if (Option.isNone(yield* this.credentials.get("openai-codex")))
-          return { error: "Connect your Codex subscription first" };
+        const codex = yield* this.credentials.get("openai-codex");
+        const claude = yield* this.credentials.get("anthropic");
+        const defaultModel = Option.isNone(codex) && Option.isSome(claude) ? DEFAULT_CLAUDE_MODEL : this.env.CODEX_MODEL;
 
-        const modelId = yield* Schema.decodeUnknownEffect(CodexModel)(
-          model ?? this.env.CODEX_MODEL,
+        const modelId = yield* Schema.decodeUnknownEffect(SessionModel)(
+          model ?? defaultModel,
         ).pipe(
           Effect.mapError(
             () =>
               new OperationError({
                 operation: "session.model",
-                message: "Unknown Codex model",
-                details: "Select a model from the pinned Pi Codex catalog",
+                message: "Unknown model",
+                details: "Select a model from the pinned Pi Codex or Anthropic catalog",
               }),
           ),
         );
+
+        const provider = modelProvider(modelId);
+
+        if (Option.isNone(provider === "anthropic" ? claude : codex))
+          return { error: provider === "anthropic" ? "Connect your Claude subscription first" : "Connect your Codex subscription first" };
 
         const conversation = yield* attempt("pi.conversation.create", () =>
           this.harness.createConversation(
             {
               ownership: { kind: "ownerless" },
-              agent: { model: { provider: "openai-codex", modelId } },
+              agent: { model: { provider, modelId } },
             },
             BACKGROUND_CONTEXT,
           ),
@@ -772,8 +794,11 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(conversation)) return undefined;
 
-        if (Option.isNone(yield* this.credentials.get("openai-codex")))
-          return { error: "Connect your Codex subscription first" };
+        const agent = yield* attempt("session.model", () => conversation.value.agent(BACKGROUND_CONTEXT));
+        const provider = agent.model?.provider ?? "openai-codex";
+
+        if (Option.isNone(yield* this.credentials.get(provider)))
+          return { error: provider === "anthropic" ? "Connect your Claude subscription first" : "Connect your Codex subscription first" };
         yield* this.arm({ active: true });
 
         const submission = yield* attempt("pi.submit", () =>
@@ -789,11 +814,8 @@ export class Agent extends DurableObject<Env> {
   }
 
   private serializeTranscript(value: ConversationView) {
-    return this.credentials.get("openai-codex").pipe(
-      Effect.map((credential) => {
-        const grant = Option.getOrUndefined(credential);
-        const secrets = grant?.type === "oauth" ? [grant.access, grant.refresh] : [];
-
+    return this.credentials.secrets.pipe(
+      Effect.map((secrets) => {
         return JSON.stringify(value, (key, item) => {
           if (!Predicate.isString(item)) return item;
 
@@ -909,8 +931,11 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(parent)) return undefined;
 
-        if (Option.isNone(yield* this.credentials.get("openai-codex")))
-          return { error: "Connect your Codex subscription first" };
+        const agent = yield* attempt("parent.model", () => parent.value.agent(BACKGROUND_CONTEXT));
+        const provider = modelProvider(parsed.model ?? agent.model?.modelId ?? this.env.CODEX_MODEL);
+
+        if (Option.isNone(yield* this.credentials.get(provider)))
+          return { error: provider === "anthropic" ? "Connect your Claude subscription first" : "Connect your Codex subscription first" };
         yield* this.arm({ active: true });
 
         return yield* new Coordination(() => this.harness).spawn(parent.value.id, parsed);
@@ -930,8 +955,8 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(parent)) return undefined;
 
-        if (Option.isNone(yield* this.credentials.get("openai-codex")))
-          return { error: "Connect your Codex subscription first" };
+        if ((yield* attempt("providers.list", () => this.credentials.list())).length === 0)
+          return { error: "Connect a model subscription first" };
         yield* this.arm({ active: true });
 
         return yield* new Coordination(() => this.harness).send(parent.value.id, childId, parsed);
@@ -952,8 +977,7 @@ export class Agent extends DurableObject<Env> {
           false,
         );
 
-        const credential = Option.getOrUndefined(yield* this.credentials.get("openai-codex"));
-        const secrets = credential?.type === "oauth" ? [credential.access, credential.refresh] : [];
+        const secrets = yield* this.credentials.secrets;
 
         return "result" in receipt && receipt.result?.status === "answered"
           ? {

@@ -16,7 +16,7 @@ import { obj, opt, str } from "@earendil-works/pi-schema";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { ConversationWorkspace } from "./workspace";
-import { CodexModel, ChildRequest, ChildMessage } from "./models";
+import { SessionModel, modelProvider, ChildRequest, ChildMessage } from "./models";
 import { attempt } from "./operations";
 
 export const MAX_DEPTH = 3;
@@ -162,7 +162,7 @@ export class Coordination {
     if (!conversation) return { error: "Session not found" };
     const agent = yield* attempt("parent.model", () => conversation.agent(context));
 
-    const model = yield* Schema.decodeUnknownEffect(CodexModel)(
+    const model = yield* Schema.decodeUnknownEffect(SessionModel)(
       input.model ?? agent.model?.modelId,
     ).pipe(Effect.orDie);
 
@@ -200,7 +200,7 @@ export class Coordination {
         });
 
         const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
-        await configure(tx, child.id, { model: { provider: "openai-codex", modelId: model } });
+        await configure(tx, child.id, { model: { provider: modelProvider(model), modelId: model } });
         const parentWorkspace = await tx.doc(ConversationWorkspace, parent);
 
         if (parentWorkspace.config) {

@@ -1,7 +1,8 @@
 import { useRef, useState, type FormEvent } from "react";
 import * as Schema from "effect/Schema";
 import { request, Session, type ApiBody, type SavedSession } from "../lib/api";
-import { Modal, Select, Textarea } from "./ui";
+import { Modal, Textarea } from "./ui";
+import { ModelSelect } from "./model-select";
 import { RepositoryPicker } from "./repositories";
 
 /** Create the conversation only on submit; retries reuse both its ID and prompt receipt. */
@@ -132,18 +133,13 @@ export function NewSessionComposer({
           <label htmlFor="new-session-model" className="sr-only">
             Model
           </label>
-          <Select
+          <ModelSelect
             id="new-session-model"
             name="model"
             value={model}
             disabled={pending || Boolean(created)}
             onChange={(event) => setModel(event.target.value)}
-          >
-            <option value="">Server default</option>
-            <option value="gpt-6-sol">GPT-6 Sol</option>
-            <option value="gpt-6-luna">GPT-6 Luna</option>
-            <option value="gpt-6.1-terra">GPT-6.1 Terra</option>
-          </Select>
+          />
           <button type="submit" className="primary-button" disabled={pending || !content.trim()}>
             {pending ? "Starting…" : created ? "Retry" : "Create"}
           </button>

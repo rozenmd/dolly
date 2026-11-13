@@ -9,6 +9,7 @@ import { CodexLogin } from "./components/codex-login";
 import { GitHubSetup, GitHubSignIn, ingressHook } from "./components/github";
 import { RepositoryPicker } from "./components/repositories";
 import { NewSessionComposer } from "./components/new-session";
+import { AnthropicConnection } from "./components/anthropic";
 import {
   authState,
   codexLogin,
@@ -20,6 +21,7 @@ import {
   Snapshot,
   turnsFromSnapshot,
   sessionBody,
+  anthropicStatus,
 } from "./lib/api";
 import { ago } from "./lib/time";
 import { watchSession } from "./lib/session-stream";
@@ -38,6 +40,8 @@ export function WorkspaceApp() {
   const [details, setDetails] = useState(false);
   const [modal, setModal] = useState<"settings" | "codex" | "new" | "import" | null>(null);
   const [codex, setCodex] = useState<boolean | null>(null);
+  const [anthropic, setAnthropic] = useState(false);
+  const [showClaude, setShowClaude] = useState(false);
   const [error, setError] = useState("");
   const [streamError, setStreamError] = useState("");
   const [notice, setNotice] = useState("");
@@ -95,15 +99,16 @@ export function WorkspaceApp() {
 
     let active = true;
 
-    codexLogin().then(
-      (status) => {
+    Promise.all([codexLogin().catch(() => null), anthropicStatus().catch(() => ({ connected: false }))]).then(
+      ([status, claude]) => {
         if (!active) return;
 
-        const signedIn = status.state === "connected";
+        const signedIn = status?.state === "connected";
         setCodex(signedIn);
+        setAnthropic(claude.connected);
         setSelected((current) => current || sessions[0]?.id || "");
 
-        setModal(!signedIn ? "codex" : sessions.length ? null : "new");
+        setModal(!signedIn && !claude.connected ? "codex" : sessions.length ? null : "new");
       },
       () => active && setCodex(null),
     );
@@ -159,7 +164,7 @@ export function WorkspaceApp() {
 
   function newSession() {
     setMobileOpen(false);
-    setModal(codex === false ? "codex" : "new");
+    setModal(codex === false && !anthropic ? "codex" : "new");
   }
 
   async function send(content: string, requestId: string) {
@@ -334,9 +339,9 @@ export function WorkspaceApp() {
                 <span className="brand-mark large" aria-hidden="true">
                   D
                 </span>
-                <h2>{codex === false ? "Sign in to ChatGPT" : "No workspace selected"}</h2>
+                <h2>{codex === false && !anthropic ? "Connect a model" : "No workspace selected"}</h2>
                 <button type="button" className="primary-button" onClick={newSession}>
-                  {codex === false ? "Sign in with ChatGPT" : "New session"}
+                  {codex === false && !anthropic ? "Connect a model" : "New session"}
                 </button>
               </div>
             )}
@@ -355,6 +360,7 @@ export function WorkspaceApp() {
           login={auth.user.login}
           github={auth.github}
           codex={codex}
+          onAnthropicConnection={setAnthropic}
           onClose={() => setModal(null)}
           onCodexSignIn={() => setModal("codex")}
           onCodexSignOut={() => setCodex(false)}
@@ -373,6 +379,7 @@ export function WorkspaceApp() {
           onSignOut={() => {
             setAuth({ ...auth, user: null });
             setCodex(null);
+            setAnthropic(false);
             setSnapshot(null);
             setModal(null);
             setNotice("");
@@ -380,7 +387,8 @@ export function WorkspaceApp() {
         />
       )}
       {modal === "codex" && (
-        <Modal title="Sign in to ChatGPT" onClose={() => setModal(null)}>
+        <Modal title="Connect a model" onClose={() => setModal(null)}>
+          <h3>ChatGPT subscription</h3>
           <CodexLogin
             onConnected={() => {
               setCodex(true);
@@ -391,11 +399,16 @@ export function WorkspaceApp() {
               setModal(null);
             }}
           />
+          <button type="button" className="ghost-button" onClick={() => setShowClaude(!showClaude)}>Use Claude instead</button>
+          {showClaude && <>
+            <AnthropicConnection onConnection={setAnthropic} />
+            <button type="button" className="primary-button" disabled={!anthropic} onClick={() => setModal("new")}>Continue with Claude</button>
+          </>}
         </Modal>
       )}
       {modal === "new" && (
         <NewSessionComposer
-          initial={session ? sessionBody(session, snapshot) : {}}
+          initial={session ? sessionBody(session, snapshot) : anthropic && !codex ? { model: "claude-sonnet-4-6" } : {}}
           onClose={() => setModal(null)}
           onImport={() => setModal("import")}
           onSaved={(value) => save([value, ...sessions.filter((item) => item.id !== value.id)])}
@@ -524,6 +537,7 @@ function SettingsModal({
   onClose,
   onCodexSignIn,
   onCodexSignOut,
+  onAnthropicConnection,
   onIngress,
   onSenders,
   onSignOut,
@@ -534,6 +548,7 @@ function SettingsModal({
   onClose: () => void;
   onCodexSignIn: () => void;
   onCodexSignOut: () => void;
+  onAnthropicConnection: (connected: boolean) => void;
   onIngress: (ingress: string) => void;
   onSenders: (senders: readonly string[]) => void;
   onSignOut: () => void;
@@ -665,7 +680,7 @@ function SettingsModal({
             className="secondary-button"
             disabled={pending}
             onClick={() => {
-              if (!confirm("Sign out of ChatGPT? Agents can't run until you sign in again."))
+              if (!confirm("Sign out of ChatGPT? Codex sessions will need you to sign in again."))
                 return;
 
               void run(async () => {
@@ -682,6 +697,7 @@ function SettingsModal({
           </button>
         )}
       </div>
+      <AnthropicConnection onConnection={onAnthropicConnection} />
       <div className="connection-row">
         <span className="status-dot idle" />
         <span className="connection-label">
