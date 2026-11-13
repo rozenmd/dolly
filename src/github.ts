@@ -35,8 +35,9 @@ const App = Schema.Struct({
   id: Schema.Number,
   slug: Schema.NonEmptyString,
   pem: Schema.NonEmptyString,
+  client_id: Schema.optional(Schema.NonEmptyString),
   webhook_secret: Schema.optional(Schema.NonEmptyString),
-  owner: Schema.Struct({ login: Schema.String }),
+  owner: Schema.Struct({ login: Schema.String, type: Schema.optional(Schema.String) }),
 });
 
 const Connected = Schema.Struct({ app: App });
@@ -121,9 +122,20 @@ type GitHubBody =
   | { body: string }
   | { ref: string; sha: string }
   | { head: string; base: string; title: string; body: string }
-  | { message: string; branch: string; content: string; sha?: string };
+  | { message: string; branch: string; content: string; sha?: string }
+  | { url: string; content_type: "json"; secret: string; insecure_ssl: "0" };
 
-function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
+/** The ingress Worker's webhook URL for a base URL, with or without the `/hooks/github` path. */
+export function ingressHook(url: string) {
+  const base = url
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/hooks\/github$/, "");
+
+  return Schema.decodeUnknownOption(WebhookUrl)(`${base}/hooks/github`);
+}
+
+function makeGitHub(storage: DurableObjectStorage) {
   const setupPermit = Semaphore.makeUnsafe(1);
   const tokens = new Map<string, { value: string; expires: number }>();
 
@@ -155,6 +167,19 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
         }),
       ),
   );
+
+  const ingress = Effect.gen(function* () {
+    const raw = yield* attempt("github.ingress.read", () => storage.get("github:ingress"));
+
+    return raw === undefined ? "" : yield* decode(WebhookUrl)(raw);
+  });
+
+  // Who may run /pi commands. The signing secret stays server-side.
+  const senders = Effect.gen(function* () {
+    const raw = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
+
+    return raw === undefined ? [] : (yield* decode(WebhookProfile)(raw)).senders;
+  });
 
   const read = Effect.fn("GitHub.configuration")(function* () {
     const raw = yield* attempt("github.read", () => storage.get("github:connected"));
@@ -300,14 +325,72 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
 
     if (raw === undefined) return { connected: false };
     const value = yield* decode(Connected)(raw);
+    const slug = encodeURIComponent(value.app.slug);
+
+    const settings =
+      value.app.owner.type === "Organization"
+        ? `https://github.com/organizations/${encodeURIComponent(value.app.owner.login)}/settings/apps/${slug}`
+        : `https://github.com/settings/apps/${slug}`;
 
     return {
       connected: true,
       owner: value.app.owner.login,
       appSlug: value.app.slug,
-      installUrl: `https://github.com/apps/${encodeURIComponent(value.app.slug)}/installations/new`,
+      installUrl: `https://github.com/apps/${slug}/installations/new`,
+      settingsUrl: settings,
+      ingress: (yield* ingress) || null,
+      senders: yield* senders,
     };
   });
+
+  /** The App's OAuth client ID, which runs the device sign-in. Older setups did not store it. */
+  const clientId = Effect.gen(function* () {
+    const connected = yield* read();
+
+    if (connected.app.client_id) return connected.app.client_id;
+
+    const app = yield* api("/app", yield* jwt(connected.app)).pipe(
+      Effect.flatMap(decode(Schema.Struct({ client_id: Schema.NonEmptyString }))),
+    );
+
+    yield* attempt("github.client.save", () =>
+      storage.put("github:connected", { app: { ...connected.app, client_id: app.client_id } }),
+    );
+
+    return app.client_id;
+  });
+
+  const configureIngress = Effect.fn("GitHub.configureIngress")((url: string) =>
+    setupPermit.withPermit(
+      Effect.gen(function* () {
+        const hook = ingressHook(url);
+
+        if (Option.isNone(hook))
+          return {
+            error:
+              "Enter the ingress Worker's HTTPS URL, such as https://pi-hard-ingress.example.workers.dev",
+          };
+
+        const connected = yield* read();
+        const saved = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
+        const profile = saved === undefined ? undefined : yield* decode(WebhookProfile)(saved);
+        const secret = profile?.secret ?? connected.app.webhook_secret;
+
+        if (!secret)
+          return { error: "This GitHub App has no webhook secret. Create a new GitHub App." };
+
+        yield* api(
+          "/app/hook/config",
+          yield* jwt(connected.app),
+          { url: hook.value, content_type: "json", secret, insecure_ssl: "0" },
+          "PATCH",
+        );
+        yield* attempt("github.ingress.save", () => storage.put("github:ingress", hook.value));
+
+        return { ingress: hook.value };
+      }),
+    ),
+  );
 
   const start = Effect.fn("GitHub.start")((setup: typeof GitHubSetup.Type, origin: string) =>
     setupPermit.withPermit(
@@ -374,8 +457,7 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
 
   const manifest = Effect.fn("GitHub.manifest")(function* (state: string) {
     const value = yield* pending(state);
-
-    if (webhookUrl) yield* decode(WebhookUrl)(webhookUrl);
+    const hook = yield* decode(WebhookUrl)(value.setup.ingress);
 
     const action =
       value.setup.ownerType === "organization"
@@ -390,11 +472,8 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
         public: true,
         redirect_url: `${value.origin}/api/setup/github/callback`,
         default_permissions: GITHUB_APP_GRANT_PERMISSIONS,
-        default_events: webhookUrl ? ["issue_comment"] : [],
-        hook_attributes: {
-          url: webhookUrl || `${value.origin}/hooks/github`,
-          active: Boolean(webhookUrl),
-        },
+        default_events: ["issue_comment"],
+        hook_attributes: { url: hook, active: true },
       },
     };
   });
@@ -421,7 +500,9 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
             details: null,
           });
         yield* jwt(app);
-        yield* attempt("github.save", () => storage.put({ "github:connected": { app } }));
+        yield* attempt("github.save", () =>
+          storage.put({ "github:connected": { app }, "github:ingress": value.setup.ingress }),
+        );
         yield* attempt("github.pending.delete", () => storage.delete("github:pending"));
 
         return yield* status;
@@ -541,14 +622,14 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
         const previous = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
         const saved = previous === undefined ? undefined : yield* decode(WebhookProfile)(previous);
         const secret = input.secret ?? saved?.secret ?? connected.app.webhook_secret;
+        const webhookUrl = yield* ingress;
 
         if (!secret || !webhookUrl)
           return yield* new OperationError({
             operation: "github.webhook.setup",
-            message: "Configure GITHUB_WEBHOOK_URL and a GitHub webhook secret first",
+            message: "Set the ingress URL and a GitHub webhook secret first",
             details: null,
           });
-        yield* decode(WebhookUrl)(webhookUrl);
 
         const token = yield* jwt(connected.app);
 
@@ -670,6 +751,8 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
 
   return {
     status,
+    clientId,
+    configureIngress,
     accounts,
     configureAccounts,
     start,
@@ -686,6 +769,6 @@ function makeGitHub(storage: DurableObjectStorage, webhookUrl: string) {
 export class GitHub extends Context.Service<GitHub, ReturnType<typeof makeGitHub>>()(
   "pi-hard/GitHub",
 ) {
-  static readonly layer = (storage: DurableObjectStorage, webhookUrl = "") =>
-    Layer.succeed(GitHub, makeGitHub(storage, webhookUrl));
+  static readonly layer = (storage: DurableObjectStorage) =>
+    Layer.succeed(GitHub, makeGitHub(storage));
 }

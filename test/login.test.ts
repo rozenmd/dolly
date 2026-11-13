@@ -12,6 +12,7 @@ import type { Device } from "../src/codex-login";
 import type { Env as WorkerEnv } from "../src/env";
 import { Credentials } from "../src/credentials";
 import { exceptionDetails } from "../src/diagnostics";
+import { headers, signIn } from "./session";
 
 declare global {
   namespace Cloudflare {
@@ -19,13 +20,13 @@ declare global {
   }
 }
 
-const headers = { Authorization: "Bearer test-token-with-at-least-32-characters" };
 const jwt = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.testsignature`;
 const json = (value: Schema.Json, status = 200) => Response.json(value, { status });
 const auth = () => SELF.fetch("https://worker/api/auth/codex", { headers });
 
 beforeEach(async () => {
   await reset();
+  await signIn();
 });
 
 afterEach(() => {

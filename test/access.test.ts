@@ -1,16 +1,16 @@
 import { env } from "cloudflare:workers";
 import { sign } from "hono/jwt";
-import { afterEach, beforeAll, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 import { authorizeAccess } from "../src/access";
 import app from "../src/index";
+import { headers as signedIn, signIn } from "./session";
 
 const team = "example-team.cloudflareaccess.com";
 const audience = "test-access-application-audience";
-const bearer = "Bearer test-token-with-at-least-32-characters";
 let privateKey: JsonWebKey & { kid: string };
 let publicKey: JsonWebKey & { kid: string };
 
@@ -46,14 +46,20 @@ beforeAll(async () => {
   };
 });
 
+beforeEach(signIn);
+
 afterEach(() => vi.restoreAllMocks());
 
 function claims() {
   return { iss: `https://${team}`, aud: [audience], exp: Math.floor(Date.now() / 1000) + 300 };
 }
 
-function request(assertion?: string, overrides: Partial<typeof env> = {}, authorization = bearer) {
-  const headers = new Headers({ Authorization: authorization });
+function request(
+  assertion?: string,
+  overrides: Partial<typeof env> = {},
+  cookie = signedIn.Cookie,
+) {
+  const headers = new Headers({ Cookie: cookie });
 
   if (assertion) headers.set("Cf-Access-Jwt-Assertion", assertion);
 
@@ -79,7 +85,7 @@ function certificates() {
   });
 }
 
-it("requires Access even with the API token, and fails closed when configuration is missing or unsafe", async () => {
+it("requires Access even with a signed-in session, and fails closed when configuration is missing or unsafe", async () => {
   const fetch = certificates();
   expect((await request()).status).toBe(401);
 
@@ -101,7 +107,7 @@ it("verifies the signature, issuer, audience and expiration before reaching the 
   certificates();
   const jwt = await sign(claims(), privateKey, "RS256");
   expect((await request(jwt)).status).toBe(404);
-  expect((await request(jwt, {}, "Bearer incorrect")).status).toBe(401);
+  expect((await request(jwt, {}, "__Host-pi-hard-session=incorrect")).status).toBe(401);
 
   for (const payload of [
     { ...claims(), iss: "https://other.cloudflareaccess.com" },

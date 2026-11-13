@@ -1,5 +1,6 @@
-import { useLayoutEffect, useRef, type ComponentProps, type ReactNode } from "react";
-import { XMarkIcon } from "@heroicons/react/16/solid";
+import { useLayoutEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import { CheckIcon, XMarkIcon } from "@heroicons/react/16/solid";
+import { DocumentDuplicateIcon } from "@heroicons/react/24/outline";
 
 export function IconButton({
   label,
@@ -73,5 +74,28 @@ export function RepoBadge({ repository }: { repository: string }) {
     <span className="repo-badge" aria-hidden="true">
       {name.charAt(0).toUpperCase() || "·"}
     </span>
+  );
+}
+
+/** A one-time device code to enter on another site, copied with one click. */
+export function DeviceCode({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+
+  return (
+    <button
+      type="button"
+      className="device-code"
+      aria-label={copied ? `Copied code ${code}` : `Copy code ${code}`}
+      title={copied ? "Copied" : "Copy code"}
+      onClick={() =>
+        void navigator.clipboard.writeText(code).then(
+          () => setCopied(true),
+          () => setCopied(false),
+        )
+      }
+    >
+      <span>{code}</span>
+      {copied ? <CheckIcon /> : <DocumentDuplicateIcon />}
+    </button>
   );
 }

@@ -1,7 +1,8 @@
 import { SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { headers, signIn } from "./session";
 
-const headers = { Authorization: "Bearer test-token-with-at-least-32-characters" };
+beforeEach(signIn);
 
 describe("Hono Worker in workerd", () => {
   it("serves health without credentials and never caches responses", async () => {

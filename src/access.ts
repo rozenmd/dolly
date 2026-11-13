@@ -17,7 +17,7 @@ const AccessClaims = Schema.Struct({
   aud: Schema.Union([Schema.String, Schema.Array(Schema.String)]),
 });
 
-/** API_TOKEN alone never grants deployed access. Missing Access configuration fails closed. */
+/** A session cookie alone never grants deployed access. Missing Access configuration fails closed. */
 export const authorizeAccess = Effect.fn("Access.authorize")(function* (
   request: Request,
   env: Env,

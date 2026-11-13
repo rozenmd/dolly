@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono";
-import { bearerAuth } from "hono/bearer-auth";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { bodyLimit } from "hono/body-limit";
 import * as Cause from "effect/Cause";
@@ -12,7 +12,7 @@ import { authorizeAccess } from "./access";
 import { AgentApi } from "./api";
 import { ChildRequest, NewSession } from "./models";
 import { OperationError } from "./operations";
-import { exceptionDetails, redact } from "./diagnostics";
+import { exceptionDetails } from "./diagnostics";
 import type { Env } from "./env";
 
 export { Agent } from "./agent";
@@ -46,14 +46,14 @@ function handle(
           event: "request_failed",
           path: c.req.routePath,
           operation: error.operation,
-          error: exceptionDetails(error, [c.env.API_TOKEN]),
-          details: redact(JSON.stringify(error.details), [c.env.API_TOKEN]),
+          error: exceptionDetails(error),
+          details: error.details,
         }).pipe(Effect.as(c.json({ error: "Request failed; check Worker logs" }, 502))),
       ),
       Effect.catchCause((cause) =>
         Effect.logError({
           event: "request_defect",
-          error: redact(Cause.pretty(cause), [c.env.API_TOKEN]),
+          error: Cause.pretty(cause),
         }).pipe(Effect.as(c.json({ error: "Request failed; check Worker logs" }, 502))),
       ),
     ),
@@ -74,13 +74,6 @@ app.get("/api/health", (c) => c.json({ ok: true }));
 app.route("/", githubSetupRoutes);
 
 app.use("/api/*", async (c, next) => {
-  if (!c.env.API_TOKEN || c.env.API_TOKEN.length < 32)
-    return c.json({ error: "Set API_TOKEN to at least 32 characters" }, 503);
-
-  return bearerAuth<{ Bindings: Env }>({ token: c.env.API_TOKEN })(c, next);
-});
-
-app.use("/api/*", async (c, next) => {
   const access = await Effect.runPromise(authorizeAccess(c.req.raw, c.env), {
     signal: c.req.raw.signal,
   });
@@ -93,10 +86,93 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
+const owner = (c: Context<{ Bindings: Env }>) => c.env.AGENT.getByName("owner");
+
+// Signing in needs only Cloudflare Access. So does creating the GitHub App, until someone owns it.
+app.use("/api/*", async (c, next) => {
+  if (c.req.path === "/api/auth" || c.req.path === "/api/auth/github") return next();
+
+  if (
+    c.req.path === "/api/integrations/github/setup" &&
+    !(await Effect.runPromise(rpc("auth.owner", async () => await owner(c).authOwnerClaimed())))
+  )
+    return next();
+
+  const signedIn = await Effect.runPromise(
+    rpc("auth.session", async () => await owner(c).authSession(getCookie(c, SESSION_COOKIE) ?? "")),
+  );
+
+  if (!signedIn) return c.json({ error: "Sign in with GitHub" }, 401);
+  await next();
+});
+
 app.use(
   "/api/*",
   bodyLimit({ maxSize: 65_536, onError: (c) => c.json({ error: "Body exceeds 64 KiB" }, 413) }),
 );
+
+const SESSION_COOKIE = "__Host-pi-hard-session";
+
+const DEVICE_COOKIE = "__Host-pi-hard-github-device";
+
+const cookie = { path: "/", secure: true, httpOnly: true, sameSite: "Lax" } as const;
+
+app.get("/api/auth", async (c) => {
+  const [state, user] = await Promise.all([
+    Effect.runPromise(rpc("auth.state", async () => await owner(c).authState())),
+    Effect.runPromise(
+      rpc(
+        "auth.session",
+        async () => await owner(c).authSession(getCookie(c, SESSION_COOKIE) ?? ""),
+      ),
+    ),
+  ]);
+
+  if ("error" in state) return c.json(state, 502);
+
+  return c.json({ ...state, user });
+});
+
+app.post("/api/auth/github", async (c) => {
+  const result = await Effect.runPromise(rpc("auth.start", async () => await owner(c).authStart()));
+
+  if ("error" in result) return c.json(result, 409);
+  setCookie(c, DEVICE_COOKIE, result.flow, { ...cookie, sameSite: "Strict", maxAge: 900 });
+
+  return c.json(result.status);
+});
+
+app.get("/api/auth/github", async (c) => {
+  const flow = getCookie(c, DEVICE_COOKIE);
+
+  if (!flow) return c.json({ state: "expired" });
+
+  const result = await Effect.runPromise(
+    rpc("auth.poll", async () => await owner(c).authPoll(flow)),
+  );
+
+  if ("error" in result) return c.json(result, 502);
+
+  if (result.state === "awaiting_code") return c.json(result);
+
+  deleteCookie(c, DEVICE_COOKIE, { path: "/", secure: true });
+
+  if (result.state === "denied") return c.json(result, 403);
+
+  if (result.state === "expired") return c.json(result);
+  setCookie(c, SESSION_COOKIE, result.session, { ...cookie, maxAge: 30 * 24 * 60 * 60 });
+
+  return c.json({ state: "signed_in", login: result.login });
+});
+
+app.delete("/api/auth/session", async (c) => {
+  await Effect.runPromise(
+    rpc("auth.signout", async () => await owner(c).authSignOut(getCookie(c, SESSION_COOKIE) ?? "")),
+  );
+  deleteCookie(c, SESSION_COOKIE, { path: "/", secure: true });
+
+  return c.json({ signedIn: false });
+});
 
 app.post("/api/auth/codex", (c) =>
   handle(
@@ -298,7 +374,7 @@ app.onError((error, c) => {
   return Effect.runPromise(
     Effect.logError({
       event: "http_failure",
-      error: exceptionDetails(error, [c.env.API_TOKEN]),
+      error: exceptionDetails(error),
     }).pipe(Effect.as(c.json({ error: "Request failed; check Worker logs" }, 502))),
   );
 });

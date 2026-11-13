@@ -5,11 +5,17 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { GITHUB_APP_READ_PERMISSIONS } from "../src/github-permissions";
 import { GitHubRequest } from "../src/github-contracts";
+import { headers, signIn } from "./session";
 
-const headers = { Authorization: "Bearer test-token-with-at-least-32-characters" };
 const repository = "example/project";
 const sha = "a".repeat(40);
-const setup = { owner: "example", ownerType: "organization", repositories: [repository] };
+
+const setup = {
+  owner: "example",
+  ownerType: "organization",
+  ingress: "https://ingress.example/hooks/github",
+  repositories: [repository],
+};
 
 const keys = await crypto.subtle.generateKey(
   {
@@ -50,6 +56,17 @@ async function post<A>(path: string, body: A) {
   });
 }
 
+/** The setup callback redirects back to the app; this returns where it sent the browser. */
+async function callback(query: string) {
+  const response = await SELF.fetch(`https://worker/api/setup/github/callback?${query}`, {
+    redirect: "manual",
+  });
+
+  return response.status === 303
+    ? decodeURIComponent(response.headers.get("Location") ?? "")
+    : await response.text();
+}
+
 async function start() {
   const response = await post("/api/integrations/github/setup", setup);
   const result = await response.json<{ setupUrl: string }>();
@@ -61,11 +78,7 @@ async function connect() {
   const started = await start();
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(app));
 
-  const response = await SELF.fetch(
-    `https://worker/api/setup/github/callback?state=${started.state}&code=manifest-code`,
-  );
-
-  expect((await response.json<{ connected: boolean }>()).connected).toBe(true);
+  expect(await callback(`state=${started.state}&code=manifest-code`)).toBe("/");
   vi.restoreAllMocks();
   await SELF.fetch("https://worker/api/integrations/github/accounts", {
     method: "PUT",
@@ -82,6 +95,7 @@ async function execute(operation: typeof GitHubRequest.Type.operation) {
 
 beforeEach(async () => {
   await reset();
+  await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.delete("github:connected");
     await state.storage.delete("github:pending");
@@ -148,14 +162,18 @@ it("keeps setup state through eviction, consumes it once and never returns crede
     return Response.json(app);
   });
 
-  const callback = `https://worker/api/setup/github/callback?state=${started.state}&code=manifest-code`;
-  const response = await SELF.fetch(callback);
-  const text = await response.text();
-  expect(text).toContain('"connected":true');
+  const query = `state=${started.state}&code=manifest-code`;
+  expect(await callback(query)).toBe("/");
+
+  const status = await (
+    await SELF.fetch("https://worker/api/integrations/github", { headers })
+  ).text();
+
+  expect(status).toContain('"connected":true');
 
   for (const secret of [pem, app.client_secret, app.webhook_secret])
-    expect(text).not.toContain(secret);
-  expect(await (await SELF.fetch(callback)).text()).toContain("error");
+    expect(status).not.toContain(secret);
+  expect(await callback(query)).not.toBe("/");
   expect(fetch).toHaveBeenCalledTimes(1);
   await abortAllDurableObjects();
   expect(await (await post("/api/integrations/github/setup", setup)).json()).toMatchObject({
@@ -171,19 +189,9 @@ it("rejects forged, expired, and wrong-owner setup callbacks without connecting"
     .spyOn(globalThis, "fetch")
     .mockImplementation(async () => Response.json({ ...app, owner: { login: "other" } }));
 
-  expect(
-    await (
-      await SELF.fetch(`https://worker/api/setup/github/callback?state=${"x".repeat(43)}&code=bad`)
-    ).text(),
-  ).toContain("error");
+  expect(await callback(`state=${"x".repeat(43)}&code=bad`)).toContain("already used");
   expect(fetch).not.toHaveBeenCalled();
-  expect(
-    await (
-      await SELF.fetch(
-        `https://worker/api/setup/github/callback?state=${started.state}&code=wrong-owner`,
-      )
-    ).text(),
-  ).toContain("does not match");
+  expect(await callback(`state=${started.state}&code=wrong-owner`)).toContain("does not match");
   expect(
     await (await SELF.fetch("https://worker/api/integrations/github", { headers })).json(),
   ).toEqual({ connected: false });
@@ -191,13 +199,7 @@ it("rejects forged, expired, and wrong-owner setup callbacks without connecting"
     const pending = await state.storage.get<{ expires: number }>("github:pending");
     await state.storage.put("github:pending", { ...pending, expires: 0, phase: "pending" });
   });
-  expect(
-    await (
-      await SELF.fetch(
-        `https://worker/api/setup/github/callback?state=${started.state}&code=expired`,
-      )
-    ).text(),
-  ).toContain("expired");
+  expect(await callback(`state=${started.state}&code=expired`)).toContain("expired");
   expect(fetch).toHaveBeenCalledTimes(1);
 });
 
@@ -551,9 +553,7 @@ it("enables ingress in the manifest and configures allowed senders without repla
   expect(form).toContain("https://ingress.example/hooks/github");
   expect(form).toContain("issue_comment");
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(app));
-  await SELF.fetch(
-    `https://worker/api/setup/github/callback?state=${started.state}&code=manifest-code`,
-  );
+  expect(await callback(`state=${started.state}&code=manifest-code`)).toBe("/");
   vi.restoreAllMocks();
 
   let subscribed = true;

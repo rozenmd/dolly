@@ -40,6 +40,7 @@ import { GitHubRequest, GitHubAccounts, GitHubSetup, GitHubReply } from "./githu
 import { ChildRequest, ChildMessage, CodexModel } from "./models";
 import { Account, Credentials } from "./credentials";
 import { CodexProtocol, startLogin, pollLogin, logout } from "./codex-login";
+import { GitHubAuth } from "./github-auth";
 import { exceptionDetails, redact } from "./diagnostics";
 import { attempt, rpc, OperationError } from "./operations";
 import type { Env } from "./env";
@@ -48,7 +49,7 @@ import type { Env } from "./env";
 export class Agent extends DurableObject<Env> {
   private harness!: Harness;
   private readonly credentials: Credentials;
-  private readonly services: Layer.Layer<Account | CodexProtocol | GitHub>;
+  private readonly services: Layer.Layer<Account | CodexProtocol | GitHub | GitHubAuth>;
   private readonly githubTask = githubDelivery((event, text) =>
     Effect.flatMap(GitHub, (github) => github.reply(event, text)).pipe(
       Effect.provide(this.services),
@@ -62,7 +63,8 @@ export class Agent extends DurableObject<Env> {
     this.services = Layer.mergeAll(
       Layer.succeed(Account, this.credentials),
       CodexProtocol.layer,
-      GitHub.layer(ctx.storage, env.GITHUB_WEBHOOK_URL ?? ""),
+      GitHub.layer(ctx.storage),
+      GitHubAuth.layer(ctx.storage),
     );
     void ctx.blockConcurrencyWhile(() => Effect.runPromise(this.initialize()));
   }
@@ -306,7 +308,7 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
-  private githubRun<A>(program: Effect.Effect<A, OperationError, GitHub>) {
+  private githubRun<A>(program: Effect.Effect<A, OperationError, GitHub | GitHubAuth>) {
     return Effect.runPromise(
       program.pipe(
         Effect.provide(this.services),
@@ -341,6 +343,61 @@ export class Agent extends DurableObject<Env> {
   }
   githubStatus() {
     return this.githubRun(Effect.flatMap(GitHub, (github) => github.status));
+  }
+  /** What the browser needs before sign-in: whether a GitHub App exists and has an owner. */
+  authState() {
+    return this.githubRun(
+      Effect.gen(function* () {
+        const github = yield* Effect.flatMap(GitHub, (value) => value.status);
+        const owner = yield* Effect.flatMap(GitHubAuth, (auth) => auth.owner);
+
+        return { github, ownerClaimed: Option.isSome(owner) };
+      }),
+    );
+  }
+  authOwnerClaimed() {
+    return Effect.runPromise(
+      Effect.flatMap(GitHubAuth, (auth) => auth.owner).pipe(
+        Effect.map(Option.isSome),
+        Effect.provide(this.services),
+      ),
+    );
+  }
+  authStart() {
+    return this.githubRun(
+      Effect.flatMap(GitHub, (github) => github.clientId).pipe(
+        Effect.flatMap((clientId) => Effect.flatMap(GitHubAuth, (auth) => auth.start(clientId))),
+      ),
+    );
+  }
+  authPoll(flow: string) {
+    return this.githubRun(
+      Effect.flatMap(GitHub, (github) => github.clientId).pipe(
+        Effect.flatMap((clientId) =>
+          Effect.flatMap(GitHubAuth, (auth) => auth.poll(clientId, flow)),
+        ),
+      ),
+    );
+  }
+  authSession(token: string) {
+    return Effect.runPromise(
+      Effect.flatMap(GitHubAuth, (auth) => auth.session(token)).pipe(
+        Effect.provide(this.services),
+        Effect.catchTag("OperationError", (error) =>
+          Effect.logError({
+            event: "auth_session_failed",
+            operation: error.operation,
+            error: exceptionDetails(error),
+          }).pipe(Effect.as(null)),
+        ),
+      ),
+    );
+  }
+  authSignOut(token: string) {
+    return this.githubRun(Effect.flatMap(GitHubAuth, (auth) => auth.signOut(token)));
+  }
+  githubConfigureIngress(url: string) {
+    return this.githubRun(Effect.flatMap(GitHub, (github) => github.configureIngress(url)));
   }
   githubStart(input: typeof GitHubSetup.Type, origin: string) {
     return this.githubRun(

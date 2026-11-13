@@ -68,7 +68,7 @@ export function Sidebar({
             type="button"
             className="account-switch"
             onClick={onSettings}
-            aria-label="Connection settings"
+            aria-label="Settings"
           >
             <span className="brand-mark" aria-hidden="true">
               π

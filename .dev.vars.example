@@ -1,2 +1,2 @@
-# Generate a private value with: openssl rand -hex 32
-API_TOKEN=
+# Local development only: skips Cloudflare Access verification. Never deploy with this set.
+ACCESS_LOCAL_DEV=true
