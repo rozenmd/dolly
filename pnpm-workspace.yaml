@@ -21,3 +21,4 @@ minimumReleaseAgeExclude:
 packages:
   - .
   - ingress
+  - web

@@ -2,6 +2,33 @@
 
 A Cloudflare Access-protected personal coding-agent API on Cloudflare Workers, using Hono, Effect 4.0.0-rc.112, Pi Durable 1.5.2, Cloudflare Sandbox 1.0.3, and a ChatGPT/Codex subscription. No OpenAI API key is required.
 
+## Web frontend
+
+The `web/` workspace is a TanStack Start + React frontend with a dark, responsive workspace sidebar, searchable sessions, an activity feed, Markdown conversations, tool output, and a message composer.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm dev:web
+```
+
+Open `http://localhost:3000`. It starts in a labeled preview with example content; preview actions never submit work to the agent. To use real sessions:
+
+1. Start the local Worker in another terminal with `pnpm dev --var ACCESS_LOCAL_DEV:true` (Docker and `.dev.vars` are required).
+2. Connect the local Worker's Codex subscription using the login instructions below, and connect GitHub if you want repository checkouts.
+3. Choose **Connect your API** and enter the existing `API_TOKEN` from `.dev.vars`. The frontend's local development server proxies `/api` to `http://localhost:8787`; it does not inject credentials or bypass the Worker's bearer authentication.
+4. Create a workspace with an optional `owner/repository`, or open a known session ID. Send a task; the frontend polls the recent transcript and live progress every 2.5 seconds. **Stop agent** aborts the selected session and its descendants.
+
+The token stays in memory and must be entered again after reloading. Only session IDs, titles, repository labels, models, and update times are saved in local storage. There is no server session-list endpoint yet, so the activity feed lists only sessions created or imported in this browser, not all sessions on the Worker. Imported sessions use manually entered display labels. Repository sessions use the server's restricted default network policy; the UI does not grant dependency network hosts.
+
+```sh
+pnpm build:web
+pnpm check:web
+pnpm --dir web exec playwright install chromium
+pnpm --dir web test:e2e
+```
+
+The frontend build produces `web/dist/client` and `web/dist/server`. Existing `pnpm deploy` and `pnpm build` remain backend-only; this change does not deploy or reconfigure the Worker. Production hosting needs a TanStack Start-compatible server adapter and same-origin routing: `/api/*` to the existing Worker, and frontend/assets to the web app. Protect the **entire hostname** with Cloudflare Access, preserving the existing Worker's JWT and bearer-token checks. A browser's Access cookie supplies the JWT through Cloudflare; never put Access service credentials or `API_TOKEN` in a `VITE_*` variable or a client bundle. The development proxy targets only the local Worker and is not a production proxy.
+
 ## Deploy to Cloudflare
 
 Use Node.js 24.22.2 and pnpm 12.18.0 (pinned in `.node-version` and `package.json`), a running Docker engine to build the container image, and a paid Cloudflare Workers account with Artifacts enabled. Create a private Artifacts namespace named `pi-hard-workspaces`; the typed configuration binds it as `WORKSPACES`. The image builds a pinned ArtifactFS driver and includes FUSE.
