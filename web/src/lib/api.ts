@@ -8,6 +8,36 @@ export function liveFromSnapshot(snapshot: typeof Snapshot.Type) {
   return Option.getOrNull(Schema.decodeUnknownOption(Live)(snapshot.docs["pi.live"]));
 }
 
+const QueuedInput = Schema.Struct({
+  id: Schema.Number,
+  mode: Schema.Literals(["followUp", "steer"]),
+  content: Schema.Union([Schema.String, Schema.Array(Block)]),
+});
+
+export type QueuedMessage = { id: number; text: string; steering: boolean };
+
+export function queueFromSnapshot(snapshot: typeof Snapshot.Type): QueuedMessage[] {
+  const inbox = Schema.decodeUnknownOption(Schema.Struct({ items: Schema.Array(Schema.Unknown) }))(
+    snapshot.docs["pi.inbox"],
+  );
+
+  if (Option.isNone(inbox)) return [];
+
+  return inbox.value.items.flatMap((item) => {
+    const input = Schema.decodeUnknownOption(QueuedInput)(item);
+
+    if (Option.isNone(input)) return [];
+
+    return [
+      {
+        id: input.value.id,
+        text: messageText({ role: "user", content: input.value.content }),
+        steering: input.value.mode === "steer",
+      },
+    ];
+  });
+}
+
 export const Session = Schema.Struct({ id: Schema.String, model: Schema.String });
 
 export const SavedSession = Schema.Struct({

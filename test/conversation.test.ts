@@ -3,7 +3,7 @@ import { zstdDecompressSync } from "node:zlib";
 import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { configure, type ConversationId } from "@earendil-works/pi-durable";
+import { configure, InboxDoc, type ConversationId } from "@earendil-works/pi-durable";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
 import { Snapshot, Live } from "../src/transcript";
@@ -24,6 +24,138 @@ beforeEach(async () => {
 });
 
 afterEach(() => vi.restoreAllMocks());
+
+it("promotes the original queued input atomically without duplication or crossing sessions", async () => {
+  let release!: (body: string) => void;
+
+  const blocked = new Promise<string>((resolve) => {
+    release = resolve;
+  });
+
+  let finish!: () => void;
+
+  const next = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+
+  const model = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    await next;
+
+    return Response.json({ error: { message: "Model unavailable" } }, { status: 400 });
+  });
+
+  model.mockImplementationOnce(
+    async () =>
+      new Response(await blocked, {
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+  );
+
+  const create = async () => {
+    const response = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
+
+    return (await response.json<{ id: string }>()).id;
+  };
+
+  const id = await create();
+  const other = await create();
+
+  const send = async (content: string) => {
+    const response = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content, requestId: crypto.randomUUID() }),
+    });
+
+    expect(response.status).toBe(202);
+
+    return (await response.json<{ submissionId: number }>()).submissionId;
+  };
+
+  const steer = (session: string, submissionId: number) =>
+    SELF.fetch(`https://worker/api/sessions/${session}/queue/${submissionId}/steer`, {
+      method: "POST",
+      headers,
+    });
+
+  try {
+    const first = await send("Work on this");
+    await expect.poll(() => model.mock.calls.length).toBeGreaterThan(0);
+    const queued = await send("Actually, use pnpm");
+    const later = await send("Then run tests");
+
+    expect((await steer(other, queued)).status).toBe(409);
+    expect((await steer(id, first)).status).toBe(409);
+    expect((await steer(id, queued)).status).toBe(202);
+    expect((await steer(id, queued)).status).toBe(202);
+
+    await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+      const conversationId = (await state.storage.get<ConversationId>(`session:${id}`))!;
+      const inbox = await agent["harness"].snapshot(InboxDoc, conversationId, BACKGROUND_CONTEXT);
+      expect(inbox?.items).toEqual([
+        { id: queued, mode: "steer", content: "Actually, use pnpm" },
+        { id: later, mode: "followUp", content: "Then run tests" },
+      ]);
+    });
+
+    // Complete a tool-calling response. The promoted input must join this run
+    // at its tool boundary, while the ordinary follow-up stays queued.
+    const call = {
+      type: "function_call",
+      id: "fc_test",
+      call_id: "call_test",
+      name: "github",
+      arguments: JSON.stringify({ operation: { action: "repositories" } }),
+    };
+
+    const events = [
+      {
+        type: "response.created",
+        response: { id: "resp_test", status: "in_progress", output: [] },
+      },
+      { type: "response.output_item.done", output_index: 0, item: call },
+      {
+        type: "response.completed",
+        response: {
+          id: "resp_test",
+          status: "completed",
+          output: [call],
+          usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+        },
+      },
+    ];
+
+    release(
+      events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+    );
+
+    const read = async () =>
+      Schema.decodeUnknownSync(Snapshot)(
+        await (await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })).json(),
+      );
+
+    await expect
+      .poll(
+        async () =>
+          (await read()).entries
+            .flatMap((entry) => entry.model ?? [])
+            .filter(
+              (message) => message.role === "user" && message.content === "Actually, use pnpm",
+            ).length,
+      )
+      .toBe(1);
+    const snapshot = await read();
+    expect(Schema.decodeUnknownSync(Live)(snapshot.docs["pi.live"]).run).toBeDefined();
+    expect(snapshot.docs["pi.inbox"]).toEqual({
+      items: [{ id: later, mode: "followUp", content: "Then run tests" }],
+    });
+    expect((await steer(id, queued)).status).toBe(409);
+  } finally {
+    release("");
+    finish();
+    await SELF.fetch(`https://worker/api/sessions/${id}/abort`, { method: "POST", headers });
+  }
+});
 
 it.each([20, null])(
   "sets new and existing conversations to 100 turns (old limit: %s)",

@@ -431,6 +431,25 @@ app.post("/api/sessions/:id/messages", (c) =>
   ),
 );
 
+app.post("/api/sessions/:id/queue/:submissionId/steer", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const submissionId = Number(c.req.param("submissionId"));
+
+      if (!Number.isSafeInteger(submissionId) || submissionId <= 0)
+        return c.json({ error: "Expected a positive submission ID" }, 400);
+
+      const agent = yield* AgentApi;
+      const result = yield* agent.steerQueued(c.req.param("id"), submissionId);
+
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 409 : 202);
+    }),
+  ),
+);
+
 app.post("/api/sessions/:id/abort", (c) =>
   handle(
     c,

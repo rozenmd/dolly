@@ -9,6 +9,7 @@ import {
   createRegistry,
   defineExtension,
   Harness,
+  InboxDoc,
   section,
   type ConversationId,
   type ConversationView,
@@ -870,6 +871,34 @@ export class Agent extends DurableObject<Env> {
         );
 
         return { submissionId: submission.id };
+      }),
+    );
+  }
+
+  steerQueued(id: string, submissionId: number) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        yield* this.arm({ active: true });
+
+        return yield* attempt("pi.queue.steer", () =>
+          this.harness.commit(async (tx) => {
+            const inbox = await tx.doc(InboxDoc, conversation.value.id);
+            const item = inbox.items.find((candidate) => candidate.id === submissionId);
+
+            // The boundary may already have consumed it. Never resubmit it, or
+            // touch a submission belonging to another conversation.
+            if (!item || item.mode === "write")
+              return { error: "This message is no longer queued" };
+
+            item.mode = "steer";
+
+            return { state: "steering" };
+          }, BACKGROUND_CONTEXT),
+        );
       }),
     );
   }

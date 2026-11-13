@@ -18,7 +18,10 @@ const signedIn = { github: app, ownerClaimed: true, user: { login: "octocat" } }
 test.beforeEach(async ({ page }) => {
   const updates = new Set<() => Promise<void>>();
   page.on("requestfinished", (request) => {
-    if (request.method() === "POST" && /\/(messages|abort)$/.test(new URL(request.url()).pathname))
+    if (
+      request.method() === "POST" &&
+      /\/(messages|abort|steer)$/.test(new URL(request.url()).pathname)
+    )
       for (const update of updates) void update();
   });
   await page.routeWebSocket("**/api/sessions/*/events", (socket) => {
@@ -42,6 +45,80 @@ test.beforeEach(async ({ page }) => {
     });
     void update();
   });
+});
+
+test("queues a message while running and promotes it with Send now, including after reload", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      "dolly.sessions.v1",
+      JSON.stringify([
+        {
+          id: "queue-session",
+          model: "gpt-6-luna",
+          title: "Queue test",
+          repository: "",
+          updatedAt: 1,
+        },
+      ]),
+    ),
+  );
+  const items: { id: number; mode: string; content: string }[] = [];
+  let submissions = 0;
+  let promotions = 0;
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+
+    if (path === "/api/auth") return route.fulfill({ json: signedIn });
+
+    if (path === "/api/auth/codex") return route.fulfill({ json: { state: "connected" } });
+
+    if (path === "/api/auth/anthropic") return route.fulfill({ json: { connected: false } });
+
+    if (path === "/api/sessions/queue-session/messages") {
+      submissions++;
+      items.push({ id: 42, mode: "followUp", content: route.request().postDataJSON().content });
+
+      return route.fulfill({ status: 202, json: { submissionId: 42 } });
+    }
+
+    if (path === "/api/sessions/queue-session/queue/42/steer") {
+      promotions++;
+
+      if (promotions === 1) return route.fulfill({ status: 502, json: { error: "Try again" } });
+      items[0]!.mode = "steer";
+
+      return route.fulfill({ status: 202, json: { state: "steering" } });
+    }
+
+    if (path === "/api/sessions/queue-session")
+      return route.fulfill({
+        json: {
+          entries: [
+            { id: 1, kind: "pi.user", model: [{ role: "user", content: "Original task" }] },
+          ],
+          docs: { "pi.live": { run: {} }, "pi.inbox": { items } },
+        },
+      });
+
+    return route.fulfill({ json: {} });
+  });
+  await page.goto("/", { waitUntil: "networkidle" });
+  await page.getByLabel("Message your agent").fill("Use pnpm instead");
+  await page.getByRole("button", { name: "Queue message", exact: true }).click();
+  const queue = page.getByRole("region", { name: "Queued messages" });
+  await expect(queue).toContainText("Use pnpm instead");
+  await expect(page.getByLabel("Message your agent")).toHaveValue("");
+  await page.reload();
+  await expect(queue).toContainText("Use pnpm instead");
+  await queue.getByRole("button", { name: "Send now", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Try again");
+  await queue.getByRole("button", { name: "Send now", exact: true }).click();
+  await expect(queue).toContainText("Sending after the current step");
+  await expect(queue.getByRole("button", { name: "Send now", exact: true })).toHaveCount(0);
+  expect(submissions).toBe(1);
+  expect(promotions).toBe(2);
 });
 
 test("connects Claude without Codex, explicitly tests Worker inference, and starts a Claude conversation", async ({
