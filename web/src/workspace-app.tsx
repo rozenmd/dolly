@@ -314,7 +314,10 @@ export function WorkspaceApp() {
               setCodex(true);
               setModal(sessions.length ? null : "new");
             }}
-            onCancel={() => setModal(null)}
+            onCancel={() => {
+              setCodex(false);
+              setModal(null);
+            }}
           />
         </Modal>
       )}

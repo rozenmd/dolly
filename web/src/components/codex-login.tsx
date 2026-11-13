@@ -26,10 +26,14 @@ export function CodexLogin({
   const [pending, setPending] = useState(false);
   const [paused, setPaused] = useState(false);
   const failures = useRef(0);
+  // Set synchronously on Cancel so a status response already in flight cannot report a sign-in.
+  const cancelled = useRef(false);
   const connected = useRef(onConnected);
   connected.current = onConnected;
 
   function apply(next: CodexStatus) {
+    if (cancelled.current) return;
+
     failures.current = 0;
     setStatus(next);
     setError("");
@@ -52,6 +56,8 @@ export function CodexLogin({
   }
 
   async function cancel() {
+    cancelled.current = true;
+    setPaused(true);
     setPending(true);
 
     try {
@@ -91,7 +97,7 @@ export function CodexLogin({
       codexLogin(token).then(
         (next) => active && apply(next),
         (cause) => {
-          if (!active) return;
+          if (!active || cancelled.current) return;
 
           failures.current += 1;
 

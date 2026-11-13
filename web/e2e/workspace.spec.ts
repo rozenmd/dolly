@@ -158,3 +158,63 @@ test("ChatGPT device sign-in shows the code, polls until approved, then opens a 
   });
   expect(polls).toBe(3);
 });
+
+test("cancelling ChatGPT sign-in ignores an approval that was already in flight", async ({
+  page,
+}) => {
+  const token = "test-token-with-at-least-32-characters";
+  let started = false;
+  let deleted = false;
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+
+    if (path === "/api/integrations/github") return route.fulfill({ json: { connected: true } });
+
+    if (method === "DELETE") {
+      deleted = true;
+      // The Worker serialises DELETE behind the approval already holding the account lock.
+      await held;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      return route.fulfill({ json: { state: "not_connected" } });
+    }
+
+    if (method === "POST") {
+      started = true;
+
+      return route.fulfill({
+        json: {
+          state: "awaiting_code",
+          verificationUri: "https://auth.openai.com/codex/device",
+          userCode: "ABCD-1234",
+          expiresAt: Date.now() + 900_000,
+          pollAfterSeconds: 1,
+        },
+      });
+    }
+
+    if (!started) return route.fulfill({ json: { state: "not_connected" } });
+
+    await held;
+
+    return route.fulfill({ json: { state: "connected" } });
+  });
+  await page.goto("/", { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await page.getByLabel("API token", { exact: true }).fill(token);
+  await page.getByRole("dialog").getByRole("button", { name: "Connect", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Sign in to ChatGPT" });
+  await dialog.getByRole("button", { name: "Sign in with ChatGPT" }).click();
+  await expect(dialog.getByRole("button", { name: "Copy code ABCD-1234" })).toBeVisible();
+  await page.waitForTimeout(1_500);
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect.poll(() => deleted).toBe(true);
+  release();
+  await page.waitForTimeout(1_000);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Sign in to ChatGPT" })).toBeVisible();
+});
