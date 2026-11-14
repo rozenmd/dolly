@@ -228,7 +228,7 @@ export function ModelsSettings() {
           onCancel={() => setSigningIn(false)}
         />
       )}
-      <AnthropicConnection onConnection={() => {}} />
+      <AnthropicConnection variant="row" onConnection={() => {}} />
       {alert}
     </Section>
   );

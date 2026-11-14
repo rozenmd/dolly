@@ -2,7 +2,7 @@ import { BoltIcon } from "@heroicons/react/16/solid";
 import { Picker, type PickerOption } from "./picker";
 
 const CHATGPT = "ChatGPT subscription";
-const CLAUDE = "Claude subscription (experimental)";
+const CLAUDE = "Claude subscription";
 
 export const MODELS: PickerOption[] = [
   { value: "", label: "Server default" },
