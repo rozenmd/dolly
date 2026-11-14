@@ -12,6 +12,7 @@ import {
   InboxDoc,
   GenerationTask,
   hook,
+  runEndTask,
   Harness,
   ToolTask,
   section,
@@ -75,6 +76,7 @@ import { listSessions } from "./session-list";
 import type { PullRequestState, SavedSession } from "./session-contracts";
 import { PreviewOutbound, PreviewRequest, PreviewToolInput } from "./preview";
 import { capturePreview } from "./browser-preview";
+import { workspaceCheckpoint } from "./workspace-checkpoint";
 
 /** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
 export class Agent extends DurableObject<Env> {
@@ -88,6 +90,11 @@ export class Agent extends DurableObject<Env> {
     ),
   );
   private readonly alarmPermit = Semaphore.makeUnsafe(1);
+  private readonly checkpointTask = workspaceCheckpoint(
+    (sandboxId, turnId) => this.env.SANDBOX.getByName(sandboxId).checkpoint(turnId),
+    (conversationId, message) =>
+      this.capturePapercut("workspace:checkpoint", message, conversationId),
+  );
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -149,7 +156,7 @@ export class Agent extends DurableObject<Env> {
     const shell = {
       name: "shell",
       description:
-        "Run a shell command in the active repository's isolated Linux checkout (or /workspace if none). Use workspace checkout to switch repositories in this same conversation; other checkouts and changes are preserved. Git credentials stay outside the container. Only configured network hosts are reachable. Output is capped at 32 KiB per stream and time at 60 seconds. Repository checkouts are checkpointed after commands.",
+        "Run a shell command in the active repository's isolated Linux checkout (or /workspace if none). Use workspace checkout to switch repositories in this same conversation; other live checkouts are preserved. Git credentials stay outside the container. Only configured network hosts are reachable. Output is capped at 32 KiB per stream and time at 60 seconds. Repository files are snapshotted once after the agent turn answers, not after each command. Changes since the last successful turn-end save can be lost on container shutdown or restart. Push important work to GitHub for long-term storage.",
       parameters: obj({ command: str() }),
       replay: "unsafe",
       executionMode: "sequential",
@@ -227,7 +234,7 @@ export class Agent extends DurableObject<Env> {
     const workspaceTool = {
       name: "workspace",
       description:
-        "Work across repositories in this conversation. Always supply action. checkout/attach require repository (optional ref), commit requires message, and open_pull_request requires title and body. When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or losing changes. Shell, read_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. diagnostics works even when checkout fails. restart also bypasses checkout, discards uncheckpointed work and restores the last acknowledged checkpoint on the next tool: use only after explicit user confirmation and supply discardUncheckpointed=true. Mutations are not automatically replayed; inspect state after interruption.",
+        "Work across repositories in this conversation. Always supply action. checkout/attach require repository (optional ref), commit requires message, and open_pull_request requires title and body. When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or disturbing other live checkouts. Shell, read_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. diagnostics works even when checkout fails and reports the last saved turn and any save error. Files are saved once at the end of an answered agent turn, not after each command. restart bypasses checkout, discards changes since the last successful save, and restores that snapshot on the next repository tool. Use only after explicit user confirmation and supply discardUncheckpointed=true. Missing or expired snapshots fail closed; no saved snapshot means a fresh checkout of the configured ref. Mutations are not automatically replayed; inspect state after interruption.",
       parameters: workspaceSchema,
       replay: "unsafe",
       executionMode: "sequential",
@@ -356,9 +363,27 @@ export class Agent extends DurableObject<Env> {
     const extension = defineExtension({
       name: "sandbox",
       tools,
-      tasks: [...coordinationTasks, this.githubTask],
+      tasks: [...coordinationTasks, this.githubTask, this.checkpointTask],
       hooks: [
         hook(GenerationTask, {
+          afterRun: async (run, api, context) => {
+            const state = await api.snapshot(ConversationWorkspace, api.conversationId, context);
+
+            const sandboxes = [
+              ...(state?.config ? [String(api.conversationId)] : []),
+              ...(state?.attached ?? []).map(
+                (config) => `${api.conversationId}:repo:${config.repository.toLowerCase()}`,
+              ),
+            ];
+
+            return sandboxes.length
+              ? {
+                  tasks: [
+                    runEndTask(this.checkpointTask, { sandboxes, turnId: String(run.answer) }),
+                  ],
+                }
+              : undefined;
+          },
           beforeRequest: async ({ messages }) => ({
             messages: await resolveImages(this.env.SCREENSHOTS, messages),
           }),
@@ -866,7 +891,8 @@ export class Agent extends DurableObject<Env> {
 
       return {
         restarted: true,
-        recovery: "The next tool restores the last acknowledged checkpoint",
+        recovery:
+          "Changes since the last successful turn-end save were discarded. The next repository tool restores that checkpoint, or starts fresh if none exists.",
       };
     }
 

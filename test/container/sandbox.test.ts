@@ -115,7 +115,21 @@ it("executes commands and uses Sandbox 1.0 Files in isolated containers", async 
   expect(await second.run("test ! -e /workspace/proof.txt")).toMatchObject({ exitCode: 0 });
 });
 
-it("fails closed on a missing native snapshot rather than cloning an empty workspace", async () => {
+it("keeps repository-less workspaces ephemeral", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+
+  try {
+    expect(await sandbox.run("printf ephemeral > local.txt")).toMatchObject({ exitCode: 0 });
+    expect(await sandbox.readFile("/workspace/local.txt")).toBe("ephemeral");
+    await sandbox.restart();
+    expect(await sandbox.diagnostics()).toMatchObject({ running: false });
+    expect(await sandbox.run("test ! -e local.txt")).toMatchObject({ exitCode: 0 });
+  } finally {
+    await sandbox.restart();
+  }
+});
+
+it("fails closed on a missing saved snapshot rather than cloning over lost work", async () => {
   const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
   const config = workspaceConfig({ repository: "owner/project" }, "snapshot-fixture");
   const id = "missing-native-snapshot";
@@ -131,7 +145,6 @@ it("fails closed on a missing native snapshot rather than cloning an empty works
     failure = error;
   }
 
-  expect(failure).toBeDefined();
   expect(String(failure)).toContain(id);
   expect(await sandbox.diagnostics()).toMatchObject({ running: false });
   await runInDurableObject(sandbox, async (_, state) => {

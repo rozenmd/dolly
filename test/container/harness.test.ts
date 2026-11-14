@@ -1,14 +1,14 @@
 import { Buffer } from "node:buffer";
 import { zstdDecompressSync } from "node:zlib";
 import { env } from "cloudflare:workers";
-import { SELF, runInDurableObject } from "cloudflare:test";
+import { SELF, runInDurableObject, evictDurableObject } from "cloudflare:test";
 import { expect, it, vi } from "vite-plus/test";
 import { headers, signIn } from "../session";
-import { workspaceConfig } from "../../src/workspace";
+import { workspaceConfig, type WorkspaceSnapshot } from "../../src/workspace";
 import * as Effect from "effect/Effect";
-import { attempt, OperationError } from "../../src/operations";
+import { OperationError } from "../../src/operations";
 
-it("runs the registered coding tools on another owner's repository, pushes a tested commit, opens a PR, and restores dirty work", async () => {
+it("saves once after an agent turn, restores local work, and retains the previous save on failure", async () => {
   const remoteName = crypto.randomUUID();
   const remote = env.SANDBOX.getByName(remoteName);
 
@@ -89,6 +89,8 @@ mkdir -p remotes/another-owner
 
   let generation = 0;
   let opened = false;
+  let workingSandboxId: string | undefined;
+  let expectedCheckpoint: WorkspaceSnapshot | undefined;
 
   const originalFetch = globalThis.fetch;
 
@@ -110,6 +112,12 @@ mkdir -p remotes/another-owner
 
     if (url.hostname === "chatgpt.com") {
       if (generation > 0) {
+        if (!workingSandboxId) throw new Error("Working sandbox is not configured");
+        expect(
+          await runInDurableObject(env.SANDBOX.getByName(workingSandboxId), async (_, state) =>
+            state.storage.get<WorkspaceSnapshot>("snapshot:checkpoint"),
+          ),
+        ).toEqual(expectedCheckpoint);
         const encoded = new Uint8Array(await new Response(init?.body).arrayBuffer());
 
         const bytes =
@@ -262,6 +270,9 @@ mkdir -p remotes/another-owner
 
     expect(created.status).toBe(201);
     const session = await created.json<{ id: string }>();
+    workingSandboxId = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+      String(await state.storage.get(`session:${session.id}`)),
+    );
     expect(
       (
         await SELF.fetch(`https://worker/api/sessions/${session.id}/messages`, {
@@ -339,10 +350,16 @@ mkdir -p remotes/another-owner
 
     const config = workspaceConfig({ repository: "another-owner/project", ref: "main" }, id);
 
-    const checkpoint = () =>
-      runInDurableObject(sandbox, async (_, state) => state.storage.get("snapshot:checkpoint"));
+    const snapshotPointer = () =>
+      runInDurableObject(sandbox, async (_, state) =>
+        state.storage.get<WorkspaceSnapshot>("snapshot:checkpoint"),
+      );
 
-    const beforePrepare = await checkpoint();
+    await expect.poll(snapshotPointer, { timeout: 120000 }).toMatchObject({
+      id: expect.any(String),
+      turnId: expect.any(String),
+    });
+    const answeredTurn = await snapshotPointer();
 
     await sandbox.prepare(config);
     await sandbox.readFile("/workspace/repo/answer.mjs");
@@ -350,12 +367,13 @@ mkdir -p remotes/another-owner
       status: "ready",
       inventory: expect.stringContaining("Fixture repository verification"),
     });
-    expect(await checkpoint()).toEqual(beforePrepare);
+    expect(await snapshotPointer()).toEqual(answeredTurn);
 
     const dirty = await sandbox.run(`set -eu
 test ! -L /workspace/repo
 test -d .git
 test "$(git rev-parse --is-shallow-repository)" = true
+git commit --allow-empty -m 'Unpushed local commit'
 printf 'staged work' > staged.txt
 git add staged.txt
 printf 'unstaged work' > staged.txt
@@ -366,68 +384,121 @@ mkdir empty-directory
 ln -s dirty.txt dirty-link`);
 
     expect(dirty.exitCode, dirty.stderr).toBe(0);
-    await sandbox.restart();
-    expect((await sandbox.run("cat dirty.txt; git log -1 --format=%s")).stdout).toContain(
-      "unsaved workFix answer",
-    );
+    const beforeEviction = await sandbox.diagnostics();
 
-    const restored = await sandbox.run(
+    await evictDurableObject(sandbox);
+    await sandbox.prepare(config);
+    expect((await sandbox.diagnostics()).setup).toEqual(beforeEviction.setup);
+
+    const live = await sandbox.run(
       "test ! -L /workspace/repo; git show :staged.txt; cat staged.txt ignored.txt dirty-link; test -d empty-directory; git status --porcelain",
     );
 
-    expect(restored.exitCode, restored.stderr).toBe(0);
-    expect(restored.stdout).toContain("staged workunstaged workignored workunsaved work");
-    expect(restored.stdout).toContain("AM staged.txt");
-    const afterRestore = await checkpoint();
+    expect(live.exitCode, live.stderr).toBe(0);
+    expect(live.stdout).toContain("staged workunstaged workignored workunsaved work");
+    expect(live.stdout).toContain("AM staged.txt");
+    expect(await snapshotPointer()).toEqual(answeredTurn);
+    expect(await sandbox.run("exit 7")).toMatchObject({ exitCode: 7 });
+    expect(await snapshotPointer()).toEqual(answeredTurn);
+    const saved = await sandbox.checkpoint("next-answered-turn");
 
-    await sandbox.prepare(config);
-    expect(await checkpoint()).toEqual(afterRestore);
-
-    await runInDurableObject(sandbox, async (instance, state) => {
-      let fail = true;
-      Object.assign(instance, {
-        publishSnapshot: (snapshot: { id: string }) =>
-          Effect.suspend(() => {
-            if (fail) {
-              fail = false;
-
-              return Effect.fail(
-                new OperationError({
-                  operation: "workspace.checkpoint.save",
-                  message: "Snapshot acknowledgement unavailable",
-                  details: null,
-                }),
-              );
-            }
-
-            return attempt("workspace.checkpoint.save", () =>
-              state.storage.put("snapshot:checkpoint", snapshot),
-            );
-          }),
-      });
-    });
-    // Await RPC directly: Vitest's .rejects leaves an unhandled RPC rejection.
-    let checkpointError: unknown;
-
-    try {
-      await sandbox.run("printf 'not acknowledged' > lost.txt");
-    } catch (error) {
-      checkpointError = error;
-    }
-
-    expect(checkpointError).toMatchObject({
-      operation: "workspace.checkpoint.save",
-      message: "Snapshot acknowledgement unavailable",
-    });
-    expect(await checkpoint()).toEqual(afterRestore);
+    expect(saved).toMatchObject({ turnId: "next-answered-turn" });
+    expect(await sandbox.checkpoint("next-answered-turn")).toEqual(saved);
+    await sandbox.run("printf unsaved > lost.txt");
     await sandbox.restart();
 
-    const recovered = await sandbox.run(
-      "test ! -e lost.txt && cat dirty.txt && git log -1 --format=%s",
-    );
+    const restored = await sandbox.run(`set -eu
+test ! -e lost.txt
+git show :staged.txt
+cat staged.txt ignored.txt dirty-link
+test -d empty-directory
+git log -1 --format=%s`);
 
-    expect(recovered.exitCode, recovered.stderr).toBe(0);
-    expect(recovered.stdout).toContain("unsaved workFix answer");
+    expect(restored.exitCode, restored.stderr).toBe(0);
+    expect(restored.stdout).toContain("staged workunstaged workignored workunsaved work");
+    expect(restored.stdout).toContain("Unpushed local commit");
+    expect(await snapshotPointer()).toEqual(saved);
+    await runInDurableObject(sandbox, async (instance) => {
+      const publish = instance["publishSnapshot"].bind(instance);
+      let fail = true;
+      Object.assign(instance, {
+        publishSnapshot: (snapshot: { id: string; turnId?: string }) => {
+          if (fail) {
+            fail = false;
+
+            return Effect.fail(
+              new OperationError({
+                operation: "workspace.checkpoint.save",
+                message: "Snapshot acknowledgement unavailable",
+                details: null,
+              }),
+            );
+          }
+
+          return publish(snapshot);
+        },
+      });
+    });
+    await sandbox.run("printf unacknowledged > lost.txt");
+    expectedCheckpoint = await snapshotPointer();
+    expect(
+      (
+        await SELF.fetch(`https://worker/api/sessions/${session.id}/messages`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            content: "Finish this turn",
+            requestId: crypto.randomUUID(),
+          }),
+        })
+      ).status,
+    ).toBe(202);
+    await expect
+      .poll(() => sandbox.diagnostics(), { timeout: 120000 })
+      .toMatchObject({
+        checkpointError: {
+          turnId: expect.any(String),
+          error: expect.stringContaining("unavailable"),
+        },
+      });
+    expect(await snapshotPointer()).toEqual(saved);
+    await expect
+      .poll(() =>
+        runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => [
+          ...state.storage.sql.exec(
+            "SELECT id FROM app_papercuts WHERE source = 'workspace:checkpoint'",
+          ),
+        ]),
+      )
+      .toHaveLength(1);
+    await sandbox.restart();
+    expect(await sandbox.run("test ! -e lost.txt && cat dirty.txt")).toMatchObject({
+      exitCode: 0,
+      stdout: "unsaved work",
+    });
+    expectedCheckpoint = await snapshotPointer();
+    expect(
+      (
+        await SELF.fetch(`https://worker/api/sessions/${session.id}/messages`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            content: "Inspect the preserved workspace",
+            requestId: crypto.randomUUID(),
+          }),
+        })
+      ).status,
+    ).toBe(202);
+    await expect.poll(snapshotPointer, { timeout: 120000 }).not.toEqual(expectedCheckpoint);
+    expect((await sandbox.diagnostics()).checkpointError).toBeUndefined();
+    expect(await snapshotPointer()).toMatchObject({ turnId: expect.any(String) });
+    expect(
+      (
+        await remote.run(
+          `git --git-dir=remotes/another-owner/project.git show dolly/session-${id}:answer.mjs`,
+        )
+      ).stdout,
+    ).toContain("answer = 2");
 
     const denied = await sandbox.run(
       "curl --silent --show-error --fail-with-body --max-time 5 https://example.com",
@@ -466,7 +537,11 @@ git push ../remotes/another-owner/project.git HEAD:main`);
     await fresh.prepare(workspaceConfig({ repository: config.repository }, freshId));
     expect(await fresh.readFile("/workspace/repo/latest.txt")).toBe("latest main\n");
     await sandbox.prepare(config);
-    expect(await sandbox.readFile("/workspace/repo/dirty.txt")).toBe("unsaved work");
+    expect(await sandbox.run("test -e dirty.txt && test ! -e latest.txt")).toMatchObject({
+      exitCode: 0,
+    });
+    await fresh.restart();
+    expect(await fresh.readFile("/workspace/repo/latest.txt")).toBe("latest main\n");
   } finally {
     mocked.mockRestore();
     await remote.restart();

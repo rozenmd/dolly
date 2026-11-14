@@ -124,7 +124,8 @@ def cache_key():
             inputs.add(name)
     # Local file dependencies can embed source not described by the lockfile.
     if any(
-        re.search(rb"\b(?:file|portal):", Path(lock).read_bytes())
+        # Match a protocol, not the suffix of a package name like get-caller-file:.
+        re.search(rb"(?<![A-Za-z0-9_./-])(?:file|portal):", Path(lock).read_bytes())
         for lock in LOCKFILES[manager] if Path(lock).is_file()
     ):
         return None
@@ -300,9 +301,15 @@ def publish(key):
 def eligible_key():
     try:
         if not os.environ.get("DOLLY_DEPENDENCY_CACHE_TOKEN"):
+            print("dependency_cache: skipped (no setup capability)", flush=True)
             return None
         if cache_paths(Path.cwd()):
+            print("dependency_cache: skipped (existing install artifacts)", flush=True)
             return None
-        return cache_key()
-    except Exception:
+        key = cache_key()
+        if key is None:
+            print("dependency_cache: skipped (repository inputs are not cacheable)", flush=True)
+        return key
+    except Exception as error:
+        print("dependency_cache: skipped (key unavailable: " + type(error).__name__ + ")", flush=True)
         return None

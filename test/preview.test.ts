@@ -65,7 +65,7 @@ it("does not initialize a sandbox for preview status or unauthorised browser req
 it("revokes preview capability before stopping its process without replacing workspace state", async () => {
   const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
   await runInDurableObject(sandbox, async (instance, state) => {
-    await state.storage.put("snapshot:checkpoint", { id: "preserve-me" });
+    await state.storage.put("workspace", { repository: "owner/project" });
     let killed = 0;
     Object.assign(instance, {
       preview: {
@@ -84,7 +84,7 @@ it("revokes preview capability before stopping its process without replacing wor
     });
     await instance.previewStop();
     expect(killed).toBe(15);
-    expect(await state.storage.get("snapshot:checkpoint")).toEqual({ id: "preserve-me" });
+    expect(await state.storage.get("workspace")).toEqual({ repository: "owner/project" });
     expect(
       (await instance.previewFetch(new Request("http://preview.test/"), "private")).status,
     ).toBe(404);
