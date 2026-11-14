@@ -1552,3 +1552,70 @@ select.input {
   font-size: 0.85em;
   opacity: 0.7;
 }
+
+.settings-page {
+  display: flex;
+  min-height: 100dvh;
+}
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 240px;
+  flex-shrink: 0;
+  padding: 14px 10px;
+  background: var(--sidebar);
+  border-right: 1px solid var(--line);
+}
+.settings-nav .nav-row {
+  text-decoration: none;
+}
+.settings-nav-heading {
+  margin: 18px 0 4px;
+  padding-left: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+.settings-main {
+  flex: 1;
+  min-width: 0;
+  padding: 48px 24px;
+  overflow-y: auto;
+}
+.settings-section {
+  max-width: 680px;
+  margin: 0 auto;
+}
+.settings-section h1 {
+  font-size: 24px;
+  font-weight: 600;
+}
+.settings-description {
+  margin: 6px 0 24px;
+  color: var(--muted);
+}
+.settings-card {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 16px;
+  border-radius: 10px;
+  background: #1d1d1d;
+  border: 1px solid var(--line);
+}
+.settings-card label {
+  padding-top: 6px;
+  font-size: 13px;
+  color: #cfcfcf;
+}
+@media (max-width: 760px) {
+  .settings-page {
+    flex-direction: column;
+  }
+  .settings-nav {
+    width: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}

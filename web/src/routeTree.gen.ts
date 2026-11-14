@@ -10,33 +10,108 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as SettingsRouteImport } from './routes/settings'
+import { Route as SettingsIndexRouteImport } from './routes/settings/index'
+import { Route as SettingsAccountRouteImport } from './routes/settings/account'
+import { Route as SettingsGithubRouteImport } from './routes/settings/github'
+import { Route as SettingsModelsRouteImport } from './routes/settings/models'
+import { Route as SettingsRepositoriesRouteImport } from './routes/settings/repositories'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SettingsRoute = SettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsIndexRoute = SettingsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsAccountRoute = SettingsAccountRouteImport.update({
+  id: '/account',
+  path: '/account',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsGithubRoute = SettingsGithubRouteImport.update({
+  id: '/github',
+  path: '/github',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsModelsRoute = SettingsModelsRouteImport.update({
+  id: '/models',
+  path: '/models',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsRepositoriesRoute = SettingsRepositoriesRouteImport.update({
+  id: '/repositories',
+  path: '/repositories',
+  getParentRoute: () => SettingsRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/settings': typeof SettingsRouteWithChildren
+  '/settings/account': typeof SettingsAccountRoute
+  '/settings/github': typeof SettingsGithubRoute
+  '/settings/models': typeof SettingsModelsRoute
+  '/settings/repositories': typeof SettingsRepositoriesRoute
+  '/settings/': typeof SettingsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/settings/account': typeof SettingsAccountRoute
+  '/settings/github': typeof SettingsGithubRoute
+  '/settings/models': typeof SettingsModelsRoute
+  '/settings/repositories': typeof SettingsRepositoriesRoute
+  '/settings': typeof SettingsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/settings': typeof SettingsRouteWithChildren
+  '/settings/account': typeof SettingsAccountRoute
+  '/settings/github': typeof SettingsGithubRoute
+  '/settings/models': typeof SettingsModelsRoute
+  '/settings/repositories': typeof SettingsRepositoriesRoute
+  '/settings/': typeof SettingsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    | '/'
+    | '/settings'
+    | '/settings/account'
+    | '/settings/github'
+    | '/settings/models'
+    | '/settings/repositories'
+    | '/settings/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to:
+    | '/'
+    | '/settings/account'
+    | '/settings/github'
+    | '/settings/models'
+    | '/settings/repositories'
+    | '/settings'
+  id:
+    | '__root__'
+    | '/'
+    | '/settings'
+    | '/settings/account'
+    | '/settings/github'
+    | '/settings/models'
+    | '/settings/repositories'
+    | '/settings/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  SettingsRoute: typeof SettingsRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +123,74 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings': {
+      id: '/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof SettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings/': {
+      id: '/settings/'
+      path: '/'
+      fullPath: '/settings/'
+      preLoaderRoute: typeof SettingsIndexRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/account': {
+      id: '/settings/account'
+      path: '/account'
+      fullPath: '/settings/account'
+      preLoaderRoute: typeof SettingsAccountRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/github': {
+      id: '/settings/github'
+      path: '/github'
+      fullPath: '/settings/github'
+      preLoaderRoute: typeof SettingsGithubRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/models': {
+      id: '/settings/models'
+      path: '/models'
+      fullPath: '/settings/models'
+      preLoaderRoute: typeof SettingsModelsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/repositories': {
+      id: '/settings/repositories'
+      path: '/repositories'
+      fullPath: '/settings/repositories'
+      preLoaderRoute: typeof SettingsRepositoriesRouteImport
+      parentRoute: typeof SettingsRoute
+    }
   }
 }
 
+interface SettingsRouteChildren {
+  SettingsAccountRoute: typeof SettingsAccountRoute
+  SettingsGithubRoute: typeof SettingsGithubRoute
+  SettingsModelsRoute: typeof SettingsModelsRoute
+  SettingsRepositoriesRoute: typeof SettingsRepositoriesRoute
+  SettingsIndexRoute: typeof SettingsIndexRoute
+}
+
+const SettingsRouteChildren: SettingsRouteChildren = {
+  SettingsAccountRoute: SettingsAccountRoute,
+  SettingsGithubRoute: SettingsGithubRoute,
+  SettingsModelsRoute: SettingsModelsRoute,
+  SettingsRepositoriesRoute: SettingsRepositoriesRoute,
+  SettingsIndexRoute: SettingsIndexRoute,
+}
+
+const SettingsRouteWithChildren = SettingsRoute._addFileChildren(
+  SettingsRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  SettingsRoute: SettingsRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
