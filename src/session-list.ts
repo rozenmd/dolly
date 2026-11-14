@@ -1,10 +1,36 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import * as Schema from "effect/Schema";
-import type { ConversationId, Cursor, Harness } from "@earendil-works/pi-durable";
+import type { ConversationId, Cursor, EntryRecord, Harness } from "@earendil-works/pi-durable";
 import { ConversationWorkspace } from "./workspace";
 import { redact } from "./diagnostics";
 import type { SavedSession } from "./session-contracts";
 import { indexSession } from "./coordination";
+
+type PullRequestRef = { repository: string; number: number; url: string };
+
+const PULL_URL = /https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/;
+const PULL_SCAN_LIMIT = 500;
+
+/** Find the newest pull request opened by the github or workspace tool in a transcript page. */
+function findPullRequest(entries: readonly EntryRecord[]): PullRequestRef | undefined {
+  for (const entry of entries) {
+    for (const message of [...(entry.model ?? [])].reverse()) {
+      if (message.role !== "toolResult" || message.isError) continue;
+
+      if (message.toolName !== "github" && message.toolName !== "workspace") continue;
+
+      for (const block of message.content) {
+        if (block.type !== "text" || !block.text.includes('"pull_request"')) continue;
+        const match = PULL_URL.exec(block.text);
+
+        if (match?.[1] && match[2])
+          return { repository: match[1], number: Number(match[2]), url: match[0] };
+      }
+    }
+  }
+}
+
+const LIVE_STATUSES = ["running", "waiting", "sleeping"] as const;
 
 type Metadata = { archived: boolean; createdAt?: number };
 
@@ -36,9 +62,25 @@ export async function listSessions(
       const page = await tx.scanConversations({}, 100, cursor);
 
       // Make discovered pre-index conversations openable by their canonical ID too.
-      for (const record of page.items) await indexSession(tx, record.id);
+      const running = new Set<ConversationId>();
 
-      return page;
+      for (const record of page.items) {
+        await indexSession(tx, record.id);
+
+        for (const status of LIVE_STATUSES) {
+          const tasks = await tx.scanTasks(
+            { conversationId: record.id, status, background: false },
+            1,
+          );
+
+          if (tasks.items.length) {
+            running.add(record.id);
+            break;
+          }
+        }
+      }
+
+      return { ...page, running };
     }, BACKGROUND_CONTEXT);
 
     for (const record of page.items) {
@@ -46,12 +88,44 @@ export async function listSessions(
 
       if (!conversation) continue;
 
-      const [agent, workspace, metadata, latest] = await Promise.all([
+      const [agent, workspace, metadata, latest, savedPull] = await Promise.all([
         conversation.agent(BACKGROUND_CONTEXT),
         harness.snapshot(ConversationWorkspace, record.id, BACKGROUND_CONTEXT),
         storage.get<Metadata>(`session-meta:${record.id}`),
-        conversation.entries({}, 50, undefined, BACKGROUND_CONTEXT),
+        conversation.entries({ order: "descending" }, 50, undefined, BACKGROUND_CONTEXT),
+        storage.get<PullRequestRef & { seen: string }>(`session-pr:${record.id}`),
       ]);
+
+      // Newest first; stop at the cached result so old transcripts are scanned once.
+      let pullRequest = findPullRequest(latest.items);
+      const newest = latest.items[0] ? String(latest.items[0].id) : "";
+
+      if (!pullRequest && savedPull?.seen !== newest) {
+        let older = latest.next;
+        let scanned = latest.items.length;
+
+        while (!pullRequest && older && scanned < PULL_SCAN_LIMIT) {
+          const entries = await conversation.entries(
+            { order: "descending" },
+            50,
+            older,
+            BACKGROUND_CONTEXT,
+          );
+
+          if (savedPull && entries.items.some((entry) => String(entry.id) === savedPull.seen))
+            break;
+          pullRequest = findPullRequest(entries.items);
+          scanned += entries.items.length;
+          older = entries.next;
+        }
+      }
+
+      pullRequest ??= savedPull?.url
+        ? { repository: savedPull.repository, number: savedPull.number, url: savedPull.url }
+        : undefined;
+
+      if (savedPull?.seen !== newest || savedPull?.url !== pullRequest?.url)
+        await storage.put(`session-pr:${record.id}`, { ...pullRequest, seen: newest });
 
       let title = "";
       let history: Cursor | undefined;
@@ -98,6 +172,8 @@ export async function listSessions(
         ref: workspace?.config?.ref,
         updatedAt,
         archived: metadata?.archived ?? false,
+        running: page.running.has(record.id),
+        pullRequest,
       });
     }
 

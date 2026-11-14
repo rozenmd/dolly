@@ -335,7 +335,22 @@ select.input {
   margin: 0 4px;
 }
 .workspace-icon {
-  color: var(--green);
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--faint);
+}
+.workspace-icon.pr-open {
+  color: #3fb950;
+}
+.workspace-icon.pr-merged {
+  color: #a371f7;
+}
+.workspace-icon.pr-closed {
+  color: #f85149;
+}
+.workspace-icon.pr-draft {
+  color: var(--faint);
 }
 .workspace-title {
   flex: 1;

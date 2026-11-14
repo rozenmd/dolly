@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type SVGProps } from "react";
 import { ChevronDownIcon, XMarkIcon } from "@heroicons/react/16/solid";
 import {
   ArchiveBoxIcon,
@@ -10,6 +10,7 @@ import {
 import { ago } from "../lib/time";
 import { sessionList } from "../lib/session-list";
 import { IconButton, Input, RepoBadge } from "./ui";
+import type { SavedSession } from "../lib/api";
 
 export type WorkspaceRow = {
   id: string;
@@ -18,7 +19,55 @@ export type WorkspaceRow = {
   updatedAt: number;
   running: boolean;
   archived?: boolean;
+  pullRequest?: SavedSession["pullRequest"];
 };
+
+const PULL_LABELS = {
+  open: "Pull request open",
+  draft: "Draft pull request",
+  merged: "Pull request merged",
+  closed: "Pull request closed",
+} as const;
+
+/** One status glyph per row: activity wins, then pull request state, then plain branch. */
+function RowStatus({ row }: { row: WorkspaceRow }) {
+  if (row.running) return <span className="status-dot working pulse" aria-label="Agent working" />;
+
+  const pull = row.pullRequest;
+
+  if (pull) {
+    const state = pull.state ?? "open";
+
+    return (
+      <PullRequestIcon
+        className={`workspace-icon pr-${state}`}
+        aria-label={`${PULL_LABELS[state]} #${pull.number}`}
+      />
+    );
+  }
+
+  return row.repository ? (
+    <BranchIcon className="workspace-icon branch" aria-label="No pull request" />
+  ) : (
+    <CodeBracketIcon className="workspace-icon branch" aria-label="No repository" />
+  );
+}
+
+function PullRequestIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" role="img" {...props}>
+      <path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z" />
+    </svg>
+  );
+}
+
+function BranchIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" role="img" {...props}>
+      <path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" />
+    </svg>
+  );
+}
 
 export function Sidebar({
   rows,
@@ -155,11 +204,7 @@ export function Sidebar({
                   aria-current={active ? "page" : undefined}
                   onClick={() => onSelect(row.id)}
                 >
-                  {row.running ? (
-                    <span className="status-dot working" aria-label="Working" />
-                  ) : (
-                    <CodeBracketIcon className="workspace-icon" />
-                  )}
+                  <RowStatus row={row} />
                   <RepoBadge repository={row.repository} />
                   <span className="workspace-title">{row.title}</span>
                   <span className="workspace-time">{ago(row.updatedAt, now)}</span>
