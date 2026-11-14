@@ -354,36 +354,8 @@ export class Sandbox extends DurableObject<Env> {
     );
   }
 
-  private installDependencies = Effect.fn("Sandbox.installDependencies")(function* (
-    this: Sandbox,
-    config: WorkspaceConfig,
-  ) {
-    const container = yield* this.container();
-
-    // Only the setup job gets the two public package registries. GitHub and
-    // model credentials still stay in the Worker; no general Internet access.
-    const setupOutbound = this.loopback.WorkspaceOutbound({
-      props: {
-        ...config,
-        networkHosts: [...config.networkHosts, "registry.npmjs.org", "registry.yarnpkg.com"],
-      },
-    });
-
-    const normalOutbound = this.loopback.WorkspaceOutbound({ props: config });
-
-    const apply = (outbound: typeof normalOutbound) =>
-      Effect.gen(function* () {
-        yield* attempt("workspace.network.http", () =>
-          container.interceptAllOutboundHttp(outbound),
-        );
-        yield* attempt("workspace.network.https", () =>
-          container.interceptOutboundHttps("*", outbound),
-        );
-      });
-
+  private installDependencies = Effect.fn("Sandbox.installDependencies")(function* (this: Sandbox) {
     return yield* Effect.gen({ self: this }, function* () {
-      yield* apply(setupOutbound);
-
       const result = yield* this.execute(
         "python3 /usr/local/lib/dolly-setup.py",
         "/workspace/repo",
@@ -393,11 +365,7 @@ export class Sandbox extends DurableObject<Env> {
       return result.exitCode === 0
         ? undefined
         : redact(result.stderr || result.stdout || `Setup exited ${result.exitCode}`).slice(-2000);
-    }).pipe(
-      Effect.catchCause((cause) => Effect.succeed(redact(Cause.pretty(cause)).slice(-2000))),
-      // Failure to restore the restricted broker is fatal, not best-effort.
-      Effect.ensuring(apply(normalOutbound).pipe(Effect.orDie)),
-    );
+    }).pipe(Effect.catchCause((cause) => Effect.succeed(redact(Cause.pretty(cause)).slice(-2000))));
   });
 
   /** Persist intent before returning; tools join the same serialized prepare. */
@@ -484,7 +452,7 @@ export class Sandbox extends DurableObject<Env> {
             yield* this.setupStatus("checkout");
             yield* this.checkout(config);
             yield* this.setupStatus("installing");
-            const warning = yield* this.installDependencies(config);
+            const warning = yield* this.installDependencies();
             yield* this.checkpoint();
             yield* this.setupStatus(warning ? "warning" : "ready", warning);
             this.prepared = true;

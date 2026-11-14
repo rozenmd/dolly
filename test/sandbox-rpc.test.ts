@@ -283,32 +283,32 @@ it("reports dependency setup warnings without blocking checkout or repeating set
   });
 });
 
-it("restores the ordinary outbound policy when a dependency setup is cancelled", async () => {
+it("cancels dependency setup before restarting", async () => {
   const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
   await runInDurableObject(sandbox, async (instance) => {
-    let httpPolicies = 0;
-    let httpsPolicies = 0;
+    let installing = false;
+    let cancelled = false;
     Object.assign(instance, {
-      container: () =>
-        Effect.succeed({
-          interceptAllOutboundHttp: async () => {
-            httpPolicies++;
-          },
-          interceptOutboundHttps: async () => {
-            httpsPolicies++;
-          },
-        }),
+      container: () => Effect.succeed({}),
       execute: (command: string) =>
         command === "python3 /usr/local/lib/dolly-setup.py"
-          ? Effect.never
+          ? Effect.sync(() => {
+              installing = true;
+            }).pipe(
+              Effect.andThen(Effect.never),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  cancelled = true;
+                }),
+              ),
+            )
           : Effect.succeed({ stdout: "", stderr: "", exitCode: 0 }),
       checkpoint: () => Effect.void,
     });
     await instance.warm(config);
-    await expect.poll(() => httpPolicies).toBe(1);
+    await expect.poll(() => installing).toBe(true);
     await instance.restart();
-    expect(httpPolicies).toBe(2);
-    expect(httpsPolicies).toBe(2);
+    expect(cancelled).toBe(true);
   });
 });
 

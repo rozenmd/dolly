@@ -84,7 +84,10 @@ mkdir -p remotes/another-owner
   const originalFetch = globalThis.fetch;
 
   const mocked = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    const url = new URL(String(input));
+    const url = new URL(input instanceof Request ? input.url : String(input));
+
+    if (url.hostname === "registry.npmjs.org" || url.hostname === "registry.yarnpkg.com")
+      return Response.json({ name: "typescript", version: "5.0.0" });
 
     if (url.hostname === "chatgpt.com") {
       const call = calls[generation++];
@@ -370,11 +373,10 @@ ln -s dirty.txt dirty-link`);
     expect(denied.stdout).toContain("Network destination not enabled for this session");
 
     const registryAfterSetup = await sandbox.run(
-      "curl --silent --show-error --fail-with-body --max-time 5 https://registry.npmjs.org",
+      "curl --silent --show-error --fail-with-body --max-time 10 https://registry.npmjs.org/typescript/latest",
     );
 
-    expect(registryAfterSetup.exitCode).toBe(22);
-    expect(registryAfterSetup.stdout).toContain("Network destination not enabled for this session");
+    expect(registryAfterSetup.exitCode).toBe(0);
 
     const verification = await remote.run(
       "git --git-dir=remotes/another-owner/project.git for-each-ref --format='%(refname)' refs/heads/",

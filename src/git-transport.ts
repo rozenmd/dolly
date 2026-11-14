@@ -2,6 +2,8 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env";
 import type { WorkspaceConfig } from "./workspace";
 
+const packageRegistries = new Set(["registry.npmjs.org", "registry.yarnpkg.com"]);
+
 /** The first receive-pack command must update exactly the session branch, never delete it. */
 export async function checkedPush(body: ReadableStream<Uint8Array> | null, branch: string) {
   if (!body) return null;
@@ -110,9 +112,10 @@ export class WorkspaceOutbound extends WorkerEntrypoint<Env, WorkspaceConfig> {
     if (
       url.protocol !== "https:" ||
       url.port ||
-      !this.ctx.props.networkHosts?.some(
-        (host) => host.toLowerCase() === url.hostname.toLowerCase(),
-      )
+      (!packageRegistries.has(url.hostname) &&
+        !this.ctx.props.networkHosts?.some(
+          (host) => host.toLowerCase() === url.hostname.toLowerCase(),
+        ))
     )
       return new Response("Network destination not enabled for this session", { status: 403 });
     const headers = new Headers(request.headers);
