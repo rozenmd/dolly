@@ -251,11 +251,15 @@ it.each(["gpt-6-luna", "claude-haiku-5-5"])(
 
     await expect.poll(read).toContain("model_error");
     expect(requests).toHaveLength(1);
+    const stored = await env.SCREENSHOTS.list();
+
+    expect(stored.objects).toHaveLength(1);
+    const reference = `r2://${stored.objects[0].key}`;
+
     expect(requests[0]).toContain(data);
-    expect(requests[0]).not.toContain("r2://");
+    expect(requests[0]).not.toContain(reference);
     expect(await read()).toContain("r2://screenshots/png/");
     expect(await read()).not.toContain(data);
-    expect((await env.SCREENSHOTS.list()).objects).toHaveLength(1);
     await abortAllDurableObjects();
 
     const next = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
@@ -268,7 +272,7 @@ it.each(["gpt-6-luna", "claude-haiku-5-5"])(
     await expect.poll(() => requests.length).toBe(2);
     await expect.poll(read).toContain("model_error");
     expect(requests[1]).toContain(data);
-    expect(requests[1]).not.toContain("r2://");
+    expect(requests[1]).not.toContain(reference);
     await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
       for (const table of ["entries", "submissions", "tasks", "documents", "document_revisions"]) {
         const rows = [...state.storage.sql.exec(`SELECT * FROM ${table}`)];
