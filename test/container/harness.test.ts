@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { zstdDecompressSync } from "node:zlib";
 import { env } from "cloudflare:workers";
 import { SELF, runInDurableObject } from "cloudflare:test";
 import { expect, it, vi } from "vite-plus/test";
@@ -99,7 +100,15 @@ mkdir -p remotes/another-owner
 
     if (url.hostname === "chatgpt.com") {
       if (generation > 0) {
-        const request = JSON.parse(String(init?.body));
+        const encoded = new Uint8Array(await new Response(init?.body).arrayBuffer());
+
+        const bytes =
+          new Headers(init?.headers).get("content-encoding") === "zstd"
+            ? zstdDecompressSync(encoded)
+            : encoded;
+
+        const request = JSON.parse(new TextDecoder().decode(bytes));
+
         expect(request.instructions).toContain("Fixture repository verification");
         expect(request.instructions).toContain(".agents/skills/verify/SKILL.md");
         expect(request.instructions).not.toContain("Fixture full skill instructions");

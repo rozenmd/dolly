@@ -464,29 +464,34 @@ it("bounds child message deliveries and validates authenticated HTTP inputs", as
 it.each([
   { rounds: 21, result: { status: "answered", text: "Finished after 21 tool turns" } },
   { rounds: 100, result: { status: "unanswered", reason: "turn_limit" } },
-])("settles a child correctly after $rounds tool turns", async ({ rounds, result }) => {
-  let turns = 0;
+])(
+  "settles a child correctly after $rounds tool turns",
+  async ({ rounds, result }) => {
+    let turns = 0;
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-    if (turns === rounds) return answer(`Finished after ${rounds} tool turns`);
-    turns++;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      if (turns === rounds) return answer(`Finished after ${rounds} tool turns`);
+      turns++;
 
-    return sse({
-      type: "function_call",
-      id: `fc_status_${turns}`,
-      call_id: `call_status_${turns}`,
-      name: "task_status",
-      arguments: JSON.stringify({ taskId: "missing" }),
+      return sse({
+        type: "function_call",
+        id: `fc_status_${turns}`,
+        call_id: `call_status_${turns}`,
+        name: "task_status",
+        arguments: JSON.stringify({ taskId: "missing" }),
+      });
     });
-  });
-  const parent = await root();
-  const child = await spawn(parent);
-  await expect
-    .poll(async () => (await receipt(parent, child.taskId)).status, { timeout: 4000 })
-    .toBe("terminal");
-  expect(await receipt(parent, child.taskId)).toMatchObject({
-    outcome: "completed",
-    result,
-  });
-  expect(turns).toBe(rounds);
-});
+    const parent = await root();
+    const child = await spawn(parent);
+    // A hundred real durable tool/generation turns need headroom under parallel CI load.
+    await expect
+      .poll(async () => (await receipt(parent, child.taskId)).status, { timeout: 10000 })
+      .toBe("terminal");
+    expect(await receipt(parent, child.taskId)).toMatchObject({
+      outcome: "completed",
+      result,
+    });
+    expect(turns).toBe(rounds);
+  },
+  15000,
+);
