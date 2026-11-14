@@ -6,10 +6,10 @@ export const dependencyCacheBucket = {
 } as const;
 
 export const dependencyCacheExpiry = {
-  id: "expire-dependency-cache-after-7-days",
+  id: "expire-dependency-cache-after-30-days",
   enabled: true,
   prefix: "",
   deleteObjectsTransition: {
-    condition: { type: "Age", maxAge: 7 * 24 * 60 * 60 },
+    condition: { type: "Age", maxAge: 30 * 24 * 60 * 60 },
   },
 } as const;

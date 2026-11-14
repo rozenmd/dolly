@@ -271,7 +271,7 @@ verified build artifacts or backups. Only `node_modules` is archived; do not put
 credentials there.
 
 Alchemy manages the bucket in `infra/alchemy.run.ts`, with public access disabled,
-a Western Europe location hint and seven-day object expiry. Review `pnpm access:plan`
+a Western Europe location hint and 30-day object expiry. Review `pnpm access:plan`
 before provisioning; the existing Access resources must remain unchanged. Provision
 the bucket before deploying the new Worker binding and sandbox image. Cache reuse
 does not change native snapshot recovery or remove the snapshot taken after setup.
