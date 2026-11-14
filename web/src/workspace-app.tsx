@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { useLocation, useNavigate } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import { Bars3Icon, CheckIcon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
 import {
@@ -13,8 +13,7 @@ import { Sidebar } from "./components/sidebar";
 import { Composer, Conversation } from "./components/conversation";
 import { IconButton, Input, Modal, RepoBadge } from "./components/ui";
 import { CodexLogin } from "./components/codex-login";
-import { GitHubSetup, GitHubSignIn, ingressHook } from "./components/github";
-import { RepositoryPicker } from "./components/repositories";
+import { GitHubSetup, GitHubSignIn } from "./components/github";
 import { NewSessionComposer } from "./components/new-session";
 import { AnthropicConnection } from "./components/anthropic";
 import {
@@ -49,10 +48,8 @@ export function WorkspaceApp() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [feed, setFeed] = useState(false);
   const [details, setDetails] = useState(false);
-  const [dialog, setModal] = useState<"codex" | "new" | "import" | null>(null);
+  const [modal, setModal] = useState<"codex" | "new" | "import" | null>(null);
   const navigate = useNavigate();
-  const settingsOpen = useLocation({ select: (location) => location.pathname === "/settings" });
-  const modal = settingsOpen && !dialog ? "settings" : dialog;
   const [codex, setCodex] = useState<boolean | null>(null);
   const [anthropic, setAnthropic] = useState(false);
   const [showClaude, setShowClaude] = useState(false);
@@ -544,38 +541,6 @@ export function WorkspaceApp() {
           )}
         </div>
       </main>
-      {modal === "settings" && auth?.user && auth.github.connected && (
-        <SettingsModal
-          login={auth.user.login}
-          github={auth.github}
-          codex={codex}
-          onAnthropicConnection={setAnthropic}
-          onClose={() => void navigate({ to: "/" })}
-          onCodexSignIn={() => setModal("codex")}
-          onCodexSignOut={() => setCodex(false)}
-          onIngress={(ingress) =>
-            setAuth({
-              ...auth,
-              github: auth.github.connected ? { ...auth.github, ingress } : auth.github,
-            })
-          }
-          onSenders={(senders) =>
-            setAuth({
-              ...auth,
-              github: auth.github.connected ? { ...auth.github, senders } : auth.github,
-            })
-          }
-          onSignOut={() => {
-            setAuth({ ...auth, user: null });
-            setCodex(null);
-            setAnthropic(false);
-            setSnapshot(null);
-            setModal(null);
-            void navigate({ to: "/" });
-            setNotice("");
-          }}
-        />
-      )}
       {modal === "codex" && (
         <Modal title="Connect a model" onClose={() => setModal(null)}>
           <h3>ChatGPT subscription</h3>
@@ -734,261 +699,6 @@ function SessionDetails({
         </p>
       </section>
     </aside>
-  );
-}
-
-function SettingsModal({
-  login,
-  github,
-  codex,
-  onClose,
-  onCodexSignIn,
-  onCodexSignOut,
-  onAnthropicConnection,
-  onIngress,
-  onSenders,
-  onSignOut,
-}: {
-  login: string;
-  github: Extract<AuthState["github"], { connected: true }>;
-  codex: boolean | null;
-  onClose: () => void;
-  onCodexSignIn: () => void;
-  onCodexSignOut: () => void;
-  onAnthropicConnection: (connected: boolean) => void;
-  onIngress: (ingress: string) => void;
-  onSenders: (senders: readonly string[]) => void;
-  onSignOut: () => void;
-}) {
-  const [ingress, setIngress] = useState(github.ingress ?? "");
-  const [accounts, setAccounts] = useState("");
-  const [senders, setSenders] = useState(github.senders.join(", "));
-  const [error, setError] = useState("");
-  const [saved, setSaved] = useState("");
-  const [pending, setPending] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-
-    request("/integrations/github/accounts").then(
-      (text) => {
-        const result = Schema.decodeUnknownSync(
-          Schema.fromJsonString(Schema.Struct({ accounts: Schema.Array(Schema.String) })),
-        )(text);
-
-        if (active) setAccounts(result.accounts.join(", "));
-      },
-      (cause) =>
-        active &&
-        setError(cause instanceof Error ? cause.message : "Could not load allowed accounts."),
-    );
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  /** Logins from a comma- or space-separated list, without a leading @. */
-  function logins(value: string) {
-    return value
-      .split(/[\s,]+/)
-      .map((login) => login.replace(/^@/, ""))
-      .filter(Boolean);
-  }
-
-  function saveAccess(event: FormEvent) {
-    event.preventDefault();
-    setSaved("");
-    void run(async () => {
-      await request(
-        "/integrations/github/accounts",
-        { accounts: logins(accounts) },
-        undefined,
-        "PUT",
-      );
-
-      const next = logins(senders);
-
-      // Saved whenever it changed, including to empty, which stops every /pi command.
-      if (next.join(",") !== github.senders.join(",")) {
-        await request("/integrations/github/webhook", { senders: next }, undefined, "PUT");
-        onSenders(next);
-      }
-
-      setSaved("access");
-    }, "Could not save GitHub access.");
-  }
-
-  async function run(action: () => Promise<void>, failure: string) {
-    setPending(true);
-    setError("");
-
-    try {
-      await action();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : failure);
-    } finally {
-      setPending(false);
-    }
-  }
-
-  function saveIngress(event: FormEvent) {
-    event.preventDefault();
-    setSaved("");
-    void run(async () => {
-      const text = await request(
-        "/integrations/github/ingress",
-        { url: ingressHook(ingress) },
-        undefined,
-        "PUT",
-      );
-
-      const result = Schema.decodeUnknownSync(
-        Schema.fromJsonString(Schema.Struct({ ingress: Schema.String })),
-      )(text);
-
-      setIngress(result.ingress);
-      onIngress(result.ingress);
-      setSaved("ingress");
-    }, "Could not update the ingress URL.");
-  }
-
-  return (
-    <Modal title="Settings" onClose={onClose}>
-      <div className="connection-row">
-        <span className="status-dot idle" />
-        <span className="connection-label">
-          GitHub
-          <span className="muted">Signed in as @{login}</span>
-        </span>
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={pending}
-          onClick={() =>
-            void run(async () => {
-              await request("/auth/session", undefined, undefined, "DELETE");
-              onSignOut();
-            }, "Could not sign out.")
-          }
-        >
-          Sign out
-        </button>
-      </div>
-      <div className="connection-row">
-        <span className={`status-dot ${codex ? "idle" : ""}`} />
-        <span className="connection-label">
-          ChatGPT
-          <span className="muted">{codex ? "Signed in" : "Not signed in"}</span>
-        </span>
-        {codex ? (
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={pending}
-            onClick={() => {
-              if (!confirm("Sign out of ChatGPT? Codex sessions will need you to sign in again."))
-                return;
-
-              void run(async () => {
-                await codexLogin("DELETE");
-                onCodexSignOut();
-              }, "Could not sign out of ChatGPT.");
-            }}
-          >
-            Sign out
-          </button>
-        ) : (
-          <button type="button" className="primary-button" onClick={onCodexSignIn}>
-            Sign in
-          </button>
-        )}
-      </div>
-      <AnthropicConnection onConnection={onAnthropicConnection} />
-      <div className="connection-row">
-        <span className="status-dot idle" />
-        <span className="connection-label">
-          GitHub App
-          <span className="muted">{github.appSlug}</span>
-        </span>
-        <a className="secondary-button" href={github.installUrl} target="_blank" rel="noreferrer">
-          Add repositories
-        </a>
-      </div>
-      <h3>Repositories</h3>
-      <RepositoryPicker manage />
-      <form onSubmit={saveIngress}>
-        <label htmlFor="settings-ingress">Ingress URL</label>
-        <Input
-          id="settings-ingress"
-          name="ingress"
-          type="url"
-          required
-          value={ingress}
-          onChange={(event) => {
-            setIngress(event.target.value);
-            setSaved("");
-          }}
-          aria-describedby="settings-ingress-help"
-        />
-        <p id="settings-ingress-help" className="field-help">
-          {saved === "ingress"
-            ? "Saved. GitHub now sends comments to this URL."
-            : "Where GitHub sends issue and pull request comments."}
-        </p>
-        <div className="modal-actions">
-          <button type="submit" className="primary-button" disabled={pending}>
-            Save
-          </button>
-        </div>
-      </form>
-      <form onSubmit={saveAccess}>
-        <label htmlFor="settings-accounts">Accounts dolly can work in</label>
-        <Input
-          id="settings-accounts"
-          name="accounts"
-          placeholder={`e.g. ${github.owner}`}
-          value={accounts}
-          onChange={(event) => {
-            setAccounts(event.target.value);
-            setSaved("");
-          }}
-          aria-describedby="settings-accounts-help"
-        />
-        <p id="settings-accounts-help" className="field-help">
-          {accounts.trim()
-            ? "GitHub users and organizations whose repositories agents may use, separated by commas."
-            : "No GitHub accounts are allowed. Add the repository owner and Save. Installing the App does not populate this list."}
-        </p>
-        <label htmlFor="settings-senders">Who can run /pi commands</label>
-        <Input
-          id="settings-senders"
-          name="senders"
-          placeholder={login}
-          value={senders}
-          onChange={(event) => {
-            setSenders(event.target.value);
-            setSaved("");
-          }}
-          aria-describedby="settings-senders-help"
-        />
-        <p id="settings-senders-help" className="field-help">
-          {saved === "access"
-            ? "Saved."
-            : "GitHub users whose /pi comments on pull requests start an agent."}
-        </p>
-        <div className="modal-actions">
-          <button type="submit" className="primary-button" disabled={pending}>
-            Save
-          </button>
-        </div>
-      </form>
-      {error && (
-        <p role="alert" className="error-text">
-          {error}
-        </p>
-      )}
-    </Modal>
   );
 }
 

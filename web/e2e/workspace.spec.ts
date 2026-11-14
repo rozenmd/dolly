@@ -810,7 +810,8 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
 
-    if (path === "/api/auth") return route.fulfill({ json: signedIn });
+    if (path === "/api/auth")
+      return route.fulfill({ json: signedOut ? { ...signedIn, user: null } : signedIn });
 
     if (path === "/api/auth/anthropic") return route.fulfill({ json: { connected: false } });
 
@@ -843,36 +844,43 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   await page.goto("/", { waitUntil: "networkidle" });
   await page.getByRole("dialog").getByRole("button", { name: "Close dialog" }).click();
   await page.getByRole("button", { name: "Settings" }).click();
-  const dialog = page.getByRole("dialog", { name: "Settings" });
-  await expect(page).toHaveURL(/\/settings$/);
-  await expect(dialog).toContainText("Signed in as @octocat");
-  await expect(dialog.getByRole("link", { name: "Add repositories" })).toHaveAttribute(
+  // Settings is a page, and each section has its own URL.
+  await expect(page).toHaveURL(/\/settings\/account$/);
+  const nav = page.getByRole("navigation", { name: "Settings" });
+  const main = page.locator("main");
+  await expect(main).toContainText("Signed in as @octocat");
+  await nav.getByRole("link", { name: "Repositories" }).click();
+  await expect(page).toHaveURL(/\/settings\/repositories$/);
+  await expect(main.getByRole("link", { name: "Add repositories" })).toHaveAttribute(
     "href",
     app.installUrl,
   );
-  await dialog.getByLabel("Ingress URL").fill("https://new-ingress.example");
-  await dialog.getByRole("button", { name: "Save", exact: true }).first().click();
-  await expect(dialog).toContainText("GitHub now sends comments to this URL.");
+  await nav.getByRole("link", { name: "GitHub" }).click();
+  await expect(page).toHaveURL(/\/settings\/github$/);
+  await main.getByLabel("Ingress URL").fill("https://new-ingress.example");
+  await main.getByRole("button", { name: "Save", exact: true }).first().click();
+  await expect(main).toContainText("GitHub now sends comments to this URL.");
   expect(ingress).toEqual({ url: "https://new-ingress.example/hooks/github" });
-  await expect(dialog.getByLabel("Accounts dolly can work in")).toHaveValue("octocat");
-  await expect(dialog.getByLabel("Who can run /pi commands")).toHaveValue("octocat");
-  await dialog.getByLabel("Accounts dolly can work in").fill("octocat, @acme");
-  await dialog.getByLabel("Who can run /pi commands").fill("octocat hubot");
-  await dialog.getByRole("button", { name: "Save", exact: true }).last().click();
-  await expect(dialog.getByText("Saved.", { exact: true })).toBeVisible();
+  await expect(main.getByLabel("Accounts dolly can work in")).toHaveValue("octocat");
+  await expect(main.getByLabel("Who can run /pi commands")).toHaveValue("octocat");
+  await main.getByLabel("Accounts dolly can work in").fill("octocat, @acme");
+  await main.getByLabel("Who can run /pi commands").fill("octocat hubot");
+  await main.getByRole("button", { name: "Save", exact: true }).last().click();
+  await expect(main.getByText("Saved.", { exact: true })).toBeVisible();
   expect(accounts).toEqual({ accounts: ["octocat", "acme"] });
   expect(senders).toEqual({ senders: ["octocat", "hubot"] });
-  // Reopening shows what was saved, and clearing the list saves an empty list.
-  await dialog.getByRole("button", { name: "Close dialog" }).click();
-  await expect(page).not.toHaveURL(/\/settings$/);
-  // Settings has its own URL, so loading it directly opens it.
-  await page.goto("/settings", { waitUntil: "networkidle" });
-  await expect(dialog.getByLabel("Who can run /pi commands")).toHaveValue("octocat, hubot");
-  await dialog.getByLabel("Who can run /pi commands").fill("");
-  await dialog.getByRole("button", { name: "Save", exact: true }).last().click();
-  await expect(dialog.getByText("Saved.", { exact: true })).toBeVisible();
+  // Leaving and returning keeps what was saved, and clearing the list saves an empty list.
+  await nav.getByRole("link", { name: "Account" }).click();
+  await nav.getByRole("link", { name: "GitHub" }).click();
+  await expect(main.getByLabel("Who can run /pi commands")).toHaveValue("octocat, hubot");
+  await main.getByLabel("Who can run /pi commands").fill("");
+  await main.getByRole("button", { name: "Save", exact: true }).last().click();
+  await expect(main.getByText("Saved.", { exact: true })).toBeVisible();
   expect(senders).toEqual({ senders: [] });
-  await dialog.getByRole("button", { name: "Sign out" }).first().click();
+  // Loading /settings directly opens the first section.
+  await page.goto("/settings", { waitUntil: "networkidle" });
+  await expect(page).toHaveURL(/\/settings\/account$/);
+  await main.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Sign in to dolly" })).toBeVisible();
   expect(signedOut).toBe(true);
 });
