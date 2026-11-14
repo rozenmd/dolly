@@ -202,6 +202,7 @@ export class Sandbox extends DurableObject<Env> {
           env: {
             GIT_TERMINAL_PROMPT: "0",
             GIT_CONFIG_NOSYSTEM: "1",
+            GIT_SSL_CAINFO: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
             CURL_CA_BUNDLE: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
             SSL_CERT_FILE: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
             NODE_EXTRA_CA_CERTS: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",

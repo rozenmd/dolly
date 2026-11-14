@@ -88,16 +88,17 @@ export async function listSessions(
 
       if (!conversation) continue;
 
-      const [agent, workspace, metadata, latest, savedPull] = await Promise.all([
+      const [agent, workspace, metadata, latest, savedPull, createdPull] = await Promise.all([
         conversation.agent(BACKGROUND_CONTEXT),
         harness.snapshot(ConversationWorkspace, record.id, BACKGROUND_CONTEXT),
         storage.get<Metadata>(`session-meta:${record.id}`),
         conversation.entries({ order: "descending" }, 50, undefined, BACKGROUND_CONTEXT),
         storage.get<PullRequestRef & { seen: string }>(`session-pr:${record.id}`),
+        storage.get<PullRequestRef>(`session-created-pr:${record.id}`),
       ]);
 
       // Newest first; stop at the cached result so old transcripts are scanned once.
-      let pullRequest = findPullRequest(latest.items);
+      let pullRequest = createdPull ?? findPullRequest(latest.items);
       const newest = latest.items[0] ? String(latest.items[0].id) : "";
 
       if (!pullRequest && savedPull?.seen !== newest) {
