@@ -1233,6 +1233,22 @@ select.input {
   .modal .input {
     font-size: 16px;
   }
+  .new-session-modal .composer-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .new-session-modal .composer-tools {
+    grid-column: 1 / -1;
+    margin-right: 0;
+  }
+  .new-session-modal .model-picker {
+    justify-self: start;
+    max-width: 100%;
+  }
+  .new-session-modal .model-picker .picker-menu {
+    left: 0;
+    right: auto;
+  }
   .icon-button {
     width: 40px;
     height: 40px;
