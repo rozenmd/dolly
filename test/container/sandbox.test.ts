@@ -1,8 +1,11 @@
 import { env } from "cloudflare:workers";
 import { expect, it } from "vite-plus/test";
-import { runInDurableObject } from "cloudflare:test";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { Files } from "@cloudflare/sandbox";
 import * as Effect from "effect/Effect";
+import * as Logger from "effect/Logger";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import type { Env as WorkerEnv } from "../../src/env";
 import { workspaceConfig } from "../../src/workspace";
 
@@ -11,6 +14,149 @@ declare global {
     interface Env extends WorkerEnv {}
   }
 }
+
+const TimingLog = Schema.Struct({
+  event: Schema.String,
+  phase: Schema.String,
+  initializationId: Schema.String,
+  operation: Schema.optional(Schema.String),
+  executionId: Schema.optional(Schema.String),
+  elapsedMs: Schema.optional(Schema.Number),
+  exitCode: Schema.optional(Schema.Number),
+});
+
+it("times real initialization steps, process launch and live-container reconnection", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  const config = workspaceConfig({ repository: "fixture/timings" }, "timings");
+
+  try {
+    await runInDurableObject(sandbox, async (instance, state) => {
+      await state.storage.put("workspace", config);
+      const logs: (typeof TimingLog.Type)[] = [];
+
+      let duringStartup:
+        | Promise<Awaited<ReturnType<typeof instance.diagnostics>>["initialization"]>
+        | undefined;
+
+      const logger = Logger.make((options) => {
+        const parsed = Schema.decodeUnknownOption(Schema.Array(TimingLog))(options.message);
+
+        if (Option.isSome(parsed)) {
+          logs.push(...parsed.value);
+
+          if (parsed.value.some((log) => log.operation === "total" && log.phase === "started"))
+            duringStartup = instance
+              .diagnostics()
+              .then((diagnostics) => structuredClone(diagnostics.initialization));
+        }
+      });
+
+      const result = await Effect.runPromise(
+        instance["execute"]("printf timing-proof", "/workspace").pipe(
+          Effect.provide(Logger.layer([logger])),
+        ),
+      );
+
+      expect(result).toMatchObject({ exitCode: 0, stdout: "timing-proof" });
+      expect(await duringStartup).toMatchObject({ state: "running" });
+      const diagnostics = await instance.diagnostics();
+      const initialization = diagnostics.initialization;
+
+      expect(initialization).toMatchObject({
+        id: expect.any(String),
+        wasRunning: false,
+        restoringSnapshot: false,
+        state: "succeeded",
+        elapsedMs: expect.any(Number),
+      });
+
+      if (!initialization) throw new Error("Missing initialization timings");
+
+      expect(initialization.steps.map((step) => step.operation)).toEqual([
+        "workspace.read",
+        "workspace.snapshot.read",
+        "workspace.dependencies.cleanup",
+        "workspace.start",
+        "workspace.network.http",
+        "workspace.network.https",
+        "sandbox.inactivity",
+      ]);
+
+      for (const step of initialization.steps) {
+        expect(step.state).toBe("succeeded");
+        expect(step.startedAt).toBeGreaterThanOrEqual(initialization.startedAt);
+        expect(step.elapsedMs).toBeGreaterThanOrEqual(0);
+        const events = logs.filter((log) => log.operation === step.operation);
+
+        expect(events.map((log) => log.phase)).toEqual(["started", "succeeded"]);
+        expect(events[1]?.elapsedMs).toBe(step.elapsedMs);
+      }
+
+      expect(initialization.elapsedMs).toBeGreaterThanOrEqual(
+        initialization.steps.reduce((total, step) => total + (step.elapsedMs ?? 0), 0),
+      );
+      const execution = logs.filter((log) => log.event === "sandbox_execution");
+
+      expect(execution.map((log) => log.phase)).toEqual([
+        "started",
+        "process_started",
+        "completed",
+      ]);
+      expect(new Set(logs.map((log) => log.initializationId))).toEqual(
+        new Set([initialization.id]),
+      );
+      expect(new Set(execution.map((log) => log.executionId)).size).toBe(1);
+      expect(execution[1]?.elapsedMs).toBeGreaterThanOrEqual(0);
+      expect(execution[2]?.elapsedMs).toBeGreaterThanOrEqual(execution[1]?.elapsedMs ?? 0);
+      expect(execution[2]?.exitCode).toBe(0);
+      const beforeWarm = structuredClone(initialization);
+
+      // Warm commands must not replace or append to the last startup report.
+      await Effect.runPromise(instance["execute"]("true", "/workspace"));
+      expect((await instance.diagnostics()).initialization).toEqual(beforeWarm);
+
+      let timedOut = false;
+
+      try {
+        await Effect.runPromise(
+          instance["execute"]("sleep 120", "/workspace", 0.1).pipe(
+            Effect.provide(Logger.layer([logger])),
+          ),
+        );
+      } catch (error) {
+        expect(error).toHaveProperty("_tag", "TimeoutError");
+        timedOut = true;
+      }
+
+      expect(timedOut).toBe(true);
+      expect(logs.at(-1)).toMatchObject({
+        event: "sandbox_execution",
+        phase: "failed",
+        elapsedMs: expect.any(Number),
+      });
+      expect(logs.at(-1)?.elapsedMs).toBeGreaterThanOrEqual(100);
+    });
+
+    await evictDurableObject(sandbox);
+    await runInDurableObject(sandbox, async (instance) => {
+      await Effect.runPromise(instance["execute"]("true", "/workspace"));
+      const initialization = (await instance.diagnostics()).initialization;
+
+      expect(initialization).toMatchObject({ wasRunning: true, state: "succeeded" });
+      expect(initialization?.steps.map((step) => step.operation)).toEqual([
+        "workspace.read",
+        "workspace.snapshot.read",
+        "workspace.network.http",
+        "workspace.network.https",
+        "workspace.setup.read",
+        "workspace.restore.probe",
+        "sandbox.inactivity",
+      ]);
+    });
+  } finally {
+    await sandbox.restart();
+  }
+});
 
 it("privately previews without an image-provided runtime directory and preserves workspace files", async () => {
   const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
@@ -158,6 +304,20 @@ it("fails closed on a missing saved snapshot rather than cloning over lost work"
 
   expect(String(failure)).toContain(id);
   expect(await sandbox.diagnostics()).toMatchObject({ running: false });
+  const initialization = (await sandbox.diagnostics()).initialization;
+
+  expect(initialization).toMatchObject({
+    state: "failed",
+    restoringSnapshot: true,
+    elapsedMs: expect.any(Number),
+  });
+  expect(initialization?.steps).toContainEqual(
+    expect.objectContaining({
+      operation: "workspace.restore.probe",
+      state: "failed",
+      elapsedMs: expect.any(Number),
+    }),
+  );
   await runInDurableObject(sandbox, async (_, state) => {
     expect(await state.storage.get("snapshot:checkpoint")).toEqual({ id });
   });
