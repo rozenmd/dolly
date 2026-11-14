@@ -24,6 +24,7 @@ import {
 } from "./github-webhook";
 import { exceptionDetails } from "./diagnostics";
 import { integrationJson } from "./integration-http";
+import { budgetPatches, invalidAnchors, REVIEW_FOOTER } from "./github-review";
 import { attempt, OperationError } from "./operations";
 
 import {
@@ -68,6 +69,112 @@ const FileResponse = Schema.Struct({
 
 const CommitResponse = Schema.Struct({ commit: Schema.Struct({ sha: Sha }) });
 const PullResponse = Schema.Struct({ number: Schema.Number, html_url: Schema.String });
+
+const FILES_PER_PAGE = 30;
+const COMMENTS_PER_PAGE = 50;
+
+const User = Schema.NullOr(Schema.Struct({ login: Schema.String }));
+
+const PullDetails = Schema.Struct({
+  number: Schema.Number,
+  html_url: Schema.String,
+  title: Schema.String,
+  body: Schema.NullOr(Schema.String),
+  state: Schema.String,
+  draft: Schema.optional(Schema.Boolean),
+  merged: Schema.optional(Schema.Boolean),
+  mergeable: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  mergeable_state: Schema.optional(Schema.String),
+  user: User,
+  base: Schema.Struct({ ref: Schema.String, sha: Sha }),
+  head: Schema.Struct({ ref: Schema.String, sha: Sha }),
+  labels: Schema.Array(Schema.Struct({ name: Schema.String })),
+  requested_reviewers: Schema.Array(Schema.Struct({ login: Schema.String })),
+  commits: Schema.optional(Schema.Number),
+  additions: Schema.optional(Schema.Number),
+  deletions: Schema.optional(Schema.Number),
+  changed_files: Schema.optional(Schema.Number),
+  created_at: Schema.String,
+  updated_at: Schema.String,
+});
+
+const PullFile = Schema.Struct({
+  filename: Schema.String,
+  status: Schema.String,
+  additions: Schema.Number,
+  deletions: Schema.Number,
+  previous_filename: Schema.optional(Schema.String),
+  patch: Schema.optional(Schema.String),
+});
+
+const IssueComment = Schema.Struct({
+  id: Schema.Number,
+  user: User,
+  body: Schema.optional(Schema.NullOr(Schema.String)),
+  html_url: Schema.String,
+});
+
+const InlineComment = Schema.Struct({
+  id: Schema.Number,
+  user: User,
+  body: Schema.String,
+  path: Schema.String,
+  line: Schema.optional(Schema.NullOr(Schema.Number)),
+  start_line: Schema.optional(Schema.NullOr(Schema.Number)),
+  side: Schema.optional(Schema.NullOr(Schema.String)),
+  in_reply_to_id: Schema.optional(Schema.Number),
+  html_url: Schema.String,
+});
+
+const Review = Schema.Struct({
+  id: Schema.Number,
+  user: User,
+  body: Schema.optional(Schema.NullOr(Schema.String)),
+  state: Schema.String,
+  commit_id: Schema.optional(Schema.NullOr(Schema.String)),
+  html_url: Schema.optional(Schema.String),
+});
+
+const CheckRuns = Schema.Struct({
+  check_runs: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      status: Schema.String,
+      conclusion: Schema.NullOr(Schema.String),
+      details_url: Schema.optional(Schema.NullOr(Schema.String)),
+    }),
+  ),
+});
+
+const CombinedStatus = Schema.Struct({
+  state: Schema.String,
+  statuses: Schema.Array(
+    Schema.Struct({
+      context: Schema.String,
+      state: Schema.String,
+      description: Schema.optional(Schema.NullOr(Schema.String)),
+      target_url: Schema.optional(Schema.NullOr(Schema.String)),
+    }),
+  ),
+});
+
+type ThreadComment = {
+  id: number;
+  author: string | null;
+  body: string;
+  path: string;
+  line: number | null;
+  start_line: number | null;
+  side: string | null;
+  outdated: boolean;
+  url: string;
+};
+
+function truncate(text: string, limit: number) {
+  return text.length <= limit
+    ? text
+    : `${text.slice(0, limit)}\n…[truncated ${text.length - limit} characters]`;
+}
 
 function base64url(bytes: Uint8Array) {
   return btoa(String.fromCharCode(...bytes))
@@ -125,7 +232,13 @@ type GitHubBody =
   | { ref: string; sha: string }
   | { head: string; base: string; title: string; body: string }
   | { message: string; branch: string; content: string; sha?: string }
-  | { url: string; content_type: "json"; secret: string; insecure_ssl: "0" };
+  | { url: string; content_type: "json"; secret: string; insecure_ssl: "0" }
+  | {
+      commit_id: string;
+      body: string;
+      event?: "COMMENT";
+      comments: ReadonlyArray<Readonly<Record<string, string | number>>>;
+    };
 
 /** The ingress Worker's webhook URL for a base URL, with or without the `/hooks/github` path. */
 export function ingressHook(url: string) {
@@ -620,6 +733,31 @@ function makeGitHub(storage: DurableObjectStorage) {
     ),
   );
 
+  // A successful anonymous request proves the resource is public. Never send App
+  // credentials to an unapproved owner, even after a public failure.
+  const readApi = Effect.fn("GitHub.readApi")((repository: string, path: string) =>
+    api(path, "").pipe(
+      Effect.catchTag("OperationError", (error) =>
+        Effect.gen(function* () {
+          const status = Schema.decodeUnknownOption(Schema.Struct({ status: Schema.Number }))(
+            error.details,
+          );
+
+          if (
+            Option.isNone(status) ||
+            status.value.status !== 404 ||
+            !(yield* accountAllowed(repository.split("/")[0]))
+          )
+            return yield* Effect.fail(error);
+
+          const token = yield* tokenFor(yield* read(), repository, "read");
+
+          return yield* api(path, token);
+        }),
+      ),
+    ),
+  );
+
   const execute = Effect.fn("GitHub.execute")(function* (
     input: typeof GitHubRequest.Type,
   ): Effect.fn.Return<typeof GitHubReply.Type, OperationError> {
@@ -628,29 +766,7 @@ function makeGitHub(storage: DurableObjectStorage) {
     if (op.action === "read_file") {
       const path = `/repos/${op.repository}/contents/${op.path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(op.ref)}`;
 
-      // A successful anonymous contents request proves the file is public. Never
-      // send App credentials to an unapproved owner, even after a public failure.
-      const file = yield* api(path, "").pipe(
-        Effect.catchTag("OperationError", (error) =>
-          Effect.gen(function* () {
-            const status = Schema.decodeUnknownOption(Schema.Struct({ status: Schema.Number }))(
-              error.details,
-            );
-
-            if (
-              Option.isNone(status) ||
-              status.value.status !== 404 ||
-              !(yield* accountAllowed(op.repository.split("/")[0]))
-            )
-              return yield* Effect.fail(error);
-
-            const token = yield* tokenFor(yield* read(), op.repository, "read");
-
-            return yield* api(path, token);
-          }),
-        ),
-        Effect.flatMap(decode(FileResponse)),
-      );
+      const file = yield* readApi(op.repository, path).pipe(Effect.flatMap(decode(FileResponse)));
 
       if (file.size > 32_768 || file.content.replace(/\s/g, "").length > 43_692)
         return { ok: false, code: "file_too_large", message: "File exceeds 32 KiB" };
@@ -664,7 +780,221 @@ function makeGitHub(storage: DurableObjectStorage) {
       return { ok: true, result: { kind: "file", path: file.path, sha: file.sha, content } };
     }
 
+    if (op.action === "read_pull_request") {
+      const pull = yield* readApi(op.repository, `/repos/${op.repository}/pulls/${op.number}`).pipe(
+        Effect.flatMap(decode(PullDetails)),
+      );
+
+      return {
+        ok: true,
+        result: {
+          kind: "pull_request_details",
+          data: {
+            ...pull,
+            author: pull.user?.login ?? null,
+            user: undefined,
+            base: { ref: pull.base.ref, sha: pull.base.sha },
+            head: { ref: pull.head.ref, sha: pull.head.sha },
+            labels: pull.labels.map((label) => label.name),
+            requested_reviewers: pull.requested_reviewers.map((user) => user.login),
+            body: truncate(pull.body ?? "", 16_384),
+          },
+        },
+      };
+    }
+
+    if (op.action === "list_pull_request_files") {
+      const page = op.page ?? 1;
+
+      const files = yield* readApi(
+        op.repository,
+        `/repos/${op.repository}/pulls/${op.number}/files?per_page=${FILES_PER_PAGE}&page=${page}`,
+      ).pipe(Effect.flatMap(decode(Schema.Array(PullFile))));
+
+      return {
+        ok: true,
+        result: {
+          kind: "pull_request_files",
+          data: {
+            page,
+            next_page: files.length === FILES_PER_PAGE ? page + 1 : null,
+            note: "patch_truncated files exceeded the output budget; check out the head SHA in the sandbox to read them.",
+            files: budgetPatches(files, 48_000),
+          },
+        },
+      };
+    }
+
+    if (op.action === "list_pull_request_comments") {
+      const page = op.page ?? 1;
+      const query = `per_page=${COMMENTS_PER_PAGE}&page=${page}`;
+      const root = `/repos/${op.repository}`;
+
+      const [discussion, inline, reviews] = yield* Effect.all([
+        readApi(op.repository, `${root}/issues/${op.number}/comments?${query}`).pipe(
+          Effect.flatMap(decode(Schema.Array(IssueComment))),
+        ),
+        readApi(op.repository, `${root}/pulls/${op.number}/comments?${query}`).pipe(
+          Effect.flatMap(decode(Schema.Array(InlineComment))),
+        ),
+        readApi(op.repository, `${root}/pulls/${op.number}/reviews?${query}`).pipe(
+          Effect.flatMap(decode(Schema.Array(Review))),
+        ),
+      ]);
+
+      const threads = new Map<number, Array<ThreadComment>>();
+
+      for (const comment of inline) {
+        const root = comment.in_reply_to_id ?? comment.id;
+        const thread = threads.get(root) ?? [];
+        thread.push({
+          id: comment.id,
+          author: comment.user?.login ?? null,
+          body: truncate(comment.body, 4_096),
+          path: comment.path,
+          line: comment.line ?? null,
+          start_line: comment.start_line ?? null,
+          side: comment.side ?? null,
+          outdated: comment.line === null,
+          url: comment.html_url,
+        });
+        threads.set(root, thread);
+      }
+
+      const more = [discussion, inline, reviews].some((list) => list.length === COMMENTS_PER_PAGE);
+
+      return {
+        ok: true,
+        result: {
+          kind: "pull_request_comments",
+          data: {
+            page,
+            next_page: more ? page + 1 : null,
+            discussion: discussion.map((comment) => ({
+              id: comment.id,
+              author: comment.user?.login ?? null,
+              body: truncate(comment.body ?? "", 4_096),
+              url: comment.html_url,
+            })),
+            threads: [...threads].map(([id, comments]) => ({ id, comments })),
+            reviews: reviews.map((review) => ({
+              id: review.id,
+              author: review.user?.login ?? null,
+              state: review.state,
+              body: truncate(review.body ?? "", 4_096),
+              commit_id: review.commit_id ?? null,
+            })),
+          },
+        },
+      };
+    }
+
+    if (op.action === "read_pull_request_checks") {
+      const root = `/repos/${op.repository}`;
+
+      const pull = yield* readApi(op.repository, `${root}/pulls/${op.number}`).pipe(
+        Effect.flatMap(decode(PullDetails)),
+      );
+
+      const [runs, status] = yield* Effect.all([
+        readApi(op.repository, `${root}/commits/${pull.head.sha}/check-runs?per_page=100`).pipe(
+          Effect.flatMap(decode(CheckRuns)),
+        ),
+        readApi(op.repository, `${root}/commits/${pull.head.sha}/status`).pipe(
+          Effect.flatMap(decode(CombinedStatus)),
+        ),
+      ]);
+
+      return {
+        ok: true,
+        result: {
+          kind: "pull_request_checks",
+          data: {
+            head_sha: pull.head.sha,
+            combined_state: status.state,
+            check_runs: runs.check_runs,
+            statuses: status.statuses,
+          },
+        },
+      };
+    }
+
     const connected = yield* read();
+
+    if (op.action === "create_review" || op.action === "reply_to_review_comment") {
+      const token = yield* tokenFor(connected, op.repository, "write");
+      const root = `/repos/${op.repository}/pulls/${op.number}`;
+
+      if (op.action === "reply_to_review_comment") {
+        const reply = yield* api(`${root}/comments/${op.comment_id}/replies`, token, {
+          body: `${op.body}${REVIEW_FOOTER}`,
+        }).pipe(Effect.flatMap(decode(InlineComment)));
+
+        return {
+          ok: true,
+          result: { kind: "review_comment", data: { id: reply.id, url: reply.html_url } },
+        };
+      }
+
+      const pull = yield* api(root, token).pipe(Effect.flatMap(decode(PullDetails)));
+
+      if (pull.head.sha !== op.commit_id)
+        return {
+          ok: false,
+          code: "stale_commit",
+          message: `The pull request head is now ${pull.head.sha}, not ${op.commit_id}. Re-read the diff and anchor comments to the new head.`,
+        };
+      const patches = new Map<string, string | undefined>();
+
+      for (let page = 1; page <= 3_000 / FILES_PER_PAGE; page++) {
+        const files = yield* api(
+          `${root}/files?per_page=${FILES_PER_PAGE}&page=${page}`,
+          token,
+        ).pipe(Effect.flatMap(decode(Schema.Array(PullFile))));
+
+        for (const file of files) patches.set(file.filename, file.patch);
+
+        if (files.length < FILES_PER_PAGE) break;
+      }
+
+      const problems = invalidAnchors(op.comments, patches);
+
+      if (problems.length > 0)
+        return {
+          ok: false,
+          code: "invalid_comment_anchor",
+          message: `No review was posted. Fix these comments: ${problems.join("; ")}`,
+        };
+
+      const request: Extract<GitHubBody, { commit_id: string }> = {
+        commit_id: op.commit_id,
+        body: op.body ? `${op.body}${REVIEW_FOOTER}` : "",
+        comments: op.comments.map((comment) => ({
+          ...comment,
+          body: `${comment.body}${REVIEW_FOOTER}`,
+        })),
+      };
+
+      // Omitting event leaves the review PENDING (unsubmitted) on GitHub.
+      if (op.event === "COMMENT") request.event = "COMMENT";
+
+      const review = yield* api(`${root}/reviews`, token, request, "POST").pipe(
+        Effect.flatMap(decode(Review)),
+      );
+
+      return {
+        ok: true,
+        result: {
+          kind: "review",
+          data: {
+            id: review.id,
+            state: review.state,
+            url: review.html_url ?? null,
+            comments: op.comments.length,
+          },
+        },
+      };
+    }
 
     if (op.action === "repositories") {
       if ((yield* accounts).length === 0)

@@ -1240,3 +1240,230 @@ it("blocks revoked accounts from authenticated reads, writes, and Git transport"
   expect(response.status).toBe(502);
   expect(fetch).not.toHaveBeenCalled();
 });
+
+const head = "b".repeat(40);
+
+const pullDetails = {
+  number: 49,
+  html_url: "https://github.com/example/project/pull/49",
+  title: "Add feature",
+  body: "Description",
+  state: "open",
+  draft: false,
+  user: { login: "author" },
+  base: { ref: "main", sha },
+  head: { ref: "feature", sha: head },
+  labels: [{ name: "enhancement" }],
+  requested_reviewers: [{ login: "reviewer" }],
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-02T00:00:00Z",
+};
+
+it("reads public pull requests, files, comment threads and checks anonymously", async () => {
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    expect(new Headers(init?.headers).has("Authorization")).toBe(false);
+    const { pathname, searchParams } = new URL(String(url));
+
+    if (pathname === "/repos/example/project/pulls/49") return Response.json(pullDetails);
+
+    if (pathname.endsWith("/pulls/49/files"))
+      return Response.json(
+        Array.from({ length: 30 }, (_, index) => ({
+          filename: `f${index}.ts`,
+          status: "modified",
+          additions: 1,
+          deletions: 0,
+          patch: `@@ -1 +1 @@\n+${"x".repeat(index === 0 ? 50_000 : 10)}`,
+        })),
+      );
+
+    if (pathname.endsWith("/issues/49/comments"))
+      return Response.json([{ id: 1, user: { login: "a" }, body: "hi", html_url: "u1" }]);
+
+    if (pathname.endsWith("/pulls/49/comments")) {
+      expect(searchParams.get("page")).toBe("1");
+
+      return Response.json([
+        {
+          id: 10,
+          user: { login: "a" },
+          body: "nit",
+          path: "f.ts",
+          line: 3,
+          side: "RIGHT",
+          html_url: "u10",
+        },
+        {
+          id: 11,
+          user: { login: "b" },
+          body: "ok",
+          path: "f.ts",
+          line: null,
+          in_reply_to_id: 10,
+          html_url: "u11",
+        },
+      ]);
+    }
+
+    if (pathname.endsWith("/pulls/49/reviews"))
+      return Response.json([
+        { id: 5, user: { login: "r" }, body: "", state: "APPROVED", commit_id: sha },
+      ]);
+
+    if (pathname.endsWith(`/commits/${head}/check-runs`))
+      return Response.json({
+        check_runs: [
+          { name: "test", status: "completed", conclusion: "failure", details_url: "d" },
+        ],
+      });
+
+    if (pathname.endsWith(`/commits/${head}/status`))
+      return Response.json({ state: "success", statuses: [{ context: "ci", state: "success" }] });
+    throw new Error(`Unexpected GitHub path ${pathname}`);
+  });
+
+  const number = 49;
+
+  expect(
+    await (await execute({ action: "read_pull_request", repository, number })).json(),
+  ).toMatchObject({
+    ok: true,
+    result: {
+      kind: "pull_request_details",
+      data: {
+        author: "author",
+        head: { ref: "feature", sha: head },
+        labels: ["enhancement"],
+        requested_reviewers: ["reviewer"],
+      },
+    },
+  });
+
+  const files = await (
+    await execute({ action: "list_pull_request_files", repository, number })
+  ).json<{ result: { data: { next_page: number; files: Array<{ patch_truncated: boolean }> } } }>();
+
+  expect(files.result.data.next_page).toBe(2);
+  expect(files.result.data.files[0].patch_truncated).toBe(true);
+  expect(files.result.data.files[1].patch_truncated).toBe(false);
+
+  expect(
+    await (await execute({ action: "list_pull_request_comments", repository, number })).json(),
+  ).toMatchObject({
+    ok: true,
+    result: {
+      data: {
+        next_page: null,
+        discussion: [{ id: 1, body: "hi" }],
+        threads: [{ id: 10, comments: [{ id: 10 }, { id: 11, outdated: true }] }],
+        reviews: [{ id: 5, state: "APPROVED" }],
+      },
+    },
+  });
+  expect(
+    await (await execute({ action: "read_pull_request_checks", repository, number })).json(),
+  ).toMatchObject({
+    ok: true,
+    result: {
+      data: {
+        head_sha: head,
+        combined_state: "success",
+        check_runs: [{ name: "test", conclusion: "failure" }],
+      },
+    },
+  });
+  expect(fetch).toHaveBeenCalledTimes(8);
+});
+
+it("posts inline reviews only against the current head and diff, and never approves", async () => {
+  await connect();
+  const writes: Array<{ path: string; body: unknown }> = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const path = new URL(String(url)).pathname;
+
+    if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (path.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+    if (init?.method === "POST") {
+      writes.push({ path, body: JSON.parse(String(init.body)) });
+
+      return path.endsWith("/replies")
+        ? Response.json({ id: 99, user: null, body: "", path: "a.ts", html_url: "reply" })
+        : Response.json({ id: 77, user: null, state: "PENDING", html_url: "review" });
+    }
+
+    if (path === "/repos/example/project/pulls/49") return Response.json(pullDetails);
+
+    if (path.endsWith("/pulls/49/files"))
+      return Response.json([
+        {
+          filename: "a.ts",
+          status: "modified",
+          additions: 1,
+          deletions: 1,
+          patch: "@@ -1,2 +1,2 @@\n ctx\n-old\n+new",
+        },
+      ]);
+    throw new Error(`Unexpected GitHub path ${path}`);
+  });
+
+  const review = {
+    action: "create_review" as const,
+    repository,
+    number: 49,
+    commit_id: head,
+    body: "Looks close",
+    event: "PENDING" as const,
+    comments: [{ path: "a.ts", line: 2, side: "RIGHT" as const, body: "Use a constant" }],
+  };
+
+  expect(await (await execute({ ...review, commit_id: sha })).json()).toMatchObject({
+    ok: false,
+    code: "stale_commit",
+  });
+  expect(
+    await (await execute({ ...review, comments: [{ ...review.comments[0], line: 9 }] })).json(),
+  ).toMatchObject({ ok: false, code: "invalid_comment_anchor" });
+  expect(writes).toEqual([]);
+
+  expect(await (await execute(review)).json()).toMatchObject({
+    ok: true,
+    result: { kind: "review", data: { id: 77, state: "PENDING", comments: 1 } },
+  });
+  expect(await (await execute({ ...review, event: "COMMENT" })).json()).toMatchObject({ ok: true });
+  expect(
+    await (
+      await execute({
+        action: "reply_to_review_comment",
+        repository,
+        number: 49,
+        comment_id: 10,
+        body: "Done",
+      })
+    ).json(),
+  ).toMatchObject({ ok: true, result: { kind: "review_comment", data: { id: 99 } } });
+
+  expect(writes.map((write) => write.path)).toEqual([
+    "/repos/example/project/pulls/49/reviews",
+    "/repos/example/project/pulls/49/reviews",
+    "/repos/example/project/pulls/49/comments/10/replies",
+  ]);
+  expect(writes[0].body).not.toHaveProperty("event");
+  expect(writes[0].body).toMatchObject({
+    commit_id: head,
+    comments: [
+      { path: "a.ts", line: 2, side: "RIGHT", body: expect.stringContaining("posted by Dolly") },
+    ],
+  });
+  expect(writes[1].body).toMatchObject({ event: "COMMENT" });
+
+  for (const event of ["APPROVE", "REQUEST_CHANGES"])
+    expect(
+      (await post("/api/integrations/github/execute", { operation: { ...review, event } })).ok,
+    ).toBe(false);
+});
