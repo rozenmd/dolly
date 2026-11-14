@@ -1445,26 +1445,104 @@ select.input {
     font-size: 16px;
   }
 }
-.repository-list {
-  max-height: 18rem;
-  overflow-y: auto;
+.repository-picker:has(.repository-toolbar) {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
 }
-
+.repository-toolbar {
+  display: flex;
+  gap: 8px;
+}
+.repository-refresh {
+  height: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 38px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+}
+.repository-refresh:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.repository-refresh svg {
+  width: 16px;
+  height: 16px;
+}
+.repository-refresh .spin {
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.repository-list {
+  max-height: 24rem;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #1d1d1d;
+}
 .repository-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.75rem 0;
+  gap: 12px;
+  padding: 10px 12px 10px 14px;
 }
-
-.repository-row > div {
+.repository-row + .repository-row {
+  border-top: 1px solid var(--line);
+}
+.repository-row:hover {
+  background: rgb(255 255 255 / 2%);
+}
+.repository-meta {
+  display: grid;
+  flex: 1;
   min-width: 0;
-  overflow-wrap: anywhere;
+  gap: 2px;
 }
-
+.repository-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repository-detail {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repository-tag {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgb(34 197 94 / 12%);
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 500;
+}
 .repository-row > button {
   flex-shrink: 0;
+  margin-left: 0;
+}
+.repository-row > .ghost-button.danger {
+  color: var(--muted);
+}
+.repository-row > .ghost-button.danger:hover {
+  color: var(--red);
+}
+.repository-empty {
+  margin: 0;
+  padding: 20px;
+  color: var(--muted);
+  text-align: center;
 }
 .run-failure {
   margin: 16px 0;
