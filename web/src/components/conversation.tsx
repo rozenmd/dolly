@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type SyntheticEvent,
+} from "react";
 import {
   ArrowUpIcon,
   CheckIcon,
@@ -151,14 +158,35 @@ function failureReason(reason: string) {
   }
 }
 
+/**
+ * Disclosure state for a <details>. `auto` suggests whether it should be open
+ * (e.g. while running) until the user toggles it; after that the user's choice
+ * is final and the app never opens or closes it again.
+ */
+function useDisclosure(auto: boolean) {
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? auto;
+  return {
+    open,
+    onToggle: (event: SyntheticEvent<HTMLDetailsElement>) => {
+      const next = event.currentTarget.open;
+      if (next !== open) setUserOpen(next);
+    },
+  };
+}
+
 function WorkLog({ turn }: { turn: Turn }) {
+  // The work log is opened once when it appears (if running or failed) and is
+  // otherwise left entirely to the user.
+  const [initial] = useState(() => turn.running || Boolean(turn.failure));
+  const disclosure = useDisclosure(initial);
   const started = turn.prompt?.at ?? turn.startedAt;
 
   const elapsed =
     started !== undefined && turn.endedAt !== undefined ? duration(turn.endedAt - started) : "";
 
   return (
-    <details className="work-log" open={turn.running || Boolean(turn.failure)}>
+    <details className="work-log" {...disclosure}>
       <summary>
         <ChevronRightIcon className="disclosure" />
         <span className="work-label">{turn.running ? "Working" : "Worked"}</span>
@@ -186,9 +214,10 @@ function stepCount(count: number) {
 function StepGroup({ steps }: { steps: readonly Step[] }) {
   const running = steps.some((step) => step.status === "running");
   const failed = steps.some((step) => step.status === "error");
+  const disclosure = useDisclosure(running || failed);
 
   return (
-    <details className="step-group" open={running || failed}>
+    <details className="step-group" {...disclosure}>
       <summary>
         <Square2StackIcon />
         <span>{stepCount(steps.length)}</span>
@@ -198,26 +227,33 @@ function StepGroup({ steps }: { steps: readonly Step[] }) {
       <ol>
         {steps.map((step) => (
           <li key={step.id}>
-            <details className="step" open={step.status === "running" || step.status === "error"}>
-              <summary>
-                <span className={`step-name step-${step.status}`}>{step.name}</span>
-                {step.detail && <code>{step.detail}</code>}
-              </summary>
-              <pre>{step.output || stepPlaceholder(step.status)}</pre>
-              {step.images?.map((src) => (
-                <a key={src} href={src} target="_blank" rel="noreferrer">
-                  <img
-                    src={src}
-                    alt="Browser Run screenshot"
-                    loading="lazy"
-                    style={{ maxWidth: "100%", height: "auto" }}
-                  />
-                </a>
-              ))}
-            </details>
+            <StepDetails step={step} />
           </li>
         ))}
       </ol>
+    </details>
+  );
+}
+
+function StepDetails({ step }: { step: Step }) {
+  const disclosure = useDisclosure(step.status === "running" || step.status === "error");
+  return (
+    <details className="step" {...disclosure}>
+      <summary>
+        <span className={`step-name step-${step.status}`}>{step.name}</span>
+        {step.detail && <code>{step.detail}</code>}
+      </summary>
+      <pre>{step.output || stepPlaceholder(step.status)}</pre>
+      {step.images?.map((src) => (
+        <a key={src} href={src} target="_blank" rel="noreferrer">
+          <img
+            src={src}
+            alt="Browser Run screenshot"
+            loading="lazy"
+            style={{ maxWidth: "100%", height: "auto" }}
+          />
+        </a>
+      ))}
     </details>
   );
 }
