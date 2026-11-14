@@ -11,12 +11,12 @@ test("builds production Workers explicitly before prebuilt deployment or dry run
     await readFile(new URL("../ingress/package.json", import.meta.url), "utf8"),
   );
 
-  assert.equal(root.scripts.deploy, "vite build && cf deploy --prebuilt");
+  assert.equal(root.scripts.deploy, "vp -C . build && cf deploy --prebuilt");
   assert.equal(
     root.scripts.build,
-    "vite build && cf deploy --prebuilt --dry-run && pnpm --dir ingress run build && pnpm --dir ingress exec cf deploy --prebuilt --dry-run",
+    "vp -C . build && cf deploy --prebuilt --dry-run && pnpm --dir ingress run build && pnpm --dir ingress exec cf deploy --prebuilt --dry-run",
   );
-  assert.equal(ingress.scripts.build, "vite build");
+  assert.equal(ingress.scripts.build, "vp build");
   assert.equal(ingress.scripts.deploy, "pnpm run build && cf deploy --prebuilt");
 });
 

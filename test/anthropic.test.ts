@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
 import { Snapshot, Live } from "../src/transcript";

@@ -3,12 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build",
+    "build": "vp build",
     "deploy": "pnpm run build && cf deploy --prebuilt"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "2.0.0-beta.v.13",
-    "vite": "8.3.8",
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
     "wrangler": "4.160.0"
   }
 }

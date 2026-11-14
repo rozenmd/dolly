@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { reset } from "cloudflare:test";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import type { Message } from "@earendil-works/pi-ai";
 import { MAX_IMAGE_BYTES, PromptImage, resolveImages, storeImages } from "../src/images";

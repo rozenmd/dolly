@@ -2,7 +2,7 @@ import { createPrivateKey } from "node:crypto";
 import api from "../src/index";
 import { env } from "cloudflare:workers";
 import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { GITHUB_APP_READ_PERMISSIONS } from "../src/github-permissions";
 import { GitHubRequest } from "../src/github-contracts";
 import { GitHub } from "../src/github";

@@ -8,7 +8,7 @@ import {
   reset,
   abortAllDurableObjects,
 } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { GitHubThreads } from "../src/github-inbox";
 import { GitHubIngress } from "../src/github-ingress";
 import { ingress } from "../src/ingress";

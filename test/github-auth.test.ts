@@ -1,7 +1,7 @@
 import { createPrivateKey } from "node:crypto";
 import { env } from "cloudflare:workers";
 import { SELF, reset, runInDurableObject } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type * as Schema from "effect/Schema";
 import { DEVICE_FLOW_DISABLED } from "../src/github-auth";
 

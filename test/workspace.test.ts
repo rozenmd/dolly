@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import {
   GITHUB_APP_GRANT_PERMISSIONS,

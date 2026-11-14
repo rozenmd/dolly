@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig } from "vite-plus";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { sandboxTestConfig } from "./scripts/sandbox-config.ts";
 

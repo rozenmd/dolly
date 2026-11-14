@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vite-plus";
 import { cloudflare } from "@cloudflare/vite-plugin";
 import { webPlugins } from "../../web/vite.config.ts";
 

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import { expect, it } from "vitest";
+import { expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import { previewRequest, PreviewRequest } from "../src/preview";
 

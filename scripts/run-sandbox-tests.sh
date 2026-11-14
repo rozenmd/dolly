@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-run_container_tests() { pnpm exec vitest run --config vitest.sandbox.config.ts "$@"; }
+run_container_tests() { pnpm exec vp test run --config vitest.sandbox.config.ts "$@"; }
 status=0
 run_container_tests "$@" || status=$?
 if [[ $status != 0 && ${GITHUB_ACTIONS:-} == true ]]; then

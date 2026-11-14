@@ -14,7 +14,7 @@
     "src/**/*.ts",
     "test/**/*.ts",
     "vitest*.config.ts",
-    "oxlint.config.ts",
+    "vite.config.ts",
     "cloudflare.config.ts",
     "ingress/**/*.ts",
     "scripts/**/*.ts"

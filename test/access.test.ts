@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { sign } from "hono/jwt";
-import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";

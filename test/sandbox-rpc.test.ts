@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import { expect, it } from "vitest";
+import { expect, it } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import { checkoutDiagnosticsScript } from "../src/workspace";
 
