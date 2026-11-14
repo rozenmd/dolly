@@ -826,6 +826,8 @@ function makeGitHub(
         yield* attempt("github.save", () =>
           storage.put({ "github:connected": { app }, "github:ingress": value.setup.ingress }),
         );
+        publicToken = undefined;
+        publicTokenRetry = 0;
         yield* attempt("github.pending.delete", () => storage.delete("github:pending"));
 
         return yield* status;
@@ -833,10 +835,80 @@ function makeGitHub(
     ),
   );
 
-  // A successful anonymous request proves the resource is public. Never send App
-  // credentials to an unapproved owner, even after a public failure.
+  // Public reads use an App installation token narrowed to metadata:read, so they
+  // count against the installation's rate limit instead of the shared anonymous
+  // per-IP limit (which Workers exhaust, surfacing as HTTP 403/429). Metadata-only
+  // tokens cannot read private contents, and every repository is additionally
+  // confirmed public before data is returned. Without a usable App installation,
+  // reads fall back to anonymous requests.
+  let publicToken: { value: string; expires: number } | undefined;
+  let publicTokenRetry = 0;
+  const publicRepositories = new Map<string, number>();
+
+  const publicReadToken = Effect.gen(function* () {
+    if (publicToken && publicToken.expires > Date.now() + 300_000) return publicToken.value;
+
+    if (publicTokenRetry > Date.now()) return "";
+    const raw = yield* attempt("github.read", () => storage.get("github:connected"));
+
+    if (raw === undefined) return "";
+    const connected = yield* decode(Connected)(raw);
+    const appToken = yield* jwt(connected.app);
+
+    const installations = yield* api("/app/installations?per_page=1", appToken).pipe(
+      Effect.flatMap(decode(Schema.Array(Schema.Struct({ id: Schema.Number })))),
+    );
+
+    if (installations.length === 0) return "";
+
+    const result = yield* api(`/app/installations/${installations[0].id}/access_tokens`, appToken, {
+      permissions: { metadata: "read" },
+    }).pipe(Effect.flatMap(decode(Token)));
+
+    const expires = yield* decode(Schema.Finite)(Date.parse(result.expires_at));
+
+    if (expires <= Date.now()) return "";
+    publicToken = { value: result.token, expires };
+
+    return result.token;
+  }).pipe(
+    Effect.catch(() => Effect.succeed("")),
+    Effect.tap((token) =>
+      Effect.sync(() => {
+        if (!token) publicTokenRetry = Date.now() + 60_000;
+      }),
+    ),
+  );
+
+  const notPublic = (repository: string) =>
+    new OperationError({
+      operation: "integration.response",
+      message: "Provider returned HTTP 404",
+      details: { status: 404, repository },
+    });
+
+  const publicApi = Effect.fn("GitHub.publicApi")(function* (repository: string, path: string) {
+    const token = yield* publicReadToken;
+
+    if (!token) return yield* api(path, "");
+    const checked = publicRepositories.get(repository.toLowerCase());
+
+    if (!checked || checked < Date.now()) {
+      const repo = yield* api(`/repos/${repository}`, token).pipe(
+        Effect.flatMap(decode(Schema.Struct({ private: Schema.Boolean }))),
+      );
+
+      if (repo.private) return yield* notPublic(repository);
+      publicRepositories.set(repository.toLowerCase(), Date.now() + 600_000);
+    }
+
+    return yield* api(path, token);
+  });
+
+  // Only a confirmed-public repository is readable for unapproved owners. Approved
+  // owners fall back to a full read token after a public 404.
   const readApi = Effect.fn("GitHub.readApi")((repository: string, path: string) =>
-    api(path, "").pipe(
+    publicApi(repository, path).pipe(
       Effect.catchTag("OperationError", (error) =>
         Effect.gen(function* () {
           const status = Schema.decodeUnknownOption(Schema.Struct({ status: Schema.Number }))(

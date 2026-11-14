@@ -169,88 +169,146 @@ it("persists session PR creation without a transcript and retains it after failu
   ).toEqual(expected);
 });
 
-it.each(["no App", "unapproved owner", "empty policy"])(
-  "reads public files anonymously with %s",
+const publicFile = {
+  type: "file",
+  path: "src/main.ts",
+  sha,
+  encoding: "base64",
+  content: btoa("public code"),
+  size: 11,
+};
+
+const readPublic = async (target = "tellahq/opensession") =>
+  (
+    await execute({
+      action: "read_file",
+      repository: target,
+      path: "src/main.ts",
+      ref: "feature/read",
+    })
+  ).json();
+
+// Fake GitHub for public reads through the App. `visibility` maps repositories to
+// their privacy; `contents` overrides the contents response status.
+function publicGitHub(options: {
+  visibility?: Record<string, boolean>;
+  contents?: number;
+  installations?: { id: number }[];
+}) {
+  const minted: unknown[] = [];
+
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = new URL(String(input));
+    const auth = new Headers(init?.headers).get("Authorization");
+
+    if (url.pathname === "/app/installations")
+      return Response.json(options.installations ?? [{ id: 7 }]);
+
+    if (url.pathname === "/app/installations/7/access_tokens") {
+      minted.push(JSON.parse(String(init?.body)));
+
+      return Response.json({ token: "public-token", expires_at: "2099-01-01T00:00:00Z" });
+    }
+
+    const repo = /^\/repos\/([^/]+\/[^/]+)$/.exec(url.pathname)?.[1];
+
+    if (repo) {
+      expect(auth).toBe("Bearer public-token");
+      const isPrivate = options.visibility?.[repo];
+
+      return isPrivate === undefined
+        ? Response.json({ message: "Not Found" }, { status: 404 })
+        : Response.json({ private: isPrivate });
+    }
+
+    if (url.pathname.includes("/contents/")) {
+      if (options.contents) return Response.json({ message: "x" }, { status: options.contents });
+
+      return Response.json(publicFile);
+    }
+
+    throw new Error(`Unexpected ${url}`);
+  });
+
+  return { fetch, minted };
+}
+
+it("reads public files anonymously when no App is connected", async () => {
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    expect(String(input)).toBe(
+      "https://api.github.com/repos/tellahq/opensession/contents/src/main.ts?ref=feature%2Fread",
+    );
+    expect(new Headers(init?.headers).has("Authorization")).toBe(false);
+
+    return Response.json(publicFile);
+  });
+
+  expect(await readPublic()).toEqual({
+    ok: true,
+    result: { kind: "file", path: "src/main.ts", sha, content: "public code" },
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it.each(["unapproved owner", "empty policy"])(
+  "reads public files through a metadata-only App token with %s",
   async (mode) => {
-    if (mode !== "no App") await connect();
+    await connect();
 
     if (mode === "empty policy") await setAccounts([]);
+    const { fetch, minted } = publicGitHub({ visibility: { "tellahq/opensession": false } });
 
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      expect(String(input)).toBe(
-        "https://api.github.com/repos/tellahq/opensession/contents/src/main.ts?ref=feature%2Fread",
-      );
-      expect(new Headers(init?.headers).has("Authorization")).toBe(false);
-      expect(init?.method).toBe("GET");
-      expect(init?.redirect).toBe("manual");
-
-      return Response.json({
-        type: "file",
-        path: "src/main.ts",
-        sha,
-        encoding: "base64",
-        content: btoa("public code"),
-        size: 11,
-      });
-    });
-
-    expect(
-      await (
-        await execute({
-          action: "read_file",
-          repository: "tellahq/opensession",
-          path: "src/main.ts",
-          ref: "feature/read",
-        })
-      ).json(),
-    ).toEqual({
+    expect(await readPublic()).toEqual({
       ok: true,
       result: { kind: "file", path: "src/main.ts", sha, content: "public code" },
     });
+    expect(minted).toEqual([{ permissions: { metadata: "read" } }]);
+    const contents = fetch.mock.calls.find(([input]) => String(input).includes("/contents/"));
+
+    expect(new Headers(contents?.[1]?.headers).get("Authorization")).toBe("Bearer public-token");
+
+    // Token and visibility are cached: a second read is a single request.
+    fetch.mockClear();
+    expect(await readPublic()).toMatchObject({ ok: true });
     expect(fetch).toHaveBeenCalledTimes(1);
   },
 );
 
-it.each([403, 404, 429, 500])(
-  "does not send credentials to unapproved owners after anonymous HTTP %i",
+it("refuses private repositories for unapproved owners even when the App can see them", async () => {
+  await connect();
+  const { fetch } = publicGitHub({ visibility: { "tellahq/opensession": true } });
+
+  expect(await readPublic()).toMatchObject({ ok: false, message: "Provider returned HTTP 404" });
+  expect(fetch.mock.calls.some(([input]) => String(input).includes("/contents/"))).toBe(false);
+});
+
+it("falls back to anonymous reads when the App has no installations", async () => {
+  await connect();
+  const { fetch } = publicGitHub({ installations: [] });
+
+  expect(await readPublic()).toMatchObject({ ok: true });
+  const contents = fetch.mock.calls.find(([input]) => String(input).includes("/contents/"));
+
+  expect(new Headers(contents?.[1]?.headers).has("Authorization")).toBe(false);
+});
+
+it.each([403, 429, 500])(
+  "preserves public-read HTTP %i even for approved owners",
   async (status) => {
     await connect();
+    const { fetch } = publicGitHub({ visibility: { [repository]: false }, contents: status });
 
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
-      expect(new Headers(init?.headers).has("Authorization")).toBe(false);
-
-      return Response.json({ message: "Unavailable" }, { status });
+    expect(await readPublic(repository)).toMatchObject({
+      ok: false,
+      message: `Provider returned HTTP ${status}`,
     });
-
     expect(
-      await (
-        await execute({
-          action: "read_file",
-          repository: "tellahq/opensession",
-          path: "README.md",
-          ref: "main",
-        })
-      ).json(),
-    ).toMatchObject({ ok: false, message: `Provider returned HTTP ${status}` });
-    expect(fetch).toHaveBeenCalledTimes(1);
+      fetch.mock.calls.some(([input]) =>
+        String(input).includes(`/repos/${repository}/installation`),
+      ),
+    ).toBe(false);
   },
 );
-
-it.each([403, 429, 500])("preserves anonymous HTTP %i even for approved owners", async (status) => {
-  await connect();
-
-  const fetch = vi
-    .spyOn(globalThis, "fetch")
-    .mockImplementation(async () => Response.json({ message: "Unavailable" }, { status }));
-
-  expect(
-    await (
-      await execute({ action: "read_file", repository, path: "README.md", ref: "main" })
-    ).json(),
-  ).toMatchObject({ ok: false, message: `Provider returned HTTP ${status}` });
-  expect(fetch).toHaveBeenCalledTimes(1);
-  expect(new Headers(fetch.mock.calls[0][1]?.headers).has("Authorization")).toBe(false);
-});
 
 it("keeps the file size limit for anonymous public reads", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
@@ -645,12 +703,12 @@ it("mints repository-scoped tokens with a valid App signature and reads UTF-8 fi
     result: { kind: "file", path: "src/main.ts", sha, content: "export const answer = 42;" },
   });
   expect(await (await execute(operation)).json()).toEqual(result);
-  expect(fetch).toHaveBeenCalledTimes(6);
+  expect(fetch).toHaveBeenCalledTimes(7);
   fetch.mockImplementation(async () => Response.json({ message: "Not Found" }, { status: 404 }));
   expect(await (await execute({ ...operation, repository: "other/project" })).text()).toContain(
     "HTTP 404",
   );
-  expect(fetch).toHaveBeenCalledTimes(8);
+  expect(fetch).toHaveBeenCalledTimes(9);
 });
 
 it("creates only feature branches, preserves optimistic file writes, and opens but never merges PRs", async () => {
@@ -832,7 +890,7 @@ it("rejects expired installation tokens, bounds responses and removes credential
   expect(await (await execute(operation)).text()).toContain(
     "expired or invalid installation token",
   );
-  expect(fetch).toHaveBeenCalledTimes(3);
+  expect(fetch).toHaveBeenCalledTimes(4);
   mode = "large";
   expect(await (await execute(operation)).text()).toContain("exceeds 1 MiB");
   mode = "failure";
