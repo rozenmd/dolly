@@ -250,8 +250,8 @@ export function RepositoryPicker({
             )}
           </div>
           <p className="field-help">
-            Only repositories the GitHub App can access in allowed accounts appear here. Missing one?
-            Use Add repositories above, then refresh.
+            Only repositories the GitHub App can access in allowed accounts appear here. Missing
+            one? Use Add repositories above, then refresh.
           </p>
           {!manage && (
             <button type="button" className="ghost-button" onClick={() => setEnrolling(false)}>

@@ -88,6 +88,39 @@ Deploy the Worker to enable its `BROWSER` binding; no Alchemy changes are needed
 Browser Run usage is billable under Cloudflare's account limits. Local unit tests mock
 the browser service; deployed Browser Run connectivity requires a live smoke test.
 
+### Publish screenshots to GitHub PRs
+
+The `preview` screenshot result includes an `image` reference in its text metadata.
+When asked to attach PR evidence, Dolly can pass it to the `github` tool:
+
+```json
+{
+  "operation": {
+    "action": "upload_screenshot",
+    "repository": "owner/repo",
+    "number": 123,
+    "image": "r2://screenshots/png/<64-character hash from preview>",
+    "caption": "After — desktop 1280×800"
+  }
+}
+```
+
+This copies only the selected image to the separate **public** `dolly-pr-screenshots`
+R2 bucket and posts an embedded image in a PR discussion comment. Inspect screenshots
+for secrets/private data before publishing, including on private PRs: anyone with the
+image URL can view it. Ordinary conversation images and previews remain private.
+No Git commits, code-branch changes, or unsupported GitHub upload APIs are involved.
+
+Alchemy enables the bucket's managed `r2.dev` domain and a 30-day lifecycle deletion
+rule. Images are temporary evidence, not a permanent archive; R2 deletion is asynchronous
+and GitHub may cache images. The managed domain is rate-limited by Cloudflare.
+Run `pnpm access:plan`, then `pnpm access:deploy` to provision and export the public URL;
+deploy the main Worker separately to activate the binding and tool.
+
+The action returns `image_url`, `markdown`, and `comment_url`. If commenting fails after
+upload, `comment_url` is null and `comment_error` explains why; the image URL is still
+usable. Do not report that the PR was updated or blindly repeat an interrupted upload.
+
 ## Papercuts
 
 Inspired by [OpenSession's friction log](https://github.com/tellahq/opensession), Dolly keeps a cross-session log in the Agent Durable Object's `app_papercuts` SQLite table. Each occurrence records its conversation, active repository (when available), source, message, timestamp, and resolution timestamp. The table is created automatically without replacing existing storage; existing conversations gain the new tool on their next Agent initialization.
@@ -131,7 +164,7 @@ pnpm --dir ingress run deploy
 
 ### Require Cloudflare Access
 
-The first deployment refuses web and API requests until Access is configured. The Alchemy 2 stack in `infra/` manages Access and the private screenshot and dependency-cache R2 buckets independently of `cf deploy`, following Rat Stack's typed infrastructure and plan-before-deploy approach. Both buckets use the `weur` location hint (Western Europe, not a residency guarantee), disable public access and are retained on stack removal. It does not own the Workers, containers, DNS, or your account-wide Zero Trust settings. Provision the buckets with the stack before deploying a Worker that binds them; existing installations also need to run the plan and deployment below.
+The first deployment refuses web and API requests until Access is configured. The Alchemy 2 stack in `infra/` manages Access, private screenshot and dependency-cache R2 buckets, and a separate public PR-evidence bucket independently of `cf deploy`, following Rat Stack's typed infrastructure and plan-before-deploy approach. All buckets use the `weur` location hint (Western Europe, not a residency guarantee), expire objects after 30 days, and are retained on stack removal. Only the PR-evidence bucket enables public access. The stack does not own the Workers, containers, DNS, or your account-wide Zero Trust settings. Provision the buckets with the stack before deploying a Worker that binds them; existing installations also need to run the plan and deployment below.
 
 1. Enable Zero Trust in your Cloudflare account if needed, and note its existing team domain (`your-team.cloudflareaccess.com`, without `https://` or a path). Create or reuse an Access service token; the stack only needs its **token UUID**, not its client ID or secret.
 2. Configure an Alchemy authentication profile with `pnpm --dir infra exec alchemy profile create dolly`, then `pnpm --dir infra exec alchemy profile edit --profile dolly`. Select the same Cloudflare account as the Worker deployment and run `export ALCHEMY_PROFILE=dolly` for subsequent commands. The credentials need Access application/policy, identity-provider edit, and R2 storage edit permissions. Keep provider credentials in the profile, not Worker bindings or committed files.

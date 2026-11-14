@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import { ScreenshotReference } from "./images";
 
 const Name = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/));
 
@@ -92,6 +93,13 @@ export const GitHubRequest = Schema.Struct({
       body: Schema.String.check(Schema.isMaxLength(32_768)),
     }),
     Schema.Struct({
+      action: Schema.Literal("upload_screenshot"),
+      repository: Repository,
+      number: PullNumber,
+      image: ScreenshotReference,
+      caption: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1000)),
+    }),
+    Schema.Struct({
       action: Schema.Literal("read_pull_request"),
       repository: Repository,
       number: PullNumber,
@@ -157,6 +165,7 @@ export const GitHubResult = Schema.Union([
       "pull_request_checks",
       "review",
       "review_comment",
+      "screenshot",
     ]),
     data: Schema.Unknown,
   }),

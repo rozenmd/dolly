@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { GITHUB_APP_READ_PERMISSIONS } from "../src/github-permissions";
 import { GitHubRequest } from "../src/github-contracts";
 import { GitHub } from "../src/github";
+import { storeImages } from "../src/images";
 import * as Effect from "effect/Effect";
 import { headers, signIn } from "./session";
 
@@ -252,6 +253,10 @@ it("does not treat empty installation discovery as an access denial for a known 
 
 beforeEach(async () => {
   await reset();
+  const published = await env.PR_SCREENSHOTS.list();
+
+  if (published.objects.length)
+    await env.PR_SCREENSHOTS.delete(published.objects.map((object) => object.key));
   await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.delete("github:connected");
@@ -375,7 +380,7 @@ it("resolves enrolled short names case-insensitively and asks instead of guessin
     const resolve = (name: string) =>
       Effect.runPromise(
         Effect.flatMap(GitHub, (github) => github.resolveRepository(name)).pipe(
-          Effect.provide(GitHub.layer(state.storage)),
+          Effect.provide(GitHub.layer(state.storage, env)),
           Effect.catchTag("OperationError", (error) => Effect.succeed(error.message)),
         ),
       );
@@ -1466,4 +1471,183 @@ it("posts inline reviews only against the current head and diff, and never appro
     expect(
       (await post("/api/integrations/github/execute", { operation: { ...review, event } })).ok,
     ).toBe(false);
+});
+
+it("publishes selected screenshots to public R2 and embeds them in a PR comment", async () => {
+  await connect();
+  const image = { mimeType: "image/png" as const, data: "iVBORw0KGgo=" };
+  const [stored] = await storeImages(env.SCREENSHOTS, [image]);
+
+  const [privateImage] = await storeImages(env.SCREENSHOTS, [
+    { mimeType: "image/png", data: btoa("not selected for publication") },
+  ]);
+
+  const writes: Array<{ path: string; body: Record<string, string> }> = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const path = new URL(String(url)).pathname;
+
+    if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (path.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+    if (path.endsWith("/pulls/49")) return Response.json(pullDetails);
+    const body = JSON.parse(String(init?.body));
+    writes.push({ path, body });
+
+    if (path.endsWith("/issues/49/comments"))
+      return Response.json({
+        id: 123,
+        user: null,
+        body: body.body,
+        html_url: "https://github.com/example/project/pull/49#issuecomment-123",
+      });
+    throw new Error(`Unexpected GitHub path ${path}`);
+  });
+
+  const response = await post("/api/integrations/github/execute", {
+    operation: {
+      action: "upload_screenshot",
+      repository,
+      number: 49,
+      image: stored.data,
+      caption: "After: desktop [1280×800]",
+    },
+  });
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    ok: true,
+    result: {
+      kind: "screenshot",
+      data: {
+        comment_url: "https://github.com/example/project/pull/49#issuecomment-123",
+        image_url: expect.stringMatching(/^https:\/\/public-test\.r2\.dev\/[a-f0-9-]+\.png$/),
+      },
+    },
+  });
+  expect(writes).toHaveLength(1);
+  expect(writes[0].body.body).toContain("After: desktop \\[1280×800\\]");
+  expect(writes[0].body.body).toContain("posted by Dolly");
+  expect(writes[0].body.body).toContain("expires after 30 days");
+  const published = await env.PR_SCREENSHOTS.list();
+  expect(published.objects).toHaveLength(1);
+  const object = await env.PR_SCREENSHOTS.get(published.objects[0].key);
+  expect(object?.httpMetadata?.contentType).toBe("image/png");
+  expect(btoa(String.fromCharCode(...new Uint8Array(await object!.arrayBuffer())))).toBe(
+    image.data,
+  );
+  expect(await env.SCREENSHOTS.get(stored.data.slice(5))).not.toBeNull();
+  expect(await env.SCREENSHOTS.get(privateImage.data.slice(5))).not.toBeNull();
+});
+
+it.each(["missing", "oversized", "closed", "denied", "comment failure"] as const)(
+  "handles screenshot publishing failure: %s",
+  async (scenario) => {
+    await connect();
+
+    if (scenario === "denied") await setAccounts([]);
+    const key = `screenshots/png/${"a".repeat(64)}`;
+
+    if (scenario !== "missing")
+      await env.SCREENSHOTS.put(
+        key,
+        scenario === "oversized" ? new Uint8Array(5 * 1024 * 1024 + 1) : "image bytes",
+      );
+    const comments: string[] = [];
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const path = new URL(String(url)).pathname;
+
+      if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+      if (path.endsWith("/access_tokens"))
+        return Response.json({
+          token: "private-installation-token",
+          expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        });
+
+      if (path.endsWith("/pulls/49"))
+        return Response.json({ ...pullDetails, state: scenario === "closed" ? "closed" : "open" });
+
+      if (path.endsWith("/issues/49/comments")) {
+        comments.push(String(init?.body));
+
+        return Response.json({ message: "Comment forbidden" }, { status: 403 });
+      }
+
+      throw new Error(`Unexpected GitHub path ${path}`);
+    });
+
+    const response = await post("/api/integrations/github/execute", {
+      operation: {
+        action: "upload_screenshot",
+        repository,
+        number: 49,
+        image: `r2://${key}`,
+        caption: "Before — phone",
+      },
+    });
+
+    const result = await response.json();
+
+    if (scenario === "comment failure") {
+      expect(result).toMatchObject({
+        ok: true,
+        result: {
+          kind: "screenshot",
+          data: {
+            comment_url: null,
+            comment_error: expect.any(String),
+            image_url: expect.stringContaining("https://public-test.r2.dev/"),
+            markdown: expect.stringContaining("Before — phone"),
+          },
+        },
+      });
+      expect(comments).toHaveLength(1);
+      expect((await env.PR_SCREENSHOTS.list()).objects).toHaveLength(1);
+    } else {
+      const codes = {
+        missing: "screenshot_missing",
+        oversized: "screenshot_size",
+        closed: "pull_request_closed",
+        denied: "provider_error",
+      };
+
+      expect(result).toMatchObject({ ok: false, code: codes[scenario] });
+      expect(comments).toHaveLength(0);
+      expect((await env.PR_SCREENSHOTS.list()).objects).toHaveLength(0);
+
+      if (scenario === "denied") expect(fetch).not.toHaveBeenCalled();
+    }
+  },
+);
+
+it("rejects non-screenshot references before publishing", async () => {
+  await connect();
+  const fetch = vi.spyOn(globalThis, "fetch");
+
+  for (const image of [
+    "https://example.com/image.png",
+    "r2://other/private",
+    "r2://screenshots/png/../secret",
+  ])
+    expect(
+      (
+        await post("/api/integrations/github/execute", {
+          operation: {
+            action: "upload_screenshot",
+            repository,
+            number: 49,
+            image,
+            caption: "After",
+          },
+        })
+      ).status,
+    ).toBe(400);
+  expect(fetch).not.toHaveBeenCalled();
+  expect((await env.PR_SCREENSHOTS.list()).objects).toHaveLength(0);
 });
