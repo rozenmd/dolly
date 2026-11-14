@@ -72,7 +72,9 @@ export function WorkspaceApp() {
         repository: item.repository,
         updatedAt: item.updatedAt,
         archived: item.archived,
-        running: item.id === selected && running,
+        // The open session streams live state; others rely on the polled list.
+        running: item.id === selected && snapshot ? running : Boolean(item.running),
+        pullRequest: item.pullRequest,
       }))
     : [];
 
@@ -202,7 +204,7 @@ export function WorkspaceApp() {
       }
     };
 
-    const timer = window.setInterval(() => void refresh(), 30_000);
+    const timer = window.setInterval(() => void refresh(), 15_000);
     window.addEventListener("focus", refresh);
 
     return () => {

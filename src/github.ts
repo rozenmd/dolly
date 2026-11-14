@@ -69,6 +69,13 @@ const FileResponse = Schema.Struct({
 const CommitResponse = Schema.Struct({ commit: Schema.Struct({ sha: Sha }) });
 const PullResponse = Schema.Struct({ number: Schema.Number, html_url: Schema.String });
 
+const PullStateResponse = Schema.Struct({
+  state: Schema.String,
+  draft: Schema.optional(Schema.Boolean),
+  merged: Schema.optional(Schema.Boolean),
+  merged_at: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
 function base64url(bytes: Uint8Array) {
   return btoa(String.fromCharCode(...bytes))
     .replace(/=/g, "")
@@ -895,9 +902,28 @@ function makeGitHub(storage: DurableObjectStorage) {
     return { token, defaultBranch: info.default_branch };
   });
 
+  const pullRequestState = Effect.fn("GitHub.pullRequestState")(function* (
+    repository: string,
+    number: number,
+  ) {
+    const connected = yield* read();
+    const token = yield* tokenFor(connected, repository, "read");
+
+    const pull = yield* api(`/repos/${repository}/pulls/${number}`, token).pipe(
+      Effect.flatMap(decode(PullStateResponse)),
+    );
+
+    if (pull.merged || pull.merged_at) return "merged" as const;
+
+    if (pull.state === "closed") return "closed" as const;
+
+    return pull.draft ? ("draft" as const) : ("open" as const);
+  });
+
   return {
     status,
     clientId,
+    pullRequestState,
     configureIngress,
     accounts,
     configureAccounts,
