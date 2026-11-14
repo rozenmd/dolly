@@ -295,8 +295,12 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
   await page.screenshot({ path: test.info().outputPath("claude-connection-mobile.png") });
   await connect.getByRole("button", { name: "Continue with Claude" }).click();
   const composer = page.getByRole("dialog", { name: "New session" });
-  await expect(composer.getByLabel("Model", { exact: true })).toHaveValue("claude-sonnet-5-5");
-  await composer.getByLabel("Model", { exact: true }).selectOption("claude-haiku-5-5");
+  await expect(composer.getByRole("button", { name: "Model", exact: true })).toHaveAttribute(
+    "data-value",
+    "claude-sonnet-5-5",
+  );
+  await composer.getByRole("button", { name: "Model", exact: true }).click();
+  await composer.getByRole("option", { name: "Claude Haiku 5.5" }).click();
   await composer.getByLabel("Task", { exact: true }).fill("Say hello");
   await composer.getByRole("button", { name: "Create", exact: true }).click();
   await expect(page.getByRole("article", { name: "assistant message" })).toContainText(
@@ -507,8 +511,14 @@ for (const repository of ["octocat/project", ""]) {
 
     await navigation.getByRole("button", { name: "New session" }).click();
     const dialog = page.getByRole("dialog", { name: "New session" });
-    await expect(dialog.getByLabel("Repository", { exact: true })).toHaveValue(repository);
-    await expect(dialog.getByLabel("Model", { exact: true })).toHaveValue(source.model);
+    await expect(dialog.getByLabel("Repository", { exact: true })).toHaveAttribute(
+      "data-value",
+      repository,
+    );
+    await expect(dialog.getByLabel("Model", { exact: true })).toHaveAttribute(
+      "data-value",
+      source.model,
+    );
     await expect(dialog.getByLabel("Workspace name")).toHaveCount(0);
     await expect(dialog.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
     expect(creates).toHaveLength(0);
@@ -582,11 +592,15 @@ test("enrolls an App repository and anchors a new workspace to its default branc
   await page.goto("/", { waitUntil: "networkidle" });
   const dialog = page.getByRole("dialog", { name: "New session" });
   await dialog.getByLabel("Task").fill("Cross-repo task");
-  await dialog.getByLabel("Repository", { exact: true }).selectOption("__enroll__");
+  await dialog.getByRole("button", { name: "Repository", exact: true }).click();
+  await dialog.getByRole("button", { name: "New repository…" }).click();
   await dialog.getByLabel("Find a repository").fill("project");
   await expect(dialog).toContainText("Private · develop · Our project");
   await dialog.getByRole("button", { name: "Enroll", exact: true }).click();
-  await expect(dialog.getByLabel("Repository", { exact: true })).toHaveValue("octocat/project");
+  await expect(dialog.getByRole("button", { name: "Repository", exact: true })).toHaveAttribute(
+    "data-value",
+    "octocat/project",
+  );
   await dialog.getByRole("button", { name: "Create", exact: true }).click();
   await expect(dialog).not.toBeVisible();
   expect(created).toEqual({ workspace: { repository: "octocat/project", ref: "develop" } });

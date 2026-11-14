@@ -26,11 +26,14 @@ export function Modal({
   children,
   onClose,
   className = "",
+  bare = false,
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
   className?: string;
+  /** Hide the visible header; the title stays available to assistive tech. */
+  bare?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useLayoutEffect(() => {
@@ -50,13 +53,23 @@ export function Modal({
       className={`modal ${className}`}
       aria-labelledby="modal-title"
       onCancel={onClose}
+      onClick={(event) => {
+        // Clicks on the backdrop target the dialog element itself.
+        if (bare && event.target === event.currentTarget) onClose();
+      }}
     >
-      <header>
-        <h2 id="modal-title">{title}</h2>
-        <IconButton label="Close dialog" onClick={onClose}>
-          <XMarkIcon />
-        </IconButton>
-      </header>
+      {bare ? (
+        <h2 id="modal-title" className="sr-only">
+          {title}
+        </h2>
+      ) : (
+        <header>
+          <h2 id="modal-title">{title}</h2>
+          <IconButton label="Close dialog" onClick={onClose}>
+            <XMarkIcon />
+          </IconButton>
+        </header>
+      )}
       {children}
     </dialog>
   );
@@ -74,11 +87,29 @@ export function Select(props: ComponentProps<"select">) {
   return <select {...props} className={`input ${props.className ?? ""}`} />;
 }
 
+const BADGE_COLOURS = [
+  "#3b82f6",
+  "#e0663a",
+  "#c04fd6",
+  "#8b5cf6",
+  "#5d9b2f",
+  "#4f6ef7",
+  "#d4a017",
+  "#14a3a3",
+  "#e0457b",
+];
+
 export function RepoBadge({ repository }: { repository: string }) {
   const name = repository.split("/").at(-1) ?? "";
 
+  // Stable per-repository colour so repos are recognisable at a glance.
+  let hash = 0;
+
+  for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) | 0;
+  const background = BADGE_COLOURS[Math.abs(hash) % BADGE_COLOURS.length];
+
   return (
-    <span className="repo-badge" aria-hidden="true">
+    <span className="repo-badge" aria-hidden="true" style={{ background }}>
       {name.charAt(0).toUpperCase() || "·"}
     </span>
   );

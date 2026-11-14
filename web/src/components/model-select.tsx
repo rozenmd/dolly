@@ -1,21 +1,49 @@
-import type { ComponentProps } from "react";
-import { Select } from "./ui";
+import { BoltIcon } from "@heroicons/react/16/solid";
+import { Picker, type PickerOption } from "./picker";
 
-export function ModelSelect(props: ComponentProps<"select">) {
+const CHATGPT = "ChatGPT subscription";
+const CLAUDE = "Claude subscription (experimental)";
+
+export const MODELS: PickerOption[] = [
+  { value: "", label: "Server default" },
+  { value: "gpt-6-sol", label: "GPT-6 Sol", group: CHATGPT },
+  { value: "gpt-6-luna", label: "GPT-6 Luna", group: CHATGPT },
+  { value: "gpt-6.1-terra", label: "GPT-6.1 Terra", group: CHATGPT },
+  { value: "claude-haiku-5-5", label: "Claude Haiku 5.5", group: CLAUDE },
+  { value: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", group: CLAUDE },
+  { value: "claude-opus-5-5", label: "Claude Opus 5.5", group: CLAUDE },
+  { value: "claude-fable-5-2", label: "Claude Fable 5.2", group: CLAUDE },
+];
+
+export function ModelPicker({
+  id,
+  value,
+  disabled,
+  onChange,
+}: {
+  id?: string;
+  value: string;
+  disabled?: boolean;
+  onChange: (model: string) => void;
+}) {
+  const current = MODELS.find((model) => model.value === value);
+
   return (
-    <Select {...props}>
-      <option value="">Server default</option>
-      <optgroup label="ChatGPT subscription">
-        <option value="gpt-6-sol">GPT-6 Sol</option>
-        <option value="gpt-6-luna">GPT-6 Luna</option>
-        <option value="gpt-6.1-terra">GPT-6.1 Terra</option>
-      </optgroup>
-      <optgroup label="Claude subscription (experimental)">
-        <option value="claude-haiku-5-5">Claude Haiku 5.5</option>
-        <option value="claude-sonnet-5-5">Claude Sonnet 5.5</option>
-        <option value="claude-opus-5-5">Claude Opus 5.5</option>
-        <option value="claude-fable-5-2">Claude Fable 5.2</option>
-      </optgroup>
-    </Select>
+    <Picker
+      id={id}
+      label="Model"
+      className="model-picker"
+      align="end"
+      value={value}
+      options={MODELS}
+      disabled={disabled}
+      onChange={onChange}
+      trigger={
+        <>
+          <BoltIcon className="model-picker-bolt" aria-hidden="true" />
+          <span>{current?.label ?? value}</span>
+        </>
+      }
+    />
   );
 }
