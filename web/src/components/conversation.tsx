@@ -166,10 +166,12 @@ function failureReason(reason: string) {
 function useDisclosure(auto: boolean) {
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const open = userOpen ?? auto;
+
   return {
     open,
     onToggle: (event: SyntheticEvent<HTMLDetailsElement>) => {
       const next = event.currentTarget.open;
+
       if (next !== open) setUserOpen(next);
     },
   };
@@ -237,6 +239,7 @@ function StepGroup({ steps }: { steps: readonly Step[] }) {
 
 function StepDetails({ step }: { step: Step }) {
   const disclosure = useDisclosure(step.status === "running" || step.status === "error");
+
   return (
     <details className="step" {...disclosure}>
       <summary>

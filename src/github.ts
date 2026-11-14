@@ -69,6 +69,13 @@ const FileResponse = Schema.Struct({
   size: Schema.Number,
 });
 
+const TreeResponse = Schema.Struct({
+  truncated: Schema.Boolean,
+  tree: Schema.Array(Schema.Struct({ path: Schema.String, type: Schema.String })),
+});
+
+const TREE_ENTRIES_PER_PAGE = 1000;
+
 const CommitResponse = Schema.Struct({ commit: Schema.Struct({ sha: Sha }) });
 const PullResponse = Schema.Struct({ number: Schema.Number, html_url: Schema.String });
 
@@ -950,6 +957,36 @@ function makeGitHub(
       );
 
       return { ok: true, result: { kind: "file", path: file.path, sha: file.sha, content } };
+    }
+
+    if (op.action === "list_files") {
+      const page = op.page ?? 1;
+      const prefix = op.path === undefined ? "" : `${op.path}/`;
+
+      const tree = yield* readApi(
+        op.repository,
+        `/repos/${op.repository}/git/trees/${encodeURIComponent(op.ref)}?recursive=1`,
+      ).pipe(Effect.flatMap(decode(TreeResponse)));
+
+      const entries = tree.tree
+        .filter((entry) => entry.path.startsWith(prefix))
+        .map((entry) => (entry.type === "tree" ? `${entry.path}/` : entry.path));
+
+      const start = (page - 1) * TREE_ENTRIES_PER_PAGE;
+
+      return {
+        ok: true,
+        result: {
+          kind: "files",
+          data: {
+            page,
+            next_page: entries.length > start + TREE_ENTRIES_PER_PAGE ? page + 1 : null,
+            total: entries.length,
+            truncated_by_github: tree.truncated,
+            paths: entries.slice(start, start + TREE_ENTRIES_PER_PAGE),
+          },
+        },
+      };
     }
 
     if (op.action === "read_pull_request") {
