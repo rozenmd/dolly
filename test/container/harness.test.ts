@@ -11,6 +11,8 @@ it("runs the registered coding tools on another owner's repository, pushes a tes
   const remoteName = crypto.randomUUID();
   const remote = env.SANDBOX.getByName(remoteName);
 
+  expect(await remote.skills()).toEqual({ status: "unavailable" });
+
   const seeded = await remote.run(`set -eu
 mkdir -p remotes/another-owner
  git init --bare remotes/another-owner/project.git
@@ -21,9 +23,11 @@ mkdir -p remotes/another-owner
  git init -b main seed
  cd seed
  git config user.name Fixture
- git config user.email fixture@example.com
- printf 'export const answer = 1;\n' > answer.mjs
- git add . && git commit -m initial
+  git config user.email fixture@example.com
+  printf 'export const answer = 1;\n' > answer.mjs
+  mkdir -p .agents/skills/verify
+  printf '%s\\n' '---' 'name: verify' 'description: Fixture repository verification' '---' 'Fixture full skill instructions' > .agents/skills/verify/SKILL.md
+  git add . && git commit -m initial
  git push ../remotes/another-owner/project.git HEAD:main`);
 
   expect(seeded.exitCode).toBe(0);
@@ -63,6 +67,10 @@ mkdir -p remotes/another-owner
       input: { action: "checkout", repository: "another-owner/project", ref: "main" },
     },
     {
+      name: "read_file",
+      input: { path: ".agents/skills/verify/SKILL.md" },
+    },
+    {
       name: "shell",
       input: {
         command: `printf 'export const answer = 2;\n' > answer.mjs; printf "import { answer } from './answer.mjs'; if (answer !== 2) throw Error('wrong answer');\\n" > test.mjs; node --test test.mjs`,
@@ -90,6 +98,13 @@ mkdir -p remotes/another-owner
       return Response.json({ name: "typescript", version: "5.0.0" });
 
     if (url.hostname === "chatgpt.com") {
+      if (generation > 0) {
+        const request = JSON.parse(String(init?.body));
+        expect(request.instructions).toContain("Fixture repository verification");
+        expect(request.instructions).toContain(".agents/skills/verify/SKILL.md");
+        expect(request.instructions).not.toContain("Fixture full skill instructions");
+      }
+
       const call = calls[generation++];
 
       const item = call
@@ -264,6 +279,11 @@ mkdir -p remotes/another-owner
 
       for (const part of result.content)
         if (part.type === "text") {
+          if (part.text.startsWith("---")) {
+            expect(part.text).toContain("Fixture full skill instructions");
+            continue;
+          }
+
           const value = JSON.parse(part.text);
           expect(value.error).toBeUndefined();
 
@@ -286,6 +306,10 @@ mkdir -p remotes/another-owner
 
     await sandbox.prepare(config);
     await sandbox.readFile("/workspace/repo/answer.mjs");
+    expect(await sandbox.skills()).toMatchObject({
+      status: "ready",
+      inventory: expect.stringContaining("Fixture repository verification"),
+    });
     expect(await checkpoint()).toEqual(beforePrepare);
 
     const dirty = await sandbox.run(`set -eu

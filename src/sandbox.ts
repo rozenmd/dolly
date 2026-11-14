@@ -10,6 +10,7 @@ import {
   type WorkspaceConfig,
   type WorkspaceSnapshot,
   type WorkspaceSetup,
+  shellQuote,
 } from "./workspace";
 import { attempt, OperationError } from "./operations";
 import { exceptionDetails, redact } from "./diagnostics";
@@ -17,6 +18,7 @@ import type { Env } from "./env";
 import { PREVIEW_TTL_MS, PreviewPort } from "./preview";
 import * as Schema from "effect/Schema";
 import previewSupervisor from "../container/preview.py?raw";
+import skillsInventory from "../container/skills.py?raw";
 
 type RunningPreview = {
   token: string;
@@ -516,6 +518,33 @@ export class Sandbox extends DurableObject<Env> {
 
           return yield* readBounded(response.body, { limit: 65_536, overflow: "fail" });
         }).pipe(Effect.timeout("60 seconds")),
+      ),
+    );
+  }
+
+  /** Read only the ready active checkout; never start a container just to build a prompt. */
+  skills() {
+    if (!this.prepared || !this.ctx.container?.running)
+      return Promise.resolve({ status: "unavailable" as const });
+
+    return Effect.runPromise(
+      this.permit.withPermit(
+        Effect.gen({ self: this }, function* () {
+          const container = this.ctx.container;
+
+          if (!this.prepared || !container?.running) return { status: "unavailable" as const };
+
+          const result = yield* this.execute(
+            `python3 -I -c ${shellQuote(skillsInventory)} /workspace/repo`,
+            "/workspace/repo",
+            10,
+            container,
+          );
+
+          if (result.exitCode !== 0) return { status: "unavailable" as const };
+
+          return { status: "ready" as const, inventory: result.stdout };
+        }),
       ),
     );
   }
