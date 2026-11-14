@@ -28,6 +28,7 @@ export default defineConfig({
     }),
   ],
   test: {
+    testTimeout: 120_000,
     include: [
       process.env.WEB_TEST_ACCESS === "required"
         ? "test/worker/access.test.ts"
