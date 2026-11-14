@@ -6,7 +6,7 @@ import {
   evictDurableObject,
   abortAllDurableObjects,
 } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type * as Schema from "effect/Schema";
 import type { Device } from "../src/codex-login";
 import type { Env as WorkerEnv } from "../src/env";

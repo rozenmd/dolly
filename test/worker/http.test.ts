@@ -1,5 +1,5 @@
 import { SELF, reset } from "cloudflare:test";
-import { expect, it } from "vitest";
+import { expect, it } from "vite-plus/test";
 import { headers, signIn } from "../session";
 
 it("serves the rendered workspace at the Worker root and its real bundled assets", async () => {

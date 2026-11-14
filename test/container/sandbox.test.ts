@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { expect, it } from "vitest";
+import { expect, it } from "vite-plus/test";
 import { runInDurableObject } from "cloudflare:test";
 import * as Effect from "effect/Effect";
 import type { Env as WorkerEnv } from "../../src/env";

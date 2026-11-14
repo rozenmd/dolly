@@ -1,5 +1,5 @@
 import { SELF } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vite-plus/test";
 import { headers, signIn } from "./session";
 import { MAX_PROMPT_BYTES } from "../src/images";
 import { env } from "cloudflare:workers";

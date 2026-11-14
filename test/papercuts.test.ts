@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { configure, type ConversationId } from "@earendil-works/pi-durable";
 import { Papercuts, toolFailure } from "../src/papercuts";

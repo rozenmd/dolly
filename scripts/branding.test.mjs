@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 test("tracked source and documentation use the current product name", () => {
@@ -9,7 +9,7 @@ test("tracked source and documentation use the current product name", () => {
   const matches = [];
 
   for (const file of files) {
-    if (!file) continue;
+    if (!file || !existsSync(file)) continue;
 
     const contents = readFileSync(file, "utf8");
 

@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { env } from "cloudflare:workers";
 import { SELF, runInDurableObject } from "cloudflare:test";
-import { expect, it, vi } from "vitest";
+import { expect, it, vi } from "vite-plus/test";
 import { headers, signIn } from "../session";
 import { workspaceConfig } from "../../src/workspace";
 import * as Effect from "effect/Effect";

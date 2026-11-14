@@ -37,7 +37,9 @@ pnpm build   # deployment dry runs, including the frontend and sandbox image
 pnpm deploy  # publish the combined Worker and frontend
 ```
 
-The root Vite configuration uses the Cloudflare adapter to bundle the TanStack Start server, the Hono API, Durable Objects, and frontend assets into one Worker build. `pnpm build` and `pnpm deploy` include the UI; no separate frontend host or production proxy is needed. `pnpm dev:web` and `pnpm build:web` remain available for frontend-only development, with the development server on port 3000 proxying `/api` to the Worker on port 8787.
+The workspaces use Vite+ for development, builds, tests, linting, and formatting. Run the existing `pnpm` scripts (no global `vp` installation is needed); `pnpm exec vp toolchain` lists the bundled tool versions. The root `vite.config.ts` owns formatting and lint rules, including the custom anti-slop plugins, while the separate Vitest configs preserve the Worker and sandbox test environments.
+
+The root Vite+ configuration uses the Cloudflare adapter to bundle the TanStack Start server, the Hono API, Durable Objects, and frontend assets into one Worker build. `pnpm build` and `pnpm deploy` include the UI; no separate frontend host or production proxy is needed. `pnpm dev:web` and `pnpm build:web` remain available for frontend-only development, with the development server on port 3000 proxying `/api` to the Worker on port 8787.
 
 Protect the **entire hostname** with Cloudflare Access, preserving the Worker's JWT check. A browser's Access cookie supplies the JWT through Cloudflare; never put Access service credentials in a `VITE_*` variable or a client bundle. `ACCESS_LOCAL_DEV` must remain false in production. The HTTP/browser test build disables containers and uses local storage simulation; the production build and sandbox integration tests retain real containers.
 
@@ -372,9 +374,9 @@ Hono handles HTTP routes; Cloudflare Durable Objects host sessions. They run Eff
 
 `pnpm-workspace.yaml` keeps a 24-hour minimum release age, with exact-version exceptions for existing dependencies published more recently. It permits dependency install scripts only for esbuild and workerd. New dependencies with unreviewed install scripts fail installation until approved or explicitly blocked.
 
-`pnpm run check` runs oxfmt, Oxlint (warnings fail), and TypeScript, including in CI. Use `pnpm run format` to format files and `pnpm run lint:fix` for safe lint autofixes; run lint autofix before formatting.
+`pnpm run check` runs Vite+'s formatter and linter (warnings fail), and TypeScript, including in CI. Use `pnpm run format` to format files and `pnpm run lint:fix` for safe lint autofixes; run lint autofix before formatting.
 
-All generic and Effect rules from [anti-slop](https://github.com/dmmulroy/anti-slop) are enabled in `oxlint.config.ts`. The plugin is vendored in `tools/oxlint/anti-slop/`, with its source revision and licenses recorded there. Vendored rules, generated output and installed agent tooling are excluded from lint and formatting. Keep `oxlint` and `@oxlint/plugins` on the same exact version when upgrading.
+All generic and Effect rules from [anti-slop](https://github.com/dmmulroy/anti-slop) are enabled in `vite.config.ts`. The plugin is vendored in `tools/oxlint/anti-slop/`, with its source revision, local adaptations, and licenses recorded there. Vendored rules, generated output and installed agent tooling are excluded from lint and formatting. Plugin imports use `vite-plus/lint/plugins` to stay aligned with the bundled Oxlint version.
 
 ## Verification
 

@@ -46,7 +46,8 @@ process.exit(${exitCode});
       cwd: checkout,
       args: [
         "exec",
-        "vitest",
+        "vp",
+        "test",
         "run",
         "--config",
         "vitest.sandbox.config.ts",

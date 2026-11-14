@@ -1,5 +1,5 @@
 import { SELF } from "cloudflare:test";
-import { expect, it } from "vitest";
+import { expect, it } from "vite-plus/test";
 
 it("requires Cloudflare Access for the page, assets, and API even with a session cookie", async () => {
   for (const path of [

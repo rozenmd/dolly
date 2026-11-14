@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it } from "vite-plus/test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { SessionIndex } from "../src/coordination";
 import { ConversationWorkspace, workspaceConfig } from "../src/workspace";

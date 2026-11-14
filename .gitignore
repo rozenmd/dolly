@@ -12,3 +12,4 @@ web/playwright-report/
 .alchemy/
 /infra/access.generated.json
 !infra/.env.example
+.vitest/

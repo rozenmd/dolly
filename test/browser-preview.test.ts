@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { expect, it, vi } from "vitest";
+import { expect, it, vi } from "vite-plus/test";
 import { capturePreview, PreviewCdp, type CdpParams } from "../src/browser-preview";
 import { resolveImages } from "../src/images";
 
