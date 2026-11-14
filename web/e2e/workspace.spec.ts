@@ -222,7 +222,7 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
         connected = true;
       }
 
-      return route.fulfill({ json: { connected, experimental: true } });
+      return route.fulfill({ json: { connected } });
     }
 
     if (path === "/api/auth/anthropic/test") {

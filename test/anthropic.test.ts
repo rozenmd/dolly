@@ -75,12 +75,11 @@ it("protects Claude credentials, rejects API keys, and stores a wrapped setup to
     token: ` ${token.slice(0, 30)}\n${token.slice(30)} `,
   });
 
-  expect(await saved.json()).toEqual({ connected: true, experimental: true });
+  expect(await saved.json()).toEqual({ connected: true });
   expect(fetch).not.toHaveBeenCalled();
   await abortAllDurableObjects();
   expect(await (await call("/auth/anthropic")).json()).toEqual({
     connected: true,
-    experimental: true,
   });
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     expect(await state.storage.get("credential:anthropic")).toEqual({
