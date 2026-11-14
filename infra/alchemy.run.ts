@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { AccessConfig, applicationPolicies } from "./config.ts";
 import { screenshotsBucket, screenshotsExpiry } from "./screenshots.ts";
+import { dependencyCacheBucket, dependencyCacheExpiry } from "./dependency-cache.ts";
 
 export default Alchemy.Stack(
   "DollyAccess",
@@ -32,6 +33,11 @@ export default Alchemy.Stack(
       lifecycleRules: [screenshotsExpiry],
     }).pipe(retain());
 
+    const dependencyCache = yield* Cloudflare.R2.Bucket("DependencyCache", {
+      ...dependencyCacheBucket,
+      lifecycleRules: [dependencyCacheExpiry],
+    }).pipe(retain());
+
     const pin = yield* Cloudflare.Access.IdentityProvider("EmailPin", {
       type: "onetimepin",
     }).pipe(adopt(true), retain());
@@ -49,6 +55,7 @@ export default Alchemy.Stack(
 
     return {
       SCREENSHOTS_BUCKET: screenshots.bucketName,
+      DEPENDENCY_CACHE_BUCKET: dependencyCache.bucketName,
       ACCESS_AUD: application.aud,
       ACCESS_TEAM_DOMAIN: config.teamDomain,
       hostname: config.hostname,

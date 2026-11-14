@@ -3,9 +3,11 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from dependency_cache import eligible_key, publish, restore
 
 hook = Path(".agents/setup")
-if hook.is_file():
+custom_setup = hook.is_file()
+if custom_setup:
     subprocess.run(["./" + str(hook)] if os.access(hook, os.X_OK) else ["sh", str(hook)], check=True)
 
 manifest = Path("package.json")
@@ -22,4 +24,8 @@ if manifest.is_file():
         command = ["npm", "ci" if Path("package-lock.json").exists() else "install"]
     else:
         raise RuntimeError("Automatic dependency setup does not support " + manager)
-    subprocess.run(command, check=True)
+    key = None if custom_setup else eligible_key()
+    if key is None or not restore(key):
+        subprocess.run(command, check=True)
+        if key is not None:
+            publish(key)

@@ -4,6 +4,7 @@ import type { Sandbox } from "./sandbox";
 export interface Env {
   ASSETS: Fetcher;
   SCREENSHOTS: R2Bucket;
+  DEPENDENCY_CACHE: R2Bucket;
   BROWSER: BrowserRun;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;

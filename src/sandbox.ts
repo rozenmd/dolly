@@ -367,17 +367,52 @@ export class Sandbox extends DurableObject<Env> {
   }
 
   private installDependencies = Effect.fn("Sandbox.installDependencies")(function* (this: Sandbox) {
+    const started = Date.now();
+    const container = yield* this.container();
+
+    const workspace = yield* attempt("workspace.read", () =>
+      this.ctx.storage.get<WorkspaceConfig>("workspace"),
+    );
+
+    if (!workspace) return undefined;
+
+    const token = crypto.randomUUID();
+
+    const setupOutbound = this.loopback.WorkspaceOutbound({
+      props: { ...workspace, dependencyCacheToken: token },
+    });
+
+    const ordinaryOutbound = this.loopback.WorkspaceOutbound({ props: workspace });
+
+    yield* attempt("workspace.cache.enable", () =>
+      container.interceptAllOutboundHttp(setupOutbound),
+    );
+
     return yield* Effect.gen({ self: this }, function* () {
       const result = yield* this.execute(
-        "python3 /usr/local/lib/dolly-setup.py",
+        `DOLLY_DEPENDENCY_CACHE_TOKEN=${token} python3 /usr/local/lib/dolly-setup.py`,
         "/workspace/repo",
         900,
       );
 
+      yield* Effect.logInfo({
+        event: "workspace_dependencies_completed",
+        sandboxId: String(this.ctx.id),
+        elapsedMs: Date.now() - started,
+        exitCode: result.exitCode,
+      });
+
       return result.exitCode === 0
         ? undefined
         : redact(result.stderr || result.stdout || `Setup exited ${result.exitCode}`).slice(-2000);
-    }).pipe(Effect.catchCause((cause) => Effect.succeed(redact(Cause.pretty(cause)).slice(-2000))));
+    }).pipe(
+      Effect.ensuring(
+        attempt("workspace.cache.disable", () =>
+          container.interceptAllOutboundHttp(ordinaryOutbound),
+        ).pipe(Effect.orDie),
+      ),
+      Effect.catchCause((cause) => Effect.succeed(redact(Cause.pretty(cause)).slice(-2000))),
+    );
   });
 
   /** Persist intent before returning; tools join the same serialized prepare. */

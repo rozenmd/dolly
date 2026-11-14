@@ -120,7 +120,7 @@ pnpm --dir ingress run deploy
 
 ### Require Cloudflare Access
 
-The first deployment refuses web and API requests until Access is configured. The Alchemy 2 stack in `infra/` manages Access and the private screenshot R2 bucket independently of `cf deploy`, following Rat Stack's typed infrastructure and plan-before-deploy approach. The bucket uses the `weur` location hint (Western Europe, not a residency guarantee), disables public access and is retained on stack removal. It does not own the Workers, containers, DNS, or your account-wide Zero Trust settings. Provision the bucket with the stack before deploying a Worker that binds it; existing installations also need to run the plan and deployment below.
+The first deployment refuses web and API requests until Access is configured. The Alchemy 2 stack in `infra/` manages Access and the private screenshot and dependency-cache R2 buckets independently of `cf deploy`, following Rat Stack's typed infrastructure and plan-before-deploy approach. Both buckets use the `weur` location hint (Western Europe, not a residency guarantee), disable public access and are retained on stack removal. It does not own the Workers, containers, DNS, or your account-wide Zero Trust settings. Provision the buckets with the stack before deploying a Worker that binds them; existing installations also need to run the plan and deployment below.
 
 1. Enable Zero Trust in your Cloudflare account if needed, and note its existing team domain (`your-team.cloudflareaccess.com`, without `https://` or a path). Create or reuse an Access service token; the stack only needs its **token UUID**, not its client ID or secret.
 2. Configure an Alchemy authentication profile with `pnpm --dir infra exec alchemy profile create dolly`, then `pnpm --dir infra exec alchemy profile edit --profile dolly`. Select the same Cloudflare account as the Worker deployment and run `export ALCHEMY_PROFILE=dolly` for subsequent commands. The credentials need Access application/policy, identity-provider edit, and R2 storage edit permissions. Keep provider credentials in the profile, not Worker bindings or committed files.
@@ -241,6 +241,42 @@ Containers default to `standard-3` (2 vCPU, 8 GiB RAM, 16 GB disk) to give depen
 Creating a repository session schedules setup immediately in the background, so creating the conversation and submitting the first prompt do not wait on Git or dependencies. A persisted intent plus a Durable Object alarm recover interrupted scheduling. Concurrent repository tools join the same serialized setup, rather than cloning or installing twice. Setup runs `.agents/setup` when present, then installs root Node dependencies using the declared package manager or lockfile (pnpm, Yarn or npm). Each dependency setup attempt is bounded to 15 minutes. Failures become a visible `warning` in workspace/shell tool results and diagnostics; the checkout stays usable. A confirmed restart interrupts setup and kills its process group before replacing the container.
 
 This adapts Open Session's [sandbox-vs-host checkout policy and background setup](https://github.com/tellahq/opensession/blob/main/docs/worktrees.md), [remote-first fresh bases (#432)](https://github.com/tellahq/opensession/pull/432), and [bounded setup/process cleanup (#495)](https://github.com/tellahq/opensession/pull/495). Like Open Session's sandbox path, Dolly clones inside each isolated sandbox; host worktrees and a shared Git object cache are not needed across separate container filesystems.
+
+#### Dependency cache
+
+Eligible fresh pnpm workspaces restore `node_modules` from zstd-compressed tar
+archives in the private `dolly-dependency-cache` R2 bucket. A miss installs normally
+and publishes an immutable archive for later sessions. The existing Worker outbound
+broker streams transfers using an R2 binding: no S3 credentials, public bucket,
+presigned URLs or `s5cmd` configuration enter the sandbox. A short-lived
+setup-only capability gates cache access.
+
+The cache is scoped to the repository, selected ref and network-host policy, so
+pull-request refs cannot publish entries used by the default-ref cache. Keys include the
+lockfile, workspace manifests/configuration, patches, Node/platform/libc versions,
+installer environment and cache implementation. Source-only changes can reuse an
+entry. Initially this supports pinned pnpm versions with a root lockfile; custom
+`.agents/setup` hooks, repository install/prepare scripts, local file/link
+dependencies, pnpm hooks, injected workspaces, custom module-store layouts and
+existing `node_modules` skip caching. Patched dependency configurations
+conservatively include all tracked source inputs in the key. Other package managers
+still install normally.
+
+Cache transfers are bounded to 30 seconds and 512 MiB compressed. Extraction
+rejects paths outside dependency directories, unsafe links, special files and
+archives exceeding 4 GiB expanded or 200,000 entries. Missing, expired, corrupt or
+unavailable archives fall back to installation, never a workspace reset. Cache
+entries share the repository's dependency trust boundary; they are not independently
+verified build artifacts or backups. Only `node_modules` is archived; do not put
+credentials there.
+
+Alchemy manages the bucket in `infra/alchemy.run.ts`, with public access disabled,
+a Western Europe location hint and seven-day object expiry. Review `pnpm access:plan`
+before provisioning; the existing Access resources must remain unchanged. Provision
+the bucket before deploying the new Worker binding and sandbox image. Cache reuse
+does not change native snapshot recovery or remove the snapshot taken after setup.
+Worker logs include cache hit/miss/store events and dependency setup duration; a
+cache hit alone does not prove extraction succeeded.
 
 The broker permits HTTPS to `registry.npmjs.org` and `registry.yarnpkg.com` throughout the session, so initial setup and later npm/pnpm/Yarn installs can fetch packages. Other destinations still require configured hosts. Hooks and package lifecycle scripts run as the unprivileged sandbox user with no Worker credentials. Git-based dependencies, private registries, binaries on other CDNs and non-Node installers may require extra configured hosts or explicit agent setup; failures are reported, not retried with unrestricted Internet access.
 
