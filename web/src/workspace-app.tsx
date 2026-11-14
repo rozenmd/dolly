@@ -232,13 +232,12 @@ export function WorkspaceApp() {
         setStreamError("");
         setLoading(false);
 
-        const activity = turnsFromSnapshot(value).flatMap((turn) => [
-          turn.prompt?.at ?? 0,
-          turn.startedAt ?? 0,
-          turn.endedAt ?? 0,
-        ]);
+        // Only human prompts reorder the sidebar; agent activity would make it jump around.
+        const updatedAt = turnsFromSnapshot(value).reduce(
+          (latest, turn) => Math.max(latest, turn.prompt?.at ?? 0),
+          0,
+        );
 
-        const updatedAt = activity.reduce((latest, at) => Math.max(latest, at), 0);
         updateSessions((current) => {
           if (!current.some((item) => item.id === selected && updatedAt > item.updatedAt))
             return current;
