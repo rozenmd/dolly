@@ -41,9 +41,7 @@ export function claudeProvider() {
 export const anthropicStatus = (credentials: Credentials) =>
   credentials
     .get("anthropic")
-    .pipe(
-      Effect.map((credential) => ({ connected: Option.isSome(credential), experimental: true })),
-    );
+    .pipe(Effect.map((credential) => ({ connected: Option.isSome(credential) })));
 
 export const saveAnthropic = (credentials: Credentials, input: typeof AnthropicSetup.Type) =>
   credentials.locked(
@@ -58,7 +56,7 @@ export const saveAnthropic = (credentials: Credentials, input: typeof AnthropicS
         };
       yield* credentials.put("anthropic", { type: "api_key", key: token });
 
-      return { connected: true, experimental: true };
+      return { connected: true };
     }),
   );
 

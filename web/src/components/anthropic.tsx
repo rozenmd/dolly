@@ -20,9 +20,13 @@ const Probe = Schema.Struct({
 
 export function AnthropicConnection({
   onConnection,
+  variant = "panel",
 }: {
   onConnection: (connected: boolean) => void;
+  /** "row" renders a compact settings row matching the ChatGPT connection. */
+  variant?: "panel" | "row";
 }) {
+  const [expanded, setExpanded] = useState(false);
   const [connected, setConnected] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [token, setToken] = useState("");
@@ -73,15 +77,126 @@ export function AnthropicConnection({
       setConnected(true);
       setLoaded(true);
       setProbe(null);
+      setExpanded(false);
       notify.current(true);
     });
   }
 
+  function disconnect() {
+    if (!confirm("Disconnect Claude? Claude sessions will need a new setup token.")) return;
+
+    void run(async () => {
+      await request("/auth/anthropic", undefined, undefined, "DELETE");
+      setConnected(false);
+      setProbe(null);
+      notify.current(false);
+    });
+  }
+
+  function test() {
+    void run(async () => {
+      setProbe(
+        Schema.decodeUnknownSync(Schema.fromJsonString(Probe))(
+          await request("/auth/anthropic/test", {}),
+        ),
+      );
+    });
+  }
+
+  const tokenForm = (
+    <form onSubmit={save}>
+      <label htmlFor="claude-token">Claude setup token</label>
+      <Input
+        id="claude-token"
+        name="claude-token"
+        type="password"
+        autoComplete="off"
+        value={token}
+        onChange={(event) => setToken(event.target.value)}
+        required
+        disabled={pending}
+        placeholder="sk-ant-oat01-…"
+      />
+      <button type="submit" className="secondary-button" disabled={pending || !token.trim()}>
+        {connected ? "Replace token" : "Save token"}
+      </button>
+    </form>
+  );
+
+  const probeResult = probe && (
+    <div role={probe.ok ? "status" : "alert"} className={probe.ok ? "field-help" : "error-text"}>
+      <p>{probe.message}</p>
+      <p>
+        {probe.model} · {probe.durationMs} ms
+        {probe.upstream ? ` · HTTP ${probe.upstream.status} · ${probe.upstream.contentType}` : ""}
+      </p>
+      {probe.upstream?.requestId && <p>Request ID: {probe.upstream.requestId}</p>}
+      {probe.upstream?.rayId && <p>Ray ID: {probe.upstream.rayId}</p>}
+    </div>
+  );
+
+  const errorText = error && (
+    <p role="alert" className="error-text">
+      {error}
+    </p>
+  );
+
+  if (variant === "row")
+    return (
+      <>
+        <div className="connection-row" aria-label="Claude connection">
+          <span className={`status-dot ${connected ? "idle" : ""}`} />
+          <span className="connection-label">
+            Claude
+            <span className="muted">
+              {!loaded ? "Checking…" : connected ? "Connected" : "Not connected"}
+            </span>
+          </span>
+          {connected ? (
+            <>
+              <button type="button" className="secondary-button" disabled={pending} onClick={test}>
+                Test
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={pending}
+                onClick={disconnect}
+              >
+                Disconnect
+              </button>
+            </>
+          ) : (
+            loaded &&
+            !expanded && (
+              <button type="button" className="primary-button" onClick={() => setExpanded(true)}>
+                Connect
+              </button>
+            )
+          )}
+        </div>
+        {expanded && !connected && (
+          <div className="anthropic-connection">
+            <p className="field-help">
+              Run <code>claude setup-token</code> on your computer, then paste the token here. This
+              uses your Claude subscription, not a billed API key.
+            </p>
+            {tokenForm}
+            <div className="modal-actions">
+              <button type="button" className="ghost-button" onClick={() => setExpanded(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+        {probeResult}
+        {errorText}
+      </>
+    );
+
   return (
     <section className="anthropic-connection" aria-label="Claude connection">
-      <h3>
-        Claude subscription <span className="muted">Experimental</span>
-      </h3>
+      <h3>Claude subscription</h3>
       <p className="field-help">
         Run <code>claude setup-token</code> on your computer, then paste the token here. This uses
         your Claude subscription, not a billed API key. Setup tokens are stored only on the server
