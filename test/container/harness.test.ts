@@ -96,7 +96,17 @@ mkdir -p remotes/another-owner
     const url = new URL(input instanceof Request ? input.url : String(input));
 
     if (url.hostname === "registry.npmjs.org" || url.hostname === "registry.yarnpkg.com")
-      return Response.json({ name: "typescript", version: "5.0.0" });
+      if (url.pathname.startsWith("/dolly-fixture.git/")) {
+        const packet = (text: string) => (text.length + 4).toString(16).padStart(4, "0") + text;
+
+        return new Response(
+          packet("# service=git-upload-pack\n") +
+            "0000" +
+            packet(`${"a".repeat(40)} HEAD\0\n`) +
+            "0000",
+          { headers: { "Content-Type": "application/x-git-upload-pack-advertisement" } },
+        );
+      } else return Response.json({ name: "typescript", version: "5.0.0" });
 
     if (url.hostname === "chatgpt.com") {
       if (generation > 0) {
@@ -307,11 +317,25 @@ mkdir -p remotes/another-owner
         }
     }
 
-    const id = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
-      String(await state.storage.get(`session:${session.id}`)),
-    );
+    const id = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+      const id = String(await state.storage.get(`session:${session.id}`));
+      expect(await state.storage.get(`session-created-pr:${id}`)).toEqual({
+        repository: "another-owner/project",
+        number: 1,
+        url: "https://github.com/another-owner/project/pull/1",
+      });
+
+      return id;
+    });
 
     const sandbox = env.SANDBOX.getByName(id);
+
+    const httpsGit = await sandbox.run(
+      "git ls-remote https://registry.npmjs.org/dolly-fixture.git",
+    );
+
+    expect(httpsGit.exitCode, httpsGit.stderr).toBe(0);
+    expect(httpsGit.stdout).toContain(`${"a".repeat(40)}\tHEAD`);
 
     const config = workspaceConfig({ repository: "another-owner/project", ref: "main" }, id);
 

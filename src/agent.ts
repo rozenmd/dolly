@@ -205,11 +205,13 @@ export class Agent extends DurableObject<Env> {
       parameters: githubSchema,
       replay: "unsafe",
       executionMode: "sequential",
-      execute: (input: typeof GitHubRequest.Type) =>
+      execute: (input: typeof GitHubRequest.Type, api) =>
         Effect.runPromise(
           Schema.decodeUnknownEffect(GitHubRequest)(input).pipe(
             Effect.orDie,
-            Effect.flatMap((parsed) => Effect.tryPromise(() => this.githubExecute(parsed))),
+            Effect.flatMap((parsed) =>
+              Effect.tryPromise(() => this.githubForSession(api.conversationId, parsed)),
+            ),
             Effect.map((result) => ({
               output: [{ type: "text" as const, text: JSON.stringify(result) }],
             })),
@@ -764,6 +766,26 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
+  private async githubForSession(id: ConversationId, input: typeof GitHubRequest.Type) {
+    const reply = await this.githubExecute(input);
+
+    if (
+      input.operation.action === "open_pull_request" &&
+      reply.ok &&
+      reply.result.kind === "pull_request"
+    ) {
+      // Record before returning: workspace RPCs need not produce transcript entries,
+      // and a long conversation may outlive the historical transcript scan window.
+      await this.ctx.storage.put(`session-created-pr:${id}`, {
+        repository: input.operation.repository,
+        number: reply.result.number,
+        url: reply.result.url,
+      });
+    }
+
+    return reply;
+  }
+
   githubConfigureWebhook(input: typeof WebhookSetup.Type) {
     return this.githubRun(Effect.flatMap(GitHub, (github) => github.configureWebhook(input)));
   }
@@ -901,7 +923,7 @@ export class Agent extends DurableObject<Env> {
           ),
         );
 
-        return this.githubExecute({
+        return this.githubForSession(id, {
           operation: {
             action: "open_pull_request",
             repository: workspace.repository,

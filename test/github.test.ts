@@ -9,6 +9,8 @@ import { GitHub } from "../src/github";
 import { storeImages } from "../src/images";
 import * as Effect from "effect/Effect";
 import { headers, signIn } from "./session";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { SavedSession } from "../src/session-contracts";
 
 const repository = "example/project";
 const sha = "a".repeat(40);
@@ -95,6 +97,77 @@ async function connect() {
 async function execute(operation: typeof GitHubRequest.Type.operation) {
   return post("/api/integrations/github/execute", { operation });
 }
+
+it("persists session PR creation without a transcript and retains it after failure and restart", async () => {
+  await connect();
+  let fail = false;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const path = new URL(String(input)).pathname;
+
+    if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (path.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+
+    if (path.endsWith("/pulls"))
+      return fail
+        ? Response.json({ message: "Unavailable" }, { status: 503 })
+        : Response.json({ number: 8, html_url: "https://github.com/example/project/pull/8" });
+
+    if (path.endsWith("/pulls/8"))
+      return Response.json({ state: "open", draft: false, merged: false });
+
+    if (path === "/repos/example/project") return Response.json({ default_branch: "main" });
+    throw new Error(`Unexpected GitHub path ${path}`);
+  });
+
+  const id = await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    const conversation = await agent["harness"].createConversation(
+      { ownership: { kind: "ownerless" } },
+      BACKGROUND_CONTEXT,
+    );
+
+    const request = {
+      operation: {
+        action: "open_pull_request" as const,
+        repository,
+        branch: "dolly/fix",
+        base: "main",
+        title: "Fix",
+        body: "Details",
+      },
+    };
+
+    fail = true;
+    expect(await agent["githubForSession"](conversation.id, request)).toMatchObject({ ok: false });
+    expect(await state.storage.get(`session-created-pr:${conversation.id}`)).toBeUndefined();
+    fail = false;
+    expect(await agent["githubForSession"](conversation.id, request)).toMatchObject({ ok: true });
+    fail = true;
+    expect(await agent["githubForSession"](conversation.id, request)).toMatchObject({ ok: false });
+
+    return String(conversation.id);
+  });
+
+  const expected = {
+    repository,
+    number: 8,
+    url: "https://github.com/example/project/pull/8",
+    state: "open",
+  };
+
+  const sessions = () => env.AGENT.getByName("owner").sessions();
+  expect(
+    (await sessions()).find((session: SavedSession) => session.id === id)?.pullRequest,
+  ).toEqual(expected);
+  await abortAllDurableObjects();
+  expect(
+    (await sessions()).find((session: SavedSession) => session.id === id)?.pullRequest,
+  ).toEqual(expected);
+});
 
 it.each(["no App", "unapproved owner", "empty policy"])(
   "reads public files anonymously with %s",
