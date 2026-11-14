@@ -8,6 +8,17 @@ For repository changes, use `pnpm verify` for static-only checks and follow the
 [integration-first verification workflow](tools/verify/README.md). This guidance
 is for developing Dolly, not for workloads it runs.
 
+Dolly automatically inventories repository skills before model requests once the
+active checkout is ready. It searches `.claude/skills`, `.agents/skills`, then
+`.opencode/skills` (first name wins), including nested skill groups. Names,
+descriptions and paths reach the model; full `SKILL.md` instructions are read with
+`read_file` when relevant. The bounded inventory reports truncation and unreadable
+paths. An unprepared checkout reports unavailable, not an empty skill list.
+Skills come from the active checkout, not Dolly's deployed source tree or host
+account. Switching repositories refreshes the inventory; repository guidance does
+not grant permission for live operations. There is no skill slash-command menu or
+expansion yet.
+
 The `web/` workspace is a TanStack Start + React frontend with a dark, responsive workspace sidebar, searchable sessions, an activity feed, Markdown conversations, tool output, and a message composer.
 
 The app is served at the Worker's `/`, with the Hono endpoints under `/api/*` on the same origin. `/api/health` is available without credentials. Cloudflare Access protects the whole hostname. Behind Access, you sign in with GitHub. The current authentication implementation records the first GitHub account as an owner and refuses other accounts; this is an implementation limitation, not an intended single-user product constraint. Signing in sets an HttpOnly session cookie that lasts 30 days.

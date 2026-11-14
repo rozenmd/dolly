@@ -382,5 +382,16 @@ it("includes the selected repository in Claude's system prompt before any tool c
   expect(system).toContain("workspace-context");
   expect(system).toContain("workspace checkout");
   expect(system).toContain("not proof of GitHub access");
+  expect(system).toContain("repository-guidance");
+  expect(system).toContain("repository-skills");
+  expect(system).toContain("unavailable");
+  expect(system).toContain(".agents/skills");
+  expect(system).toContain(".claude/skills");
+  expect(system).toContain(".opencode/skills");
+  expect(system).toContain("SKILL.md");
+  expect(system).toContain("read_file");
+  expect(system).toContain("not the tool list");
+  expect(system).not.toContain("pnpm verify");
+  expect(system).not.toContain("90%");
   expect(system).not.toContain(token);
 });
