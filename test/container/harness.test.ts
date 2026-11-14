@@ -109,9 +109,16 @@ mkdir -p remotes/another-owner
 
         const request = JSON.parse(new TextDecoder().decode(bytes));
 
-        expect(request.instructions).toContain("Fixture repository verification");
-        expect(request.instructions).toContain(".agents/skills/verify/SKILL.md");
-        expect(request.instructions).not.toContain("Fixture full skill instructions");
+        const instructions = JSON.stringify([
+          request.instructions,
+          ...request.input.filter(
+            (item: { role?: string }) => item.role === "developer" || item.role === "system",
+          ),
+        ]);
+
+        expect(instructions).toContain("Fixture repository verification");
+        expect(instructions).toContain(".agents/skills/verify/SKILL.md");
+        expect(instructions).not.toContain("Fixture full skill instructions");
       }
 
       const call = calls[generation++];
