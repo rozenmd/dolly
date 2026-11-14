@@ -156,6 +156,20 @@ it("streams an accepted push unchanged across fragmented packets", async () => {
   expect(await new Response(checked).text()).toBe(text);
 });
 
+it("accepts shallow boundary announcements without relaxing session branch restrictions", async () => {
+  const shallow = packet(`shallow ${"c".repeat(40)}\n`);
+  const text = shallow + update(`refs/heads/${branch}`) + "0000PACKbinary-payload";
+  const checked = await checkedPush(new Blob([text]).stream(), branch);
+  expect(checked).not.toBeNull();
+  expect(await new Response(checked).text()).toBe(text);
+  expect(
+    await checkedPush(
+      new Blob([shallow + update("refs/heads/main") + "0000PACK"]).stream(),
+      branch,
+    ),
+  ).toBeNull();
+});
+
 it("refuses other branches, tags, deletes, multiple ref updates and malformed pushes, cancelling rejected bodies", async () => {
   for (const text of [
     update("refs/heads/main") + "0000PACK",
@@ -196,33 +210,32 @@ it("quotes shell values and keeps checkout refs out of shell syntax", () => {
     "42",
   );
 
-  expect(checkoutScript(config)).toContain("ref='main'\\''; touch /tmp/injected; '\\'''\n");
+  expect(checkoutScript(config)).toContain("'main'\\''; touch /tmp/injected; '\\'''");
   expect(config.networkHosts).toEqual([]);
 });
 
-it("records fixed checkout phases before potentially blocking operations", () => {
+it("uses only the ordinary local checkout helper, with separately quoted arguments", () => {
   const script = checkoutScript(workspaceConfig({ repository: "owner/repo" }, "42"));
 
-  for (const [phase, command] of [
-    ["resolve_ref", "advertisement=$(git ls-remote"],
-    ["artifactfs_mount", "  dolly-mount repo"],
-    ["exact_revision_checkout", "  git -C /workspace/checkout init"],
-    ["git_config", "git config user.name"],
-    ["git_checkout_branch", "dolly-branch"],
-    ["ready", "touch /workspace/ready"],
-  ]) {
-    expect(script.indexOf(`phase ${phase}\n`)).toBeGreaterThan(-1);
-    expect(script.indexOf(`phase ${phase}\n`)).toBeLessThan(script.indexOf(command));
-  }
+  expect(script).toBe(
+    "sh /usr/local/lib/dolly-checkout.sh 'http://github.workspace/owner/repo.git' 'HEAD' 'dolly/session-42'",
+  );
 });
 
-it("limits ArtifactFS diagnostics to read-only metadata and a bounded daemon log tail", () => {
-  expect(checkoutDiagnosticsScript).toContain("tail -c 12288 /workspace/artifact-fs.log");
+it("limits local workspace diagnostics to read-only metadata and no process arguments", () => {
   expect(checkoutDiagnosticsScript).toContain("ps -eo pid,ppid,stat,etime,comm");
-  expect(checkoutDiagnosticsScript).toContain(
-    "stat /workspace/artifact-fs/repos/repo/git/index.lock",
-  );
+  expect(checkoutDiagnosticsScript).toContain("stat /workspace/repo/.git/index.lock");
   expect(checkoutDiagnosticsScript).not.toMatch(/\brm\b|\bkill\b|\bprintenv\b|ps .*args/);
+});
+
+it("requires explicit acknowledgement for workspace restart but not diagnostics", () => {
+  const decode = Schema.decodeUnknownSync(WorkspaceRequest);
+  expect(decode({ action: "diagnostics" })).toEqual({ action: "diagnostics" });
+  expect(() => decode({ action: "restart" })).toThrow();
+  expect(() => decode({ action: "restart", discardUncheckpointed: false })).toThrow();
+  expect(decode({ action: "restart", discardUncheckpointed: true })).toMatchObject({
+    action: "restart",
+  });
 });
 
 it("keeps Open Session's public permission maps and narrows every mint to the App grant", () => {

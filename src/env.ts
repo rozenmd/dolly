@@ -3,7 +3,6 @@ import type { Sandbox } from "./sandbox";
 
 export interface Env {
   ASSETS: Fetcher;
-  WORKSPACES: Artifacts;
   SCREENSHOTS: R2Bucket;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;

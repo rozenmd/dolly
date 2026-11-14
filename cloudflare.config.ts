@@ -21,7 +21,6 @@ export default defineConfig({
     compatibilityFlags: ["nodejs_compat"],
     env: {
       ASSETS: bindings.assets(),
-      WORKSPACES: bindings.artifacts({ namespace: "dolly-workspaces" }),
       SCREENSHOTS: bindings.r2({ name: screenshotsBucket.name }),
       ACCESS_TEAM_DOMAIN: bindings.text(access.ACCESS_TEAM_DOMAIN),
       ACCESS_AUD: bindings.text(access.ACCESS_AUD),

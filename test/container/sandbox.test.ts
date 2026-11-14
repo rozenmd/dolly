@@ -3,6 +3,7 @@ import { expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import * as Effect from "effect/Effect";
 import type { Env as WorkerEnv } from "../../src/env";
+import { workspaceConfig } from "../../src/workspace";
 
 declare global {
   namespace Cloudflare {
@@ -27,6 +28,30 @@ it("executes commands and uses Sandbox 1.0 Files in isolated containers", async 
   });
   const second = env.SANDBOX.getByName(crypto.randomUUID());
   expect(await second.run("test ! -e /workspace/proof.txt")).toMatchObject({ exitCode: 0 });
+});
+
+it("fails closed on a missing native snapshot rather than cloning an empty workspace", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  const config = workspaceConfig({ repository: "owner/project" }, "snapshot-fixture");
+  const id = "missing-native-snapshot";
+  await runInDurableObject(sandbox, async (_, state) => {
+    await state.storage.put("workspace", config);
+    await state.storage.put("snapshot:checkpoint", { id });
+  });
+  let failure: unknown;
+
+  try {
+    await sandbox.prepare(config);
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toBeDefined();
+  expect(String(failure)).toContain(id);
+  expect(await sandbox.diagnostics()).toMatchObject({ running: false });
+  await runInDurableObject(sandbox, async (_, state) => {
+    expect(await state.storage.get("snapshot:checkpoint")).toEqual({ id });
+  });
 });
 
 it("timeout kills command descendants, reaps them, and leaves detached services running", async () => {

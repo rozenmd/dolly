@@ -15,11 +15,6 @@ export default defineConfig({
           env: {
             ...config.worker.env,
             ACCESS_LOCAL_DEV: { type: "text", value: "true" },
-            WORKSPACES: {
-              type: "artifacts",
-              namespace: "test-web-workspaces",
-              dev: { remote: false },
-            },
           },
           exports: {
             ...config.worker.exports,

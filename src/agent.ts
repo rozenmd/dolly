@@ -154,9 +154,11 @@ export class Agent extends DurableObject<Env> {
           rpc("sandbox.shell", async () => {
             const workspace = await this.prepareWorkspace(api.conversationId);
 
-            return this.env.SANDBOX.getByName(
+            const result = await this.env.SANDBOX.getByName(
               workspace?.sandboxId ?? String(api.conversationId),
             ).run(command);
+
+            return { ...result, workspaceSetup: workspace?.setup };
           }).pipe(
             Effect.map((result) => ({ output: [{ type: "text", text: JSON.stringify(result) }] })),
           ),
@@ -218,7 +220,7 @@ export class Agent extends DurableObject<Env> {
     const workspaceTool = {
       name: "workspace",
       description:
-        "Work across repositories in this conversation. Always supply action. checkout/attach require repository (optional ref), commit requires message, and open_pull_request requires title and body. When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or losing changes. Shell, read_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. Mutations are not automatically replayed; inspect state after interruption.",
+        "Work across repositories in this conversation. Always supply action. checkout/attach require repository (optional ref), commit requires message, and open_pull_request requires title and body. When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or losing changes. Shell, read_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. diagnostics works even when checkout fails. restart also bypasses checkout, discards uncheckpointed work and restores the last acknowledged checkpoint on the next tool: use only after explicit user confirmation and supply discardUncheckpointed=true. Mutations are not automatically replayed; inspect state after interruption.",
       parameters: workspaceSchema,
       replay: "unsafe",
       executionMode: "sequential",
@@ -711,12 +713,31 @@ export class Agent extends DurableObject<Env> {
     const active = activeWorkspace(state, String(id));
 
     if (!active) return null;
-    await this.env.SANDBOX.getByName(active.sandboxId).prepare(active.config);
 
-    return { ...active.config, sandboxId: active.sandboxId };
+    const prepared = await Effect.runPromise(
+      rpc("workspace.prepare", () =>
+        this.env.SANDBOX.getByName(active.sandboxId).prepare(active.config),
+      ),
+    );
+
+    return { ...active.config, sandboxId: active.sandboxId, setup: prepared.setup };
   }
 
   private async runWorkspace(id: ConversationId, input: typeof WorkspaceRequest.Type) {
+    if (input.action === "diagnostics" || input.action === "restart") {
+      const state = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
+      const active = activeWorkspace(state, String(id));
+      const sandbox = this.env.SANDBOX.getByName(active?.sandboxId ?? String(id));
+
+      if (input.action === "diagnostics") return sandbox.diagnostics();
+      await sandbox.restart();
+
+      return {
+        restarted: true,
+        recovery: "The next tool restores the last acknowledged checkpoint",
+      };
+    }
+
     if (input.action === "repositories") {
       const state = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
       const enrolled = await this.githubRepositories(false);
@@ -966,6 +987,25 @@ export class Agent extends DurableObject<Env> {
         yield* attempt("session.write", () =>
           this.ctx.storage.put(`session:${id}`, conversation.id),
         );
+
+        if (workspace)
+          this.ctx.waitUntil(
+            Effect.runPromise(
+              rpc("workspace.prewarm", () =>
+                this.env.SANDBOX.getByName(String(conversation.id)).warm(
+                  workspaceConfig(workspace, String(conversation.id)),
+                ),
+              ).pipe(
+                Effect.asVoid,
+                Effect.catch((error) =>
+                  Effect.logWarning({
+                    event: "workspace_prewarm_failed",
+                    error: exceptionDetails(error),
+                  }),
+                ),
+              ),
+            ),
+          );
 
         return { id, model: modelId };
       }),

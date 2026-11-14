@@ -48,9 +48,11 @@ signal.signal(signal.SIGTERM, terminate)
 pid = os.fork()
 if pid == 0:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    (root / 'child').write_text(str(os.getpid()))
+    (root / 'child.tmp').write_text(str(os.getpid()))
+    (root / 'child.tmp').replace(root / 'child')
 else:
-    (root / 'parent').write_text(str(os.getpid()))
+    (root / 'parent.tmp').write_text(str(os.getpid()))
+    (root / 'parent.tmp').replace(root / 'parent')
 while True:
     time.sleep(0.1)
 """)
