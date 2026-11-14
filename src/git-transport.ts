@@ -1,8 +1,13 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env";
 import type { WorkspaceConfig } from "./workspace";
+import { dependencyCache } from "./dependency-cache";
 
-const packageRegistries = new Set(["registry.npmjs.org", "registry.yarnpkg.com"]);
+const packageRegistries = new Set([
+  "registry.npmjs.org",
+  "registry.yarnpkg.com",
+  "repo.yarnpkg.com",
+]);
 
 /** The first receive-pack command must update exactly the session branch, never delete it. */
 export async function checkedPush(body: ReadableStream<Uint8Array> | null, branch: string) {
@@ -102,9 +107,20 @@ export async function checkedPush(body: ReadableStream<Uint8Array> | null, branc
 }
 
 /** Only a Sandbox can mint this per-conversation capability through ctx.exports. */
-export class WorkspaceOutbound extends WorkerEntrypoint<Env, WorkspaceConfig> {
+export class WorkspaceOutbound extends WorkerEntrypoint<
+  Env,
+  WorkspaceConfig & { dependencyCacheToken?: string }
+> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.hostname === "dependencies.workspace")
+      return dependencyCache(
+        request,
+        this.env.DEPENDENCY_CACHE,
+        this.ctx.props,
+        this.ctx.props.dependencyCacheToken,
+      );
 
     if (url.hostname === "github.workspace" && url.protocol === "http:")
       return this.env.AGENT.getByName("owner").gitTransport(request, this.ctx.props);

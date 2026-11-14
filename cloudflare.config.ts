@@ -1,6 +1,7 @@
 import { bindings, defineConfig, defineContainer, exports } from "cf/config";
 import { readAccessSettings } from "./scripts/access-settings.ts";
 import { screenshotsBucket } from "./infra/screenshots.ts";
+import { dependencyCacheBucket } from "./infra/dependency-cache.ts";
 
 const workerName = "dolly";
 const access = readAccessSettings();
@@ -22,6 +23,7 @@ export default defineConfig({
     env: {
       ASSETS: bindings.assets(),
       SCREENSHOTS: bindings.r2({ name: screenshotsBucket.name }),
+      DEPENDENCY_CACHE: bindings.r2({ name: dependencyCacheBucket.name }),
       BROWSER: bindings.browser(),
       ACCESS_TEAM_DOMAIN: bindings.text(access.ACCESS_TEAM_DOMAIN),
       ACCESS_AUD: bindings.text(access.ACCESS_AUD),
