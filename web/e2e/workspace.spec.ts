@@ -317,6 +317,8 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
   await composer.getByRole("button", { name: "Model", exact: true }).click();
   await composer.getByRole("option", { name: "Claude Haiku 5.5" }).click();
   await composer.getByLabel("Task", { exact: true }).fill("Say hello");
+  expect(await composer.evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth)).toBe(true);
+  await expect(composer.getByRole("button", { name: "Create", exact: true })).toBeInViewport();
   await composer.getByRole("button", { name: "Create", exact: true }).click();
   await expect(page.getByRole("article", { name: "assistant message" })).toContainText(
     "Hello from Claude",
@@ -842,7 +844,8 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
     return route.fulfill({ json: { state: "connected" } });
   });
   await page.goto("/", { waitUntil: "networkidle" });
-  await page.getByRole("dialog").getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("dialog", { name: "New session" }).press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("button", { name: "Settings" }).click();
   // Settings is a page, and each section has its own URL.
   await expect(page).toHaveURL(/\/settings\/account$/);
@@ -889,7 +892,8 @@ test("mobile navigation and 320px layout", async ({ page }) => {
   await signedInWorkspace(page);
   await page.setViewportSize({ width: 320, height: 740 });
   await page.goto("/", { waitUntil: "networkidle" });
-  await page.getByRole("dialog").getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("dialog", { name: "New session" }).press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByRole("complementary", { name: "Workspace navigation" })).not.toBeVisible();
   await page.getByRole("button", { name: "Open navigation" }).click();
   await expect(page.getByRole("complementary", { name: "Workspace navigation" })).toBeVisible();

@@ -4,7 +4,7 @@ import { authorizeAccess } from "./access";
 import start from "../web/server";
 import type { Env } from "./env";
 
-export { Agent, Sandbox, GitHubIngress, WorkspaceOutbound } from "./index";
+export { Agent, Sandbox, GitHubIngress, WorkspaceOutbound, PreviewOutbound } from "./index";
 
 export default {
   async fetch(request, env, ctx) {

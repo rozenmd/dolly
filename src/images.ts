@@ -51,7 +51,11 @@ export async function resolveImages(
 ): Promise<Message[]> {
   return Promise.all(
     messages.map(async (message) => {
-      if (message.role !== "user" || Schema.is(Schema.String)(message.content)) return message;
+      if (
+        (message.role !== "user" && message.role !== "toolResult") ||
+        Schema.is(Schema.String)(message.content)
+      )
+        return message;
 
       const content = await Promise.all(
         message.content.map(async (block) => {

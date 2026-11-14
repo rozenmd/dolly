@@ -41,6 +41,36 @@ The root Vite configuration uses the Cloudflare adapter to bundle the TanStack S
 
 Protect the **entire hostname** with Cloudflare Access, preserving the Worker's JWT check. A browser's Access cookie supplies the JWT through Cloudflare; never put Access service credentials in a `VITE_*` variable or a client bundle. `ACCESS_LOCAL_DEV` must remain false in production. The HTTP/browser test build disables containers and uses local storage simulation; the production build and sandbox integration tests retain real containers.
 
+## Private browser previews
+
+Ask Dolly to preview an app, take a screenshot, or verify a page in a browser. The opt-in
+`preview` tool runs a foreground dev-server command in the active session/repository's
+sandbox, then uses Cloudflare Browser Run to capture it:
+
+- `{"action":"start","command":"pnpm dev --host 0.0.0.0","port":3000}`
+- `{"action":"screenshot","path":"/","width":1280,"height":800,"waitFor":"main"}`
+- `{"action":"status"}` — readiness and the last 32 KiB of server logs.
+- `{"action":"stop"}` — revoke browser access and stop the server, preserving workspace files.
+
+There is no tunnel, public preview URL, DNS record, or container credential. Browser Run's
+binding API routes an ephemeral HTTP `.test` hostname through a scoped `PreviewOutbound`
+Worker entrypoint to the active sandbox's port. External browser requests are denied except
+for the workspace's configured network hosts; redirects do not grant additional access.
+The main application is never served on the preview origin, and application credentials
+are stripped before forwarding. The Browser Run session closes after each capture.
+
+Previews expire after 15 minutes. Their capability and process handle are intentionally
+in-memory: after a Durable Object or container restart, start a new preview. The container
+supervisor enforces its own deadline even if the Durable Object disappears, and bounds
+logs on disk. Container inactivity can stop a preview sooner. Failed readiness stops the
+server; `status` can still show its logs. Commands must listen on `0.0.0.0` and stay in
+the foreground. Screenshots use the existing private R2 store and 30-day retention,
+appear in tool output, and are hydrated transiently for model vision.
+
+Deploy the Worker to enable its `BROWSER` binding; no Alchemy changes are needed.
+Browser Run usage is billable under Cloudflare's account limits. Local unit tests mock
+the browser service; deployed Browser Run connectivity requires a live smoke test.
+
 ## Papercuts
 
 Inspired by [OpenSession's friction log](https://github.com/tellahq/opensession), Dolly keeps a cross-session log in the Agent Durable Object's `app_papercuts` SQLite table. Each occurrence records its conversation, active repository (when available), source, message, timestamp, and resolution timestamp. The table is created automatically without replacing existing storage; existing conversations gain the new tool on their next Agent initialization.

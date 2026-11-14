@@ -22,6 +22,8 @@ export { Agent } from "./agent";
 
 export { Sandbox } from "./sandbox";
 
+export { PreviewOutbound } from "./preview";
+
 class InvalidInput extends Schema.TaggedError<InvalidInput>()("InvalidInput", {
   message: Schema.String,
 }) {}
@@ -132,6 +134,25 @@ const SESSION_COOKIE = "__Host-dolly-session";
 const DEVICE_COOKIE = "__Host-dolly-github-device";
 
 const cookie = { path: "/", secure: true, httpOnly: true, sameSite: "Lax" } as const;
+
+// Private image bytes use the same Access + GitHub-owner authentication as transcripts.
+app.get("/api/screenshots/:format/:hash", async (c) => {
+  const { format, hash } = c.req.param();
+
+  if (!/^(png|jpeg|gif|webp)$/.test(format) || !/^[a-f0-9]{64}$/.test(hash)) return c.notFound();
+  const object = await c.env.SCREENSHOTS.get(`screenshots/${format}/${hash}`);
+
+  if (!object) return c.notFound();
+
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": `image/${format}`,
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+    },
+  });
+});
 
 app.get("/api/auth", async (c) => {
   const [state, user] = await Promise.all([

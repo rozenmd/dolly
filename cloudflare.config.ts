@@ -22,6 +22,7 @@ export default defineConfig({
     env: {
       ASSETS: bindings.assets(),
       SCREENSHOTS: bindings.r2({ name: screenshotsBucket.name }),
+      BROWSER: bindings.browser(),
       ACCESS_TEAM_DOMAIN: bindings.text(access.ACCESS_TEAM_DOMAIN),
       ACCESS_AUD: bindings.text(access.ACCESS_AUD),
       ACCESS_LOCAL_DEV: bindings.text("false"),
@@ -32,6 +33,7 @@ export default defineConfig({
     exports: {
       GitHubIngress: exports.worker(),
       WorkspaceOutbound: exports.worker(),
+      PreviewOutbound: exports.worker(),
       Agent: exports.durableObject({ storage: "sqlite" }),
       Sandbox: exports.durableObject({ storage: "sqlite", container: sandbox }),
     },

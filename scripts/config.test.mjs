@@ -29,6 +29,8 @@ test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", ()
   assert.deepEqual(worker.compatibilityFlags, ["nodejs_compat"]);
   assert.ok(Object.values(worker.env).every((binding) => binding.type !== "artifacts"));
   assert.equal(worker.exports.WorkspaceOutbound.type, "worker");
+  assert.equal(worker.exports.PreviewOutbound.type, "worker");
+  assert.equal(worker.env.BROWSER.type, "browser");
   assert.equal(worker.previewUrls, false);
   assert.equal(worker.env.ACCESS_LOCAL_DEV.value, "false");
   assert.equal(worker.env.ACCESS_TEAM_DOMAIN.type, "text");
