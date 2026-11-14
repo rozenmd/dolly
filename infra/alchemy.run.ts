@@ -7,7 +7,7 @@ import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { AccessConfig, applicationPolicies } from "./config.ts";
-import { screenshotsBucket } from "./screenshots.ts";
+import { screenshotsBucket, screenshotsExpiry } from "./screenshots.ts";
 
 export default Alchemy.Stack(
   "DollyAccess",
@@ -27,9 +27,10 @@ export default Alchemy.Stack(
       ),
     }).pipe(Effect.orDie);
 
-    const screenshots = yield* Cloudflare.R2.Bucket("Screenshots", screenshotsBucket).pipe(
-      retain(),
-    );
+    const screenshots = yield* Cloudflare.R2.Bucket("Screenshots", {
+      ...screenshotsBucket,
+      lifecycleRules: [screenshotsExpiry],
+    }).pipe(retain());
 
     const pin = yield* Cloudflare.Access.IdentityProvider("EmailPin", {
       type: "onetimepin",

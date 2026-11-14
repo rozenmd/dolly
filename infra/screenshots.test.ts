@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { screenshotsBucket } from "./screenshots.ts";
+import { screenshotsBucket, screenshotsExpiry } from "./screenshots.ts";
 
 test("provisions a private WEUR screenshot bucket with the matching Worker binding", () => {
   assert.deepEqual(screenshotsBucket, {
@@ -14,7 +14,18 @@ test("provisions a private WEUR screenshot bucket with the matching Worker bindi
 
   assert.match(
     stack,
-    /Cloudflare\.R2\.Bucket\("Screenshots", screenshotsBucket\)\.pipe\(\s*retain\(\),?\s*\)/,
+    /Cloudflare\.R2\.Bucket\("Screenshots", \{\s*\.\.\.screenshotsBucket,\s*lifecycleRules: \[screenshotsExpiry\],?\s*\}\)\.pipe\(retain\(\)\)/,
   );
   assert.match(worker, /SCREENSHOTS: bindings\.r2\(\{ name: screenshotsBucket\.name \}\)/);
+});
+
+test("expires all uploaded assets after 30 days", () => {
+  assert.deepEqual(screenshotsExpiry, {
+    id: "expire-assets-after-30-days",
+    enabled: true,
+    prefix: "",
+    deleteObjectsTransition: {
+      condition: { type: "Age", maxAge: 2_592_000 },
+    },
+  });
 });

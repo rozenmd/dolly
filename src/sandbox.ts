@@ -99,7 +99,7 @@ export class Sandbox extends DurableObject<Env> {
               ...(snapshot
                 ? { containerSnapshot: { id: snapshot.id } }
                 : { image: container.images.sandbox }),
-              instance: "standard-1",
+              instance: "standard-3",
               enableInternet: false,
             }),
           ),
