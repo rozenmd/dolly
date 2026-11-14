@@ -1,5 +1,6 @@
 import * as Cloudflare from "@alchemy.run/cloudflare";
 import * as Alchemy from "alchemy";
+import * as Output from "alchemy/Output";
 import { adopt } from "alchemy/AdoptPolicy";
 import { retain } from "alchemy/RemovalPolicy";
 import { localState } from "alchemy/State/LocalState";
@@ -9,6 +10,7 @@ import * as Schema from "effect/Schema";
 import { AccessConfig, applicationPolicies } from "./config.ts";
 import { screenshotsBucket, screenshotsExpiry } from "./screenshots.ts";
 import { dependencyCacheBucket, dependencyCacheExpiry } from "./dependency-cache.ts";
+import { prScreenshotsBucket, prScreenshotsExpiry } from "./pr-screenshots.ts";
 
 export default Alchemy.Stack(
   "DollyAccess",
@@ -38,6 +40,11 @@ export default Alchemy.Stack(
       lifecycleRules: [dependencyCacheExpiry],
     }).pipe(retain());
 
+    const prScreenshots = yield* Cloudflare.R2.Bucket("PrScreenshots", {
+      ...prScreenshotsBucket,
+      lifecycleRules: [prScreenshotsExpiry],
+    }).pipe(retain());
+
     const pin = yield* Cloudflare.Access.IdentityProvider("EmailPin", {
       type: "onetimepin",
     }).pipe(adopt(true), retain());
@@ -55,6 +62,14 @@ export default Alchemy.Stack(
 
     return {
       SCREENSHOTS_BUCKET: screenshots.bucketName,
+      PR_SCREENSHOTS_BUCKET: prScreenshots.bucketName,
+      PR_SCREENSHOTS_URL: prScreenshots.publicDomain.pipe(
+        Output.map((domain) => {
+          if (!domain) throw new Error("PR screenshot bucket has no public domain");
+
+          return `https://${domain}`;
+        }),
+      ),
       DEPENDENCY_CACHE_BUCKET: dependencyCache.bucketName,
       ACCESS_AUD: application.aud,
       ACCESS_TEAM_DOMAIN: config.teamDomain,

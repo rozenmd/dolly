@@ -198,6 +198,7 @@ export async function capturePreview(
             path: input.path ?? "/",
             width: input.width ?? 1280,
             height: input.height ?? 800,
+            image: images[0].data,
           }),
         },
         ...images,

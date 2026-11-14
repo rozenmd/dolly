@@ -26,6 +26,8 @@ import { exceptionDetails } from "./diagnostics";
 import { integrationJson } from "./integration-http";
 import { budgetPatches, invalidAnchors, REVIEW_FOOTER } from "./github-review";
 import { attempt, OperationError } from "./operations";
+import { MAX_IMAGE_BYTES } from "./images";
+import type { Env } from "./env";
 
 import {
   GITHUB_APP_GRANT_PERMISSIONS,
@@ -250,7 +252,10 @@ export function ingressHook(url: string) {
   return Schema.decodeUnknownOption(WebhookUrl)(`${base}/hooks/github`);
 }
 
-function makeGitHub(storage: DurableObjectStorage) {
+function makeGitHub(
+  storage: DurableObjectStorage,
+  images: Pick<Env, "SCREENSHOTS" | "PR_SCREENSHOTS" | "PR_SCREENSHOTS_URL">,
+) {
   const setupPermit = Semaphore.makeUnsafe(1);
   const tokens = new Map<string, { value: string; expires: number }>();
 
@@ -564,6 +569,94 @@ function makeGitHub(storage: DurableObjectStorage) {
       ingress: (yield* ingress) || null,
       senders: yield* senders,
     };
+  });
+
+  const uploadScreenshot = Effect.fn("GitHub.uploadScreenshot")(function* (
+    op: Extract<typeof GitHubRequest.Type.operation, { action: "upload_screenshot" }>,
+    connected: typeof Connected.Type,
+  ) {
+    const token = yield* tokenFor(connected, op.repository, "write");
+
+    if (!/^https:\/\/[a-z0-9-]+\.r2\.dev$/.test(images.PR_SCREENSHOTS_URL))
+      return {
+        ok: false as const,
+        code: "screenshots_unconfigured",
+        message: "Provision the public PR screenshot bucket and export its URL before publishing",
+      };
+    const root = `/repos/${op.repository}`;
+
+    const pull = yield* api(`${root}/pulls/${op.number}`, token).pipe(
+      Effect.flatMap(decode(PullDetails)),
+    );
+
+    if (pull.state !== "open")
+      return {
+        ok: false as const,
+        code: "pull_request_closed",
+        message: "The pull request is not open",
+      };
+
+    const image = yield* attempt("github.screenshot.read", () =>
+      images.SCREENSHOTS.get(op.image.slice(5)),
+    );
+
+    if (!image)
+      return {
+        ok: false as const,
+        code: "screenshot_missing",
+        message: "Screenshot is missing from R2",
+      };
+
+    if (!image.size || image.size > MAX_IMAGE_BYTES)
+      return {
+        ok: false as const,
+        code: "screenshot_size",
+        message: "Screenshot must be between 1 byte and 5 MiB",
+      };
+
+    const format = op.image.split("/")[3];
+    // A fresh, unguessable key avoids exposing private content-addressed references.
+    const key = `${crypto.randomUUID()}.${format}`;
+    const bytes = yield* attempt("github.screenshot.bytes", () => image.arrayBuffer());
+    yield* attempt("github.screenshot.publish", () =>
+      images.PR_SCREENSHOTS.put(key, bytes, {
+        httpMetadata: {
+          contentType: `image/${format}`,
+          cacheControl: "public, max-age=3600",
+        },
+      }),
+    );
+    const imageUrl = `${images.PR_SCREENSHOTS_URL}/${key}`;
+    const caption = op.caption.replace(/[\\`*_[\]<>!]/g, "\\$&").replace(/[\r\n]/g, " ");
+    const markdown = `![${caption}](${imageUrl})`;
+
+    // Preserve the uploaded URL if commenting fails; don't imply the PR was updated.
+    return yield* api(`${root}/issues/${op.number}/comments`, token, {
+      body: `${markdown}\n\nScreenshot expires after 30 days.${REVIEW_FOOTER}`,
+    }).pipe(
+      Effect.flatMap(decode(IssueComment)),
+      Effect.map((comment) => ({
+        ok: true as const,
+        result: {
+          kind: "screenshot" as const,
+          data: { image_url: imageUrl, comment_url: comment.html_url, markdown },
+        },
+      })),
+      Effect.catchTag("OperationError", (error) =>
+        Effect.succeed({
+          ok: true as const,
+          result: {
+            kind: "screenshot" as const,
+            data: {
+              image_url: imageUrl,
+              comment_url: null,
+              markdown,
+              comment_error: error.message,
+            },
+          },
+        }),
+      ),
+    );
   });
 
   /** The App's OAuth client ID, which runs the device sign-in. Older setups did not store it. */
@@ -921,6 +1014,8 @@ function makeGitHub(storage: DurableObjectStorage) {
 
     const connected = yield* read();
 
+    if (op.action === "upload_screenshot") return yield* uploadScreenshot(op, connected);
+
     if (op.action === "create_review" || op.action === "reply_to_review_comment") {
       const token = yield* tokenFor(connected, op.repository, "write");
       const root = `/repos/${op.repository}/pulls/${op.number}`;
@@ -1250,6 +1345,8 @@ function makeGitHub(storage: DurableObjectStorage) {
 export class GitHub extends Context.Service<GitHub, ReturnType<typeof makeGitHub>>()(
   "dolly/GitHub",
 ) {
-  static readonly layer = (storage: DurableObjectStorage) =>
-    Layer.succeed(GitHub, makeGitHub(storage));
+  static readonly layer = (
+    storage: DurableObjectStorage,
+    images: Pick<Env, "SCREENSHOTS" | "PR_SCREENSHOTS" | "PR_SCREENSHOTS_URL">,
+  ) => Layer.succeed(GitHub, makeGitHub(storage, images));
 }

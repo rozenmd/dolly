@@ -11,8 +11,9 @@ export default defineConfig({
         bindings: {
           ACCESS_LOCAL_DEV: "true",
           CODEX_MODEL: "gpt-6-luna",
+          PR_SCREENSHOTS_URL: "https://public-test.r2.dev",
         },
-        r2Buckets: ["SCREENSHOTS", "DEPENDENCY_CACHE"],
+        r2Buckets: ["SCREENSHOTS", "PR_SCREENSHOTS", "DEPENDENCY_CACHE"],
         durableObjects: {
           AGENT: { className: "Agent", useSQLite: true },
           SANDBOX: { className: "Sandbox", useSQLite: true },

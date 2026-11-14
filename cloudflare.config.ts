@@ -2,6 +2,7 @@ import { bindings, defineConfig, defineContainer, exports } from "cf/config";
 import { readAccessSettings } from "./scripts/access-settings.ts";
 import { screenshotsBucket } from "./infra/screenshots.ts";
 import { dependencyCacheBucket } from "./infra/dependency-cache.ts";
+import { prScreenshotsBucket } from "./infra/pr-screenshots.ts";
 
 const workerName = "dolly";
 const access = readAccessSettings();
@@ -23,6 +24,8 @@ export default defineConfig({
     env: {
       ASSETS: bindings.assets(),
       SCREENSHOTS: bindings.r2({ name: screenshotsBucket.name }),
+      PR_SCREENSHOTS: bindings.r2({ name: prScreenshotsBucket.name }),
+      PR_SCREENSHOTS_URL: bindings.text(access.PR_SCREENSHOTS_URL ?? ""),
       DEPENDENCY_CACHE: bindings.r2({ name: dependencyCacheBucket.name }),
       BROWSER: bindings.browser(),
       ACCESS_TEAM_DOMAIN: bindings.text(access.ACCESS_TEAM_DOMAIN),

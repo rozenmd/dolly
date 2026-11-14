@@ -4,6 +4,11 @@ import * as Schema from "effect/Schema";
 
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_IMAGES = 4;
+
+export const ScreenshotReference = Schema.String.check(
+  Schema.isPattern(/^r2:\/\/screenshots\/(png|jpeg|gif|webp)\/[a-f0-9]{64}$/),
+);
+
 const MAX_BASE64_LENGTH = 4 * Math.ceil(MAX_IMAGE_BYTES / 3);
 
 /** Allow four maximum-sized images plus text and JSON overhead, only on the prompt route. */
@@ -61,7 +66,7 @@ export async function resolveImages(
         message.content.map(async (block) => {
           if (block.type !== "image" || !block.data.startsWith("r2://")) return block;
 
-          if (!/^r2:\/\/screenshots\/(png|jpeg|gif|webp)\/[a-f0-9]{64}$/.test(block.data))
+          if (!Schema.is(ScreenshotReference)(block.data))
             throw new Error("Invalid screenshot reference");
 
           const object = await bucket.get(block.data.slice(5));

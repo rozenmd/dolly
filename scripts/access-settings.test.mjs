@@ -12,6 +12,7 @@ const settings = {
   ACCESS_AUD: "a".repeat(64),
   ACCESS_TEAM_DOMAIN: "dolly.cloudflareaccess.com",
   hostname: "dolly.example.workers.dev",
+  PR_SCREENSHOTS_URL: "https://public-example.r2.dev",
 };
 
 function fixture() {
@@ -32,6 +33,7 @@ test("missing settings keep an unconfigured deployment fail-closed", () => {
   assert.deepEqual(readAccessSettings(fixture().target), {
     ACCESS_AUD: "",
     ACCESS_TEAM_DOMAIN: "",
+    PR_SCREENSHOTS_URL: "",
   });
 });
 
@@ -53,6 +55,7 @@ test("missing or invalid stack output never replaces existing settings", () => {
     JSON.stringify({ ...settings, ACCESS_AUD: "" }),
     JSON.stringify({ ...settings, ACCESS_TEAM_DOMAIN: "https://dolly.cloudflareaccess.com" }),
     JSON.stringify({ ...settings, hostname: "*.workers.dev" }),
+    JSON.stringify({ ...settings, PR_SCREENSHOTS_URL: "http://public-example.r2.dev" }),
     JSON.stringify({ ACCESS_AUD: { expression: "unresolved" } }),
   ]) {
     writeFileSync(output, invalid);
