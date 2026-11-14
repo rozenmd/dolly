@@ -11,7 +11,7 @@ const script = fileURLToPath(new URL("../container/setup.py", import.meta.url));
 for (const [manager, lockfile, expected] of [
   ["pnpm@12.18.0", "pnpm-lock.yaml", ["pnpm", "install", "--frozen-lockfile"]],
   ["yarn@4.0.0", "yarn.lock", ["yarn", "install"]],
-  ["npm@11.0.0", "package-lock.json", ["ci"]],
+  ["npm@11.0.0", "package-lock.json", ["npm", "ci"]],
 ]) {
   test(`runs repository setup then the declared ${manager} installer`, (t) => {
     const root = mkdtempSync(join(tmpdir(), "dolly-setup-"));

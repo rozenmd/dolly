@@ -214,7 +214,7 @@ Create a conversation with a repository and optional ref. The App owner does not
 }
 ```
 
-Send that JSON to `POST /api/sessions`, then submit a task through its messages route. The agent has a `workspace` tool to check out, inspect status/diff, commit, push, and open a PR. Its `shell` tool runs in `/workspace/repo`, with Git, Node.js, Corepack, Python 3, curl and CA certificates installed. Use shell commands for edits and the repository's test suite. Other toolchains can be installed through hosts explicitly enabled for the session; not every repository uses the image's built-in tools.
+Send that JSON to `POST /api/sessions`, then submit a task through its messages route. The agent has a `workspace` tool to check out, inspect status/diff, commit, push, and open a PR. Its `shell` tool runs in `/workspace/repo`, with Git, Node.js, Corepack, Bun 1.4.4, Python 3, curl and CA certificates installed. Use shell commands for edits and the repository's test suite. Other toolchains can be installed through hosts explicitly enabled for the session; not every repository uses the image's built-in tools.
 
 You can also create a blank conversation and let the agent select a repository using `workspace` with `{"action":"checkout","repository":"another-owner/project","ref":"main"}`. Dependency network hosts are supplied by the API client when creating a repository session, not granted by the model. An omitted host list permits only brokered Git traffic. The HTTPS intercept trusts the Containers CA through the provided certificate environment settings; tools with their own certificate store may need configuration.
 
@@ -238,13 +238,13 @@ Each repository gets an ordinary shallow Git checkout on its sandbox's local dis
 
 Containers default to `standard-3` (2 vCPU, 8 GiB RAM, 16 GB disk) to give dependency installs, typechecks and builds more headroom. This is changeable: edit the `instance` value passed to `container.start()` in `src/sandbox.ts` and redeploy. The choice applies when containers start, not to already-running instances. See [Cloudflare's available instance sizes](https://developers.cloudflare.com/containers/platform/limits/) for alternatives; larger instances incur higher allocated memory and disk costs while running.
 
-Creating a repository session schedules setup immediately in the background, so creating the conversation and submitting the first prompt do not wait on Git or dependencies. A persisted intent plus a Durable Object alarm recover interrupted scheduling. Concurrent repository tools join the same serialized setup, rather than cloning or installing twice. Setup runs `.agents/setup` when present, then installs root Node dependencies using the declared package manager or lockfile (pnpm, Yarn or npm). Each dependency setup attempt is bounded to 15 minutes. Failures become a visible `warning` in workspace/shell tool results and diagnostics; the checkout stays usable. A confirmed restart interrupts setup and kills its process group before replacing the container.
+Creating a repository session schedules setup immediately in the background, so creating the conversation and submitting the first prompt do not wait on Git or dependencies. A persisted intent plus a Durable Object alarm recover interrupted scheduling. Concurrent repository tools join the same serialized setup, rather than cloning or installing twice. Setup runs `.agents/setup` when present, then installs root JavaScript dependencies using the declared package manager or lockfile (pnpm, npm, Yarn or Bun). Without a declaration, conflicting package-manager lockfiles require an explicit `packageManager` instead of guessing. Declared npm/pnpm/Yarn versions use Corepack; Bun uses the bundled version or an exact declared version fetched through npm. Each dependency setup attempt is bounded to 15 minutes. Failures become a visible `warning` in workspace/shell tool results and diagnostics; the checkout stays usable. A confirmed restart interrupts setup and kills its process group before replacing the container.
 
 This adapts Open Session's [sandbox-vs-host checkout policy and background setup](https://github.com/tellahq/opensession/blob/main/docs/worktrees.md), [remote-first fresh bases (#432)](https://github.com/tellahq/opensession/pull/432), and [bounded setup/process cleanup (#495)](https://github.com/tellahq/opensession/pull/495). Like Open Session's sandbox path, Dolly clones inside each isolated sandbox; host worktrees and a shared Git object cache are not needed across separate container filesystems.
 
 #### Dependency cache
 
-Eligible fresh pnpm workspaces restore `node_modules` from zstd-compressed tar
+Eligible fresh JavaScript workspaces restore dependency installs from zstd-compressed tar
 archives in the private `dolly-dependency-cache` R2 bucket. A miss installs normally
 and publishes an immutable archive for later sessions. The existing Worker outbound
 broker streams transfers using an R2 binding: no S3 credentials, public bucket,
@@ -253,22 +253,38 @@ setup-only capability gates cache access.
 
 The cache is scoped to the repository, selected ref and network-host policy, so
 pull-request refs cannot publish entries used by the default-ref cache. Keys include the
-lockfile, workspace manifests/configuration, patches, Node/platform/libc versions,
-installer environment and cache implementation. Source-only changes can reuse an
-entry. Initially this supports pinned pnpm versions with a root lockfile; custom
+lockfile, actual package-manager name/version, workspace manifests/configuration,
+patches, Node/platform/libc versions, installer environment and cache implementation.
+Source-only changes can reuse an entry. A root lockfile is required for caching:
+
+| Manager      | Lockfiles                                  | Cached install                                                                                               |
+| ------------ | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| pnpm         | `pnpm-lock.yaml`                           | Root and workspace `node_modules`                                                                            |
+| npm          | `package-lock.json`, `npm-shrinkwrap.json` | Root and workspace `node_modules`                                                                            |
+| Yarn Classic | `yarn.lock`                                | `node_modules`                                                                                               |
+| Modern Yarn  | `yarn.lock`                                | `node_modules` and install state, or PnP loaders/data, local ZIP cache, unplugged packages and install state |
+| Bun          | `bun.lock`, `bun.lockb`                    | `node_modules`, including its isolated store                                                                 |
+
+Pin `packageManager` for reproducible toolchain selection; inferred managers use
+the available/default version, which is still recorded in the key. Modern Yarn
+setup sets `YARN_ENABLE_GLOBAL_CACHE=false` so PnP references a portable,
+repository-local `.yarn/cache`, not another session's global store. Yarn Classic's
+experimental PnP format, Yarn plugins/custom cache paths and unsupported custom
+module-store layouts skip caching. Custom
 `.agents/setup` hooks, repository install/prepare scripts, local file/link
-dependencies, pnpm hooks, injected workspaces, custom module-store layouts and
-existing `node_modules` skip caching. Patched dependency configurations
+dependencies, pnpm hooks, injected workspaces and existing install artifacts also
+skip caching. Patched dependency configurations
 conservatively include all tracked source inputs in the key. Other package managers
-still install normally.
+need an explicit setup hook; supported managers without a lockfile install normally
+without caching.
 
 Cache transfers are bounded to 30 seconds and 512 MiB compressed. Extraction
-rejects paths outside dependency directories, unsafe links, special files and
+rejects paths outside approved dependency directories/PnP files, unsafe links, special files and
 archives exceeding 4 GiB expanded or 200,000 entries. Missing, expired, corrupt or
 unavailable archives fall back to installation, never a workspace reset. Cache
 entries share the repository's dependency trust boundary; they are not independently
-verified build artifacts or backups. Only `node_modules` is archived; do not put
-credentials there.
+verified build artifacts or backups. Only dependency directories and the listed Yarn
+runtime/state files are archived; do not put credentials there.
 
 Alchemy manages the bucket in `infra/alchemy.run.ts`, with public access disabled,
 a Western Europe location hint and 30-day object expiry. Review `pnpm access:plan`
@@ -278,7 +294,7 @@ does not change native snapshot recovery or remove the snapshot taken after setu
 Worker logs include cache hit/miss/store events and dependency setup duration; a
 cache hit alone does not prove extraction succeeded.
 
-The broker permits HTTPS to `registry.npmjs.org` and `registry.yarnpkg.com` throughout the session, so initial setup and later npm/pnpm/Yarn installs can fetch packages. Other destinations still require configured hosts. Hooks and package lifecycle scripts run as the unprivileged sandbox user with no Worker credentials. Git-based dependencies, private registries, binaries on other CDNs and non-Node installers may require extra configured hosts or explicit agent setup; failures are reported, not retried with unrestricted Internet access.
+The broker permits HTTPS to `registry.npmjs.org`, `registry.yarnpkg.com` and Yarn's distribution host `repo.yarnpkg.com` throughout the session, so initial setup and later npm/pnpm/Yarn/Bun installs can fetch their tools and packages. Other destinations still require configured hosts. Hooks and package lifecycle scripts run as the unprivileged sandbox user with no Worker credentials. Git-based dependencies, private registries, binaries on other CDNs and non-Node installers may require extra configured hosts or explicit agent setup; failures are reported, not retried with unrestricted Internet access.
 
 After initial setup and foreground shell commands (including commands that fail), Dolly captures a native Container snapshot and publishes its ID in Durable Object storage only after capture succeeds. Snapshots preserve the local repository, `.git`, index, staged/dirty/ignored files, dependencies, symlinks and empty directories without making checkpoint commits in the user's branch. Capture or acknowledgement failure leaves the previous checkpoint pointer unchanged. Commands are serialized with capture; stop background writers before checkpointing. Snapshotting does not save running processes or memory.
 

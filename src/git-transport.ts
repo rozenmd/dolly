@@ -3,7 +3,11 @@ import type { Env } from "./env";
 import type { WorkspaceConfig } from "./workspace";
 import { dependencyCache } from "./dependency-cache";
 
-const packageRegistries = new Set(["registry.npmjs.org", "registry.yarnpkg.com"]);
+const packageRegistries = new Set([
+  "registry.npmjs.org",
+  "registry.yarnpkg.com",
+  "repo.yarnpkg.com",
+]);
 
 /** The first receive-pack command must update exactly the session branch, never delete it. */
 export async function checkedPush(body: ReadableStream<Uint8Array> | null, branch: string) {
