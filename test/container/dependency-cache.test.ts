@@ -36,7 +36,7 @@ it("installs once, restores zstd node_modules through the broker, and invalidate
 
     const fixture = await sandbox.run(`set -eu
 cd /workspace/repo
-printf '%s' '{"name":"cache-fixture","private":true,"packageManager":"pnpm@12.18.0","dependencies":{"is-number":"7.0.0","@cache/helper":"workspace:*"}}' > package.json
+printf '%s' '{"name":"cache-fixture","private":true,"packageManager":"pnpm@12.18.0","dependencies":{"is-number":"7.0.0","get-caller-file":"2.0.5","@cache/helper":"workspace:*"}}' > package.json
 printf '%s\\n' 'packages:' '  - packages/*' > pnpm-workspace.yaml
 printf '%s' '{"name":"@cache/helper","version":"1.0.0","main":"index.js"}' > packages/helper/package.json
 printf '%s' 'module.exports = 42;' > packages/helper/index.js
@@ -44,14 +44,15 @@ printf '%s\\n' node_modules/ > .gitignore
 git init
 git add .
 corepack pnpm install --lockfile-only
+grep -q 'get-caller-file:' pnpm-lock.yaml
 ${setup}
-node -e 'if(!require("is-number")(42) || require("@cache/helper") !== 42) process.exit(1)'
+node -e 'if(!require("is-number")(42) || typeof require("get-caller-file") !== "function" || require("@cache/helper") !== 42) process.exit(1)'
 printf '#!/bin/sh\\nif [ "$2" = "--version" ]; then exec /usr/local/bin/corepack "$@"; fi\\nexit 87\\n' > /workspace/no-install/corepack
 chmod +x /workspace/no-install/corepack
 cp pnpm-lock.yaml original-lock.yaml
 python3 -c 'import shutil; shutil.rmtree("node_modules")'
 PATH="/workspace/no-install:$PATH" ${setup}
-node -e 'if(!require("is-number")(42) || require("@cache/helper") !== 42) process.exit(1)'`);
+node -e 'if(!require("is-number")(42) || typeof require("get-caller-file") !== "function" || require("@cache/helper") !== 42) process.exit(1)'`);
 
     expect(fixture.exitCode, fixture.stdout + fixture.stderr).toBe(0);
     expect(fixture.stdout).toContain("dependency_cache: miss");
@@ -67,6 +68,27 @@ PATH="/workspace/no-install:$PATH" ${setup}`);
     expect(invalidated.exitCode).not.toBe(0);
     expect(invalidated.stdout).toContain("dependency_cache: miss");
     expect(invalidated.stderr).toContain("87");
+
+    const localReferences = await sandbox.run(`set -eu
+cd /workspace/repo
+PYTHONPATH=/usr/local/lib python3 - <<'PY'
+from pathlib import Path
+from dependency_cache import cache_key
+lock = Path("pnpm-lock.yaml")
+original = Path("original-lock.yaml").read_bytes()
+try:
+    lock.write_bytes(original)
+    assert cache_key() is not None, "ordinary package names must remain cacheable"
+    for reference in [b"file:../outside", b"portal:../outside", b"helper@file:../outside"]:
+        lock.write_bytes(original + b"\\nresolution: '" + reference + b"'\\n")
+        assert cache_key() is None, reference
+    print("local dependency references remain excluded")
+finally:
+    lock.write_bytes(original)
+PY`);
+
+    expect(localReferences.exitCode, localReferences.stdout + localReferences.stderr).toBe(0);
+    expect(localReferences.stdout).toContain("local dependency references remain excluded");
 
     const unavailable = await sandbox.run(`set -eu
 cd /workspace/repo

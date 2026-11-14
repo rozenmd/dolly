@@ -81,6 +81,7 @@ export class Sandbox extends DurableObject<Env> {
   private initialized = false;
   private prepared = false;
   private setupAbort: AbortController | undefined;
+  private setupOperations = 0;
   private readonly loopback: SandboxState["exports"];
   private preview?: RunningPreview;
 
@@ -101,12 +102,13 @@ export class Sandbox extends DurableObject<Env> {
         this.ctx.storage.get<WorkspaceConfig>("workspace"),
       );
 
+      const wasRunning = container.running;
+
       const snapshot = yield* attempt("workspace.snapshot.read", () =>
         this.ctx.storage.get<WorkspaceSnapshot>("snapshot:checkpoint"),
       );
 
-      if (!container.running) {
-        // A missing/expired snapshot is an error, never permission to start empty.
+      if (!wasRunning) {
         yield* attempt("workspace.start", () =>
           Promise.resolve(
             container.start({
@@ -134,24 +136,29 @@ export class Sandbox extends DurableObject<Env> {
           container.interceptOutboundHttps("*", outbound),
         );
 
-        if (snapshot) {
-          // start() is lazy. Force a real operation before reporting ready so a
-          // missing/expired snapshot cannot masquerade as a restored workspace.
+        if (wasRunning || snapshot) {
+          // A Durable Object eviction does not necessarily stop its container.
+          // Reuse that live checkout, but never infer readiness for a fresh image.
           this.initialized = true;
 
-          const restored = yield* this.execute(
+          const setup = yield* attempt("workspace.setup.read", () =>
+            this.ctx.storage.get<WorkspaceSetup>("workspace:setup"),
+          );
+
+          const ready = yield* this.execute(
             "test -f /workspace/ready && test -d /workspace/repo/.git",
             "/workspace",
             120,
             container,
           ).pipe(
-            Effect.mapError(
-              (error) =>
-                new OperationError({
-                  operation: "workspace.restore",
-                  message: `Unable to restore snapshot ${snapshot.id}: ${exceptionDetails(error).message}`,
-                  details: null,
-                }),
+            Effect.mapError((error) =>
+              snapshot && !wasRunning
+                ? new OperationError({
+                    operation: "workspace.restore",
+                    message: `Unable to restore snapshot ${snapshot.id}: ${exceptionDetails(error).message}`,
+                    details: null,
+                  })
+                : error,
             ),
             Effect.onError(() =>
               Effect.sync(() => {
@@ -160,18 +167,22 @@ export class Sandbox extends DurableObject<Env> {
             ),
           );
 
-          if (restored.exitCode !== 0) {
+          if (snapshot && !wasRunning && ready.exitCode !== 0) {
             this.initialized = false;
 
             return yield* new OperationError({
               operation: "workspace.restore",
-              message: "Snapshot is missing a prepared local workspace; refusing to clone over it",
+              message: "Snapshot is missing its prepared checkout; refusing a fresh clone",
               details: { snapshotId: snapshot.id },
             });
           }
-        }
 
-        this.prepared = Boolean(snapshot);
+          this.prepared =
+            ready.exitCode === 0 &&
+            ((!wasRunning && Boolean(snapshot)) ||
+              setup?.state === "ready" ||
+              setup?.state === "warning");
+        }
       }
 
       this.initialized = true;
@@ -190,7 +201,7 @@ export class Sandbox extends DurableObject<Env> {
     initializingContainer?: Container,
   ) {
     // Initialization probes must not recursively re-enter container() when a
-    // lazy start fails (for example, an expired or missing snapshot).
+    // lazy container startup fails.
     const container = initializingContainer ?? (yield* this.container());
     let exited = false;
 
@@ -246,50 +257,6 @@ export class Sandbox extends DurableObject<Env> {
             ),
     ).pipe(Effect.timeout(`${timeout} seconds`));
   });
-
-  private checkpoint = Effect.fn("Sandbox.checkpoint")(function* (this: Sandbox) {
-    const workspace = yield* attempt("workspace.read", () => this.ctx.storage.get("workspace"));
-
-    if (!workspace) return;
-
-    const container = yield* this.container();
-    const started = Date.now();
-    yield* Effect.logInfo({
-      event: "workspace_checkpoint_started",
-      sandboxId: String(this.ctx.id),
-    });
-
-    const snapshot = yield* attempt("workspace.checkpoint", () =>
-      container.snapshotContainer({ name: `workspace-${crypto.randomUUID()}` }),
-    ).pipe(
-      Effect.timeout("120 seconds"),
-      Effect.onError((cause) =>
-        Effect.logError({
-          event: "workspace_checkpoint_failed",
-          sandboxId: String(this.ctx.id),
-          elapsedMs: Date.now() - started,
-          error: redact(Cause.pretty(cause)),
-        }),
-      ),
-    );
-
-    // Publish only after capture succeeds. An unacknowledged snapshot cannot
-    // replace the last recoverable checkpoint in Durable Object storage.
-    yield* this.publishSnapshot({ id: snapshot.id });
-    yield* Effect.logInfo({
-      event: "workspace_checkpoint_succeeded",
-      sandboxId: String(this.ctx.id),
-      snapshotId: snapshot.id,
-      size: snapshot.size,
-      elapsedMs: Date.now() - started,
-    });
-  });
-
-  private publishSnapshot(snapshot: WorkspaceSnapshot) {
-    return attempt("workspace.checkpoint.save", () =>
-      this.ctx.storage.put("snapshot:checkpoint", snapshot),
-    );
-  }
 
   private checkout = Effect.fn("Sandbox.checkout")(function* (
     this: Sandbox,
@@ -366,6 +333,76 @@ export class Sandbox extends DurableObject<Env> {
           ...status,
         }),
       ),
+    );
+  }
+
+  /** Called only by the durable run-end task, never by setup or individual commands. */
+  checkpoint(turnId: string) {
+    return Effect.runPromise(
+      this.permit.withPermit(
+        Effect.gen({ self: this }, function* () {
+          const previous = yield* attempt("workspace.snapshot.read", () =>
+            this.ctx.storage.get<WorkspaceSnapshot>("snapshot:checkpoint"),
+          );
+
+          if (previous?.turnId === turnId) return previous;
+
+          // Saving must never resurrect a stopped container or clone over lost work.
+          if (!this.ctx.container?.running) return null;
+          const container = yield* this.container();
+
+          if (!this.prepared) return null;
+          const started = Date.now();
+          yield* Effect.logInfo({
+            event: "workspace_checkpoint_started",
+            sandboxId: String(this.ctx.id),
+            turnId,
+          });
+
+          return yield* Effect.gen({ self: this }, function* () {
+            const snapshot = yield* attempt("workspace.checkpoint", () =>
+              container.snapshotContainer({ name: `workspace-${crypto.randomUUID()}` }),
+            ).pipe(Effect.timeout("120 seconds"));
+
+            const saved = { id: snapshot.id, turnId };
+            yield* this.publishSnapshot(saved);
+            yield* Effect.logInfo({
+              event: "workspace_checkpoint_succeeded",
+              sandboxId: String(this.ctx.id),
+              turnId,
+              size: snapshot.size,
+              elapsedMs: Date.now() - started,
+            });
+
+            return saved;
+          }).pipe(
+            Effect.onError((cause) =>
+              Effect.gen({ self: this }, function* () {
+                const error = redact(Cause.pretty(cause));
+                yield* attempt("workspace.snapshot.error", () =>
+                  this.ctx.storage.put("snapshot:error", { turnId, error }),
+                ).pipe(Effect.ignore);
+                yield* Effect.logError({
+                  event: "workspace_checkpoint_failed",
+                  sandboxId: String(this.ctx.id),
+                  turnId,
+                  elapsedMs: Date.now() - started,
+                  error,
+                });
+              }),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  private publishSnapshot(snapshot: WorkspaceSnapshot) {
+    return attempt("workspace.checkpoint.save", () =>
+      this.ctx.storage.transaction(async (tx) => {
+        await tx.put("snapshot:checkpoint", snapshot);
+        await tx.delete("snapshot:error");
+      }),
     );
   }
 
@@ -457,103 +494,117 @@ export class Sandbox extends DurableObject<Env> {
     }
   }
 
-  prepare(config: WorkspaceConfig) {
+  private prepareWorkspace = Effect.fn("Sandbox.prepareWorkspace")(function* (
+    this: Sandbox,
+    config: WorkspaceConfig,
+  ) {
+    const existing = yield* attempt("workspace.read", () =>
+      this.ctx.storage.get<WorkspaceConfig>("workspace"),
+    );
+
+    if (existing && JSON.stringify(existing) !== JSON.stringify(config))
+      return yield* new OperationError({
+        operation: "workspace.configure",
+        message: "This conversation already owns a different workspace",
+        details: null,
+      });
+
+    if (!existing) {
+      yield* attempt("workspace.configure", () => this.ctx.storage.put("workspace", config));
+      this.initialized = false;
+    }
+
+    // Initialize first so a restarted container never uses a stale warm flag.
+    yield* this.container();
+
+    const info = {
+      repository: config.repository,
+      branch: config.branch,
+      ref: config.ref ?? "HEAD",
+    };
+
+    if (this.prepared)
+      return {
+        ...info,
+        setup: yield* attempt("workspace.setup.read", () =>
+          this.ctx.storage.get<WorkspaceSetup>("workspace:setup"),
+        ),
+      };
+
+    yield* this.setupStatus("checkout");
+    yield* this.checkout(config);
+    yield* this.setupStatus("installing");
+    const warning = yield* this.installDependencies();
+    yield* this.setupStatus(warning ? "warning" : "ready", warning);
+    this.prepared = true;
+
+    return {
+      ...info,
+      setup: yield* attempt("workspace.setup.read", () =>
+        this.ctx.storage.get<WorkspaceSetup>("workspace:setup"),
+      ),
+    };
+  });
+
+  private runWorkspaceOperation<A, E>(operation: Effect.Effect<A, E>) {
     const controller = (this.setupAbort ??= new AbortController());
+    this.setupOperations++;
 
-    return Effect.runPromise(
+    return Effect.runPromise(operation, { signal: controller.signal }).finally(() => {
+      this.setupOperations--;
+
+      if (!this.setupOperations && this.setupAbort === controller) this.setupAbort = undefined;
+    });
+  }
+
+  prepare(config: WorkspaceConfig) {
+    return this.runWorkspaceOperation(
       this.permit
-        .withPermit(
-          Effect.gen({ self: this }, function* () {
-            const existing = yield* attempt("workspace.read", () =>
-              this.ctx.storage.get<WorkspaceConfig>("workspace"),
-            );
-
-            if (existing && JSON.stringify(existing) !== JSON.stringify(config))
-              return yield* new OperationError({
-                operation: "workspace.configure",
-                message: "This conversation already owns a different workspace",
-                details: null,
-              });
-
-            if (!existing) {
-              yield* attempt("workspace.configure", () =>
-                this.ctx.storage.put("workspace", config),
-              );
-              this.initialized = false;
-            }
-
-            // Initialize/restore first so a restarted container never uses a stale warm flag.
-            yield* this.container();
-
-            const info = {
-              repository: config.repository,
-              branch: config.branch,
-              ref: config.ref ?? "HEAD",
-            };
-
-            if (this.prepared)
-              return {
-                ...info,
-                setup: yield* attempt("workspace.setup.read", () =>
-                  this.ctx.storage.get<WorkspaceSetup>("workspace:setup"),
-                ),
-              };
-
-            yield* this.setupStatus("checkout");
-            yield* this.checkout(config);
-            yield* this.setupStatus("installing");
-            const warning = yield* this.installDependencies();
-            yield* this.checkpoint();
-            yield* this.setupStatus(warning ? "warning" : "ready", warning);
-            this.prepared = true;
-
-            return {
-              ...info,
-              setup: yield* attempt("workspace.setup.read", () =>
-                this.ctx.storage.get<WorkspaceSetup>("workspace:setup"),
-              ),
-            };
-          }),
-        )
+        .withPermit(this.prepareWorkspace(config))
         .pipe(
           Effect.onError((cause) =>
             this.setupStatus("failed", redact(Cause.pretty(cause))).pipe(Effect.ignore),
           ),
         ),
-      { signal: controller.signal },
-    ).finally(() => {
-      if (this.setupAbort === controller) this.setupAbort = undefined;
-    });
+    );
   }
 
   run(command: string) {
-    return Effect.runPromise(
+    return this.runWorkspaceOperation(
       this.permit.withPermit(
         Effect.gen({ self: this }, function* () {
           const workspace = yield* attempt("workspace.read", () =>
-            this.ctx.storage.get("workspace"),
+            this.ctx.storage.get<WorkspaceConfig>("workspace"),
           );
 
-          return yield* this.execute(command, workspace ? "/workspace/repo" : "/workspace").pipe(
-            Effect.ensuring(this.checkpoint().pipe(Effect.timeout("120 seconds"), Effect.orDie)),
-          );
+          if (workspace) yield* this.prepareWorkspace(workspace);
+
+          return yield* this.execute(command, workspace ? "/workspace/repo" : "/workspace");
         }),
       ),
     );
   }
 
   readFile(path: string) {
-    return Effect.runPromise(
+    return this.runWorkspaceOperation(
       this.permit.withPermit(
         Effect.gen({ self: this }, function* () {
-          const container = yield* this.container();
-
-          const response = yield* attempt("sandbox.file.open", (signal) =>
-            new Files(container).readFile(path, { signal }),
+          const workspace = yield* attempt("workspace.read", () =>
+            this.ctx.storage.get<WorkspaceConfig>("workspace"),
           );
 
-          return yield* readBounded(response.body, { limit: 65_536, overflow: "fail" });
-        }).pipe(Effect.timeout("60 seconds")),
+          if (workspace) yield* this.prepareWorkspace(workspace);
+
+          const container = yield* this.container();
+
+          return yield* Effect.gen(function* () {
+            const response = yield* attempt("sandbox.file.open", (signal) =>
+              new Files(container).readFile(path, { signal }),
+            );
+
+            return yield* readBounded(response.body, { limit: 65_536, overflow: "fail" });
+          }).pipe(Effect.timeout("60 seconds"));
+        }),
       ),
     );
   }
@@ -641,7 +692,7 @@ export class Sandbox extends DurableObject<Env> {
           if (occupied) throw new Error("Preview port is already in use; choose another port");
           const workspace = await this.ctx.storage.get("workspace");
 
-          // Native snapshots may predate this feature and retain their old image files.
+          // Use the supervisor bundled with the current Worker.
           await new Files(container).writeFile("/run/sandbox/dolly-preview.py", previewSupervisor);
 
           const process = await container.exec(
@@ -791,7 +842,15 @@ export class Sandbox extends DurableObject<Env> {
           this.ctx.storage.get<WorkspaceSetup>("workspace:setup"),
         );
 
-        if (!container?.running) return { running: false, setup };
+        const checkpoint = yield* attempt("workspace.snapshot.read", () =>
+          this.ctx.storage.get<WorkspaceSnapshot>("snapshot:checkpoint"),
+        );
+
+        const checkpointError = yield* attempt("workspace.snapshot.error.read", () =>
+          this.ctx.storage.get<{ turnId: string; error: string }>("snapshot:error"),
+        );
+
+        if (!container?.running) return { running: false, setup, checkpoint, checkpointError };
 
         return yield* Effect.acquireUseRelease(
           attempt("sandbox.diagnostics", () =>
@@ -802,6 +861,8 @@ export class Sandbox extends DurableObject<Env> {
               {
                 running: Effect.succeed(true),
                 setup: Effect.succeed(setup),
+                checkpoint: Effect.succeed(checkpoint),
+                checkpointError: Effect.succeed(checkpointError),
                 stdout: readBounded(process.stdout, { limit: 32_768, overflow: "truncate" }).pipe(
                   Effect.map(redact),
                 ),

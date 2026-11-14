@@ -174,7 +174,7 @@ export function workspacePrompt(state: WorkspaceState | null | undefined) {
 /** Values are passed as shell arguments, never interpreted as source. */
 export const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
 
-export type WorkspaceSnapshot = { id: string };
+export type WorkspaceSnapshot = { id: string; turnId?: string };
 
 export type WorkspaceSetup = {
   state: "queued" | "checkout" | "installing" | "ready" | "warning" | "failed";

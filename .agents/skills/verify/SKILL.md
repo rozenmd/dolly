@@ -7,7 +7,7 @@ description: Verify changes to Dolly itself with static checks and integration-f
 
 1. Name the changed behavior, affected callers and observable pass condition. Reproduce a bug through the affected boundary before fixing it; establish a known-good baseline for a refactor.
 2. Run `pnpm verify` for formatting, lint and root/infra/web typechecks. It does not run tests, build, deploy or contact live product services. Inspect the diff after any generation commands. `pnpm check` is not the static-only equivalent: it also runs frontend unit tests.
-3. Prove changed behavior primarily with integration tests through real boundaries: HTTP handlers, Durable Objects/storage, built Worker routing, containers, Git and checkpoint restoration. Choose the affected scenarios and relevant failure cases; widen coverage for shared contracts. Add or extend integration coverage when the existing harness does not exercise the change.
+3. Prove changed behavior primarily with integration tests through real boundaries: HTTP handlers, Durable Objects/storage, built Worker routing, containers, Git, turn-end checkpoint recovery and dependency caching. Choose the affected scenarios and relevant failure cases; widen coverage for shared contracts. Add or extend integration coverage when the existing harness does not exercise the change.
 4. Use a small number of browser or live end-to-end journeys for critical behavior that needs them. Existing Playwright tests intercept API/WebSocket traffic: they prove browser interactions against fixtures, not real backend operations. Static checks and mocked internal behavior are not integration proof.
 5. Record the scenario, commands, observed output and side effects. State which boundaries were real, simulated or mocked. For visible UI changes, capture desktop and phone before/after screenshots or an interaction recording. Preserve evidence and clean up only resources the run created.
 6. Report results and gaps in the PR. Failed, skipped, unavailable or unexercised scenarios are unverified, not passes. Fix relevant failures; identify unrelated failures separately. Never claim live-system proof from local or fixture-backed tests.
@@ -21,7 +21,7 @@ Verification follows the diff, not a mandatory final full-repository run. Reuse 
 ## Commands and safety
 
 - `pnpm test:integration:worker`: build the test Worker and exercise real bundled HTTP/SSR routing and Worker-side Access enforcement, without Playwright.
-- `pnpm test:sandbox`: exercise container, Git and checkpoint integration paths; requires Docker.
+- `pnpm test:sandbox`: exercise container, Git, turn-end checkpoint recovery and dependency-cache integration paths; requires Docker.
 - `pnpm test:worker`: Worker integration checks followed by fixture-backed browser tests. It is not a live end-to-end suite.
 - `pnpm build`: production packaging and deployment dry runs, including ingress and the sandbox image; not a deployment.
 
