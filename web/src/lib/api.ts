@@ -82,6 +82,7 @@ export type Step = {
   name: string;
   detail: string;
   output: string;
+  images?: string[];
   status: "pending" | "running" | "done" | "error";
 };
 
@@ -212,7 +213,20 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
       const output = messageText(message);
       const status = message.isError ? "error" : "done";
 
-      if (step) Object.assign(step, { output, status });
+      const images = Schema.is(Schema.String)(message.content)
+        ? []
+        : message.content.flatMap((block) => {
+            const match =
+              block.type === "image" && block.data
+                ? /^r2:\/\/screenshots\/(png|jpeg|gif|webp)\/([a-f0-9]{64})$/.exec(block.data)
+                : null;
+
+            return match ? [`/api/screenshots/${match[1]}/${match[2]}`] : [];
+          });
+
+      const imageOutput = images.length ? { images } : {};
+
+      if (step) Object.assign(step, { output, status, ...imageOutput });
       else
         addStep(turn, id, {
           id: message.toolCallId ?? id,
@@ -220,6 +234,7 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
           detail: "",
           output,
           status,
+          ...imageOutput,
         });
 
       return;

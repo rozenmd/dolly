@@ -78,6 +78,40 @@ describe("new session context", () => {
 });
 
 describe("session transcript", () => {
+  it("renders only validated private screenshot references from tool results", () => {
+    const hash = "a".repeat(64);
+
+    const snapshot = Schema.decodeUnknownSync(Snapshot)({
+      entries: [
+        {
+          id: 1,
+          kind: "tool",
+          model: [
+            {
+              role: "toolResult",
+              toolName: "preview",
+              toolCallId: "capture",
+              content: [
+                { type: "text", text: "Screenshot" },
+                { type: "image", mimeType: "image/png", data: `r2://screenshots/png/${hash}` },
+                { type: "image", data: "https://untrusted.test/image.png" },
+                { type: "image", data: "r2://other/key" },
+              ],
+            },
+          ],
+        },
+      ],
+      docs: {},
+    });
+
+    expect(turnsFromSnapshot(snapshot)[0]?.items).toMatchObject([
+      {
+        kind: "steps",
+        steps: [{ output: "Screenshot", images: [`/api/screenshots/png/${hash}`] }],
+      },
+    ]);
+  });
+
   it("reports live activity without exposing reasoning, including sequential queued tools", () => {
     const entries = [{ id: 1, kind: "pi.user", model: [{ role: "user", content: "Run tests" }] }];
 

@@ -3,6 +3,8 @@ import * as Schema from "effect/Schema";
 export const Block = Schema.Struct({
   type: Schema.String,
   text: Schema.optional(Schema.String),
+  data: Schema.optional(Schema.String),
+  mimeType: Schema.optional(Schema.String),
   thinking: Schema.optional(Schema.String),
   id: Schema.optional(Schema.String),
   name: Schema.optional(Schema.String),

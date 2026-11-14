@@ -73,6 +73,8 @@ import type { Env } from "./env";
 import { resolveImages, storeImages, type PromptImage } from "./images";
 import { listSessions } from "./session-list";
 import type { SavedSession } from "./session-contracts";
+import { PreviewOutbound, PreviewRequest, PreviewToolInput } from "./preview";
+import { capturePreview } from "./browser-preview";
 
 /** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
 export class Agent extends DurableObject<Env> {
@@ -287,6 +289,64 @@ export class Agent extends DurableObject<Env> {
       githubTool,
       workspaceTool,
       papercutsTool,
+      {
+        name: "preview",
+        description:
+          "Private, opt-in dev-server previews in the active repository's sandbox. Use only when the user asks for a preview, screenshot, or browser verification. start requires command and port (1024–65535); bind the server to 0.0.0.0 and keep it in the foreground. It waits up to 30 seconds and expires after 15 minutes. screenshot captures a relative path (default /), optional width/height (200–2560) and waitFor CSS selector, using Cloudflare Browser Run; no public URL exists. External browser requests are limited to the workspace's configured network hosts. status returns bounded server logs; stop revokes access and stops only the dev server, preserving workspace files. Previews are ephemeral: after sandbox/DO restart start again. Never start a server via shell backgrounding for this workflow.",
+        parameters: Schema.toJsonSchemaDocument(PreviewToolInput).schema,
+        replay: "unsafe",
+        executionMode: "sequential",
+        execute: async (input: typeof PreviewRequest.Type, api) => {
+          const parsed = Schema.decodeUnknownSync(PreviewRequest)(input);
+
+          // Stop/status must work even if checkout/setup is broken.
+          const state = await this.harness.snapshot(
+            ConversationWorkspace,
+            api.conversationId,
+            BACKGROUND_CONTEXT,
+          );
+
+          const active = activeWorkspace(state, String(api.conversationId));
+
+          if (parsed.action === "start") await this.prepareWorkspace(api.conversationId);
+          const sandboxId = active?.sandboxId ?? String(api.conversationId);
+          const sandbox = this.env.SANDBOX.getByName(sandboxId);
+
+          if (parsed.action === "screenshot") {
+            const { token } = await sandbox.previewCapability();
+            const hostname = `preview-${crypto.randomUUID()}.test`;
+
+            // SAFETY: PreviewOutbound is declared in the production Worker's exports.
+            const exports = this.ctx.exports as Cloudflare.Exports & {
+              PreviewOutbound: LoopbackForExport<typeof PreviewOutbound>;
+            };
+
+            return capturePreview(
+              this.env,
+              exports.PreviewOutbound({ props: { sandboxId, token, hostname } }),
+              hostname,
+              parsed,
+              active?.config.networkHosts,
+            );
+          }
+
+          let result;
+
+          switch (parsed.action) {
+            case "start":
+              result = await sandbox.previewStart(parsed.command, parsed.port);
+              break;
+            case "stop":
+              result = await sandbox.previewStop();
+              break;
+            case "status":
+              result = await sandbox.previewStatus();
+              break;
+          }
+
+          return { output: [{ type: "text", text: JSON.stringify(result) }] };
+        },
+      } satisfies ToolRegistration,
       ...coordination.tools(),
     ];
 
@@ -452,6 +512,34 @@ export class Agent extends DurableObject<Env> {
       );
       yield* attempt("papercuts.migration.write", () =>
         this.ctx.storage.put("migration:papercuts-tools", true),
+      );
+    }
+
+    if (
+      !(yield* attempt("preview.migration.read", () =>
+        this.ctx.storage.get("migration:preview-tools"),
+      ))
+    ) {
+      yield* attempt("preview.tools.update", () =>
+        this.harness.commit(async (tx) => {
+          let cursor: Cursor | undefined;
+
+          do {
+            const page = await tx.scanConversations({}, 100, cursor);
+
+            for (const conversation of page.items) {
+              const agent = await tx.doc(AgentDoc, conversation.id);
+
+              for (const names of [agent.tools, agent.modelTools])
+                if (Array.isArray(names) && !names.includes("preview")) names.push("preview");
+            }
+
+            cursor = page.next;
+          } while (cursor);
+        }, BACKGROUND_CONTEXT),
+      );
+      yield* attempt("preview.migration.write", () =>
+        this.ctx.storage.put("migration:preview-tools", true),
       );
     }
 

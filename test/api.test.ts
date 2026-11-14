@@ -2,6 +2,7 @@ import { SELF } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { headers, signIn } from "./session";
 import { MAX_PROMPT_BYTES } from "../src/images";
+import { env } from "cloudflare:workers";
 
 beforeEach(signIn);
 
@@ -30,9 +31,32 @@ describe("Hono Worker in workerd", () => {
       ["sessions/missing/children", "POST"],
       ["sessions/missing/children/child/messages", "POST"],
       ["sessions/missing/tasks/task", "GET"],
+      [`screenshots/png/${"a".repeat(64)}`, "GET"],
     ]) {
       expect((await SELF.fetch(`https://worker/api/${path}`, { method })).status).toBe(401);
     }
+  });
+  it("serves screenshot bytes only behind owner authentication and never caches them", async () => {
+    const hash = "a".repeat(64);
+    await env.SCREENSHOTS.put(`screenshots/png/${hash}`, "private image");
+    const url = `https://worker/api/screenshots/png/${hash}`;
+    expect((await SELF.fetch(url)).status).toBe(401);
+    const response = await SELF.fetch(url, { headers });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("image/png");
+    expect(response.headers.get("Cache-Control")).toContain("no-store");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(await response.text()).toBe("private image");
+    expect(
+      (await SELF.fetch(`https://worker/api/screenshots/svg/${hash}`, { headers })).status,
+    ).toBe(404);
+    expect(
+      (await SELF.fetch("https://worker/api/screenshots/png/invalid", { headers })).status,
+    ).toBe(404);
+    expect(
+      (await SELF.fetch(`https://worker/api/screenshots/png/${"b".repeat(64)}`, { headers }))
+        .status,
+    ).toBe(404);
   });
   it("requires a subscription before creating a session", async () => {
     const response = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });

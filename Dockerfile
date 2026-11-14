@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 COPY container/checkout.sh /usr/local/lib/dolly-checkout.sh
 COPY container/setup.py /usr/local/lib/dolly-setup.py
 COPY container/exec.py /usr/local/lib/dolly-exec.py
+COPY container/preview.py /usr/local/lib/dolly-preview.py
 USER node
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]

@@ -204,6 +204,16 @@ function StepGroup({ steps }: { steps: readonly Step[] }) {
                 {step.detail && <code>{step.detail}</code>}
               </summary>
               <pre>{step.output || stepPlaceholder(step.status)}</pre>
+              {step.images?.map((src) => (
+                <a key={src} href={src} target="_blank" rel="noreferrer">
+                  <img
+                    src={src}
+                    alt="Browser Run screenshot"
+                    loading="lazy"
+                    style={{ maxWidth: "100%", height: "auto" }}
+                  />
+                </a>
+              ))}
             </details>
           </li>
         ))}

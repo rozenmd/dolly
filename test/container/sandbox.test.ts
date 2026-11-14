@@ -11,6 +11,91 @@ declare global {
   }
 }
 
+it("privately previews a server and stops it without destroying workspace files", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+
+  try {
+    await sandbox.run("printf preserved > /workspace/preview-proof.txt");
+    await sandbox.previewStart(
+      `node -e 'require("http").createServer((req,res)=>res.end("preview:"+req.url)).listen(3000,"0.0.0.0")'`,
+      3000,
+    );
+    expect(await sandbox.previewStatus()).toMatchObject({ running: true, port: 3000 });
+    const { token } = await sandbox.previewCapability();
+    expect(
+      (await sandbox.previewFetch(new Request("http://private.test/hello"), "wrong")).status,
+    ).toBe(404);
+    expect(
+      await (
+        await sandbox.previewFetch(new Request("http://private.test/hello?a=1"), token)
+      ).text(),
+    ).toBe("preview:/hello?a=1");
+    let duplicate: unknown;
+
+    try {
+      await sandbox.previewStart("sleep 60", 3001);
+    } catch (error) {
+      duplicate = error;
+    }
+
+    expect(String(duplicate)).toContain("already running");
+    await sandbox.previewStop();
+    expect((await sandbox.previewFetch(new Request("http://private.test/"), token)).status).toBe(
+      404,
+    );
+    expect(await sandbox.readFile("/workspace/preview-proof.txt")).toBe("preserved");
+    // The port is released, so a new preview can reuse it.
+    await sandbox.previewStart(
+      `node -e 'require("http").createServer((req,res)=>res.end("again")).listen(3000,"0.0.0.0")'`,
+      3000,
+    );
+    expect((await sandbox.previewCapability()).token).not.toBe(token);
+    expect((await sandbox.previewFetch(new Request("http://private.test/"), token)).status).toBe(
+      404,
+    );
+  } finally {
+    await sandbox.previewStop();
+    await sandbox.restart();
+  }
+});
+
+it("stops failed preview commands and retains bounded failure logs", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+
+  try {
+    let failure: unknown;
+
+    try {
+      await sandbox.previewStart("echo deliberate-preview-failure; exit 1", 3000);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(String(failure)).toContain("did not become ready");
+    expect(await sandbox.previewStatus()).toMatchObject({
+      running: false,
+      logs: expect.stringContaining("deliberate-preview-failure"),
+    });
+  } finally {
+    await sandbox.restart();
+  }
+});
+
+it("enforces preview supervisor TTL and bounds logs independently of the Durable Object", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+
+  try {
+    const result = await sandbox.run(
+      `python3 /usr/local/lib/dolly-preview.py "python3 -c 'import time; print(\\"x\\"*40000, flush=True); time.sleep(60)'" 1 /run/sandbox/ttl.log; wc -c < /run/sandbox/ttl.log`,
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("32768");
+  } finally {
+    await sandbox.restart();
+  }
+});
+
 it("executes commands and uses Sandbox 1.0 Files in isolated containers", async () => {
   const first = env.SANDBOX.getByName(crypto.randomUUID());
   expect(await first.run("printf 'sandbox proof' > proof.txt; cat proof.txt")).toMatchObject({

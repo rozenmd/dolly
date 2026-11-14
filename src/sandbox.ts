@@ -14,6 +14,17 @@ import {
 import { attempt, OperationError } from "./operations";
 import { exceptionDetails, redact } from "./diagnostics";
 import type { Env } from "./env";
+import { PREVIEW_TTL_MS, PreviewPort } from "./preview";
+import * as Schema from "effect/Schema";
+import previewSupervisor from "../container/preview.py?raw";
+
+type RunningPreview = {
+  token: string;
+  port: number;
+  expiresAt: number;
+  process: ExecProcess;
+  exited: boolean;
+};
 
 /** Drain output without retaining unbounded bytes. Scoped cancellation releases the stream reader. */
 export const readBounded = Effect.fn("Sandbox.readBounded")(function* (
@@ -69,6 +80,7 @@ export class Sandbox extends DurableObject<Env> {
   private prepared = false;
   private setupAbort: AbortController | undefined;
   private readonly loopback: SandboxState["exports"];
+  private preview?: RunningPreview;
 
   constructor(ctx: SandboxState, env: Env) {
     super(ctx, env);
@@ -508,6 +520,201 @@ export class Sandbox extends DurableObject<Env> {
     );
   }
 
+  /** Deliberately ephemeral: an evicted DO cannot re-authorize an old server. */
+  private livePreview(token?: string) {
+    const preview = this.preview;
+
+    return preview &&
+      !preview.exited &&
+      preview.expiresAt > Date.now() &&
+      this.ctx.container?.running &&
+      (token === undefined || token === preview.token)
+      ? preview
+      : undefined;
+  }
+
+  private async stopPreviewProcess() {
+    const preview = this.preview;
+    this.preview = undefined; // Revoke before waiting for process cleanup.
+
+    if (!preview || preview.exited) return;
+
+    try {
+      preview.process.kill(15);
+      await preview.process.exitCode;
+    } catch (error) {
+      // A stopped/replaced container has already disposed of this process.
+      if (this.ctx.container?.running) throw error;
+    }
+  }
+
+  previewStart(command: string, port: number) {
+    Schema.decodeUnknownSync(PreviewPort)(port);
+
+    if (!command.trim() || command.length > 8192) throw new Error("Invalid preview command");
+
+    return Effect.runPromise(
+      this.permit.withPermit(
+        attempt("preview.start", async () => {
+          if (this.livePreview()) throw new Error("A preview is already running; stop it first");
+          await this.stopPreviewProcess();
+          const container = await Effect.runPromise(this.container());
+          // Do not accidentally publish an unrelated service already on this port.
+          let occupied = false;
+
+          try {
+            const response = await container.getTcpPort(port).fetch("http://localhost/", {
+              signal: AbortSignal.timeout(1000),
+            });
+
+            await response.body?.cancel();
+            occupied = true;
+          } catch {
+            // Connection refused is expected before the server starts.
+          }
+
+          if (occupied) throw new Error("Preview port is already in use; choose another port");
+          const workspace = await this.ctx.storage.get("workspace");
+
+          // Native snapshots may predate this feature and retain their old image files.
+          await new Files(container).writeFile("/run/sandbox/dolly-preview.py", previewSupervisor);
+
+          const process = await container.exec(
+            [
+              "python3",
+              "/run/sandbox/dolly-preview.py",
+              command,
+              String(PREVIEW_TTL_MS / 1000),
+              "/run/sandbox/preview.log",
+            ],
+            {
+              cwd: workspace ? "/workspace/repo" : "/workspace",
+              stdout: "ignore",
+              stderr: "ignore",
+              env: {
+                NODE_EXTRA_CA_CERTS: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
+                SSL_CERT_FILE: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
+              },
+            },
+          );
+
+          const preview: RunningPreview = {
+            process,
+            token: crypto.randomUUID(),
+            port,
+            expiresAt: Date.now() + PREVIEW_TTL_MS,
+            exited: false,
+          };
+
+          this.preview = preview;
+          void process.exitCode.then(
+            () => {
+              preview.exited = true;
+            },
+            () => {
+              preview.exited = true;
+            },
+          );
+
+          try {
+            const deadline = Date.now() + 30_000;
+
+            while (!preview.exited && Date.now() < deadline) {
+              try {
+                const response = await container.getTcpPort(port).fetch("http://localhost/", {
+                  signal: AbortSignal.timeout(1000),
+                });
+
+                await response.body?.cancel();
+
+                return { port, expiresAt: preview.expiresAt };
+              } catch {
+                await scheduler.wait(250);
+              }
+            }
+
+            throw new Error(
+              "Dev server did not become ready within 30 seconds; check preview status logs",
+            );
+          } catch (error) {
+            await this.stopPreviewProcess();
+            throw error;
+          }
+        }),
+      ),
+    );
+  }
+
+  async previewStatus() {
+    const preview = this.livePreview();
+    let logs = "";
+
+    if (this.ctx.container?.running) {
+      try {
+        const response = await new Files(this.ctx.container).readFile("/run/sandbox/preview.log", {
+          signal: AbortSignal.timeout(5000),
+        });
+
+        logs = await Effect.runPromise(
+          readBounded(response.body, { limit: 32_768, overflow: "truncate" }).pipe(
+            Effect.timeout("5 seconds"),
+          ),
+        );
+      } catch {
+        // No log exists before the first preview.
+      }
+    }
+
+    return {
+      running: Boolean(preview),
+      port: preview?.port,
+      expiresAt: preview?.expiresAt,
+      logs: redact(logs),
+    };
+  }
+
+  previewStop() {
+    return Effect.runPromise(
+      this.permit.withPermit(
+        attempt("preview.stop", async () => {
+          await this.stopPreviewProcess();
+
+          return { stopped: true };
+        }),
+      ),
+    );
+  }
+
+  previewCapability() {
+    const preview = this.livePreview();
+
+    if (!preview) throw new Error("No active preview; use preview start first");
+
+    return { token: preview.token, expiresAt: preview.expiresAt };
+  }
+
+  async previewFetch(request: Request, token: string) {
+    const preview = this.livePreview(token);
+
+    if (!preview) return new Response("Preview is unavailable or expired", { status: 404 });
+    // Do not call container(): a browser request must never resurrect a workspace.
+    const url = new URL(request.url);
+    url.protocol = "http:";
+    // Use an internal host accepted by dev servers, rather than disabling host checks.
+    url.host = "localhost";
+    const headers = new Headers(request.headers);
+    headers.set("Host", "localhost");
+
+    return this.ctx.container!.getTcpPort(preview.port).fetch(
+      new Request(url, {
+        method: request.method,
+        headers,
+        body: request.body,
+        redirect: "manual",
+      }),
+    );
+  }
+
   diagnostics() {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
@@ -553,6 +760,8 @@ export class Sandbox extends DurableObject<Env> {
     return Effect.runPromise(
       this.permit.withPermit(
         Effect.gen({ self: this }, function* () {
+          yield* attempt("preview.stop", () => this.stopPreviewProcess());
+
           if (this.ctx.container?.running)
             yield* attempt("workspace.restart", () => this.ctx.container!.destroy());
           this.initialized = false;
