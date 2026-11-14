@@ -289,9 +289,9 @@ it("cancels dependency setup before restarting", async () => {
     let installing = false;
     let cancelled = false;
     Object.assign(instance, {
-      container: () => Effect.succeed({}),
+      container: () => Effect.succeed({ interceptAllOutboundHttp: async () => {} }),
       execute: (command: string) =>
-        command === "python3 /usr/local/lib/dolly-setup.py"
+        command.endsWith("python3 /usr/local/lib/dolly-setup.py")
           ? Effect.sync(() => {
               installing = true;
             }).pipe(

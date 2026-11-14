@@ -1011,7 +1011,16 @@ select.input {
   background: var(--surface-hover);
 }
 .composer-tools .ghost-button {
+  margin-left: 0;
   color: var(--muted);
+  white-space: nowrap;
+}
+.new-session-modal .model-picker {
+  min-width: 0;
+}
+.create-button {
+  flex: none;
+  white-space: nowrap;
 }
 .create-button {
   display: inline-flex;
@@ -1248,17 +1257,26 @@ select.input {
   .modal .input {
     font-size: 16px;
   }
+  .new-session-modal {
+    width: calc(100vw - 24px);
+    padding: 14px 12px 12px;
+  }
   .new-session-modal .composer-toolbar {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    flex-wrap: wrap;
+    row-gap: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgb(255 255 255 / 6%);
   }
   .new-session-modal .composer-tools {
-    grid-column: 1 / -1;
+    flex: 1 1 100%;
     margin-right: 0;
   }
   .new-session-modal .model-picker {
-    justify-self: start;
+    flex: 1 1 0;
     max-width: 100%;
+  }
+  .new-session-modal .create-button {
+    min-height: 40px;
   }
   .new-session-modal .model-picker .picker-menu {
     left: 0;
