@@ -4,6 +4,10 @@ A coding agent in development on Cloudflare Workers, using Hono, Effect 4.0.0-rc
 
 ## Web frontend
 
+For repository changes, use `pnpm verify` for static-only checks and follow the
+[integration-first verification workflow](tools/verify/README.md). This guidance
+is for developing Dolly, not for workloads it runs.
+
 The `web/` workspace is a TanStack Start + React frontend with a dark, responsive workspace sidebar, searchable sessions, an activity feed, Markdown conversations, tool output, and a message composer.
 
 The app is served at the Worker's `/`, with the Hono endpoints under `/api/*` on the same origin. `/api/health` is available without credentials. Cloudflare Access protects the whole hostname. Behind Access, you sign in with GitHub. The current authentication implementation records the first GitHub account as an owner and refuses other accounts; this is an implementation limitation, not an intended single-user product constraint. Signing in sets an HttpOnly session cookie that lasts 30 days.

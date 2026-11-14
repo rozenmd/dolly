@@ -13,6 +13,7 @@
     "access:deploy": "pnpm --dir infra run deploy && pnpm access:export",
     "access:export": "node scripts/export-access.mjs",
     "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm check:web",
+    "verify": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm --dir web typecheck",
     "test": "node --test scripts/*.test.mjs && pnpm --dir infra test && vp test run",
     "build": "vp -C . build && cf deploy --prebuilt --dry-run && pnpm --dir ingress run build && pnpm --dir ingress exec cf deploy --prebuilt --dry-run",
     "test:sandbox": "bash scripts/test-sandbox.sh",
@@ -21,7 +22,8 @@
     "lint": "vp lint --deny-warnings",
     "lint:fix": "vp lint --fix --deny-warnings",
     "typecheck": "tsrs --noEmit && pnpm --dir infra typecheck",
-    "test:worker": "vp -C . build --config test/worker/vite.config.ts && vp test run --config vitest.worker.config.ts && WEB_TEST_ACCESS=required vp test run --config vitest.worker.config.ts && pnpm --dir web exec playwright test --config playwright.worker.config.ts"
+    "test:integration:worker": "vp -C . build --config test/worker/vite.config.ts && vp test run --config vitest.worker.config.ts && WEB_TEST_ACCESS=required vp test run --config vitest.worker.config.ts",
+    "test:worker": "pnpm run test:integration:worker && pnpm --dir web exec playwright test --config playwright.worker.config.ts"
   },
   "dependencies": {
     "@cloudflare/sandbox": "1.0.3",
