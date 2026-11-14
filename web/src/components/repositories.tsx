@@ -193,20 +193,28 @@ export function RepositoryPicker({
         </>
       ) : (
         <>
-          <label htmlFor="repository-search">Find a repository</label>
-          <Input
-            id="repository-search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search App repositories"
-          />
-          <p className="field-help">
-            Only repositories available to the GitHub App in allowed accounts appear. Install the
-            App and configure accounts in Settings, then refresh.
-          </p>
+          <div className="repository-toolbar">
+            <Input
+              id="repository-search"
+              aria-label="Find a repository"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search repositories"
+            />
+            <button
+              type="button"
+              className="icon-button repository-refresh"
+              title="Refresh repositories"
+              aria-label="Refresh repositories"
+              disabled={loading || pending}
+              onClick={() => setRevision((current) => current + 1)}
+            >
+              <ArrowPathIcon className={loading ? "spin" : undefined} aria-hidden="true" />
+            </button>
+          </div>
           <div className="repository-list" aria-busy={loading}>
-            {loading ? (
-              <p role="status" className="muted">
+            {loading && !repositories.length ? (
+              <p role="status" className="repository-empty">
                 Loading repositories…
               </p>
             ) : (
@@ -214,16 +222,21 @@ export function RepositoryPicker({
                 .filter((repo) => repo.fullName.toLowerCase().includes(query.toLowerCase()))
                 .map((repo) => (
                   <div className="repository-row" key={repo.fullName}>
-                    <div>
-                      <strong>{repo.fullName}</strong>
-                      <p className="field-help">
+                    <RepoBadge repository={repo.fullName} />
+                    <div className="repository-meta">
+                      <span className="repository-name">
+                        <span className="muted">{repo.fullName.split("/")[0]}/</span>
+                        {shortName(repo.fullName)}
+                      </span>
+                      <span className="repository-detail">
                         {repo.private ? "Private" : "Public"} · {repo.defaultBranch}
                         {repo.description ? ` · ${repo.description}` : ""}
-                      </p>
+                      </span>
                     </div>
+                    {repo.registered && <span className="repository-tag">Enrolled</span>}
                     <button
                       type="button"
-                      className="secondary-button"
+                      className={repo.registered ? "ghost-button danger" : "secondary-button"}
                       disabled={pending}
                       onClick={() => void update(repo)}
                     >
@@ -233,9 +246,13 @@ export function RepositoryPicker({
                 ))
             )}
             {!loading && !repositories.length && (
-              <p className="muted">No repositories available.</p>
+              <p className="repository-empty">No repositories available.</p>
             )}
           </div>
+          <p className="field-help">
+            Only repositories the GitHub App can access in allowed accounts appear here. Missing one?
+            Use Add repositories above, then refresh.
+          </p>
           {!manage && (
             <button type="button" className="ghost-button" onClick={() => setEnrolling(false)}>
               Back to enrolled repositories
@@ -243,7 +260,7 @@ export function RepositoryPicker({
           )}
         </>
       )}
-      {(!compact || enrolling || error) && (
+      {((!compact && !enrolling) || error) && (
         <button
           type="button"
           className="ghost-button"
