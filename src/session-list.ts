@@ -30,6 +30,20 @@ function findPullRequest(entries: readonly EntryRecord[]): PullRequestRef | unde
   }
 }
 
+/** Newest timestamp of a human-authored message in a transcript page. */
+function lastPromptAt(entries: readonly EntryRecord[]): number {
+  return entries.reduce(
+    (time, entry) =>
+      Math.max(
+        time,
+        ...(entry.model ?? [])
+          .filter((message) => message.role === "user")
+          .map((message) => message.timestamp ?? 0),
+      ),
+    0,
+  );
+}
+
 const LIVE_STATUSES = ["running", "waiting", "sleeping"] as const;
 
 type Metadata = { archived: boolean; createdAt?: number };
@@ -159,11 +173,25 @@ export async function listSessions(
         history = entries.next;
       } while (!title && history);
 
-      const updatedAt = latest.items.reduce(
-        (time, entry) =>
-          Math.max(time, ...(entry.model ?? []).map((message) => message.timestamp ?? 0)),
-        metadata?.createdAt ?? 0,
-      );
+      // Order by the last human prompt so agent activity does not reshuffle the list.
+      let updatedAt = lastPromptAt(latest.items);
+      let older = latest.next;
+      let scanned = latest.items.length;
+
+      while (!updatedAt && older && scanned < PULL_SCAN_LIMIT) {
+        const entries = await conversation.entries(
+          { order: "descending" },
+          50,
+          older,
+          BACKGROUND_CONTEXT,
+        );
+
+        updatedAt = lastPromptAt(entries.items);
+        scanned += entries.items.length;
+        older = entries.next;
+      }
+
+      updatedAt = Math.max(updatedAt, metadata?.createdAt ?? 0);
 
       sessions.push({
         id: aliases.get(record.id) ?? String(record.id),
