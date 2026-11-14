@@ -18,6 +18,26 @@ const Path = Schema.String.check(
 
 const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
 
+const PullNumber = Schema.Int.check(Schema.isGreaterThan(0));
+
+const Page = Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(100));
+
+const LineNumber = Schema.Int.check(Schema.isGreaterThan(0));
+
+const Side = Schema.Literals(["LEFT", "RIGHT"]);
+
+const CommentBody = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(65_536));
+
+/** An inline review comment anchored with GitHub's line/side model (never the deprecated position). */
+export const ReviewComment = Schema.Struct({
+  path: Path,
+  body: CommentBody,
+  line: LineNumber,
+  side: Side,
+  start_line: Schema.optional(LineNumber),
+  start_side: Schema.optional(Side),
+});
+
 export const GitHubAccounts = Schema.Struct({ accounts: Schema.Array(Name) });
 
 export const EnrollRepository = Schema.Struct({ repository: Repository });
@@ -71,6 +91,46 @@ export const GitHubRequest = Schema.Struct({
       title: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
       body: Schema.String.check(Schema.isMaxLength(32_768)),
     }),
+    Schema.Struct({
+      action: Schema.Literal("read_pull_request"),
+      repository: Repository,
+      number: PullNumber,
+    }),
+    Schema.Struct({
+      action: Schema.Literal("list_pull_request_files"),
+      repository: Repository,
+      number: PullNumber,
+      page: Schema.optional(Page),
+    }),
+    Schema.Struct({
+      action: Schema.Literal("list_pull_request_comments"),
+      repository: Repository,
+      number: PullNumber,
+      page: Schema.optional(Page),
+    }),
+    Schema.Struct({
+      action: Schema.Literal("read_pull_request_checks"),
+      repository: Repository,
+      number: PullNumber,
+    }),
+    Schema.Struct({
+      action: Schema.Literal("create_review"),
+      repository: Repository,
+      number: PullNumber,
+      /** Must equal the pull request's current head SHA, so comments land on the reviewed diff. */
+      commit_id: Sha,
+      body: Schema.String.check(Schema.isMaxLength(65_000)),
+      /** PENDING leaves the review unsubmitted for a human to inspect. Approvals are never allowed. */
+      event: Schema.Literals(["COMMENT", "PENDING"]),
+      comments: Schema.Array(ReviewComment).check(Schema.isMaxLength(50)),
+    }),
+    Schema.Struct({
+      action: Schema.Literal("reply_to_review_comment"),
+      repository: Repository,
+      number: PullNumber,
+      comment_id: PullNumber,
+      body: CommentBody,
+    }),
   ]),
 });
 
@@ -88,6 +148,17 @@ export const GitHubResult = Schema.Union([
     kind: Schema.Literal("pull_request"),
     number: Schema.Number,
     url: Schema.String,
+  }),
+  Schema.Struct({
+    kind: Schema.Literals([
+      "pull_request_details",
+      "pull_request_files",
+      "pull_request_comments",
+      "pull_request_checks",
+      "review",
+      "review_comment",
+    ]),
+    data: Schema.Unknown,
   }),
 ]);
 
