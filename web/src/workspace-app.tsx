@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import * as Schema from "effect/Schema";
 import { Bars3Icon, CheckIcon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
 import {
@@ -42,6 +42,7 @@ export function WorkspaceApp() {
   const [authError, setAuthError] = useState("");
   const [setupError, setSetupError] = useState("");
   const [sessions, setSessions] = useState<readonly SavedSession[]>([]);
+  const sessionRevision = useRef(0);
   const [selected, setSelected] = useState("");
   const [snapshot, setSnapshot] = useState<typeof Snapshot.Type | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -53,6 +54,7 @@ export function WorkspaceApp() {
   const [showClaude, setShowClaude] = useState(false);
   const [error, setError] = useState("");
   const [streamError, setStreamError] = useState("");
+  const [sessionError, setSessionError] = useState("");
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -101,7 +103,7 @@ export function WorkspaceApp() {
     try {
       setSessions(readSessions(localStorage.getItem(storageKey) ?? "[]"));
     } catch {
-      setNotice("Browser storage is unavailable. Sessions will only be listed until you reload.");
+      setNotice("Browser storage is unavailable. Sessions will be loaded from the server.");
     }
   }, []);
 
@@ -109,22 +111,60 @@ export function WorkspaceApp() {
     if (!connected) return;
 
     let active = true;
+    const revision = sessionRevision.current;
 
     Promise.all([
       codexLogin().catch(() => null),
       anthropicStatus().catch(() => ({ connected: false })),
+      (async () => {
+        try {
+          for (let offset = 0; offset < sessions.length; offset += 50) {
+            await request("/sessions/import", { sessions: sessions.slice(offset, offset + 50) });
+          }
+        } catch {
+          if (active)
+            setNotice(
+              "Could not import browser archive choices. Server sessions will still be loaded.",
+            );
+        }
+
+        const saved = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(SavedSession)))(
+          await request("/sessions"),
+        );
+
+        if (active) setSessionError("");
+
+        return saved;
+      })().catch((cause) => {
+        if (active)
+          setSessionError(
+            `Could not sync sessions: ${cause instanceof Error ? cause.message : "Server unavailable"}`,
+          );
+
+        return sessions;
+      }),
     ]).then(
-      ([status, claude]) => {
+      ([status, claude, saved]) => {
         if (!active) return;
 
         const signedIn = status?.state === "connected";
         setCodex(signedIn);
         setAnthropic(claude.connected);
-        setSelected(
-          (current) => current || sessionList(sessions, "", Date.now()).active[0]?.id || "",
-        );
 
-        setModal(!signedIn && !claude.connected ? "codex" : sessions.length ? null : "new");
+        if (sessionRevision.current !== revision) {
+          // Do not replace sessions created or changed while sign-in discovery was in flight.
+          updateSessions((current) => [
+            ...current,
+            ...saved.filter((item) => !current.some((local) => local.id === item.id)),
+          ]);
+
+          return;
+        }
+
+        save(saved);
+        setSelected((current) => current || sessionList(saved, "", Date.now()).active[0]?.id || "");
+
+        setModal(!signedIn && !claude.connected ? "codex" : saved.length ? null : "new");
       },
       () => active && setCodex(null),
     );
@@ -133,6 +173,42 @@ export function WorkspaceApp() {
       active = false;
     };
     // Checked once per sign-in; the saved session list does not change who is signed in.
+  }, [connected]);
+
+  useEffect(() => {
+    if (!connected) return;
+    let active = true;
+
+    const refresh = async () => {
+      if (document.visibilityState === "hidden") return;
+      const revision = sessionRevision.current;
+
+      try {
+        const saved = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(SavedSession)))(
+          await request("/sessions"),
+        );
+
+        if (active) {
+          setSessionError("");
+
+          if (sessionRevision.current === revision) save(saved);
+        }
+      } catch (cause) {
+        if (active)
+          setSessionError(
+            `Could not sync sessions: ${cause instanceof Error ? cause.message : "Server unavailable"}`,
+          );
+      }
+    };
+
+    const timer = window.setInterval(() => void refresh(), 30_000);
+    window.addEventListener("focus", refresh);
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+    };
   }, [connected]);
 
   useEffect(() => {
@@ -187,12 +263,13 @@ export function WorkspaceApp() {
       const next = update(current);
 
       if (next === current) return current;
+      sessionRevision.current++;
 
       try {
         localStorage.setItem(storageKey, JSON.stringify(next));
       } catch {
         setNotice(
-          "Could not save the session list in this browser. Keep a copy of your session ID.",
+          "Could not cache the session list in this browser. Your sessions are still on the server.",
         );
       }
 
@@ -208,13 +285,26 @@ export function WorkspaceApp() {
     setStreamError("");
   }
 
-  function toggleArchive(id: string) {
+  async function toggleArchive(id: string) {
     const target = sessions.find((item) => item.id === id);
 
     if (!target) return;
 
+    try {
+      await request(
+        `/sessions/${encodeURIComponent(id)}`,
+        { archived: !target.archived },
+        undefined,
+        "PUT",
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not sync archive state.");
+
+      return;
+    }
+
     updateSessions((current) =>
-      current.map((item) => (item.id === id ? { ...item, archived: !item.archived } : item)),
+      current.map((item) => (item.id === id ? { ...item, archived: !target.archived } : item)),
     );
 
     if (!target.archived && selected === id) {
@@ -288,7 +378,7 @@ export function WorkspaceApp() {
     }
   }
 
-  const feedback = error || streamError || notice;
+  const feedback = error || streamError || sessionError || notice;
 
   if (!auth?.user)
     return (
@@ -403,19 +493,19 @@ export function WorkspaceApp() {
         </header>
         <div className="content-layout">
           <div className="conversation-panel">
+            {feedback && (
+              <p
+                className={`feedback ${error || streamError || sessionError ? "error-text" : ""}`}
+                role={error || streamError || sessionError ? "alert" : "status"}
+              >
+                {feedback}
+              </p>
+            )}
             {feed ? (
               <FeedView rows={rows.filter((row) => !row.archived)} onSelect={select} />
             ) : session ? (
               <>
                 <Conversation turns={turns} sessionId={session.id} loading={loading} />
-                {feedback && (
-                  <p
-                    className={`feedback ${error || streamError ? "error-text" : ""}`}
-                    role={error || streamError ? "alert" : "status"}
-                  >
-                    {feedback}
-                  </p>
-                )}
                 <Composer
                   draftKey={selected}
                   onSend={send}

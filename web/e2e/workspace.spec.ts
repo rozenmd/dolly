@@ -251,6 +251,21 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
       return route.fulfill({ json: { repositories: [] } });
 
     if (path === "/api/sessions") {
+      if (route.request().method() === "GET")
+        return route.fulfill({
+          json: selectedModel
+            ? [
+                {
+                  id: "claude-session",
+                  model: selectedModel,
+                  title: "Say hello",
+                  repository: "",
+                  updatedAt: 1,
+                },
+              ]
+            : [],
+        });
+
       selectedModel = route.request().postDataJSON().model;
 
       return route.fulfill({ status: 201, json: { id: "claude-session", model: selectedModel } });
@@ -370,6 +385,19 @@ for (const outcome of ["answered", "failed", "retrying"] as const) {
 
       if (path === "/api/auth") return route.fulfill({ json: signedIn });
 
+      if (path === "/api/sessions")
+        return route.fulfill({
+          json: [
+            {
+              id: "response-session",
+              model: "gpt-6.1-terra",
+              title: "hi",
+              repository: "octocat/project",
+              updatedAt: 1,
+            },
+          ],
+        });
+
       if (path === "/api/sessions/response-session")
         return route.fulfill({
           json: {
@@ -477,6 +505,7 @@ for (const repository of ["octocat/project", ""]) {
         });
 
       if (path === "/api/sessions") {
+        if (route.request().method() === "GET") return route.fulfill({ json: [source] });
         creates.push(route.request().postDataJSON());
 
         return route.fulfill({ json: { id: "created", model: source.model } });

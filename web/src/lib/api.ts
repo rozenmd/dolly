@@ -40,17 +40,9 @@ export function queueFromSnapshot(snapshot: typeof Snapshot.Type): QueuedMessage
 
 export const Session = Schema.Struct({ id: Schema.String, model: Schema.String });
 
-export const SavedSession = Schema.Struct({
-  id: Schema.String,
-  model: Schema.String,
-  title: Schema.String,
-  repository: Schema.String,
-  updatedAt: Schema.Number,
-  archived: Schema.optional(Schema.Boolean),
-  ref: Schema.optional(Schema.String),
-});
+export { SavedSession } from "../../../src/session-contracts";
 
-export type SavedSession = typeof SavedSession.Type;
+import { SavedSession } from "../../../src/session-contracts";
 
 const WorkspaceSelection = Schema.Struct({
   repository: Schema.String,
@@ -334,6 +326,8 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 }
 
 export type ApiBody = {
+  sessions?: readonly SavedSession[];
+  archived?: boolean;
   content?: string;
   requestId?: string;
   images?: readonly { mimeType: string; data: string }[];
