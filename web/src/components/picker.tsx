@@ -1,11 +1,4 @@
-import {
-  useEffect,
-  useId,
-  useRef,
-  useState,
-  type KeyboardEvent,
-  type ReactNode,
-} from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { CheckIcon, ChevronDownIcon } from "@heroicons/react/16/solid";
 
 export type PickerOption = {
@@ -55,8 +48,9 @@ export function Picker({
     if (!open) return;
 
     const onPointer = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
+      if (!(event.target instanceof Node) || !root.current?.contains(event.target)) setOpen(false);
     };
+
     document.addEventListener("pointerdown", onPointer);
     list.current?.focus();
 
@@ -64,7 +58,12 @@ export function Picker({
   }, [open]);
 
   function show() {
-    setActive(Math.max(0, options.findIndex((option) => option.value === value)));
+    setActive(
+      Math.max(
+        0,
+        options.findIndex((option) => option.value === value),
+      ),
+    );
     setOpen(true);
   }
 
@@ -80,16 +79,19 @@ export function Picker({
 
   function onKeyDown(event: KeyboardEvent) {
     const last = options.length - 1;
-    const moves: Record<string, number> = {
-      ArrowDown: active >= last ? 0 : active + 1,
-      ArrowUp: active <= 0 ? last : active - 1,
-      Home: 0,
-      End: last,
-    };
 
-    if (event.key in moves) {
+    const moves = new Map([
+      ["ArrowDown", active >= last ? 0 : active + 1],
+      ["ArrowUp", active <= 0 ? last : active - 1],
+      ["Home", 0],
+      ["End", last],
+    ]);
+
+    const next = moves.get(event.key);
+
+    if (next !== undefined) {
       event.preventDefault();
-      setActive(moves[event.key]);
+      setActive(next);
     } else if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
 
@@ -144,6 +146,7 @@ export function Picker({
             {options.map((option, index) => {
               const heading =
                 option.group && option.group !== previousGroup ? option.group : undefined;
+
               previousGroup = option.group;
 
               return (
