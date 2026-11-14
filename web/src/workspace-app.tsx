@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import { Bars3Icon, CheckIcon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
 import {
@@ -48,7 +49,10 @@ export function WorkspaceApp() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [feed, setFeed] = useState(false);
   const [details, setDetails] = useState(false);
-  const [modal, setModal] = useState<"settings" | "codex" | "new" | "import" | null>(null);
+  const [dialog, setModal] = useState<"codex" | "new" | "import" | null>(null);
+  const navigate = useNavigate();
+  const settingsOpen = useLocation({ select: (location) => location.pathname === "/settings" });
+  const modal = settingsOpen && !dialog ? "settings" : dialog;
   const [codex, setCodex] = useState<boolean | null>(null);
   const [anthropic, setAnthropic] = useState(false);
   const [showClaude, setShowClaude] = useState(false);
@@ -438,7 +442,7 @@ export function WorkspaceApp() {
         onNew={newSession}
         onSettings={() => {
           setMobileOpen(false);
-          setModal("settings");
+          void navigate({ to: "/settings" });
         }}
         onClose={() => setMobileOpen(false)}
         onFeed={() => {
@@ -546,7 +550,7 @@ export function WorkspaceApp() {
           github={auth.github}
           codex={codex}
           onAnthropicConnection={setAnthropic}
-          onClose={() => setModal(null)}
+          onClose={() => void navigate({ to: "/" })}
           onCodexSignIn={() => setModal("codex")}
           onCodexSignOut={() => setCodex(false)}
           onIngress={(ingress) =>
@@ -567,6 +571,7 @@ export function WorkspaceApp() {
             setAnthropic(false);
             setSnapshot(null);
             setModal(null);
+            void navigate({ to: "/" });
             setNotice("");
           }}
         />

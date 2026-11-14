@@ -844,6 +844,7 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   await page.getByRole("dialog").getByRole("button", { name: "Close dialog" }).click();
   await page.getByRole("button", { name: "Settings" }).click();
   const dialog = page.getByRole("dialog", { name: "Settings" });
+  await expect(page).toHaveURL(/\/settings$/);
   await expect(dialog).toContainText("Signed in as @octocat");
   await expect(dialog.getByRole("link", { name: "Add repositories" })).toHaveAttribute(
     "href",
@@ -863,7 +864,9 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   expect(senders).toEqual({ senders: ["octocat", "hubot"] });
   // Reopening shows what was saved, and clearing the list saves an empty list.
   await dialog.getByRole("button", { name: "Close dialog" }).click();
-  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page).not.toHaveURL(/\/settings$/);
+  // Settings has its own URL, so loading it directly opens it.
+  await page.goto("/settings", { waitUntil: "networkidle" });
   await expect(dialog.getByLabel("Who can run /pi commands")).toHaveValue("octocat, hubot");
   await dialog.getByLabel("Who can run /pi commands").fill("");
   await dialog.getByRole("button", { name: "Save", exact: true }).last().click();
