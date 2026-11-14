@@ -332,92 +332,96 @@ export function Composer({
 
   return (
     <div className="composer-area">
-      {queued.length > 0 && (
-        <section className="message-queue" aria-label="Queued messages">
-          <h2>Queued messages</h2>
-          <ul>
-            {queued.map((item) => (
-              <li key={item.id}>
-                <p>{item.text}</p>
-                {item.steering ? (
-                  <span role="status">Sending after the current step…</span>
-                ) : (
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    disabled={pending}
-                    title="Deliver after the current step instead of waiting for the answer"
-                    onClick={() => onSteerQueued(item.id)}
-                  >
-                    <ArrowUpIcon />
-                    Send now
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-      <form
-        className="composer"
-        onSubmit={(event) => void submit(event)}
-        onDragOver={input.onDragOver}
-        onDrop={input.onDrop}
-      >
-        <AttachmentTray
-          attachments={attachments}
-          disabled={pending || input.reading}
-          onRemove={(id) => setAttachments(attachments.filter((item) => item.id !== id))}
-        />
-        <label className="sr-only" htmlFor="prompt">
-          Message your agent
-        </label>
-        <Textarea
-          id="prompt"
-          name="prompt"
-          rows={1}
-          placeholder={running ? "Queue for when it finishes…" : "Ask dolly…"}
-          value={content}
-          maxLength={32768}
-          disabled={pending}
-          onChange={(event) => setDrafts({ ...drafts, [draftKey]: event.target.value })}
-          onPaste={input.onPaste}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              event.currentTarget.form?.requestSubmit();
-            }
-          }}
-        />
-        <div className="composer-toolbar">
-          <AttachButton
+      <div className={queued.length > 0 ? "composer-shell has-queue" : "composer-shell"}>
+        {queued.length > 0 && (
+          <section className="message-queue" aria-label="Queued messages">
+            <h2>
+              {queued.length} {queued.length === 1 ? "message" : "messages"} queued
+            </h2>
+            <ul>
+              {queued.map((item) => (
+                <li key={item.id}>
+                  <p title={item.text}>{item.text}</p>
+                  {item.steering ? (
+                    <span role="status">Sending after the current step…</span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="queue-steer"
+                      disabled={pending}
+                      aria-label="Send now"
+                      title="Send now: deliver after the current step instead of waiting for the answer"
+                      onClick={() => onSteerQueued(item.id)}
+                    >
+                      <ArrowUpIcon />
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        <form
+          className="composer"
+          onSubmit={(event) => void submit(event)}
+          onDragOver={input.onDragOver}
+          onDrop={input.onDrop}
+        >
+          <AttachmentTray
+            attachments={attachments}
             disabled={pending || input.reading}
-            count={attachments.length}
-            onFiles={(files) => void input.add(files)}
+            onRemove={(id) => setAttachments(attachments.filter((item) => item.id !== id))}
           />
-          <span className="composer-model">{model}</span>
-          {running && !content.trim() ? (
-            <button
-              type="button"
-              className="round-button stop"
-              aria-label="Stop agent"
-              disabled={pending}
-              onClick={onStop}
-            >
-              <StopIcon />
-            </button>
-          ) : (
-            <button
-              type="submit"
-              className="round-button send"
-              disabled={!content.trim() || pending || input.reading}
-              aria-label={running ? "Queue message" : "Send message"}
-            >
-              <ArrowUpIcon />
-            </button>
-          )}
-        </div>
-      </form>
+          <label className="sr-only" htmlFor="prompt">
+            Message your agent
+          </label>
+          <Textarea
+            id="prompt"
+            name="prompt"
+            rows={1}
+            placeholder={running ? "Queue for when it finishes…" : "Ask dolly…"}
+            value={content}
+            maxLength={32768}
+            disabled={pending}
+            onChange={(event) => setDrafts({ ...drafts, [draftKey]: event.target.value })}
+            onPaste={input.onPaste}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
+          />
+          <div className="composer-toolbar">
+            <AttachButton
+              disabled={pending || input.reading}
+              count={attachments.length}
+              onFiles={(files) => void input.add(files)}
+            />
+            <span className="composer-model">{model}</span>
+            {running && !content.trim() ? (
+              <button
+                type="button"
+                className="round-button stop"
+                aria-label="Stop agent"
+                disabled={pending}
+                onClick={onStop}
+              >
+                <StopIcon />
+              </button>
+            ) : (
+              <button
+                type="submit"
+                className="round-button send"
+                disabled={!content.trim() || pending || input.reading}
+                aria-label={running ? "Queue message" : "Send message"}
+              >
+                <ArrowUpIcon />
+              </button>
+            )}
+          </div>
+        </form>
+      </div>
       {attachError && (
         <p role="alert" className="error-text">
           {attachError}
