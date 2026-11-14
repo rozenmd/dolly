@@ -57,7 +57,7 @@ Ask **“Fix the open papercuts for owner/repo”** in a session to have the age
 
 ### Existing deployments
 
-The configuration now names the main Worker `dolly`, the public receiver `dolly-ingress`, the container `dolly-sandbox`, and the Artifacts namespace `dolly-workspaces`. These are deployment identities, not cosmetic labels. Deploying them does not rename or migrate existing Workers, Durable Object namespaces, credentials, conversations, or checkpoints. An automatic migration is not implemented. Back up the existing deployment and plan its data migration before running the deployment commands below; do not delete the existing resources as part of a rename.
+The main Worker is `dolly`, the public receiver is `dolly-ingress`, and the container is `dolly-sandbox`.
 
 Access inputs now use `DOLLY_ACCESS_*`, with Alchemy stack `DollyAccess` and application resource `Dolly`. Existing local environment files and state are not rewritten automatically. Migrate the previous stack/resource state with Alchemy's state tooling before planning changes, preserve the existing application and service-token IDs, and review the plan for unintended creations or replacements. Update the protected hostname and GitHub App callback/webhook URLs when moving traffic; keep ingress public and the main hostname protected.
 
@@ -65,7 +65,7 @@ Browser cookie names and the local session-list key now use Dolly's name, so exi
 
 ### New deployments
 
-Use Node.js 24.22.2 and pnpm 12.18.0 (pinned in `.node-version` and `package.json`), a running Docker engine to build the container image, and a paid Cloudflare Workers account with native Container snapshots available. The image uses ordinary Git and local disk: no ArtifactFS, FUSE, or Go build. Fresh deployments do not need Artifacts. Only when importing older checkpoints, deploy with `DOLLY_LEGACY_ARTIFACTS=true pnpm run deploy` to retain the existing private `dolly-workspaces` namespace as a read-only `WORKSPACES` compatibility binding. Keep that opt-in until old workspaces have been imported.
+Use Node.js 24.22.2 and pnpm 12.18.0 (pinned in `.node-version` and `package.json`), a running Docker engine to build the container image, and a paid Cloudflare Workers account with native Container snapshots available. The image uses ordinary Git and local disk.
 
 Install pnpm using the [official instructions](https://pnpm.io/installation). With Node.js already installed:
 
@@ -211,8 +211,6 @@ After initial setup and foreground shell commands (including commands that fail)
 Replacement containers start from the last acknowledged snapshot, reapply the private outbound broker, and resume without replaying commands or rerunning setup. Missing or expired snapshots fail closed—there is no silent fallback to an empty clone. Native snapshots are public beta, currently expire after 30 days, and omit mounted directories; this design deliberately keeps the repository on local disk. It is not indefinite archival storage: export/push important work or add long-term R2 directory backups before relying on sessions older than the retention window. Blank sessions without a repository remain ephemeral.
 
 Checkout and native checkpoint lifecycle events include sandbox IDs and elapsed times in Worker logs. Checkout failures also capture bounded, redacted phase/process-name/index-lock metadata; they never delete locks or print environment/process arguments. `workspace diagnostics` bypasses checkout and does not start a stopped sandbox. `workspace restart` also bypasses checkout, requires `discardUncheckpointed: true` **and explicit user confirmation**, discards live uncheckpointed changes, and restores the last acknowledged checkpoint on the next repository tool. A fresh, never-checkpointed workspace will start over.
-
-With the migration opt-in above, existing stopped Artifacts workspaces are imported once through a read-only broker using normal Git, validated against the acknowledged commit, unpacked onto local disk with safe tar extraction, and saved as a native snapshot. Without the opt-in, they fail with a migration instruction rather than starting empty. The original checkpoint is retained; later runs no longer get the Artifacts capability. A running legacy sandbox fails closed so an upgrade cannot destroy unacknowledged work or snapshot a FUSE mount that would be omitted. Inspect/export it before a confirmed restart. Earlier R2 checkpoints still require an explicit export/migration. No old namespace, bucket or checkpoint is deleted by this change.
 
 The container integration tests cover shallow checkout, edit/test/commit/push, snapshot restoration of staged/dirty/ignored work, and recovery after snapshot acknowledgement fails. No FUSE device, mount capability or rootless Docker setup is required.
 

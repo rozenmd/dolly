@@ -401,7 +401,6 @@ git push ../remotes/another-owner/project.git HEAD:main`);
     expect(await fresh.readFile("/workspace/repo/latest.txt")).toBe("latest main\n");
     await sandbox.prepare(config);
     expect(await sandbox.readFile("/workspace/repo/dirty.txt")).toBe("unsaved work");
-    expect(env.WORKSPACES).toBeUndefined();
   } finally {
     mocked.mockRestore();
     await remote.restart();

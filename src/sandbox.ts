@@ -3,13 +3,11 @@ import { Files } from "@cloudflare/sandbox";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Semaphore from "effect/Semaphore";
-import { WorkspaceOutbound, type WorkspaceOutboundProps } from "./git-transport";
+import { WorkspaceOutbound } from "./git-transport";
 import {
   checkoutScript,
   checkoutDiagnosticsScript,
-  restoreScript,
   type WorkspaceConfig,
-  type WorkspaceCheckpoint,
   type WorkspaceSnapshot,
   type WorkspaceSetup,
 } from "./workspace";
@@ -70,7 +68,6 @@ export class Sandbox extends DurableObject<Env> {
   private initialized = false;
   private prepared = false;
   private setupAbort: AbortController | undefined;
-  private readonly artifactRepository = `session-${this.ctx.id}`;
   private readonly loopback: SandboxState["exports"];
 
   constructor(ctx: SandboxState, env: Env) {
@@ -94,41 +91,6 @@ export class Sandbox extends DurableObject<Env> {
         this.ctx.storage.get<WorkspaceSnapshot>("snapshot:checkpoint"),
       );
 
-      const legacy = yield* attempt("workspace.legacy.read", () =>
-        this.ctx.storage.get<WorkspaceCheckpoint>("artifact:checkpoint"),
-      );
-
-      const backend = yield* attempt("workspace.backend.read", () =>
-        this.ctx.storage.get<string>("workspace:backend"),
-      );
-
-      if (legacy && !snapshot && !this.env.WORKSPACES)
-        return yield* new OperationError({
-          operation: "workspace.migration",
-          message: "Enable DOLLY_LEGACY_ARTIFACTS=true when deploying to import this checkpoint",
-          details: null,
-        });
-
-      // An older running image may contain unacknowledged work on a FUSE mount.
-      // Never kill it or snapshot a mount that native snapshots would omit.
-      if (container.running && workspace && backend !== "local-v1")
-        return yield* new OperationError({
-          operation: "workspace.migration",
-          message: "Legacy sandbox is still running; preserve unsaved work before replacing it",
-          details: null,
-        });
-
-      if (
-        !snapshot &&
-        !legacy &&
-        (yield* attempt("workspace.legacy.read", () => this.ctx.storage.get("checkpoint")))
-      )
-        return yield* new OperationError({
-          operation: "workspace.migration",
-          message: "An R2 workspace checkpoint exists; export it before starting a new workspace",
-          details: null,
-        });
-
       if (!container.running) {
         // A missing/expired snapshot is an error, never permission to start empty.
         yield* attempt("workspace.start", () =>
@@ -142,20 +104,13 @@ export class Sandbox extends DurableObject<Env> {
             }),
           ),
         );
-        yield* attempt("workspace.backend.save", () =>
-          this.ctx.storage.put("workspace:backend", "local-v1"),
-        );
         this.initialized = false;
         this.prepared = false;
       }
 
       if (workspace) {
-        const props: WorkspaceOutboundProps = { ...workspace };
-
-        if (!snapshot && legacy) props.artifactRepository = this.artifactRepository;
-
         const outbound = this.loopback.WorkspaceOutbound({
-          props,
+          props: workspace,
         });
 
         yield* attempt("workspace.network.http", () =>
@@ -165,48 +120,7 @@ export class Sandbox extends DurableObject<Env> {
           container.interceptOutboundHttps("*", outbound),
         );
 
-        if (!snapshot && legacy) {
-          this.initialized = true;
-
-          const restored = yield* this.execute(
-            restoreScript(this.artifactRepository, legacy),
-            "/workspace",
-            120,
-            container,
-          ).pipe(
-            Effect.onError(() =>
-              Effect.sync(() => {
-                this.initialized = false;
-              }),
-            ),
-          );
-
-          if (restored.exitCode !== 0) {
-            this.initialized = false;
-
-            return yield* new OperationError({
-              operation: "workspace.restore",
-              message: "Legacy workspace import failed; original checkpoint retained",
-              details: restored,
-            });
-          }
-
-          yield* this.checkpoint().pipe(
-            Effect.onError(() =>
-              Effect.sync(() => {
-                this.initialized = false;
-              }),
-            ),
-          );
-          // Revoke the migration-only outbound capability after publication.
-          const localOutbound = this.loopback.WorkspaceOutbound({ props: workspace });
-          yield* attempt("workspace.network.http", () =>
-            container.interceptAllOutboundHttp(localOutbound),
-          );
-          yield* attempt("workspace.network.https", () =>
-            container.interceptOutboundHttps("*", localOutbound),
-          );
-        } else if (snapshot) {
+        if (snapshot) {
           // start() is lazy. Force a real operation before reporting ready so a
           // missing/expired snapshot cannot masquerade as a restored workspace.
           this.initialized = true;
@@ -243,7 +157,7 @@ export class Sandbox extends DurableObject<Env> {
           }
         }
 
-        this.prepared = Boolean(snapshot || legacy);
+        this.prepared = Boolean(snapshot);
       }
 
       this.initialized = true;

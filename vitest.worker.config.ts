@@ -20,7 +20,6 @@ export default defineConfig({
           binding: "ASSETS",
           run_worker_first: true,
         },
-        artifacts: { WORKSPACES: { namespace: "test-web-workspaces" } },
         durableObjects: {
           AGENT: { className: "Agent", useSQLite: true },
           SANDBOX: { className: "Sandbox", useSQLite: true },

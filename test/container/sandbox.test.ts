@@ -36,7 +36,6 @@ it("fails closed on a missing native snapshot rather than cloning an empty works
   const id = "missing-native-snapshot";
   await runInDurableObject(sandbox, async (_, state) => {
     await state.storage.put("workspace", config);
-    await state.storage.put("workspace:backend", "local-v1");
     await state.storage.put("snapshot:checkpoint", { id });
   });
   let failure: unknown;
@@ -54,31 +53,6 @@ it("fails closed on a missing native snapshot rather than cloning an empty works
     expect(await state.storage.get("snapshot:checkpoint")).toEqual({ id });
   });
 });
-
-for (const key of ["artifact:checkpoint", "checkpoint"])
-  it(`preserves ${key} and requires migration rather than starting empty`, async () => {
-    const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
-    const config = workspaceConfig({ repository: "owner/project" }, "legacy-fixture");
-    const saved = { branch: "checkpoint-old", commit: "a".repeat(40) };
-    await runInDurableObject(sandbox, async (_, state) => {
-      await state.storage.put("workspace", config);
-      await state.storage.put(key, saved);
-    });
-    let failure: unknown;
-
-    try {
-      await sandbox.prepare(config);
-    } catch (error) {
-      failure = error;
-    }
-
-    expect(failure).toMatchObject({ operation: "workspace.migration" });
-    expect(await sandbox.diagnostics()).toMatchObject({ running: false });
-    await runInDurableObject(sandbox, async (_, state) => {
-      expect(await state.storage.get(key)).toEqual(saved);
-      expect(await state.storage.get("snapshot:checkpoint")).toBeUndefined();
-    });
-  });
 
 it("timeout kills command descendants, reaps them, and leaves detached services running", async () => {
   const sandbox = env.SANDBOX.getByName(crypto.randomUUID());

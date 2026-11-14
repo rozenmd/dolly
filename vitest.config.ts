@@ -12,7 +12,6 @@ export default defineConfig({
           ACCESS_LOCAL_DEV: "true",
           CODEX_MODEL: "gpt-6-luna",
         },
-        artifacts: { WORKSPACES: { namespace: "test-workspaces" } },
         r2Buckets: ["SCREENSHOTS"],
         durableObjects: {
           AGENT: { className: "Agent", useSQLite: true },

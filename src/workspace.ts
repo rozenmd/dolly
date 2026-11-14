@@ -174,8 +174,6 @@ export function workspacePrompt(state: WorkspaceState | null | undefined) {
 /** Values are passed as shell arguments, never interpreted as source. */
 export const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
 
-export type WorkspaceCheckpoint = { branch: string; commit: string };
-
 export type WorkspaceSnapshot = { id: string };
 
 export type WorkspaceSetup = {
@@ -200,9 +198,4 @@ export function checkoutScript(config: WorkspaceConfig) {
   const remote = shellQuote(`http://github.workspace/${config.repository}.git`);
 
   return `sh /usr/local/lib/dolly-checkout.sh ${remote} ${shellQuote(config.ref)} ${shellQuote(config.branch)}`;
-}
-
-/** One-time, read-only import of the last acknowledged legacy checkpoint. */
-export function restoreScript(repository: string, checkpoint: WorkspaceCheckpoint) {
-  return `python3 /usr/local/lib/dolly-restore-legacy.py ${shellQuote(`http://artifacts.workspace/${repository}.git`)} ${shellQuote(checkpoint.branch)} ${shellQuote(checkpoint.commit)}`;
 }
