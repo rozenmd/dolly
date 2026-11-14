@@ -70,6 +70,14 @@ export const GitHubRequest = Schema.Struct({
       ref: Ref,
     }),
     Schema.Struct({
+      action: Schema.Literal("list_files"),
+      repository: Repository,
+      ref: Ref,
+      /** Optional directory to list beneath; omit for the whole repository. */
+      path: Schema.optional(Path),
+      page: Schema.optional(Page),
+    }),
+    Schema.Struct({
       action: Schema.Literal("create_branch"),
       repository: Repository,
       branch: Branch,
@@ -159,6 +167,7 @@ export const GitHubResult = Schema.Union([
   }),
   Schema.Struct({
     kind: Schema.Literals([
+      "files",
       "pull_request_details",
       "pull_request_files",
       "pull_request_comments",

@@ -1782,3 +1782,65 @@ it("rejects non-screenshot references before publishing", async () => {
   expect(fetch).not.toHaveBeenCalled();
   expect((await env.PR_SCREENSHOTS.list()).objects).toHaveLength(0);
 });
+
+it("lists public repository paths anonymously, scoped to a directory and paged", async () => {
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = new URL(String(input));
+
+    if (url.pathname === `/repos/${repository}`)
+      return Response.json({ default_branch: "main", private: false });
+
+    if (url.pathname === `/repos/${repository}/git/trees/feature%2Fx`) {
+      expect(url.searchParams.get("recursive")).toBe("1");
+
+      return Response.json({
+        truncated: false,
+        tree: [
+          { path: "README.md", type: "blob" },
+          { path: "packages", type: "tree" },
+          { path: "packages/usage", type: "tree" },
+          { path: "packages/usage/index.ts", type: "blob" },
+          { path: "packages/usage-other.ts", type: "blob" },
+          ...Array.from({ length: 1000 }, (_, i) => ({ path: `big/${i}.ts`, type: "blob" })),
+        ],
+      });
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.pathname}`);
+  });
+
+  expect(
+    await (
+      await execute({ action: "list_files", repository, ref: "feature/x", path: "packages/usage" })
+    ).json(),
+  ).toEqual({
+    ok: true,
+    result: {
+      kind: "files",
+      data: {
+        page: 1,
+        next_page: null,
+        total: 1,
+        truncated_by_github: false,
+        paths: ["packages/usage/index.ts"],
+      },
+    },
+  });
+
+  const second = await (
+    await execute({ action: "list_files", repository, ref: "feature/x", page: 2 })
+  ).json();
+
+  expect(second).toMatchObject({
+    ok: true,
+    result: {
+      data: {
+        page: 2,
+        next_page: null,
+        total: 1005,
+        paths: ["big/995.ts", "big/996.ts", "big/997.ts", "big/998.ts", "big/999.ts"],
+      },
+    },
+  });
+  expect(fetch.mock.calls.some(([input]) => String(input).includes("/installation"))).toBe(false);
+});
