@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import * as Schema from "effect/Schema";
 import { request } from "../lib/api";
-import { Input, Select } from "./ui";
+import { ArrowPathIcon, ChatBubbleLeftIcon, PlusIcon } from "@heroicons/react/16/solid";
+import { Input, RepoBadge, Select } from "./ui";
+import { Picker } from "./picker";
+
+const shortName = (repository: string) => repository.split("/").at(-1) ?? repository;
 
 const Catalog = Schema.Struct({
   repositories: Schema.Array(
@@ -90,32 +94,92 @@ export function RepositoryPicker({
     <div className="repository-picker">
       {!enrolling ? (
         <>
-          <Select
-            id="repository"
-            name="repository"
-            value={value}
-            disabled={loading || disabled}
-            onChange={(event) => {
-              if (event.target.value === "__enroll__") return setEnrolling(true);
-
-              if (event.target.value === "__refresh__")
-                return setRevision((current) => current + 1);
-              const repo = repositories.find((item) => item.fullName === event.target.value);
-              onChange?.(repo?.fullName ?? "", repo?.defaultBranch ?? "");
-            }}
-          >
-            <option value="">{loading ? "Loading repositories…" : "No repo"}</option>
-            {value && !repositories.some((repo) => repo.fullName === value) && (
-              <option value={value}>{value}</option>
-            )}
-            {repositories.map((repo) => (
-              <option key={repo.fullName} value={repo.fullName}>
-                {repo.fullName}
-              </option>
-            ))}
-            {compact && <option value="__enroll__">New repository…</option>}
-            {compact && <option value="__refresh__">Refresh repositories</option>}
-          </Select>
+          {compact ? (
+            <Picker
+              id="repository"
+              label="Repository"
+              className="repository-menu"
+              value={value ?? ""}
+              disabled={loading || disabled}
+              options={[
+                ...repositories.map((repo) => ({
+                  value: repo.fullName,
+                  label: shortName(repo.fullName),
+                  hint: repo.fullName.split("/")[0],
+                  icon: <RepoBadge repository={repo.fullName} />,
+                })),
+                ...(value && !repositories.some((repo) => repo.fullName === value)
+                  ? [{ value, label: shortName(value), icon: <RepoBadge repository={value} /> }]
+                  : []),
+                {
+                  value: "",
+                  label: "No repo",
+                  icon: <ChatBubbleLeftIcon className="picker-icon" aria-hidden="true" />,
+                },
+              ]}
+              onChange={(name) => {
+                const repo = repositories.find((item) => item.fullName === name);
+                onChange?.(repo?.fullName ?? name, repo?.defaultBranch ?? "");
+              }}
+              trigger={
+                value ? (
+                  <>
+                    <RepoBadge repository={value} />
+                    <span>{shortName(value)}</span>
+                  </>
+                ) : (
+                  <span>{loading ? "Loading repositories…" : "No repo"}</span>
+                )
+              }
+              footer={(close) => (
+                <>
+                  <button
+                    type="button"
+                    className="picker-action"
+                    onClick={() => {
+                      close();
+                      setEnrolling(true);
+                    }}
+                  >
+                    <PlusIcon className="picker-icon" aria-hidden="true" />
+                    New repository…
+                  </button>
+                  <button
+                    type="button"
+                    className="picker-action"
+                    onClick={() => {
+                      close();
+                      setRevision((current) => current + 1);
+                    }}
+                  >
+                    <ArrowPathIcon className="picker-icon" aria-hidden="true" />
+                    Refresh repositories
+                  </button>
+                </>
+              )}
+            />
+          ) : (
+            <Select
+              id="repository"
+              name="repository"
+              value={value}
+              disabled={loading || disabled}
+              onChange={(event) => {
+                const repo = repositories.find((item) => item.fullName === event.target.value);
+                onChange?.(repo?.fullName ?? "", repo?.defaultBranch ?? "");
+              }}
+            >
+              <option value="">{loading ? "Loading repositories…" : "No repo"}</option>
+              {value && !repositories.some((repo) => repo.fullName === value) && (
+                <option value={value}>{value}</option>
+              )}
+              {repositories.map((repo) => (
+                <option key={repo.fullName} value={repo.fullName}>
+                  {repo.fullName}
+                </option>
+              ))}
+            </Select>
+          )}
           {!compact && (
             <button
               type="button"

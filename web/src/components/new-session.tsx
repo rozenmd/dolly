@@ -2,7 +2,8 @@ import { useRef, useState, type FormEvent } from "react";
 import * as Schema from "effect/Schema";
 import { request, Session, type ApiBody, type SavedSession } from "../lib/api";
 import { Modal, Textarea } from "./ui";
-import { ModelSelect } from "./model-select";
+import { ArrowUturnLeftIcon } from "@heroicons/react/16/solid";
+import { ModelPicker } from "./model-select";
 import { RepositoryPicker } from "./repositories";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import { imagesBody, type Attachment } from "../lib/images";
@@ -93,7 +94,7 @@ export function NewSessionComposer({
   }
 
   return (
-    <Modal title="New session" className="new-session-modal" onClose={onClose}>
+    <Modal title="New session" className="new-session-modal" bare onClose={onClose}>
       <form
         className="new-session-form"
         onSubmit={(event) => void submit(event)}
@@ -104,9 +105,6 @@ export function NewSessionComposer({
           disabled={pending || input.reading || Boolean(created)}
           className="new-session-fields"
         >
-          <label htmlFor="repository" className="sr-only">
-            Repository
-          </label>
           <RepositoryPicker
             compact
             value={repository}
@@ -121,7 +119,7 @@ export function NewSessionComposer({
           <Textarea
             id="new-session-prompt"
             name="content"
-            placeholder="What would you like to work on?"
+            placeholder="What do you want to work on?"
             autoFocus
             required
             maxLength={16384}
@@ -150,31 +148,31 @@ export function NewSessionComposer({
             {created ? " Your session is saved. Retry to send this task." : ""}
           </p>
         )}
-        <div className="modal-actions">
-          <button type="button" className="ghost-button" disabled={pending} onClick={onImport}>
-            Open existing
-          </button>
-          <AttachButton
-            disabled={pending || input.reading || Boolean(created)}
-            count={attachments.length}
-            onFiles={(files) => void input.add(files)}
-          />
-          <label htmlFor="new-session-model" className="sr-only">
-            Model
-          </label>
-          <ModelSelect
+        <div className="composer-toolbar">
+          <div className="composer-tools">
+            <AttachButton
+              disabled={pending || input.reading || Boolean(created)}
+              count={attachments.length}
+              onFiles={(files) => void input.add(files)}
+            />
+            <button type="button" className="ghost-button" disabled={pending} onClick={onImport}>
+              Open existing
+            </button>
+          </div>
+          <ModelPicker
             id="new-session-model"
-            name="model"
             value={model}
             disabled={pending || Boolean(created)}
-            onChange={(event) => setModel(event.target.value)}
+            onChange={setModel}
           />
           <button
             type="submit"
-            className="primary-button"
+            className="create-button"
             disabled={pending || input.reading || !content.trim()}
+            aria-keyshortcuts="Meta+Enter Control+Enter"
           >
             {pending ? "Starting…" : created ? "Retry" : "Create"}
+            {!pending && <ArrowUturnLeftIcon className="create-enter" aria-hidden="true" />}
           </button>
         </div>
       </form>
