@@ -79,7 +79,7 @@ Record:
 
 - Changed behavior, exercised scenarios, commands and observed results.
 - Which boundaries were real, locally simulated, fixture-backed or mocked.
-- Relevant side effects and desktop/phone screenshots for visible UI changes.
+- Relevant side effects and desktop/phone before/after screenshots or an interaction recording for visible UI changes.
 - Failed, skipped or unavailable scenarios and remaining live-system gaps.
 
 Preserve evidence after cleaning up only owned test resources. Never report an
