@@ -24,7 +24,7 @@ export function modelName(id: string) {
 }
 
 export const MODELS: PickerOption[] = [
-  { value: "", label: "Server default" },
+  { value: "", label: "Default" },
   ...["gpt-6-sol", "gpt-6-luna", "gpt-6.1-terra"].map((value) => ({
     value,
     label: modelName(value),
@@ -55,14 +55,21 @@ export function ModelPicker({
   id,
   value,
   disabled,
+  defaultLabel = "Default",
   onChange,
 }: {
   id?: string;
   value: string;
   disabled?: boolean;
+  /** Label for the empty value, e.g. "Default (GPT-6 Luna)". */
+  defaultLabel?: string;
   onChange: (model: string) => void;
 }) {
-  const current = MODELS.find((model) => model.value === value);
+  const options = MODELS.map((model) =>
+    model.value === "" ? { ...model, label: defaultLabel } : model,
+  );
+
+  const current = options.find((model) => model.value === value);
 
   return (
     <Picker
@@ -71,7 +78,7 @@ export function ModelPicker({
       className="model-picker"
       align="end"
       value={value}
-      options={MODELS}
+      options={options}
       disabled={disabled}
       onChange={onChange}
       trigger={

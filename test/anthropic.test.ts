@@ -52,6 +52,7 @@ beforeEach(async () => {
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.delete("credential:anthropic");
     await state.storage.delete("credential:openai-codex");
+    await state.storage.delete("settings:default-model");
   });
 });
 
@@ -394,4 +395,55 @@ it("includes the selected repository in Claude's system prompt before any tool c
   expect(system).not.toContain("pnpm verify");
   expect(system).not.toContain("90%");
   expect(system).not.toContain(token);
+});
+
+it("saves the owner's default model in Durable Object storage and applies it to new sessions", async () => {
+  const codexAccess = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("credential:openai-codex", {
+      type: "oauth",
+      access: codexAccess,
+      refresh: "test-refresh",
+      expires: Date.now() + 3_600_000,
+    });
+  });
+
+  expect(await (await call("/settings/model")).json()).toEqual({
+    model: null,
+    effective: "gpt-6-luna",
+  });
+
+  for (const body of [{}, { model: "not-a-model" }, { model: 42 }])
+    expect((await call("/settings/model", "PUT", body)).status).toBe(400);
+
+  // A Claude default without a Claude subscription is saved but not yet used.
+  expect(await (await call("/settings/model", "PUT", { model: "claude-opus-5-5" })).json()).toEqual(
+    { model: "claude-opus-5-5", effective: "gpt-6-luna" },
+  );
+  expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({ model: "gpt-6-luna" });
+
+  await call("/auth/anthropic", "PUT", { token });
+  // The setting survives Durable Object restarts.
+  await abortAllDurableObjects();
+  expect(await (await call("/settings/model")).json()).toEqual({
+    model: "claude-opus-5-5",
+    effective: "claude-opus-5-5",
+  });
+  expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({
+    model: "claude-opus-5-5",
+  });
+  // An explicit model still overrides the default.
+  expect(await (await call("/sessions", "POST", { model: "gpt-6-sol" })).json()).toMatchObject({
+    model: "gpt-6-sol",
+  });
+
+  await call("/settings/model", "PUT", { model: "gpt-6-sol" });
+  expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({ model: "gpt-6-sol" });
+
+  expect(await (await call("/settings/model", "PUT", { model: null })).json()).toEqual({
+    model: null,
+    effective: "gpt-6-luna",
+  });
+  expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({ model: "gpt-6-luna" });
 });

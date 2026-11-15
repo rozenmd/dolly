@@ -602,13 +602,7 @@ export function WorkspaceApp() {
       )}
       {modal === "new" && (
         <NewSessionComposer
-          initial={
-            session
-              ? sessionBody(session, snapshot)
-              : anthropic && !codex
-                ? { model: "claude-sonnet-5-5" }
-                : {}
-          }
+          initial={session ? sessionBody(session, snapshot) : {}}
           onClose={() => setModal(null)}
           onImport={() => setModal("import")}
           onSaved={(value) => save([value, ...sessions.filter((item) => item.id !== value.id)])}

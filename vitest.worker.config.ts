@@ -13,7 +13,6 @@ export default defineConfig({
           ACCESS_LOCAL_DEV: process.env.WEB_TEST_ACCESS === "required" ? "false" : "true",
           ACCESS_TEAM_DOMAIN: "example-team.cloudflareaccess.com",
           ACCESS_AUD: "test-audience",
-          CODEX_MODEL: "gpt-6-luna",
         },
         assets: {
           directory: "./.cloudflare/output/v0/workers/default/assets",

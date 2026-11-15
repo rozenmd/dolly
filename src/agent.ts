@@ -65,8 +65,10 @@ import {
   SessionModel,
   modelProvider,
   DEFAULT_CLAUDE_MODEL,
+  DEFAULT_CODEX_MODEL,
   DEFAULT_THINKING_LEVEL,
   SessionSettings,
+  DefaultModelSetting,
   ThinkingLevel,
 } from "./models";
 import {
@@ -97,6 +99,27 @@ import type { PullRequestState, SavedSession } from "./session-contracts";
 import { PreviewOutbound, PreviewRequest, PreviewToolInput } from "./preview";
 import { capturePreview } from "./browser-preview";
 import { workspaceCheckpoint } from "./workspace-checkpoint";
+
+const DEFAULT_MODEL_KEY = "settings:default-model";
+
+/**
+ * The owner's default applies while its subscription is connected; otherwise new
+ * conversations use the built-in default for whichever subscription is connected.
+ */
+function effectiveDefaultModel(stored: string | null, codex: boolean, claude: boolean) {
+  if (stored && (modelProvider(stored) === "anthropic" ? claude : codex)) return stored;
+
+  if (codex) return DEFAULT_CODEX_MODEL;
+
+  if (claude) return DEFAULT_CLAUDE_MODEL;
+
+  return stored ?? DEFAULT_CODEX_MODEL;
+}
+
+/** GitHub intake requires Codex, so a Claude default does not apply to it. */
+function codexDefaultModel(stored: string | null) {
+  return stored && modelProvider(stored) === "openai-codex" ? stored : DEFAULT_CODEX_MODEL;
+}
 
 /** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
 export class Agent extends DurableObject<Env> {
@@ -494,7 +517,17 @@ export class Agent extends DurableObject<Env> {
           conversationCreated: async (tx, conversation) => {
             await indexSession(tx, conversation.id);
             await configure(tx, conversation.id, {
-              model: { provider: "openai-codex", modelId: this.env.CODEX_MODEL },
+              // Only GitHub intake creates conversations without a model; it requires Codex.
+              model: {
+                provider: "openai-codex",
+                modelId: codexDefaultModel(
+                  Option.getOrNull(
+                    Schema.decodeUnknownOption(SessionModel)(
+                      await this.ctx.storage.get(DEFAULT_MODEL_KEY),
+                    ),
+                  ),
+                ),
+              },
               thinkingLevel: DEFAULT_THINKING_LEVEL,
               maxTurns: 100,
               tools,
@@ -976,9 +1009,12 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(codex) && Option.isNone(claude)) return { status: 503 as const };
 
-        const model = Option.isSome(codex)
-          ? { provider: "openai-codex", modelId: this.env.CODEX_MODEL }
-          : { provider: "anthropic", modelId: DEFAULT_CLAUDE_MODEL };
+        const modelId = yield* this.resolveDefaultModel(
+          Option.isSome(codex),
+          Option.isSome(claude),
+        );
+
+        const model = { provider: modelProvider(modelId), modelId };
 
         const text = slackPromptText(event.text ?? "", profile.botUserId);
 
@@ -1291,6 +1327,61 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
+  private storedDefaultModel = () =>
+    attempt("settings.model.read", () => this.ctx.storage.get(DEFAULT_MODEL_KEY)).pipe(
+      // A saved model dropped from the pinned catalog reads as unset.
+      Effect.map((value) => Option.getOrNull(Schema.decodeUnknownOption(SessionModel)(value))),
+    );
+
+  private resolveDefaultModel = (codex: boolean, claude: boolean) =>
+    this.storedDefaultModel().pipe(
+      Effect.map((stored) => effectiveDefaultModel(stored, codex, claude)),
+    );
+
+  defaultModel() {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const codex = yield* this.credentials.get("openai-codex");
+        const claude = yield* this.credentials.get("anthropic");
+        const model = yield* this.storedDefaultModel();
+
+        return {
+          model,
+          effective: effectiveDefaultModel(model, Option.isSome(codex), Option.isSome(claude)),
+        };
+      }),
+    );
+  }
+
+  setDefaultModel(setting: typeof DefaultModelSetting.Type) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const { model } = yield* Schema.decodeUnknownEffect(DefaultModelSetting)(setting).pipe(
+          Effect.mapError(
+            () =>
+              new OperationError({
+                operation: "settings.model",
+                message: "Unknown model",
+                details: "Select a model from the pinned Pi Codex or Anthropic catalog",
+              }),
+          ),
+        );
+
+        yield* attempt("settings.model.write", async () => {
+          if (model === null) await this.ctx.storage.delete(DEFAULT_MODEL_KEY);
+          else await this.ctx.storage.put(DEFAULT_MODEL_KEY, model);
+        });
+        const codex = yield* this.credentials.get("openai-codex");
+        const claude = yield* this.credentials.get("anthropic");
+
+        return {
+          model,
+          effective: effectiveDefaultModel(model, Option.isSome(codex), Option.isSome(claude)),
+        };
+      }),
+    );
+  }
+
   configureSession(id: string, settings: typeof SessionSettings.Type) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
@@ -1321,10 +1412,10 @@ export class Agent extends DurableObject<Env> {
         const codex = yield* this.credentials.get("openai-codex");
         const claude = yield* this.credentials.get("anthropic");
 
-        const defaultModel =
-          Option.isNone(codex) && Option.isSome(claude)
-            ? DEFAULT_CLAUDE_MODEL
-            : this.env.CODEX_MODEL;
+        const defaultModel = yield* this.resolveDefaultModel(
+          Option.isSome(codex),
+          Option.isSome(claude),
+        );
 
         const modelId = yield* Schema.decodeUnknownEffect(SessionModel)(model ?? defaultModel).pipe(
           Effect.mapError(
@@ -1682,9 +1773,7 @@ export class Agent extends DurableObject<Env> {
 
         const agent = yield* attempt("parent.model", () => parent.value.agent(BACKGROUND_CONTEXT));
 
-        const provider = modelProvider(
-          parsed.model ?? agent.model?.modelId ?? this.env.CODEX_MODEL,
-        );
+        const provider = modelProvider(parsed.model ?? agent.model?.modelId ?? DEFAULT_CODEX_MODEL);
 
         if (Option.isNone(yield* this.credentials.get(provider)))
           return {

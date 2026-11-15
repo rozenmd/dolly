@@ -21,6 +21,10 @@ export const AnthropicModel = Schema.Literals(anthropicIds);
 
 export const SessionModel = Schema.Union([CodexModel, AnthropicModel]);
 export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5";
+export const DEFAULT_CODEX_MODEL = "gpt-6-luna";
+
+/** Owner-chosen default for new conversations; `null` clears it back to the built-in defaults. */
+export const DefaultModelSetting = Schema.Struct({ model: Schema.NullOr(SessionModel) });
 
 /** Call only after validating against SessionModel. Existing Codex IDs keep their provider. */
 export const modelProvider = (model: string) =>

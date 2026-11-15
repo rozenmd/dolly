@@ -354,7 +354,7 @@ export type ApiBody = {
   content?: string;
   requestId?: string;
   images?: readonly { mimeType: string; data: string }[];
-  model?: string;
+  model?: string | null;
   thinkingLevel?: string;
   workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] };
   repository?: string;
@@ -371,6 +371,25 @@ export type ApiBody = {
   allowedUserId?: string;
   defaultRepository?: string;
 };
+
+export const DefaultModel = Schema.Struct({
+  /** The owner's saved choice; `null` means the built-in default. */
+  model: Schema.NullOr(Schema.String),
+  /** What a new session without a model would use right now. */
+  effective: Schema.String,
+});
+
+export type DefaultModel = typeof DefaultModel.Type;
+
+/** Reads the default model for new sessions, or saves it (`null` restores the built-in default). */
+export async function defaultModel(model?: string | null) {
+  const text =
+    model === undefined
+      ? await request("/settings/model")
+      : await request("/settings/model", { model }, undefined, "PUT");
+
+  return Schema.decodeUnknownSync(Schema.fromJsonString(DefaultModel))(text);
+}
 
 export async function anthropicStatus() {
   return Schema.decodeUnknownSync(

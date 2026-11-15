@@ -183,6 +183,7 @@ beforeEach(async () => {
     ]);
     await state.storage.put("credential:anthropic", { type: "api_key", key: claudeToken });
     await state.storage.delete("credential:openai-codex");
+    await state.storage.delete("settings:default-model");
   });
 });
 
@@ -353,6 +354,23 @@ it("turns a DM into a session, replies in its thread, and gates who may start an
   await expect
     .poll(() => posted.filter((call) => call.method === "chat.postMessage"), { timeout: 15_000 })
     .toHaveLength(2);
+}, 30_000);
+
+it("starts Slack sessions with the owner's saved default model", async () => {
+  const { posted, models } = fakeServices("{}");
+
+  const saved = await SELF.fetch("https://worker/api/settings/model", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ model: "claude-opus-5-5" }),
+  });
+
+  expect(saved.status).toBe(200);
+  expect((await post("/slack/events", dm("150.1", "<@UBOT> hello"))).status).toBe(200);
+  await expect
+    .poll(() => posted.filter((call) => call.method === "chat.postMessage"), { timeout: 15_000 })
+    .toHaveLength(1);
+  expect(models).toEqual(["claude-opus-5-5"]);
 }, 30_000);
 
 it("classifies a mention with Claude Haiku and starts the PR pass on the PR head", async () => {

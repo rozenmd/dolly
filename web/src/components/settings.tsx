@@ -9,11 +9,20 @@ import {
   LinkIcon,
   UserIcon,
 } from "@heroicons/react/24/outline";
-import { authState, codexLogin, request, type ApiBody, type AuthState } from "../lib/api";
+import {
+  authState,
+  codexLogin,
+  defaultModel,
+  request,
+  type ApiBody,
+  type AuthState,
+  type DefaultModel,
+} from "../lib/api";
 import { AnthropicConnection } from "./anthropic";
 import { CodexLogin } from "./codex-login";
 import { ingressHook } from "./github";
 import { RepositoryPicker } from "./repositories";
+import { ModelPicker, modelName } from "./model-select";
 import { Input } from "./ui";
 import { UsageLimits } from "./usage";
 
@@ -179,6 +188,7 @@ export function AccountSettings() {
 
 export function ModelsSettings() {
   const [codex, setCodex] = useState<boolean | null>(null);
+  const [claude, setClaude] = useState<boolean | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const { pending, run, alert } = useAction();
 
@@ -231,10 +241,62 @@ export function ModelsSettings() {
           onCancel={() => setSigningIn(false)}
         />
       )}
-      <AnthropicConnection variant="row" onConnection={() => {}} />
+      <AnthropicConnection variant="row" onConnection={setClaude} />
       {alert}
+      <DefaultModelSetting key={`${String(codex)}:${String(claude)}`} />
       <UsageLimits key={String(codex)} />
     </Section>
+  );
+}
+
+/** Saved on the server, so it applies to sessions from the web app, the API and Slack. */
+function DefaultModelSetting() {
+  const [setting, setSetting] = useState<DefaultModel | null>(null);
+  const { pending, run, alert } = useAction();
+
+  useEffect(() => {
+    let active = true;
+    defaultModel().then(
+      (value) => {
+        if (active) setSetting(value);
+      },
+      () => {},
+    );
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const unavailable = setting?.model != null && setting.model !== setting.effective;
+
+  return (
+    <>
+      <div className="connection-row">
+        <span className="connection-label">
+          Default model
+          <span className="muted">
+            {setting
+              ? unavailable
+                ? `Using ${modelName(setting.effective)} until that subscription is connected`
+                : `New sessions use ${modelName(setting.effective)} unless you pick another`
+              : "Loading…"}
+          </span>
+        </span>
+        <ModelPicker
+          id="default-model"
+          value={setting?.model ?? ""}
+          defaultLabel="Automatic"
+          disabled={!setting || pending}
+          onChange={(model) =>
+            void run(async () => {
+              setSetting(await defaultModel(model || null));
+            }, "Could not save the default model.")
+          }
+        />
+      </div>
+      {alert}
+    </>
   );
 }
 
