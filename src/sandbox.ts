@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Files } from "@cloudflare/sandbox";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Semaphore from "effect/Semaphore";
 import { WorkspaceOutbound } from "./git-transport";
 import {
@@ -30,6 +31,20 @@ type RunningPreview = {
   expiresAt: number;
   process: ExecProcess;
   exited: boolean;
+};
+
+type InitializationTiming = {
+  operation: string;
+  startedAt: number;
+  state: "running" | "succeeded" | "failed" | "interrupted";
+  elapsedMs?: number;
+};
+
+type ContainerInitialization = InitializationTiming & {
+  id: string;
+  wasRunning: boolean;
+  restoringSnapshot: boolean;
+  steps: InitializationTiming[];
 };
 
 /** Drain output without retaining unbounded bytes. Scoped cancellation releases the stream reader. */
@@ -90,11 +105,62 @@ export class Sandbox extends DurableObject<Env> {
   private dependencyAbort: AbortController | undefined;
   private readonly loopback: SandboxState["exports"];
   private preview?: RunningPreview;
+  private initialization?: ContainerInitialization;
 
   constructor(ctx: SandboxState, env: Env) {
     super(ctx, env);
     this.loopback = ctx.exports;
   }
+
+  private timeInitialization = Effect.fn("Sandbox.timeInitialization")(function* <A, E>(
+    this: Sandbox,
+    initialization: ContainerInitialization,
+    operation: string,
+    effect: Effect.Effect<A, E>,
+    retain = true,
+  ) {
+    const timing: InitializationTiming =
+      operation === "total"
+        ? initialization
+        : { operation, startedAt: Date.now(), state: "running" };
+
+    if (operation !== "total" && retain) initialization.steps.push(timing);
+
+    const context = {
+      sandboxId: String(this.ctx.id),
+      initializationId: initialization.id,
+      operation,
+      wasRunning: initialization.wasRunning,
+      reused: !retain,
+    };
+
+    yield* Effect.logInfo({
+      event: "sandbox_initialization_step",
+      ...context,
+      phase: "started",
+      startedAt: timing.startedAt,
+    });
+
+    return yield* effect.pipe(
+      Effect.onExit((exit) =>
+        Effect.gen(function* () {
+          timing.elapsedMs = Date.now() - timing.startedAt;
+          timing.state = "succeeded";
+
+          if (Exit.isFailure(exit))
+            timing.state = Exit.hasInterrupts(exit) ? "interrupted" : "failed";
+
+          yield* Effect.logInfo({
+            event: "sandbox_initialization_step",
+            ...context,
+            phase: timing.state,
+            elapsedMs: timing.elapsedMs,
+            restoringSnapshot: initialization.restoringSnapshot,
+          });
+        }),
+      ),
+    );
+  });
 
   private container = Effect.fn("Sandbox.container")(function* (
     this: Sandbox,
@@ -103,110 +169,179 @@ export class Sandbox extends DurableObject<Env> {
 
     if (!container) return yield* Effect.die("Sandbox Container binding is not configured");
 
-    if (!container.running || !this.initialized) {
-      const workspace = yield* attempt("workspace.read", () =>
-        this.ctx.storage.get<WorkspaceConfig>("workspace"),
+    if (container.running && this.initialized) {
+      const inactivity = attempt("sandbox.inactivity", () =>
+        container.setInactivityTimeout(300_000),
       );
 
-      const wasRunning = container.running;
-
-      const snapshot = yield* attempt("workspace.snapshot.read", () =>
-        this.ctx.storage.get<WorkspaceSnapshot>("snapshot:checkpoint"),
-      );
-
-      if (!wasRunning) {
-        // Reap any installer belonging to the previous container before
-        // authorizing or starting setup in its replacement.
-        this.dependencyAbort?.abort();
-        yield* attempt(
-          "workspace.dependencies.cleanup",
-          () => this.dependencySetup ?? Promise.resolve(),
+      if (this.initialization)
+        yield* this.timeInitialization(
+          this.initialization,
+          "sandbox.inactivity",
+          inactivity,
+          false,
         );
-        this.dependencySetup = undefined;
-        this.dependencyAbort = undefined;
-        yield* attempt("workspace.start", () =>
-          Promise.resolve(
-            container.start({
-              ...(snapshot
-                ? { containerSnapshot: { id: snapshot.id } }
-                : { image: container.images.sandbox }),
-              instance: "standard-3",
-              enableInternet: false,
-            }),
-          ),
-        );
-        this.initialized = false;
-        this.prepared = false;
-      }
+      else yield* inactivity;
 
-      if (workspace) {
-        const outbound = this.loopback.WorkspaceOutbound({
-          props: workspace,
-        });
-
-        yield* attempt("workspace.network.http", () =>
-          container.interceptAllOutboundHttp(outbound),
-        );
-        yield* attempt("workspace.network.https", () =>
-          container.interceptOutboundHttps("*", outbound),
-        );
-
-        if (wasRunning || snapshot) {
-          // A Durable Object eviction does not necessarily stop its container.
-          // Reuse that live checkout, but never infer readiness for a fresh image.
-          this.initialized = true;
-
-          const setup = yield* attempt("workspace.setup.read", () =>
-            this.ctx.storage.get<WorkspaceSetup>("workspace:setup"),
-          );
-
-          const ready = yield* this.execute(
-            "test -f /workspace/ready && test -d /workspace/repo/.git",
-            "/workspace",
-            120,
-            container,
-          ).pipe(
-            Effect.mapError((error) =>
-              snapshot && !wasRunning
-                ? new OperationError({
-                    operation: "workspace.restore",
-                    message: `Unable to restore snapshot ${snapshot.id}: ${exceptionDetails(error).message}`,
-                    details: null,
-                  })
-                : error,
-            ),
-            Effect.onError(() =>
-              Effect.sync(() => {
-                this.initialized = false;
-              }),
-            ),
-          );
-
-          if (snapshot && !wasRunning && ready.exitCode !== 0) {
-            this.initialized = false;
-
-            return yield* new OperationError({
-              operation: "workspace.restore",
-              message: "Snapshot is missing its prepared checkout; refusing a fresh clone",
-              details: { snapshotId: snapshot.id },
-            });
-          }
-
-          this.prepared =
-            ready.exitCode === 0 &&
-            ((!wasRunning && Boolean(snapshot)) ||
-              setup?.state === "installing" ||
-              setup?.state === "ready" ||
-              setup?.state === "warning");
-        }
-      }
-
-      this.initialized = true;
+      return container;
     }
 
-    yield* attempt("sandbox.inactivity", () => container.setInactivityTimeout(300_000));
+    const initialization: ContainerInitialization = {
+      id: crypto.randomUUID(),
+      operation: "total",
+      startedAt: Date.now(),
+      state: "running",
+      wasRunning: container.running,
+      restoringSnapshot: false,
+      steps: [],
+    };
 
-    return container;
+    this.initialization = initialization;
+
+    return yield* this.timeInitialization(
+      initialization,
+      "total",
+      Effect.gen({ self: this }, function* () {
+        const workspace = yield* this.timeInitialization(
+          initialization,
+          "workspace.read",
+          attempt("workspace.read", () => this.ctx.storage.get<WorkspaceConfig>("workspace")),
+        );
+
+        const wasRunning = container.running;
+
+        const snapshot = yield* this.timeInitialization(
+          initialization,
+          "workspace.snapshot.read",
+          attempt("workspace.snapshot.read", () =>
+            this.ctx.storage.get<WorkspaceSnapshot>("snapshot:checkpoint"),
+          ),
+        );
+
+        initialization.restoringSnapshot = !wasRunning && Boolean(snapshot);
+
+        if (!wasRunning) {
+          // Reap any installer belonging to the previous container before
+          // authorizing or starting setup in its replacement.
+          this.dependencyAbort?.abort();
+          yield* this.timeInitialization(
+            initialization,
+            "workspace.dependencies.cleanup",
+            attempt(
+              "workspace.dependencies.cleanup",
+              () => this.dependencySetup ?? Promise.resolve(),
+            ),
+          );
+          this.dependencySetup = undefined;
+          this.dependencyAbort = undefined;
+          yield* this.timeInitialization(
+            initialization,
+            "workspace.start",
+            attempt("workspace.start", () =>
+              Promise.resolve(
+                container.start({
+                  ...(snapshot
+                    ? { containerSnapshot: { id: snapshot.id } }
+                    : { image: container.images.sandbox }),
+                  instance: "standard-3",
+                  enableInternet: false,
+                }),
+              ),
+            ),
+          );
+          this.initialized = false;
+          this.prepared = false;
+        }
+
+        if (workspace) {
+          const outbound = this.loopback.WorkspaceOutbound({
+            props: workspace,
+          });
+
+          yield* this.timeInitialization(
+            initialization,
+            "workspace.network.http",
+            attempt("workspace.network.http", () => container.interceptAllOutboundHttp(outbound)),
+          );
+          yield* this.timeInitialization(
+            initialization,
+            "workspace.network.https",
+            attempt("workspace.network.https", () =>
+              container.interceptOutboundHttps("*", outbound),
+            ),
+          );
+
+          if (wasRunning || snapshot) {
+            // A Durable Object eviction does not necessarily stop its container.
+            // Reuse that live checkout, but never infer readiness for a fresh image.
+            this.initialized = true;
+
+            const setup = yield* this.timeInitialization(
+              initialization,
+              "workspace.setup.read",
+              attempt("workspace.setup.read", () =>
+                this.ctx.storage.get<WorkspaceSetup>("workspace:setup"),
+              ),
+            );
+
+            const ready = yield* this.timeInitialization(
+              initialization,
+              "workspace.restore.probe",
+              this.execute(
+                "test -f /workspace/ready && test -d /workspace/repo/.git",
+                "/workspace",
+                120,
+                container,
+              ).pipe(
+                Effect.mapError((error) =>
+                  snapshot && !wasRunning
+                    ? new OperationError({
+                        operation: "workspace.restore",
+                        message: `Unable to restore snapshot ${snapshot.id}: ${exceptionDetails(error).message}`,
+                        details: null,
+                      })
+                    : error,
+                ),
+                Effect.tap((result) =>
+                  snapshot && !wasRunning && result.exitCode !== 0
+                    ? Effect.fail(
+                        new OperationError({
+                          operation: "workspace.restore",
+                          message:
+                            "Snapshot is missing its prepared checkout; refusing a fresh clone",
+                          details: { snapshotId: snapshot.id },
+                        }),
+                      )
+                    : Effect.void,
+                ),
+                Effect.onError(() =>
+                  Effect.sync(() => {
+                    this.initialized = false;
+                  }),
+                ),
+              ),
+            );
+
+            this.prepared =
+              ready.exitCode === 0 &&
+              ((!wasRunning && Boolean(snapshot)) ||
+                setup?.state === "installing" ||
+                setup?.state === "ready" ||
+                setup?.state === "warning");
+          }
+        }
+
+        this.initialized = true;
+
+        yield* this.timeInitialization(
+          initialization,
+          "sandbox.inactivity",
+          attempt("sandbox.inactivity", () => container.setInactivityTimeout(300_000)),
+        );
+
+        return container;
+      }),
+    );
   });
 
   private execute = Effect.fn("Sandbox.execute")(function* (
@@ -219,7 +354,18 @@ export class Sandbox extends DurableObject<Env> {
     // Initialization probes must not recursively re-enter container() when a
     // lazy container startup fails.
     const container = initializingContainer ?? (yield* this.container());
+    const startedAt = Date.now();
+
+    const context = {
+      sandboxId: String(this.ctx.id),
+      initializationId: this.initialization?.id,
+      executionId: crypto.randomUUID(),
+      timeoutSeconds: timeout,
+    };
+
     let exited = false;
+
+    yield* Effect.logInfo({ event: "sandbox_execution", ...context, phase: "started", startedAt });
 
     return yield* Effect.acquireUseRelease(
       attempt("sandbox.exec", (signal) =>
@@ -235,6 +381,15 @@ export class Sandbox extends DurableObject<Env> {
             NODE_EXTRA_CA_CERTS: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
           },
         }),
+      ).pipe(
+        Effect.tap(() =>
+          Effect.logInfo({
+            event: "sandbox_execution",
+            ...context,
+            phase: "process_started",
+            elapsedMs: Date.now() - startedAt,
+          }),
+        ),
       ),
       (process) =>
         Effect.all(
@@ -271,7 +426,19 @@ export class Sandbox extends DurableObject<Env> {
                 }),
               ),
             ),
-    ).pipe(Effect.timeout(`${timeout} seconds`));
+    ).pipe(
+      Effect.timeout(`${timeout} seconds`),
+      Effect.onExit((exit) =>
+        Effect.logInfo({
+          event: "sandbox_execution",
+          ...context,
+          phase: Exit.isSuccess(exit) ? "completed" : "failed",
+          elapsedMs: Date.now() - startedAt,
+          exitCode: Exit.isSuccess(exit) ? exit.value.exitCode : undefined,
+          interrupted: Exit.hasInterrupts(exit),
+        }),
+      ),
+    );
   });
 
   private checkout = Effect.fn("Sandbox.checkout")(function* (
@@ -932,7 +1099,14 @@ export class Sandbox extends DurableObject<Env> {
           this.ctx.storage.get<{ turnId: string; error: string }>("snapshot:error"),
         );
 
-        if (!container?.running) return { running: false, setup, checkpoint, checkpointError };
+        if (!container?.running || this.initialization?.state === "running")
+          return {
+            running: container?.running ?? false,
+            setup,
+            checkpoint,
+            checkpointError,
+            initialization: this.initialization,
+          };
 
         return yield* Effect.acquireUseRelease(
           attempt("sandbox.diagnostics", () =>
@@ -945,6 +1119,7 @@ export class Sandbox extends DurableObject<Env> {
                 setup: Effect.succeed(setup),
                 checkpoint: Effect.succeed(checkpoint),
                 checkpointError: Effect.succeed(checkpointError),
+                initialization: Effect.succeed(this.initialization),
                 stdout: readBounded(process.stdout, { limit: 32_768, overflow: "truncate" }).pipe(
                   Effect.map(redact),
                 ),
