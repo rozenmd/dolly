@@ -327,7 +327,7 @@ it("reads large public files a window at a time", async () => {
   const read = async (range: { offset?: number; limit?: number } = {}) =>
     (
       await execute({ action: "read_file", repository, path: "README.md", ref: "main", ...range })
-    ).json<{ ok: boolean; result: Record<string, unknown> }>();
+    ).json<{ ok: boolean; result: { content: string; nextOffset?: number } }>();
 
   const first = await read();
 

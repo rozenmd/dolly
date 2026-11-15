@@ -49,7 +49,7 @@ const errorReason = (response: Response) =>
     if (Option.isNone(parsed)) return "";
 
     const details = (parsed.value.errors ?? []).map((item) =>
-      typeof item === "string"
+      Schema.is(Schema.String)(item)
         ? item
         : (item.message ?? [item.field, item.code].filter(Boolean).join(" ")),
     );

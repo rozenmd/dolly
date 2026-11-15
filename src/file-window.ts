@@ -13,7 +13,7 @@ export type FileWindow = {
   /** The last line included; startLine - 1 when the window is empty. */
   readonly endLine: number;
   /** Where to continue reading, when lines remain past the window. */
-  readonly nextOffset?: number;
+  readonly nextOffset: number | undefined;
   /** The single line in the window was longer than the byte budget and was cut. */
   readonly lineCut: boolean;
 };
@@ -81,7 +81,7 @@ export class LineWindow {
       text: this.lines.join(""),
       startLine: this.offset,
       endLine: this.offset + this.lines.length - 1,
-      ...(this.nextOffset === undefined ? {} : { nextOffset: this.nextOffset }),
+      nextOffset: this.nextOffset,
       lineCut: this.lineCut,
     };
   }

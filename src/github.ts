@@ -961,22 +961,25 @@ function makeGitHub(
       );
 
       const window = windowText(text, { offset: op.offset, limit: op.limit });
-      const described = describeWindow(window, window.totalLines);
-      const note = described.slice(window.text.length).trim();
-      const partial = window.startLine > 1 || window.nextOffset !== undefined || window.lineCut;
+      const note = describeWindow(window, window.totalLines).slice(window.text.length).trim();
+      const result: {
+        kind: "file";
+        path: string;
+        sha: string;
+        content: string;
+        lines?: string;
+        nextOffset?: number;
+        note?: string;
+      } = { kind: "file", path: file.path, sha: file.sha, content: window.text };
 
-      return {
-        ok: true,
-        result: {
-          kind: "file",
-          path: file.path,
-          sha: file.sha,
-          content: window.text,
-          ...(partial ? { lines: `${window.startLine}-${window.endLine}` } : {}),
-          ...(window.nextOffset === undefined ? {} : { nextOffset: window.nextOffset }),
-          ...(note ? { note } : {}),
-        },
-      };
+      if (window.startLine > 1 || window.nextOffset !== undefined || window.lineCut)
+        result.lines = `${window.startLine}-${window.endLine}`;
+
+      if (window.nextOffset !== undefined) result.nextOffset = window.nextOffset;
+
+      if (note) result.note = note;
+
+      return { ok: true, result };
     }
 
     if (op.action === "list_files") {
