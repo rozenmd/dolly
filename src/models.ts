@@ -33,7 +33,7 @@ export const modelProvider = (model: string) =>
 /** Pi's thinking levels; providers clamp unsupported levels to the nearest supported one. */
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const ThinkingLevel = Schema.Literals(THINKING_LEVELS);
-export const DEFAULT_THINKING_LEVEL = "low";
+export const DEFAULT_THINKING_LEVEL = "medium";
 
 export const SessionSettings = Schema.Struct({ thinkingLevel: ThinkingLevel });
 

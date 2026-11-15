@@ -46,7 +46,7 @@ export const EFFORTS: PickerOption[] = [
   { value: "max", label: "Max" },
 ];
 
-export const DEFAULT_EFFORT = "low";
+export const DEFAULT_EFFORT = "medium";
 
 export const effortName = (level: string) =>
   EFFORTS.find((option) => option.value === level)?.label ?? level;

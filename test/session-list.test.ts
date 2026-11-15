@@ -65,7 +65,7 @@ it("discovers legacy sessions without browser storage and retains their public I
       id: "legacy-id",
       title: "Fix mobile discovery",
       model: "gpt-6-luna",
-      thinkingLevel: "low",
+      thinkingLevel: "medium",
       repository: "octocat/project",
       ref: "main",
       updatedAt: 259,
