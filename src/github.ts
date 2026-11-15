@@ -950,7 +950,8 @@ function makeGitHub(
         return {
           ok: false,
           code: "file_too_large",
-          message: "GitHub does not inline files over 1 MB; check out the repository and read it there",
+          message:
+            "GitHub does not inline files over 1 MB; check out the repository and read it there",
         };
 
       const text = yield* attempt("github.file.decode", async () =>

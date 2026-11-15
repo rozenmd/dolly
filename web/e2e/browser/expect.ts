@@ -6,6 +6,7 @@ import { Page, sleep } from "./page";
 const TIMEOUT = 5_000;
 
 type Options = { timeout?: number };
+
 type Check = (locator: Locator, elements: string[]) => Promise<{ pass: boolean; actual: string }>;
 
 /** Evaluate on the single matching element; zero elements yields undefined, several are a strict-mode violation. */

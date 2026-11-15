@@ -61,7 +61,10 @@ export class CdpConnection {
   static async connect(url: string, token?: string) {
     // SAFETY: Node's WebSocket (undici) accepts an init object with headers, which
     // Browser Run needs for its API token; the DOM typings only allow protocols.
-    const init = { headers: token ? { Authorization: `Bearer ${token}` } : {} } as unknown as string[];
+    const init = {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    } as unknown as string[];
+
     const socket = new WebSocket(url, init);
 
     await new Promise<void>((resolve, reject) => {

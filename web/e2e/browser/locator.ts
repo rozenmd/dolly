@@ -2,6 +2,7 @@ import type { Page } from "./page";
 import { sleep } from "./page";
 
 export type TextMatch = string | RegExp;
+
 export type RoleOptions = { name?: TextMatch; exact?: boolean; level?: number };
 
 type Step =
@@ -152,10 +153,12 @@ export class Locator {
   /** Resolve to element object IDs in one object group, released by the caller. */
   async resolve(group: string) {
     const session = this.page.session;
+
     const root = await session.send("Runtime.evaluate", {
       expression: "document",
       objectGroup: group,
     });
+
     let nodes: string[] = [root.result.objectId];
     let atRoot = true;
 
@@ -180,6 +183,7 @@ export class Locator {
 
     const elements = async (array: { objectId?: string }) => {
       if (!array.objectId) return [];
+
       const { result } = await session.send("Runtime.getProperties", {
         objectId: array.objectId,
         ownProperties: true,
@@ -213,14 +217,18 @@ export class Locator {
         const { nodes: tree } = (await session.send("Accessibility.getFullAXTree")) as {
           nodes: AXNode[];
         };
+
         const roles = step.kind === "role" ? (ROLE_ALIASES[step.role] ?? [step.role]) : undefined;
+
         const name =
           step.kind === "role"
             ? step.options.name === undefined
               ? undefined
               : matcher(step.options.name, step.options.exact)
             : matcher(step.text, step.exact);
+
         const level = step.kind === "role" ? step.options.level : undefined;
+
         const candidates = tree.filter(
           (node) =>
             !node.ignored &&
@@ -231,6 +239,7 @@ export class Locator {
               node.properties?.find((property) => property.name === "level")?.value.value ===
                 level),
         );
+
         let kept: string[] = [];
 
         for (const backendNodeId of new Set(candidates.map((node) => node.backendDOMNodeId!))) {
@@ -250,6 +259,7 @@ export class Locator {
           const flags = (
             await call(IN_PAGE.within, [{ value: nodes.length }, ...ids(nodes), ...ids(kept)], true)
           ).value as boolean[];
+
           kept = kept.filter((_, index) => flags[index]);
         }
 
@@ -336,7 +346,10 @@ export class Locator {
   }
 
   /** Wait until the element is visible, stable, enabled and (optionally) the hit target, then return its centre. */
-  private async actionPoint(objectId: string, requireHit: boolean): Promise<Attempt<{ x: number; y: number }>> {
+  private async actionPoint(
+    objectId: string,
+    requireHit: boolean,
+  ): Promise<Attempt<{ x: number; y: number }>> {
     const state = await this.callOn<{
       visible: boolean;
       stable?: boolean;
@@ -413,6 +426,7 @@ export class Locator {
       const point = await this.actionPoint(id, false);
 
       if (!point.done) return point;
+
       const editable = await this.callOn<boolean>(
         id,
         `function () {

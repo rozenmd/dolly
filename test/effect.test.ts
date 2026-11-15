@@ -67,9 +67,7 @@ it("drains shell output while retaining only the configured byte prefix", async 
     },
   });
 
-  expect(
-    await Effect.runPromise(readBounded(stream, { limit: 32_768 })),
-  ).toHaveLength(32_768);
+  expect(await Effect.runPromise(readBounded(stream, { limit: 32_768 }))).toHaveLength(32_768);
   expect(stream.locked).toBe(false);
 });
 
@@ -93,6 +91,7 @@ const chunked = (text: string, onCancel = () => {}) => {
 
 it("windows large file reads by line, stops reading early and says how to continue", async () => {
   let cancelled = false;
+
   const stream = chunked(lines(1, 100_000), () => {
     cancelled = true;
   });
@@ -106,9 +105,9 @@ it("windows large file reads by line, stops reading early and says how to contin
   expect(await Effect.runPromise(readWindow(chunked(lines(1, 100_000)), { offset: 99_999 }))).toBe(
     lines(99_999, 100_000),
   );
-  expect(
-    await Effect.runPromise(readWindow(chunked(lines(1, 10)), { offset: 3, limit: 2 })),
-  ).toBe(`${lines(3, 4)}\n[Showing lines 3-4. Use offset=5 to continue.]`);
+  expect(await Effect.runPromise(readWindow(chunked(lines(1, 10)), { offset: 3, limit: 2 }))).toBe(
+    `${lines(3, 4)}\n[Showing lines 3-4. Use offset=5 to continue.]`,
+  );
   expect(await Effect.runPromise(readWindow(chunked(lines(1, 10)), { offset: 20 }))).toBe(
     "\n[offset 20 is past the end of the file (10 lines).]",
   );
@@ -145,9 +144,7 @@ it("cancels a pending reader when its Effect fiber is interrupted", async () => 
 
   await Effect.runPromise(
     Effect.gen(function* () {
-      const fiber = yield* Effect.forkChild(
-        readBounded(stream, { limit: 32_768 }),
-      );
+      const fiber = yield* Effect.forkChild(readBounded(stream, { limit: 32_768 }));
 
       yield* Effect.yieldNow;
       yield* Fiber.interrupt(fiber);

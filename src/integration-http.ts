@@ -47,6 +47,7 @@ const errorReason = (response: Response) =>
     const parsed = Schema.decodeUnknownOption(Schema.fromJsonString(ProviderError))(text);
 
     if (Option.isNone(parsed)) return "";
+
     const details = (parsed.value.errors ?? []).map((item) =>
       typeof item === "string"
         ? item
@@ -86,6 +87,7 @@ export const integrationJson = Effect.fn("Integration.request")(function* (
           details: { status: response.status },
         });
       }
+
       const reader = response.body?.getReader();
 
       if (!reader)

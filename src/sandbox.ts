@@ -1055,9 +1055,7 @@ export class Sandbox extends DurableObject<Env> {
         });
 
         logs = await Effect.runPromise(
-          readBounded(response.body, { limit: 32_768 }).pipe(
-            Effect.timeout("5 seconds"),
-          ),
+          readBounded(response.body, { limit: 32_768 }).pipe(Effect.timeout("5 seconds")),
         );
       } catch {
         // No log exists before the first preview.
@@ -1154,12 +1152,8 @@ export class Sandbox extends DurableObject<Env> {
                 checkpoint: Effect.succeed(checkpoint),
                 checkpointError: Effect.succeed(checkpointError),
                 initialization: Effect.succeed(this.initialization),
-                stdout: readBounded(process.stdout, { limit: 32_768 }).pipe(
-                  Effect.map(redact),
-                ),
-                stderr: readBounded(process.stderr, { limit: 32_768 }).pipe(
-                  Effect.map(redact),
-                ),
+                stdout: readBounded(process.stdout, { limit: 32_768 }).pipe(Effect.map(redact)),
+                stderr: readBounded(process.stderr, { limit: 32_768 }).pipe(Effect.map(redact)),
                 exitCode: attempt("sandbox.diagnostics.exit", () => process.exitCode),
               },
               { concurrency: "unbounded" },

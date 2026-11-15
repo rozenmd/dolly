@@ -44,6 +44,7 @@ async function waitFor(url: string, server: ChildProcess) {
 
 async function launch(executable: string) {
   const profile = await mkdtemp(join(tmpdir(), "dolly-browser-"));
+
   const browser = spawn(
     executable,
     [
@@ -60,6 +61,7 @@ async function launch(executable: string) {
     ],
     { stdio: ["ignore", "ignore", "pipe"] },
   );
+
   const endpoint = await new Promise<string>((resolve, reject) => {
     let output = "";
     const timer = setTimeout(() => reject(new Error(`Browser did not start:\n${output}`)), 30_000);
@@ -90,6 +92,7 @@ export default async function setup() {
 
   if (!process.env.E2E_BASE_URL) {
     const url = "http://127.0.0.1:8787";
+
     // The test Worker built by `pnpm test:integration:worker`.
     const server = spawn(
       "pnpm",

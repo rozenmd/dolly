@@ -270,8 +270,10 @@ type WaitUntil = { waitUntil?: "load" | "networkidle" };
 
 export class Page {
   readonly session: CdpSession;
-  private readonly routes: { match: (url: string) => boolean; handler: (route: Route) => unknown }[] =
-    [];
+  private readonly routes: {
+    match: (url: string) => boolean;
+    handler: (route: Route) => unknown;
+  }[] = [];
   private readonly socketRoutes: {
     match: (url: string) => boolean;
     handler: (socket: WebSocketRoute) => unknown;
@@ -309,14 +311,17 @@ export class Page {
     const { browserContextId } = await connection.send("Target.createBrowserContext", {
       disposeOnDetach: true,
     });
+
     const { targetId } = await connection.send("Target.createTarget", {
       url: "about:blank",
       browserContextId,
     });
+
     const { sessionId } = await connection.send("Target.attachToTarget", {
       targetId,
       flatten: true,
     });
+
     const page = new Page(connection, sessionId, browserContextId, baseURL, origin);
 
     await page.initialize();
@@ -357,6 +362,7 @@ export class Page {
     session.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
       const description: string =
         exceptionDetails.exception?.description ?? exceptionDetails.text ?? "Error";
+
       const error = new Error(description.split("\n")[0].replace(/^[A-Za-z]*Error: /, ""));
 
       for (const listener of this.listeners.pageerror) listener(error);
@@ -431,6 +437,7 @@ export class Page {
     { waitUntil = "load" }: WaitUntil,
   ) {
     let dispose = () => {};
+
     const loaded = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("Navigation timed out")), 30_000);
 
@@ -469,6 +476,7 @@ export class Page {
       typeof fn === "string"
         ? fn
         : `(${fn.toString()})(${arg === undefined ? "" : JSON.stringify(arg)})`;
+
     const result = await this.session.send("Runtime.evaluate", {
       expression,
       awaitPromise: true,
@@ -500,17 +508,20 @@ export class Page {
     const name = parts.pop()!;
     const modifiers = parts.reduce((mask, part) => mask | (MODIFIERS[part] ?? 0), 0);
     const single = name.length === 1;
+
     const definition = KEYS[name] ?? {
       code: single ? `Key${name.toUpperCase()}` : name,
       keyCode: single ? name.toUpperCase().charCodeAt(0) : 0,
       text: single ? name : undefined,
     };
+
     const base = {
       key: name === "Space" ? " " : name,
       code: definition.code,
       windowsVirtualKeyCode: definition.keyCode,
       modifiers,
     };
+
     const typed = definition.text !== undefined && !modifiers;
 
     await this.session.send("Input.dispatchKeyEvent", {
@@ -567,6 +578,7 @@ export class Page {
 
   private async paused(params: PausedRequest) {
     const { request } = params;
+
     const body = request.postDataEntries
       ? Buffer.concat(
           request.postDataEntries.map((entry) => Buffer.from(entry.bytes ?? "", "base64")),
@@ -574,6 +586,7 @@ export class Page {
       : request.postData === undefined
         ? undefined
         : Buffer.from(request.postData);
+
     const data = new Request({
       url: request.url,
       method: request.method,
@@ -616,18 +629,24 @@ export class Page {
         method: params.request.method,
         headers: new Headers(params.request.headers),
         body:
-          body && !["GET", "HEAD"].includes(params.request.method) ? new Uint8Array(body) : undefined,
+          body && !["GET", "HEAD"].includes(params.request.method)
+            ? new Uint8Array(body)
+            : undefined,
         redirect: "manual",
       });
+
       const headers: { name: string; value: string }[] = [];
 
       response.headers.forEach((value, name) => {
         // fetch() has already decoded the body; set-cookie is listed separately below.
-        if (!["content-encoding", "content-length", "transfer-encoding", "set-cookie"].includes(name))
+        if (
+          !["content-encoding", "content-length", "transfer-encoding", "set-cookie"].includes(name)
+        )
           headers.push({ name, value });
       });
 
-      for (const value of response.headers.getSetCookie()) headers.push({ name: "set-cookie", value });
+      for (const value of response.headers.getSetCookie())
+        headers.push({ name: "set-cookie", value });
       const bytes = Buffer.from(await response.arrayBuffer());
 
       await this.session

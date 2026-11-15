@@ -14,7 +14,11 @@ for (const [manager, lockfile, expected] of [
     "pnpm-lock.yaml",
     ["--yes", "--package=pnpm@12.18.0", "--", "pnpm", "install", "--frozen-lockfile"],
   ],
-  ["yarn@4.0.0", "yarn.lock", ["--yes", "--package=@yarnpkg/cli-dist@4.0.0", "--", "yarn", "install"]],
+  [
+    "yarn@4.0.0",
+    "yarn.lock",
+    ["--yes", "--package=@yarnpkg/cli-dist@4.0.0", "--", "yarn", "install"],
+  ],
   ["yarn@1.22.22", "yarn.lock", ["--yes", "--package=yarn@1.22.22", "--", "yarn", "install"]],
   ["npm@11.0.0", "package-lock.json", ["--yes", "--package=npm@11.0.0", "--", "npm", "ci"]],
 ]) {

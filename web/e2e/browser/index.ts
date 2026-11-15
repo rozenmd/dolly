@@ -16,7 +16,9 @@ import { CdpConnection } from "./cdp";
 import { Page } from "./page";
 
 export { expect } from "./expect";
+
 export type { Page } from "./page";
+
 export type { Locator } from "./locator";
 
 type Fixtures = { page: Page };
