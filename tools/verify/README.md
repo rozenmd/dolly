@@ -23,7 +23,7 @@ outside this workflow; existing suites and CI remain unchanged.
 | -------------------------------------------------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Built Worker HTTP/SSR, assets, API routing, Worker-side Access enforcement | `pnpm test:integration:worker` | Real bundled requests in local workerd/Miniflare, with test bindings and controlled authentication fixtures; not deployed Access edge policy, live inference or real containers. |
 | Sandbox checkout, Git, turn-end recovery and dependency caching            | `pnpm test:sandbox`            | Existing container integration scenarios using Docker and local test services; not live GitHub App authorization or deployed snapshot lifecycle proof.                           |
-| Browser interactions                                                       | `pnpm test:worker`             | Worker integration suites plus Playwright against the test Worker. Browser tests intercept API/WebSocket traffic; their success does not prove backend operations complete.      |
+| Browser interactions                                                       | `pnpm test:worker`             | Worker integration suites plus CDP browser tests against the test Worker. Browser tests intercept API/WebSocket traffic; their success does not prove backend operations complete. |
 | Production packaging, bindings and ingress                                 | `pnpm build`                   | Builds and deployment dry runs, including the sandbox image. Requires Docker; does not deploy or prove live runtime behavior.                                                    |
 
 Choose scenarios for the changed behavior and its load-bearing neighbors. A passing
@@ -48,10 +48,12 @@ Container scenarios can also be selected:
 pnpm test:sandbox -t 'scenario name'
 ```
 
-For a focused fixture-backed browser interaction after building the test Worker:
+For a focused fixture-backed browser interaction after building the test Worker, with a
+browser container, Cloudflare Browser Run (`BROWSER_CDP_URL=wss://…` plus `BROWSER_CDP_TOKEN`)
+or a local Chrome (`BROWSER_EXECUTABLE`); see `web/e2e/browser/setup.ts`:
 
 ```sh
-pnpm --dir web exec playwright test --config playwright.worker.config.ts e2e/session-list.spec.ts
+BROWSER_CDP_URL=http://127.0.0.1:9222 pnpm --dir web test:e2e e2e/session-list.spec.ts
 ```
 
 Do not substitute `pnpm test` or `pnpm check:web` for integration proof: those
@@ -62,7 +64,7 @@ commands include unit suites. No broad test command is required by this workflow
 A genuine system journey would use an authenticated deployed Dolly, create an
 isolated session, submit a task, observe real model inference and sandbox execution,
 and inspect the resulting files or Git side effects. The current fixture-backed
-Playwright suite does not do this.
+browser suite does not do this.
 
 Live journeys require explicit authorization for the environment, credentials,
 subscription usage, mutations and cleanup. Do not automatically deploy, change

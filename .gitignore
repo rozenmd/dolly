@@ -8,8 +8,8 @@ dist/
 /.sandbox-test.wrangler.json
 web/.tanstack/
 web/test-results/
-web/playwright-report/
 .alchemy/
 /infra/access.generated.json
 !infra/.env.example
 .vitest/
+__pycache__/
