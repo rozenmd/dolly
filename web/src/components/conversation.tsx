@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -15,12 +16,14 @@ import {
   ChevronRightIcon,
   ExclamationCircleIcon,
   StopIcon,
+  XMarkIcon,
 } from "@heroicons/react/16/solid";
 import { DocumentDuplicateIcon, Square2StackIcon } from "@heroicons/react/24/outline";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { QueuedMessage, Step, Turn } from "../lib/api";
 import { ago, duration } from "../lib/time";
+import { formatToolOutput, oneLine } from "../lib/tool-output";
 import { IconButton, Textarea } from "./ui";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import type { Attachment } from "../lib/images";
@@ -262,25 +265,61 @@ function StepGroup({ id, steps }: { id: string; steps: readonly Step[] }) {
 
 function StepDetails({ step }: { step: Step }) {
   const disclosure = useDisclosure(`step-${step.id}`);
+  const output = useMemo(() => formatToolOutput(step.output), [step.output]);
+  const failed = step.status === "error" || output.exitCode !== undefined || output.failed;
 
   return (
     <details className="step" {...disclosure}>
       <summary>
-        <span className={`step-name step-${step.status}`}>{step.name}</span>
-        {step.detail && <code>{step.detail}</code>}
+        <StepStatus status={step.status} failed={Boolean(failed)} />
+        <span className="step-name">{step.name}</span>
+        {step.detail && (
+          <code className="step-detail" title={step.detail}>
+            {oneLine(step.detail)}
+          </code>
+        )}
+        {output.exitCode !== undefined && <span className="step-exit">exit {output.exitCode}</span>}
       </summary>
-      <pre>{step.output || stepPlaceholder(step.status)}</pre>
-      {step.images?.map((src) => (
-        <a key={src} href={src} target="_blank" rel="noreferrer">
-          <img
-            src={src}
-            alt="Browser Run screenshot"
-            loading="lazy"
-            style={{ maxWidth: "100%", height: "auto" }}
-          />
-        </a>
-      ))}
+      <div className="step-body">
+        {output.sections.length ? (
+          <pre className="step-output">
+            {output.sections.map((section, index) => (
+              <span key={index} className={`output-${section.kind}`}>
+                {section.text}
+              </span>
+            ))}
+          </pre>
+        ) : (
+          <p className="step-placeholder">{stepPlaceholder(step.status)}</p>
+        )}
+        {step.images?.map((src) => (
+          <a key={src} href={src} target="_blank" rel="noreferrer">
+            <img
+              src={src}
+              alt="Browser Run screenshot"
+              loading="lazy"
+              style={{ maxWidth: "100%", height: "auto" }}
+            />
+          </a>
+        ))}
+      </div>
     </details>
+  );
+}
+
+function StepStatus({ status, failed }: { status: Step["status"]; failed: boolean }) {
+  if (status === "running" || status === "pending")
+    return (
+      <span
+        className={`step-status step-${status}`}
+        aria-label={status === "running" ? "Running" : "Queued"}
+      />
+    );
+
+  return failed ? (
+    <XMarkIcon className="step-status step-error" aria-label="Failed" />
+  ) : (
+    <CheckIcon className="step-status step-done" aria-label="Done" />
   );
 }
 
