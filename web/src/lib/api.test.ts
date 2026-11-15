@@ -329,7 +329,7 @@ describe("session transcript", () => {
           { kind: "text", id: "2-0-1", text: "Checking now." },
           {
             kind: "steps",
-            id: "2-0-2",
+            id: "steps-call-1",
             steps: [
               {
                 id: "call-1",
@@ -413,7 +413,7 @@ describe("session transcript", () => {
       { kind: "text", id: "live-0", text: "Working on the fix." },
       {
         kind: "steps",
-        id: "live-1",
+        id: "steps-1",
         steps: [{ id: "1", name: "shell", detail: "", output: "Running tests", status: "running" }],
       },
     ]);

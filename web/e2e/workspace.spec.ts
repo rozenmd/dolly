@@ -1083,3 +1083,133 @@ test("cancelling ChatGPT sign-in ignores an approval that was already in flight"
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Connect a model" })).toBeVisible();
 });
+
+test("keeps steps open while the agent works and respects a step group the user closes", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      "dolly.sessions.v1",
+      JSON.stringify([
+        { id: "steps", model: "gpt-6-sol", title: "Run tests", repository: "", updatedAt: 1 },
+      ]),
+    ),
+  );
+  await page.route("**/api/**", (route) => {
+    if (new URL(route.request().url()).pathname === "/api/auth")
+      return route.fulfill({ json: signedIn });
+
+    return route.fulfill({ json: { state: "connected" } });
+  });
+
+  const prompt = {
+    id: 1,
+    kind: "pi.user",
+    model: [{ role: "user", content: "Run tests", timestamp: Date.now() - 5000 }],
+  };
+
+  const call = (id: string, command: string) => ({
+    type: "toolCall",
+    id,
+    name: "bash",
+    arguments: { command },
+  });
+
+  const result = (id: string, text: string) => ({
+    role: "toolResult",
+    toolCallId: id,
+    toolName: "bash",
+    content: [{ type: "text", text }],
+  });
+
+  let push: (entries: unknown[], live: typeof Live.Type) => void = () => {};
+
+  await page.routeWebSocket("**/api/sessions/steps/events", (socket) => {
+    push = (entries, live) =>
+      socket.send(JSON.stringify({ entries: [prompt, ...entries], docs: { "pi.live": live } }));
+    // The first tool call is still streaming, so it only exists in the live message.
+    push([], {
+      run: {},
+      generation: { message: { role: "assistant", content: [call("call-1", "pnpm lint")] } },
+      tools: [{ callId: "call-1", name: "bash", status: "running", output: "Linting" }],
+    });
+  });
+  await page.goto("/", { waitUntil: "networkidle" });
+
+  const group = page.locator("details.step-group");
+  const steps = page.locator("details.step");
+  await expect(page.getByText("Linting")).toBeVisible();
+  await expect(group).toHaveJSProperty("open", true);
+  await expect(steps.first()).toHaveJSProperty("open", true);
+
+  // A flash is a close (then a reopen), or a remount that replaces the element.
+  // Record every close from here on so one can't slip between assertions, and
+  // tag the group's element so a replacement shows up.
+  await page.evaluate(() => {
+    document.body.dataset.closed = "";
+    document.addEventListener(
+      "toggle",
+      (event) => {
+        if (event.target instanceof HTMLDetailsElement && !event.target.open)
+          document.body.dataset.closed += `${event.target.className} `;
+      },
+      true,
+    );
+  });
+  await group.evaluate((element) => element.setAttribute("data-original", ""));
+
+  const first = {
+    id: 2,
+    kind: "pi.message",
+    model: [
+      { role: "assistant", content: [call("call-1", "pnpm lint")] },
+      result("call-1", "Lint clean"),
+    ],
+  };
+
+  // The live message is saved and the tool finishes; the model is thinking
+  // about the next call, so nothing is running for a moment.
+  push([first], { run: {}, generation: { message: { role: "assistant", content: [] } } });
+  await expect(page.getByText("Lint clean")).toBeVisible();
+  // The next tool joins the same group.
+  push([first], {
+    run: {},
+    generation: { message: { role: "assistant", content: [call("call-2", "pnpm test")] } },
+    tools: [{ callId: "call-2", name: "bash", status: "running", output: "Testing" }],
+  });
+  await expect(page.getByText("Testing")).toBeVisible();
+  await expect(group).toHaveCount(1);
+  await expect(group).toHaveJSProperty("open", true);
+  await expect(steps).toHaveCount(2);
+  await expect(steps.nth(0)).toHaveJSProperty("open", true);
+  await expect(steps.nth(1)).toHaveJSProperty("open", true);
+
+  // Nothing opened or closed on its own while the agent worked.
+  const body = page.locator("body");
+  await expect(body).toHaveAttribute("data-closed", "");
+  await expect(group).toHaveAttribute("data-original", "");
+
+  // Closing the group is the user's choice and survives further progress.
+  await group.locator("> summary").click();
+  await expect(group).toHaveJSProperty("open", false);
+
+  const second = {
+    id: 3,
+    kind: "pi.message",
+    model: [
+      { role: "assistant", content: [call("call-2", "pnpm test")] },
+      result("call-2", "Tests passed"),
+    ],
+  };
+
+  push([first, second], { run: {}, generation: { message: { role: "assistant", content: [] } } });
+  push([first, second], {
+    run: {},
+    generation: { message: { role: "assistant", content: [call("call-3", "pnpm build")] } },
+    tools: [{ callId: "call-3", name: "bash", status: "running", output: "Building" }],
+  });
+  await expect(group.locator("> summary")).toContainText("3 steps");
+  await expect(group).toHaveJSProperty("open", false);
+  await expect(body).toHaveAttribute("data-closed", "step-group ");
+  await expect(group).toHaveAttribute("data-original", "");
+});

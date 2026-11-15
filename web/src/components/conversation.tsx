@@ -1,5 +1,7 @@
 import { DEFAULT_EFFORT, EffortPicker, modelName } from "./model-select";
 import {
+  createContext,
+  useContext,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -44,6 +46,10 @@ export function Conversation({
   const pinned = useRef(true);
   const [now, setNow] = useState(Date.now);
   const running = turns.some((turn) => turn.running);
+  const [sessions] = useState(() => new Map<string, Map<string, boolean>>());
+  const choices = sessions.get(sessionId) ?? new Map<string, boolean>();
+
+  sessions.set(sessionId, choices);
 
   useEffect(() => {
     if (!running) return;
@@ -78,9 +84,11 @@ export function Conversation({
         {!loading && turns.length === 0 && (
           <p className="conversation-status">Send a message to start.</p>
         )}
-        {turns.map((turn) => (
-          <TurnView key={turn.id} turn={turn} now={now} />
-        ))}
+        <DisclosureChoices.Provider value={choices}>
+          {turns.map((turn) => (
+            <TurnView key={turn.id} turn={turn} now={now} />
+          ))}
+        </DisclosureChoices.Provider>
       </div>
     </div>
   );
@@ -160,20 +168,29 @@ function failureReason(reason: string) {
 }
 
 /**
- * Disclosure state for a <details>. `auto` suggests whether it should be open
- * (e.g. while running) until the user toggles it; after that the user's choice
- * is final and the app never opens or closes it again.
+ * Open/closed choices the user made in this conversation, keyed by disclosure
+ * id. Kept above the turn tree so a choice survives a remount (for example
+ * when a live message is saved and its turn is rebuilt).
  */
-function useDisclosure(auto: boolean) {
-  const [userOpen, setUserOpen] = useState<boolean | null>(null);
-  const open = userOpen ?? auto;
+const DisclosureChoices = createContext<Map<string, boolean>>(new Map());
+
+/**
+ * Disclosure state for a step <details>. It starts open and only the user
+ * opens or closes it afterwards: run status never toggles it, so it can't
+ * flash while the agent works.
+ */
+function useDisclosure(id: string) {
+  const choices = useContext(DisclosureChoices);
+  const [open, setOpen] = useState(() => choices.get(id) ?? true);
 
   return {
     open,
     onToggle: (event: SyntheticEvent<HTMLDetailsElement>) => {
       const next = event.currentTarget.open;
 
-      if (next !== open) setUserOpen(next);
+      if (next === open) return;
+      choices.set(id, next);
+      setOpen(next);
     },
   };
 }
@@ -181,8 +198,13 @@ function useDisclosure(auto: boolean) {
 function WorkLog({ turn }: { turn: Turn }) {
   // The work log is opened once when it appears (if running or failed) and is
   // otherwise left entirely to the user.
-  const [initial] = useState(() => turn.running || Boolean(turn.failure));
-  const disclosure = useDisclosure(initial);
+  const [open, setOpen] = useState(() => turn.running || Boolean(turn.failure));
+
+  const disclosure = {
+    open,
+    onToggle: (event: SyntheticEvent<HTMLDetailsElement>) => setOpen(event.currentTarget.open),
+  };
+
   const started = turn.prompt?.at ?? turn.startedAt;
 
   const elapsed =
@@ -202,7 +224,7 @@ function WorkLog({ turn }: { turn: Turn }) {
           item.kind === "text" ? (
             <Prose key={item.id} text={item.text} />
           ) : (
-            <StepGroup key={item.id} steps={item.steps} />
+            <StepGroup key={item.id} id={item.id} steps={item.steps} />
           ),
         )}
       </div>
@@ -214,10 +236,10 @@ function stepCount(count: number) {
   return count === 0 ? "" : `${count} ${count === 1 ? "step" : "steps"}`;
 }
 
-function StepGroup({ steps }: { steps: readonly Step[] }) {
+function StepGroup({ id, steps }: { id: string; steps: readonly Step[] }) {
   const running = steps.some((step) => step.status === "running");
   const failed = steps.some((step) => step.status === "error");
-  const disclosure = useDisclosure(running || failed);
+  const disclosure = useDisclosure(id);
 
   return (
     <details className="step-group" {...disclosure}>
@@ -239,7 +261,7 @@ function StepGroup({ steps }: { steps: readonly Step[] }) {
 }
 
 function StepDetails({ step }: { step: Step }) {
-  const disclosure = useDisclosure(step.status === "running" || step.status === "error");
+  const disclosure = useDisclosure(`step-${step.id}`);
 
   return (
     <details className="step" {...disclosure}>
