@@ -247,6 +247,9 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
       });
     }
 
+    if (path === "/api/settings/model")
+      return route.fulfill({ json: { model: null, effective: "claude-sonnet-5-5" } });
+
     if (path === "/api/integrations/github/repositories")
       return route.fulfill({ json: { repositories: [] } });
 
@@ -310,9 +313,13 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
   await page.screenshot({ path: test.info().outputPath("claude-connection-mobile.png") });
   await connect.getByRole("button", { name: "Continue with Claude" }).click();
   const composer = page.getByRole("dialog", { name: "New session" });
+  // The server resolves the default, so a Claude-only owner gets Claude without a client override.
   await expect(composer.getByRole("button", { name: "Model", exact: true })).toHaveAttribute(
     "data-value",
-    "claude-sonnet-5-5",
+    "",
+  );
+  await expect(composer.getByRole("button", { name: "Model", exact: true })).toContainText(
+    "Default (Claude Sonnet 5.5)",
   );
   await composer.getByRole("button", { name: "Model", exact: true }).click();
   await composer.getByRole("option", { name: "Claude Haiku 5.5" }).click();

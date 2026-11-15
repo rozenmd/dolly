@@ -1,9 +1,9 @@
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import * as Schema from "effect/Schema";
-import { request, Session, type ApiBody, type SavedSession } from "../lib/api";
+import { defaultModel, request, Session, type ApiBody, type SavedSession } from "../lib/api";
 import { Modal, Textarea } from "./ui";
 import { ArrowUturnLeftIcon } from "@heroicons/react/16/solid";
-import { DEFAULT_EFFORT, EffortPicker, ModelPicker } from "./model-select";
+import { DEFAULT_EFFORT, EffortPicker, ModelPicker, modelName } from "./model-select";
 import { RepositoryPicker } from "./repositories";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import { imagesBody, type Attachment } from "../lib/images";
@@ -26,6 +26,7 @@ export function NewSessionComposer({
   const [repository, setRepository] = useState(initial.workspace?.repository ?? "");
   const [ref, setRef] = useState(initial.workspace?.ref ?? "");
   const [model, setModel] = useState(initial.model ?? "");
+  const [fallback, setFallback] = useState<string | null>(null);
   const [effort, setEffort] = useState(initial.thinkingLevel ?? DEFAULT_EFFORT);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
@@ -39,6 +40,20 @@ export function NewSessionComposer({
     setError,
     pending || Boolean(created),
   );
+
+  useEffect(() => {
+    let active = true;
+    defaultModel().then(
+      (setting) => {
+        if (active) setFallback(setting.effective);
+      },
+      () => {},
+    );
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -164,6 +179,7 @@ export function NewSessionComposer({
           <ModelPicker
             id="new-session-model"
             value={model}
+            defaultLabel={fallback ? `Default (${modelName(fallback)})` : "Default"}
             disabled={pending || Boolean(created)}
             onChange={setModel}
           />

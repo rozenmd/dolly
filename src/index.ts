@@ -11,7 +11,7 @@ import { githubRoutes, githubSetupRoutes } from "./github-routes";
 import { slackRoutes } from "./slack-routes";
 import { authorizeAccess } from "./access";
 import { AgentApi } from "./api";
-import { ChildRequest, NewSession, SessionSettings } from "./models";
+import { ChildRequest, DefaultModelSetting, NewSession, SessionSettings } from "./models";
 import { OperationError } from "./operations";
 import { exceptionDetails } from "./diagnostics";
 import { AnthropicSetup, AnthropicProbe } from "./anthropic";
@@ -309,6 +309,34 @@ app.delete("/api/auth/anthropic", (c) =>
     c,
     Effect.gen(function* () {
       return c.json(yield* rpc("anthropic.logout", async () => await owner(c).anthropicLogout()));
+    }),
+  ),
+);
+
+app.get("/api/settings/model", (c) =>
+  handle(
+    c,
+    rpc("settings.model.read", async () => c.json(await owner(c).defaultModel())),
+  ),
+);
+
+app.put("/api/settings/model", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const input = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(DefaultModelSetting)),
+        Effect.mapError(
+          () =>
+            new InvalidInput({
+              message: "Expected a model from the Codex or Anthropic catalog, or null",
+            }),
+        ),
+      );
+
+      return c.json(
+        yield* rpc("settings.model.write", async () => await owner(c).setDefaultModel(input)),
+      );
     }),
   ),
 );

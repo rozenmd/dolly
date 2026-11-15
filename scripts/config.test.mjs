@@ -35,7 +35,7 @@ test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", ()
   assert.equal(worker.env.ACCESS_LOCAL_DEV.value, "false");
   assert.equal(worker.env.ACCESS_TEAM_DOMAIN.type, "text");
   assert.equal(worker.env.ACCESS_AUD.type, "text");
-  assert.equal(worker.env.CODEX_MODEL.value, "gpt-6-luna");
+  assert.equal(worker.env.CODEX_MODEL, undefined);
   assert.deepEqual(worker.env.AGENT, {
     type: "durable-object",
     worker: worker.name,

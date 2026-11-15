@@ -10,7 +10,6 @@ export default defineConfig(async () => ({
       miniflare: {
         bindings: {
           ACCESS_LOCAL_DEV: "true",
-          CODEX_MODEL: "gpt-6-luna",
         },
       },
     }),

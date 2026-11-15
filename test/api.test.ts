@@ -18,6 +18,8 @@ describe("Hono Worker in workerd", () => {
       ["auth/codex", "GET"],
       ["auth/codex", "POST"],
       ["auth/codex", "DELETE"],
+      ["settings/model", "GET"],
+      ["settings/model", "PUT"],
       ["sessions", "POST"],
       ["sessions", "GET"],
       ["sessions/import", "POST"],

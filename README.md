@@ -205,7 +205,7 @@ Open the Worker's URL and follow the setup steps under [Web frontend](#web-front
 
 `cloudflare.config.ts` owns Worker bindings, SQLite Durable Object exports, observability, and the Sandbox container definition. The pinned `cf` CLI loads it for development and deployment; Wrangler remains only its underlying bundler, with no hand-maintained Wrangler configuration file. Cloudflare's programmatic configuration is currently in open beta.
 
-`CODEX_MODEL` in `cloudflare.config.ts` selects the default model for new conversations; a session request's `model` overrides it. It must be present in the pinned Pi Codex provider catalog and available to your subscription. Requests use the subscription-backed Codex Responses endpoint over SSE, not the billed OpenAI API endpoint.
+**Settings → Models → Default model** selects the default model for new conversations from the web app, the API and Slack; a session request's `model` overrides it. The choice is stored in the owner Durable Object (not an environment variable), so it survives restarts and deploys and needs no redeploy to change. `GET /api/settings/model` returns `{"model": string | null, "effective": string}`; `PUT /api/settings/model` with `{"model":"gpt-6-sol"}` saves a default and `{"model":null}` restores the built-in default. The model must be in the pinned Pi Codex or Anthropic catalog (unknown models return `400`) and available to your subscription. The saved default applies only while its subscription is connected; otherwise, and when nothing is saved, new conversations use `gpt-6-luna` when Codex is connected and `claude-sonnet-5-5` when only Claude is. GitHub webhook runs require Codex, so they use the saved default only when it is a Codex model and `gpt-6-luna` otherwise. Requests use the subscription-backed Codex Responses endpoint over SSE, not the billed OpenAI API endpoint.
 
 ## Connect GitHub
 
@@ -418,7 +418,7 @@ Sessions use Codex when connected, otherwise Claude Sonnet.
 
 The web UI uses these routes on the same origin. Every route except `/api/health` sits behind Cloudflare Access and, apart from setup and sign-in, requires the GitHub sign-in session cookie.
 
-`POST /api/sessions` with `{"model":"gpt-6-sol"}` or `{"model":"claude-sonnet-4-6"}` returns the new session's `id` and selected `model`. The optional `model` must be in Pi's pinned Codex or Anthropic catalog; unknown models return `400`. Your matching subscription must be configured and allow the selected model. An empty body or `{}` uses `CODEX_MODEL` from `cloudflare.config.ts`, except when only Claude is configured, when it uses `claude-sonnet-4-6`. Selection is saved with the conversation, survives restarts, and does not change other sessions.
+`POST /api/sessions` with `{"model":"gpt-6-sol"}` or `{"model":"claude-sonnet-4-6"}` returns the new session's `id` and selected `model`. The optional `model` must be in Pi's pinned Codex or Anthropic catalog; unknown models return `400`. Your matching subscription must be configured and allow the selected model. An empty body or `{}` uses the default model from **Settings → Models** (see above). Selection is saved with the conversation, survives restarts, and does not change other sessions.
 
 A prompt returns `202` after durable admission, not after generation. Poll the session to read its Pi conversation view, including recent entries and live progress. Reuse the same UUID `requestId` when retrying the same prompt to avoid duplicate work. The snapshot contains a bounded recent transcript window, not an export of all history.
 
@@ -450,7 +450,7 @@ Dolly uses Pi's pinned native Anthropic HTTP/SSE adapter against `https://api.an
 
 The authenticated API is `GET /api/auth/anthropic` for configured status, `PUT` with `{"token":"..."}` to save/replace, `DELETE` to disconnect, and `POST /api/auth/anthropic/test` with `{}` or `{"model":"claude-sonnet-4-6"}` for an explicit probe. Saving does not contact Anthropic; only the test or an agent turn sends model traffic. The test never creates a conversation.
 
-Select a Claude model in **New session**; the API accepts the pinned Pi Anthropic catalog as well as Codex models. If only Claude is configured, an omitted model defaults to `claude-sonnet-4-6`. With Codex configured, the existing `CODEX_MODEL` default is unchanged. There is no automatic cross-provider fallback after a failed request, and old conversations keep their provider. Child agents inherit the parent's Claude/Codex model unless explicitly overridden. GitHub webhook intake retains its existing Codex requirement/default; this change does not silently switch webhook runs to Claude.
+Select a Claude model in **New session**; the API accepts the pinned Pi Anthropic catalog as well as Codex models. An omitted model uses the saved default model; with nothing saved it is `claude-sonnet-5-5` when only Claude is configured and `gpt-6-luna` when Codex is. There is no automatic cross-provider fallback after a failed request, and old conversations keep their provider. Child agents inherit the parent's Claude/Codex model unless explicitly overridden. GitHub webhook intake retains its existing Codex requirement/default; this change does not silently switch webhook runs to Claude.
 
 ## Child agents
 
