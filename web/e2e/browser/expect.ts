@@ -8,6 +8,9 @@ const TIMEOUT = 5_000;
 
 type Options = { timeout?: number };
 
+/** What an assertion compares against, for its failure message. */
+type Expected = string | number | RegExp | undefined;
+
 type Check = (locator: Locator, elements: string[]) => Promise<{ pass: boolean; actual: string }>;
 
 /** Evaluate on the single matching element; zero elements yields undefined, several are a strict-mode violation. */
@@ -49,7 +52,7 @@ class LocatorAssertions {
     return new LocatorAssertions(this.locator, !this.negated);
   }
 
-  private async check(name: string, expected: unknown, check: Check, options: Options = {}) {
+  private async check(name: string, expected: Expected, check: Check, options: Options = {}) {
     const timeout = options.timeout ?? TIMEOUT;
     const label = `expect(${this.locator}).${this.negated ? "not." : ""}${name}`;
     let actual = "";
@@ -77,7 +80,7 @@ class LocatorAssertions {
 
   private property(
     name: string,
-    expected: unknown,
+    expected: Expected,
     declaration: string,
     pass: (value: any) => boolean,
     options?: Options,
@@ -222,53 +225,62 @@ class PageAssertions {
   }
 }
 
-type Poller = {
-  [K in "toBe" | "toEqual" | "toBeTruthy" | "toContain"]: (...args: unknown[]) => Promise<void>;
-} & { not: Poller };
+/** expect.poll: retry a Vitest matcher against fn() until it passes or times out. */
+class Poll<T> {
+  constructor(
+    private readonly fn: () => T | Promise<T>,
+    private readonly options: Options,
+    private readonly negated = false,
+  ) {}
 
-/** expect.poll: retry a plain Vitest matcher against fn() until it passes or times out. */
-function poller(fn: () => unknown, options: Options, negated: boolean): Poller {
-  const run =
-    (name: string) =>
-    async (...args: unknown[]) => {
-      const deadline = Date.now() + (options.timeout ?? TIMEOUT);
+  get not() {
+    return new Poll(this.fn, this.options, !this.negated);
+  }
 
-      while (true) {
-        const value = await fn();
+  private async retry(assert: (value: T) => void) {
+    const deadline = Date.now() + (this.options.timeout ?? TIMEOUT);
 
-        try {
-          const assertion = vitestExpect(value) as unknown as Record<string, any>;
-          (negated ? assertion.not : assertion)[name](...args);
+    while (true) {
+      const value = await this.fn();
 
-          return;
-        } catch (error) {
-          if (Date.now() > deadline) throw error;
-        }
+      try {
+        assert(value);
 
-        await sleep(100);
+        return;
+      } catch (error) {
+        if (Date.now() > deadline) throw error;
       }
-    };
 
-  return new Proxy({} as Poller, {
-    get: (_, property: string) =>
-      property === "not" ? poller(fn, options, !negated) : run(property),
-  });
+      await sleep(100);
+    }
+  }
+
+  toBe(expected: T) {
+    return this.retry((value) =>
+      this.negated ? vitestExpect(value).not.toBe(expected) : vitestExpect(value).toBe(expected),
+    );
+  }
+
+  toEqual(expected: T) {
+    return this.retry((value) =>
+      this.negated
+        ? vitestExpect(value).not.toEqual(expected)
+        : vitestExpect(value).toEqual(expected),
+    );
+  }
 }
 
-type Expect = {
-  (target: Locator): LocatorAssertions;
-  (target: Page): PageAssertions;
-  <T>(target: T): ReturnType<typeof vitestExpect<T>>;
-  poll(fn: () => unknown, options?: Options): Poller;
-};
+function assertions(target: Locator): LocatorAssertions;
+function assertions(target: Page): PageAssertions;
+function assertions<T>(target: T): ReturnType<typeof vitestExpect<T>>;
+function assertions<T>(target: T) {
+  if (target instanceof Locator) return new LocatorAssertions(target);
 
-export const expect = Object.assign(
-  (target: unknown) => {
-    if (target instanceof Locator) return new LocatorAssertions(target);
+  if (target instanceof Page) return new PageAssertions(target);
 
-    if (target instanceof Page) return new PageAssertions(target);
+  return vitestExpect(target);
+}
 
-    return vitestExpect(target);
-  },
-  { poll: (fn: () => unknown, options: Options = {}) => poller(fn, options, false) },
-) as Expect;
+export const expect = Object.assign(assertions, {
+  poll: <T>(fn: () => T | Promise<T>, options: Options = {}) => new Poll(fn, options),
+});

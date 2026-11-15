@@ -79,8 +79,8 @@ const IN_PAGE = {
 
 export const VISIBLE = IN_PAGE.visible;
 
-/** Chrome's accessibility roles that differ from the ARIA names tests use. */
-const ROLE_ALIASES: Record<string, string[]> = { img: ["image", "img"] };
+/** Chrome's accessibility role names; it reports ARIA img as "image". */
+const chromeRoles = (role: string) => (role === "img" ? ["image", "img"] : [role]);
 
 type AXNode = {
   ignored?: boolean;
@@ -185,12 +185,11 @@ export class Locator {
     const elements = async (array: { objectId?: string }) => {
       if (!array.objectId) return [];
 
-      const { result } = await session.send("Runtime.getProperties", {
-        objectId: array.objectId,
-        ownProperties: true,
-      });
+      const { result } = await session.send<{
+        result: { name: string; value?: { objectId?: string } }[];
+      }>("Runtime.getProperties", { objectId: array.objectId, ownProperties: true });
 
-      return (result as { name: string; value?: { objectId?: string } }[])
+      return result
         .filter((property) => /^\d+$/.test(property.name) && property.value?.objectId)
         .sort((a, b) => Number(a.name) - Number(b.name))
         .map((property) => property.value!.objectId!);
@@ -215,11 +214,11 @@ export class Locator {
         const node = nodes.at(step.index);
         nodes = node ? [node] : [];
       } else {
-        const { nodes: tree } = (await session.send("Accessibility.getFullAXTree")) as {
-          nodes: AXNode[];
-        };
+        const { nodes: tree } = await session.send<{ nodes: AXNode[] }>(
+          "Accessibility.getFullAXTree",
+        );
 
-        const roles = step.kind === "role" ? (ROLE_ALIASES[step.role] ?? [step.role]) : undefined;
+        const roles = step.kind === "role" ? chromeRoles(step.role) : undefined;
 
         const name =
           step.kind === "role"
@@ -252,14 +251,14 @@ export class Locator {
         }
 
         if (step.kind === "label" && kept.length) {
-          const flags = (await call(IN_PAGE.labelled, ids(kept), true)).value as boolean[];
+          const flags: boolean[] = (await call(IN_PAGE.labelled, ids(kept), true)).value;
           kept = kept.filter((_, index) => flags[index]);
         }
 
         if (!atRoot && kept.length) {
-          const flags = (
+          const flags: boolean[] = (
             await call(IN_PAGE.within, [{ value: nodes.length }, ...ids(nodes), ...ids(kept)], true)
-          ).value as boolean[];
+          ).value;
 
           kept = kept.filter((_, index) => flags[index]);
         }
@@ -343,7 +342,10 @@ export class Locator {
         result.exceptionDetails.exception?.description ?? result.exceptionDetails.text,
       );
 
-    return result.result.value as T;
+    // returnByValue: the in-page function's JSON result, typed by its caller.
+    const value: T = result.result.value;
+
+    return value;
   }
 
   /** Wait until the element is visible, stable, enabled and (optionally) the hit target, then return its centre. */

@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { STATUS_CODES } from "node:http";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { CdpConnection } from "./cdp";
+import type { CdpConnection, Json } from "./cdp";
 import { CdpSession } from "./cdp";
 import { Locator, type RoleOptions, type TextMatch } from "./locator";
 
@@ -174,13 +174,19 @@ export class Route {
 
   async fulfill(options: Fulfillment = {}) {
     this.handled = true;
-    const headers: Record<string, string> = { ...options.headers };
+
+    const headers = new Map(
+      Object.entries(options.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value]),
+    );
+
     let body = options.body;
 
     if (options.json !== undefined) {
       body = JSON.stringify(options.json);
-      headers["content-type"] ??= options.contentType ?? "application/json";
-    } else if (options.contentType) headers["content-type"] = options.contentType;
+
+      if (!headers.has("content-type"))
+        headers.set("content-type", options.contentType ?? "application/json");
+    } else if (options.contentType) headers.set("content-type", options.contentType);
 
     await this.page.fulfill(this.paused.requestId, options.status ?? 200, headers, body);
   }
@@ -246,25 +252,35 @@ export class WebSocketRoute {
   }
 }
 
-const KEYS: Record<string, { code: string; keyCode: number; text?: string }> = {
-  Enter: { code: "Enter", keyCode: 13, text: "\r" },
-  Tab: { code: "Tab", keyCode: 9 },
-  Escape: { code: "Escape", keyCode: 27 },
-  Backspace: { code: "Backspace", keyCode: 8 },
-  Delete: { code: "Delete", keyCode: 46 },
-  ArrowUp: { code: "ArrowUp", keyCode: 38 },
-  ArrowDown: { code: "ArrowDown", keyCode: 40 },
-  ArrowLeft: { code: "ArrowLeft", keyCode: 37 },
-  ArrowRight: { code: "ArrowRight", keyCode: 39 },
-  Space: { code: "Space", keyCode: 32, text: " " },
-};
+type KeyDefinition = { code: string; keyCode: number; text?: string };
 
-const MODIFIERS: Record<string, number> = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
+const KEYS = new Map<string, KeyDefinition>([
+  ["Enter", { code: "Enter", keyCode: 13, text: "\r" }],
+  ["Tab", { code: "Tab", keyCode: 9 }],
+  ["Escape", { code: "Escape", keyCode: 27 }],
+  ["Backspace", { code: "Backspace", keyCode: 8 }],
+  ["Delete", { code: "Delete", keyCode: 46 }],
+  ["ArrowUp", { code: "ArrowUp", keyCode: 38 }],
+  ["ArrowDown", { code: "ArrowDown", keyCode: 40 }],
+  ["ArrowLeft", { code: "ArrowLeft", keyCode: 37 }],
+  ["ArrowRight", { code: "ArrowRight", keyCode: 39 }],
+  ["Space", { code: "Space", keyCode: 32, text: " " }],
+]);
 
-type PageEvents = {
-  requestfinished: (request: Request) => void;
-  pageerror: (error: Error) => void;
-};
+const MODIFIERS = new Map([
+  ["Alt", 1],
+  ["Control", 2],
+  ["Meta", 4],
+  ["Shift", 8],
+]);
+
+type PageListener =
+  | [event: "requestfinished", listener: (request: Request) => void]
+  | [event: "pageerror", listener: (error: Error) => void];
+
+type RouteHandler = (route: Route) => void | Promise<void>;
+
+type SocketHandler = (socket: WebSocketRoute) => void | Promise<void>;
 
 type WaitUntil = { waitUntil?: "load" | "networkidle" };
 
@@ -272,20 +288,18 @@ export class Page {
   readonly session: CdpSession;
   private readonly routes: {
     match: (url: string) => boolean;
-    handler: (route: Route) => unknown;
+    handler: RouteHandler;
   }[] = [];
   private readonly socketRoutes: {
     match: (url: string) => boolean;
-    handler: (socket: WebSocketRoute) => unknown;
+    handler: SocketHandler;
   }[] = [];
   private readonly sockets = new Map<number, WebSocketRoute>();
   private readonly inflight = new Map<string, { method: string; url: string }>();
   private lastNetworkActivity = Date.now();
   private address = "about:blank";
-  private readonly listeners: { [K in keyof PageEvents]: PageEvents[K][] } = {
-    requestfinished: [],
-    pageerror: [],
-  };
+  private readonly finishedListeners: ((request: Request) => void)[] = [];
+  private readonly errorListeners: ((error: Error) => void)[] = [];
   /** Errors thrown by route handlers; they fail the test, as in Playwright. */
   readonly handlerErrors: unknown[] = [];
   readonly keyboard = {
@@ -351,9 +365,10 @@ export class Page {
       const request = this.inflight.get(params.requestId);
       this.inflight.delete(params.requestId);
 
-      if (request)
-        for (const listener of this.listeners.requestfinished)
-          listener(new Request({ ...request, headers: {} }));
+      if (!request) return;
+
+      for (const listener of this.finishedListeners)
+        listener(new Request({ ...request, headers: {} }));
     });
     session.on("Network.loadingFailed", (params) => {
       this.lastNetworkActivity = Date.now();
@@ -365,7 +380,7 @@ export class Page {
 
       const error = new Error(description.split("\n")[0].replace(/^[A-Za-z]*Error: /, ""));
 
-      for (const listener of this.listeners.pageerror) listener(error);
+      for (const listener of this.errorListeners) listener(error);
     });
     session.on("Runtime.bindingCalled", (params) => {
       if (params.name === "__dollyWebSocket")
@@ -392,24 +407,26 @@ export class Page {
       .catch(() => {});
   }
 
-  on<K extends keyof PageEvents>(event: K, listener: PageEvents[K]) {
-    this.listeners[event].push(listener);
+  on(event: "requestfinished", listener: (request: Request) => void): void;
+  on(event: "pageerror", listener: (error: Error) => void): void;
+  on(...[event, listener]: PageListener) {
+    if (event === "requestfinished") this.finishedListeners.push(listener);
+    else this.errorListeners.push(listener);
   }
 
   /** Later routes take precedence, as in Playwright. */
-  async route(pattern: Glob, handler: (route: Route) => unknown) {
+  async route(pattern: Glob, handler: RouteHandler) {
     this.routes.push({ match: globMatcher(pattern), handler });
   }
 
-  async routeWebSocket(pattern: Glob, handler: (socket: WebSocketRoute) => unknown) {
+  async routeWebSocket(pattern: Glob, handler: SocketHandler) {
     this.socketRoutes.push({ match: globMatcher(pattern), handler });
   }
 
-  async addInitScript<A>(script: ((arg: A) => unknown) | string, arg?: A) {
-    const source =
-      typeof script === "string" ? script : `(${script.toString()})(${JSON.stringify(arg)})`;
-
-    await this.session.send("Page.addScriptToEvaluateOnNewDocument", { source });
+  async addInitScript<A extends Json = null>(script: (arg: A) => void, arg?: A) {
+    await this.session.send("Page.addScriptToEvaluateOnNewDocument", {
+      source: `(${script.toString()})(${JSON.stringify(arg ?? null)})`,
+    });
   }
 
   async setViewportSize({ width, height }: { width: number; height: number }) {
@@ -471,11 +488,8 @@ export class Page {
     return this.address;
   }
 
-  async evaluate<R, A>(fn: ((arg: A) => R) | string, arg?: A): Promise<Awaited<R>> {
-    const expression =
-      typeof fn === "string"
-        ? fn
-        : `(${fn.toString()})(${arg === undefined ? "" : JSON.stringify(arg)})`;
+  async evaluate<R, A extends Json = null>(fn: (arg: A) => R, arg?: A): Promise<Awaited<R>> {
+    const expression = `(${fn.toString()})(${JSON.stringify(arg ?? null)})`;
 
     const result = await this.session.send("Runtime.evaluate", {
       expression,
@@ -489,7 +503,10 @@ export class Page {
         result.exceptionDetails.exception?.description ?? result.exceptionDetails.text,
       );
 
-    return result.result.value;
+    // returnByValue: the page function's JSON result, typed by its caller.
+    const value: Awaited<R> = result.result.value;
+
+    return value;
   }
 
   async screenshot({ path }: { path: string }) {
@@ -506,10 +523,10 @@ export class Page {
   async press(key: string) {
     const parts = key.split("+");
     const name = parts.pop()!;
-    const modifiers = parts.reduce((mask, part) => mask | (MODIFIERS[part] ?? 0), 0);
+    const modifiers = parts.reduce((mask, part) => mask | (MODIFIERS.get(part) ?? 0), 0);
     const single = name.length === 1;
 
-    const definition = KEYS[name] ?? {
+    const definition = KEYS.get(name) ?? {
       code: single ? `Key${name.toUpperCase()}` : name,
       keyCode: single ? name.toUpperCase().charCodeAt(0) : 0,
       text: single ? name : undefined,
@@ -527,7 +544,7 @@ export class Page {
     await this.session.send("Input.dispatchKeyEvent", {
       type: typed ? "keyDown" : "rawKeyDown",
       ...base,
-      ...(typed ? { text: definition.text } : {}),
+      text: typed ? definition.text : undefined,
     });
     await this.session.send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
   }
@@ -562,7 +579,7 @@ export class Page {
   async fulfill(
     requestId: string,
     status: number,
-    headers: Record<string, string>,
+    headers: Map<string, string>,
     body?: string | Buffer,
   ) {
     await this.session
@@ -570,7 +587,7 @@ export class Page {
         requestId,
         responseCode: status,
         responsePhrase: STATUS_CODES[status] ?? "Unknown",
-        responseHeaders: Object.entries(headers).map(([name, value]) => ({ name, value })),
+        responseHeaders: [...headers].map(([name, value]) => ({ name, value })),
         body: Buffer.from(body ?? "").toString("base64"),
       })
       .catch(() => {});

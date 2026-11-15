@@ -61,6 +61,17 @@ const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
 const RefResponse = Schema.Struct({ object: Schema.Struct({ sha: Sha }) });
 const RepoResponse = Schema.Struct({ default_branch: Schema.String });
 
+/** A read_file result; lines, nextOffset and note describe a window of a longer file. */
+type FileRead = {
+  kind: "file";
+  path: string;
+  sha: string;
+  content: string;
+  lines?: string;
+  nextOffset?: number;
+  note?: string;
+};
+
 const FileResponse = Schema.Struct({
   type: Schema.Literal("file"),
   path: Schema.String,
@@ -962,15 +973,13 @@ function makeGitHub(
 
       const window = windowText(text, { offset: op.offset, limit: op.limit });
       const note = describeWindow(window, window.totalLines).slice(window.text.length).trim();
-      const result: {
-        kind: "file";
-        path: string;
-        sha: string;
-        content: string;
-        lines?: string;
-        nextOffset?: number;
-        note?: string;
-      } = { kind: "file", path: file.path, sha: file.sha, content: window.text };
+
+      const result: FileRead = {
+        kind: "file",
+        path: file.path,
+        sha: file.sha,
+        content: window.text,
+      };
 
       if (window.startLine > 1 || window.nextOffset !== undefined || window.lineCut)
         result.lines = `${window.startLine}-${window.endLine}`;

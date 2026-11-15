@@ -149,9 +149,11 @@ export async function browserWebSocket(endpoint: string) {
   const response = await fetch(new URL("/json/version", endpoint));
 
   if (!response.ok) throw new Error(`${endpoint}/json/version returned HTTP ${response.status}`);
+
   const { webSocketDebuggerUrl } = Schema.decodeUnknownSync(
     Schema.Struct({ webSocketDebuggerUrl: Schema.String }),
   )(await response.json());
+
   // Containers report their internal address; keep the host the caller reached.
   const reported = new URL(webSocketDebuggerUrl);
   reported.host = new URL(endpoint).host;
