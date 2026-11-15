@@ -363,6 +363,11 @@ export type ApiBody = {
   accounts?: readonly string[];
   senders?: readonly string[];
   token?: string;
+  enabled?: boolean;
+  botToken?: string;
+  signingSecret?: string;
+  allowedUserId?: string;
+  defaultRepository?: string;
 };
 
 export async function anthropicStatus() {

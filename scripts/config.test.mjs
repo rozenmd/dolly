@@ -72,16 +72,22 @@ test("the sandbox test adapter retains the typed config's container link and ima
   );
 });
 
-test("public ingress binds only the private webhook entrypoint and has no credentials or Durable Object binding", async () => {
+test("public ingress binds only the private GitHub and Slack entrypoints and has no credentials or Durable Object binding", async () => {
   const { default: ingress } = await import("../ingress/cloudflare.config.ts");
   assert.equal(ingress.worker.name, "dolly-ingress");
   assert.equal(ingress.worker.entrypoint, "../src/ingress.ts");
   assert.equal(ingress.worker.previewUrls, false);
-  assert.deepEqual(Object.keys(ingress.worker.env), ["INGRESS"]);
+  assert.deepEqual(Object.keys(ingress.worker.env), ["INGRESS", "SLACK"]);
   assert.deepEqual(ingress.worker.env.INGRESS, {
     type: "worker",
     worker: config.worker.name,
     exportName: "GitHubIngress",
   });
   assert.equal(config.worker.exports.GitHubIngress.type, "worker");
+  assert.deepEqual(ingress.worker.env.SLACK, {
+    type: "worker",
+    worker: config.worker.name,
+    exportName: "SlackIngress",
+  });
+  assert.equal(config.worker.exports.SlackIngress.type, "worker");
 });

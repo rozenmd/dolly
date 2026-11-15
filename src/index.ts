@@ -8,6 +8,7 @@ import * as Schema from "effect/Schema";
 import { WorkspaceRequest } from "./workspace";
 import { rpc } from "./operations";
 import { githubRoutes, githubSetupRoutes } from "./github-routes";
+import { slackRoutes } from "./slack-routes";
 import { authorizeAccess } from "./access";
 import { AgentApi } from "./api";
 import { ChildRequest, NewSession, SessionSettings } from "./models";
@@ -608,8 +609,12 @@ app.onError((error, c) => {
 
 app.route("/", githubRoutes);
 
+app.route("/", slackRoutes);
+
 export default app;
 
 export { GitHubIngress } from "./github-ingress";
+
+export { SlackIngress } from "./slack-ingress";
 
 export { WorkspaceOutbound } from "./git-transport";
