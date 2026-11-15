@@ -7,7 +7,10 @@ export default defineConfig({
     previewUrls: false,
     compatibilityDate: "2026-11-10",
     compatibilityFlags: ["nodejs_compat"],
-    env: { INGRESS: bindings.worker({ worker: "dolly", exportName: "GitHubIngress" }) },
+    env: {
+      INGRESS: bindings.worker({ worker: "dolly", exportName: "GitHubIngress" }),
+      SLACK: bindings.worker({ worker: "dolly", exportName: "SlackIngress" }),
+    },
     observability: { enabled: true },
   },
 });

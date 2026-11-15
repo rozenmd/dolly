@@ -3,12 +3,13 @@ import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import {
   ArrowLeftIcon,
+  ChatBubbleLeftRightIcon,
   CpuChipIcon,
   FolderIcon,
   LinkIcon,
   UserIcon,
 } from "@heroicons/react/24/outline";
-import { authState, codexLogin, request, type AuthState } from "../lib/api";
+import { authState, codexLogin, request, type ApiBody, type AuthState } from "../lib/api";
 import { AnthropicConnection } from "./anthropic";
 import { CodexLogin } from "./codex-login";
 import { ingressHook } from "./github";
@@ -40,6 +41,7 @@ const sections = [
   { to: "/settings/models", label: "Models", Icon: CpuChipIcon },
   { to: "/settings/repositories", label: "Repositories", Icon: FolderIcon },
   { to: "/settings/github", label: "GitHub", Icon: LinkIcon },
+  { to: "/settings/slack", label: "Slack", Icon: ChatBubbleLeftRightIcon },
 ] as const;
 
 /** Full-page settings with its own navigation; each section has its own URL. */
@@ -400,6 +402,224 @@ export function GitHubSettings() {
           </button>
         </div>
       </form>
+      {alert}
+    </Section>
+  );
+}
+
+const SlackStatus = Schema.Struct({
+  configured: Schema.Boolean,
+  enabled: Schema.Boolean,
+  allowedUserId: Schema.NullOr(Schema.String),
+  defaultRepository: Schema.NullOr(Schema.String),
+  teamName: Schema.NullOr(Schema.String),
+  eventsUrl: Schema.NullOr(Schema.String),
+  actionsUrl: Schema.NullOr(Schema.String),
+  createAppUrl: Schema.NullOr(Schema.String),
+  scopes: Schema.Array(Schema.Struct({ label: Schema.String, items: Schema.Array(Schema.String) })),
+  events: Schema.Array(Schema.String),
+});
+
+type SlackStatus = typeof SlackStatus.Type;
+
+/** Open Session's Slack setup: create the app from a manifest, then paste the two credentials. */
+export function SlackSettings() {
+  const [status, setStatus] = useState<SlackStatus | null>(null);
+  const [enabled, setEnabled] = useState(true);
+  const [botToken, setBotToken] = useState("");
+  const [signingSecret, setSigningSecret] = useState("");
+  const [allowedUserId, setAllowedUserId] = useState("");
+  const [defaultRepository, setDefaultRepository] = useState("");
+  const [saved, setSaved] = useState(false);
+  const { pending, run, alert } = useAction();
+
+  function load(next: SlackStatus) {
+    setStatus(next);
+    setEnabled(next.configured ? next.enabled : true);
+    setAllowedUserId(next.allowedUserId ?? "");
+    setDefaultRepository(next.defaultRepository ?? "");
+  }
+
+  useEffect(() => {
+    void run(async () => {
+      load(
+        Schema.decodeUnknownSync(Schema.fromJsonString(SlackStatus))(
+          await request("/integrations/slack"),
+        ),
+      );
+    }, "Could not load Slack settings.");
+  }, []);
+
+  function save(event: FormEvent) {
+    event.preventDefault();
+    setSaved(false);
+    void run(async () => {
+      const body: ApiBody = {
+        enabled,
+        allowedUserId: allowedUserId.trim(),
+        defaultRepository: defaultRepository.trim(),
+      };
+
+      // Empty secret fields keep the saved values.
+      if (botToken.trim()) body.botToken = botToken.trim();
+
+      if (signingSecret.trim()) body.signingSecret = signingSecret.trim();
+
+      await request("/integrations/slack", body, undefined, "PUT");
+      setBotToken("");
+      setSigningSecret("");
+      load(
+        Schema.decodeUnknownSync(Schema.fromJsonString(SlackStatus))(
+          await request("/integrations/slack"),
+        ),
+      );
+      setSaved(true);
+    }, "Could not save Slack settings.");
+  }
+
+  return (
+    <Section
+      title="Slack"
+      description="DMs and @-mentions start or continue dolly sessions in a Slack thread."
+    >
+      <div className="connection-row">
+        <span className={`status-dot ${status?.configured && status.enabled ? "idle" : ""}`} />
+        <span className="connection-label">
+          Slack app
+          <span className="muted">
+            {status?.configured
+              ? `${status.enabled ? "Enabled" : "Disabled"} in ${status.teamName ?? "your workspace"}`
+              : "Not connected"}
+          </span>
+        </span>
+        {status?.createAppUrl ? (
+          <a
+            className="secondary-button"
+            href={status.createAppUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Create Slack app
+          </a>
+        ) : null}
+      </div>
+      {status && !status.createAppUrl && (
+        <p className="field-help settings-note">
+          Save the ingress URL under GitHub first; Slack sends events to the same ingress Worker.
+        </p>
+      )}
+      {status?.eventsUrl && (
+        <p className="field-help settings-note">
+          Slack sends events to {status.eventsUrl} and actions to {status.actionsUrl}. Create the
+          app from the manifest, install it to your workspace, then paste its credentials below.
+          Invite the bot to channels whose history it should read.
+        </p>
+      )}
+      <form className="settings-card" onSubmit={save}>
+        <label htmlFor="slack-bot-token">Bot token</label>
+        <Input
+          id="slack-bot-token"
+          name="botToken"
+          type="password"
+          autoComplete="off"
+          placeholder={status?.configured ? "Saved — paste to replace" : "xoxb-…"}
+          value={botToken}
+          onChange={(event) => setBotToken(event.target.value)}
+          required={!status?.configured}
+        />
+        <p className="field-help">From OAuth &amp; Permissions after installing the app.</p>
+        <label htmlFor="slack-signing-secret">Signing secret</label>
+        <Input
+          id="slack-signing-secret"
+          name="signingSecret"
+          type="password"
+          autoComplete="off"
+          placeholder={status?.configured ? "Saved — paste to replace" : ""}
+          value={signingSecret}
+          onChange={(event) => setSigningSecret(event.target.value)}
+          required={!status?.configured}
+        />
+        <p className="field-help">
+          From Basic Information. Every Slack request must be signed with it.
+        </p>
+        <label htmlFor="slack-allowed-user">Allowed Slack member ID</label>
+        <Input
+          id="slack-allowed-user"
+          name="allowedUserId"
+          placeholder="U012ABCDEF"
+          value={allowedUserId}
+          onChange={(event) => setAllowedUserId(event.target.value)}
+        />
+        <p className="field-help">
+          Only this member's DMs and mentions start sessions. Anyone in your workspace can reply in
+          a thread already linked to a session. Leave empty to admit every member of your workspace.
+        </p>
+        <label htmlFor="slack-default-repository">Default repository</label>
+        <Input
+          id="slack-default-repository"
+          name="defaultRepository"
+          placeholder="owner/repo"
+          value={defaultRepository}
+          onChange={(event) => setDefaultRepository(event.target.value)}
+        />
+        <p className="field-help">
+          Enrolled repository for DMs and for mentions the router cannot place. Empty starts
+          sessions with no repository.
+        </p>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) => setEnabled(event.target.checked)}
+          />
+          Enable Slack
+        </label>
+        {saved && <p className="field-help">Saved.</p>}
+        <div className="modal-actions">
+          {status?.configured && (
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={pending}
+              onClick={() => {
+                if (
+                  !confirm(
+                    "Disconnect Slack? Slack requests will be rejected until you set it up again.",
+                  )
+                )
+                  return;
+
+                void run(async () => {
+                  await request("/integrations/slack", undefined, undefined, "DELETE");
+                  load(
+                    Schema.decodeUnknownSync(Schema.fromJsonString(SlackStatus))(
+                      await request("/integrations/slack"),
+                    ),
+                  );
+                }, "Could not disconnect Slack.");
+              }}
+            >
+              Disconnect
+            </button>
+          )}
+          <button type="submit" className="primary-button" disabled={pending}>
+            Save
+          </button>
+        </div>
+      </form>
+      {status && (
+        <details className="settings-card">
+          <summary>Bot scopes and events</summary>
+          {status.scopes.map((group) => (
+            <p key={group.label} className="field-help">
+              <strong>{group.label}:</strong> {group.items.join(", ")}
+            </p>
+          ))}
+          <p className="field-help">
+            <strong>Events:</strong> {status.events.join(", ")}
+          </p>
+        </details>
+      )}
       {alert}
     </Section>
   );

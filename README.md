@@ -1,6 +1,6 @@
 # dolly
 
-A coding agent in development on Cloudflare Workers, using Hono, Effect 4.0.0-rc.112, Pi Durable 1.5.2, Cloudflare Sandbox 1.0.3, and ChatGPT/Codex or experimental Claude subscription credentials. No billed model API key is required. Subscription inference from Workers is not proven reliable: OpenAI can reject Worker-originated Codex requests with HTML edge-block responses, and Claude must be tested from the deployed Worker before relying on it. The implementation and authorization model are unfinished; the behavior documented below describes the current code, not a finished product contract.
+A coding agent in development on Cloudflare Workers, using Hono, Effect 4.0.0-rc.112, Pi Durable 1.5.2, Cloudflare Sandbox 1.0.3, and ChatGPT/Codex or Claude subscription credentials. No billed model API key is required. Claude subscription inference runs from the deployed Worker; Dolly itself is used through it. OpenAI can reject Worker-originated Codex requests with HTML edge-block responses. The implementation and authorization model are unfinished; the behavior documented below describes the current code, not a finished product contract.
 
 ## Web frontend
 
@@ -28,7 +28,7 @@ The first visit walks through setup:
 1. **Create the GitHub App.** Enter your GitHub username (or organization) and the URL of your deployed `dolly-ingress` Worker, then choose **Create GitHub App**. GitHub opens with every setting filled in from a manifest, including the webhook URL, and returns to dolly.
 2. **Enable device flow.** In the new App's settings on GitHub, tick **Enable Device Flow**. GitHub has no manifest setting for it. If you skip this, sign-in says so and links to the settings page.
 3. **Sign in with GitHub.** dolly shows a one-time code and a link to `github.com/login/device`. The first account to authorize becomes the owner.
-4. **Connect a model.** Sign in to ChatGPT with the code for `auth.openai.com/codex/device`, or choose **Use Claude instead** and paste a fresh token from `claude setup-token`. Enable device-code authentication in your ChatGPT security settings if OpenAI requires it. For Claude, use **Test connection** before creating a session; saving a token does not prove inference works.
+4. **Connect a model.** Sign in to ChatGPT with the code for `auth.openai.com/codex/device`, or choose **Use Claude instead** and paste a fresh token from `claude setup-token`. Enable device-code authentication in your ChatGPT security settings if OpenAI requires it. For Claude, **Test connection** optionally sends one small request to confirm the token; saving it makes no model request.
 5. **Enroll repositories.** In **Settings** (the D menu), use **Add repositories** to install the App, and list the GitHub accounts dolly can work in. Then refresh the repository picker and **Enroll** the repositories you want to use. The picker also appears when creating a workspace. No repositories are available until the account list is set.
 
 The **+** buttons open a task-first **New session** composer: choose an enrolled repository (or **No repo**), write the task, pick a model and choose **Create**. No workspace-name form is required; the first line of the task becomes the session title. From an existing workspace, the composer defaults to its primary repository, ref, dependency-host policy and model, not the agent's currently active attachment. You can change the repository before creating. New repository selections use their default branch. Nothing is created until you submit. If submitting the first task fails after session creation, the session stays in the browser list and **Retry** reuses its ID and task request ID. **Open existing** still accepts a known session ID.
@@ -354,7 +354,7 @@ The container integration tests cover shallow checkout, edit/test/commit/push, o
 
 ### Receive GitHub PR commands
 
-The public webhook Worker is separate from the Access-protected API. Its only route is `POST /hooks/github`. It holds no credentials and calls the main Worker's named `GitHubIngress` entrypoint through a private service binding. The main hostname has no public webhook route.
+The public webhook Worker is separate from the Access-protected API. Its only routes are `POST /hooks/github`, and `POST /slack/events` and `POST /slack/actions` for [Slack](#connect-slack). It holds no credentials and calls the main Worker's named `GitHubIngress` and `SlackIngress` entrypoints through private service bindings. The main hostname has no public webhook route.
 
 1. Deploy the main Worker with `pnpm run deploy` and the public receiver with `pnpm --dir ingress run deploy`. Keep the main hostname protected by Access; the separate ingress hostname must accept GitHub requests without Access. Preview URLs remain disabled for both Workers.
 2. Enter the ingress Worker's URL when creating the GitHub App. The manifest subscribes to `issue_comment` and points the webhook at `<ingress>/hooks/github`. To change it later, edit **Ingress URL** in **Settings**; dolly updates the App's webhook through GitHub's API (`PATCH /app/hook/config`), so you don't edit it on GitHub. For an App created before this, enable its webhook in GitHub App settings, grant **Issues: Read-only**, subscribe to **Issue comments**, and approve the updated permissions for the existing installation.
@@ -369,6 +369,53 @@ Intake stores the conversation mapping, comment-ID receipt, and Pi delivery task
 `GET /api/integrations/github/threads` lists conversation IDs and delivery status/outcomes. Open a conversation through the existing session API or abort it with the existing session abort route. Reply failures retain a failed task outcome after five attempts and diagnostic details in Worker logs.
 
 Payloads are capped at 256 KiB and command text at 16,384 characters. There are no application-imposed counts for repositories, allowed senders, PR threads, or commands per thread. Deduplication receipts are retained; storage grows with usage. Unconfigured intake or a missing Codex connection returns `503`; invalid signatures return `401` and disallowed identities/repositories/installations return `403`. GitHub does not automatically retry failed deliveries: use **Redeliver** in the App's recent deliveries after fixing configuration or availability. An accepted task remains durable even if GitHub misses the acknowledgement.
+
+## Connect Slack
+
+Dolly's Slack bot is a port of [Open Session's Slack agent](https://github.com/tellahq/opensession/blob/main/docs/setup/slack.md): the same app manifest, bot scopes, event subscriptions, signature checks, sender rules and mention routing.
+
+**Set it up.** Save the `dolly-ingress` URL under **Settings → GitHub** first, then open **Settings → Slack**:
+
+1. Choose **Create Slack app**. Slack opens its create-app form pre-filled from Dolly's manifest (`src/slack-manifest.ts`, copied from Open Session): bot scopes, the bot events below, interactivity, the assistant surface, the Dolly hostname for link unfurls, and the two request URLs on the ingress Worker, `/slack/events` and `/slack/actions`.
+2. Create the app and install it to your workspace.
+3. Paste the `xoxb-…` bot token (**OAuth & Permissions**) and the signing secret (**Basic Information**). Set **Allowed Slack member ID** to your own member ID, choose a **Default repository**, enable Slack and **Save**. Saving calls `auth.test` to check the token and record your workspace; the token and secret are stored in the account Durable Object and never returned by the API.
+4. Slack verifies the events URL when the app is created, before Dolly has the signing secret, so that first check fails. After saving, open **Event Subscriptions** in Slack and choose **Retry**.
+5. Invite the bot to channels whose history it should read, then test a DM and an @-mention.
+
+**Transport.** HTTP Events API only, through the public ingress Worker, which forwards just these two routes to the private `SlackIngress` entrypoint. Every request needs a valid Slack v0 signature over the exact body with a timestamp within five minutes; without saved credentials every request is rejected with 401. Bodies are capped at 1 MiB. Each DM or mention is durably admitted before Slack is acknowledged, and Slack's retries are deduplicated by message timestamp. Socket Mode is not implemented (Open Session keeps it opt-in and manual too).
+
+**Who can drive it**, as in Open Session:
+
+- An ordinary DM or mention is accepted only from the allowed member. With no allowed member set, every member of your workspace is admitted.
+- A DM reply, or a mention in a channel thread, that belongs to a thread already linked to a session steers that session, whoever sends it.
+- Senders from another workspace (Slack Connect partners in shared channels) are ignored, as are bot messages, edits and deletions.
+
+**What triggers what.**
+
+- A new top-level **DM** starts a code session in the default repository; replies in that thread continue it.
+- An **@-mention** in a channel is classified by one no-tools Claude Haiku call, using Open Session's prompt: an explicit PR pass (**review**, **auto-fix**, **simplify** or **adversarial** review) on a numbered PR; otherwise an **ask** (read-only question) or a **code** task. A second Haiku call picks the enrolled repository from the channel, message and thread context. PR passes start on `refs/pull/<number>/head` of the default repository. If Claude is not connected or the classifier fails, the mention falls back to a code task in the default repository, as Open Session fails open.
+- A mention in a thread already linked to a session continues it.
+- The agent's final text (after its last tool call) is posted back into the thread as Slack mrkdwn. Failures are posted as `Run failed: …`. Posting retries with backoff.
+- Up to six image attachments per message (4 MiB each) are passed to the model.
+
+Sessions use Codex when connected, otherwise Claude Sonnet.
+
+**Not ported yet.** Some of Open Session's Slack behaviour depends on subsystems Dolly does not have yet, and does not work:
+
+- Worktree channels and their hooks.
+- Watched-channel automations, `retrigger` and scheduling.
+- Channel memory (`remember`, `list_memory`, `forget`).
+- Teammate asks and the admin and session-control tools.
+- Live progress cards and assistant-thread status.
+- Session-link unfurls and suggested prompts. The manifest still subscribes to `link_shared` and `assistant_thread_started`, but Dolly ignores those events.
+- Block Kit actions. `/slack/actions` verifies signatures and acknowledges, but runs nothing.
+- Non-image attachments and response-media uploads.
+- The extra Slack-loop tools.
+
+Two more differences:
+
+- Open Session's ask mode is enforced by its session policy. Dolly's is an instruction to the agent, not a tool restriction.
+- Dolly's auto-fix and simplify passes push a new branch and open a pull request against the PR's branch, rather than pushing to the PR branch.
 
 ## API
 
@@ -396,13 +443,13 @@ A prompt returns `202` after durable admission, not after generation. Poll the s
 
 Logout does not revoke the grant at OpenAI or cancel an already-authorized model request. Abort active sessions before disconnecting if you need work to stop.
 
-## Experimental Claude subscription support
+## Claude subscription support
 
 In **Settings → Claude subscription**, paste a token generated by running `claude setup-token` on your computer. Never paste it into chat, commit it or copy a rotating refresh credential from another process. Tokens must start with `sk-ant-oat01-`; billed Anthropic API keys are rejected. Wrapped whitespace is removed, as in [Open Session's account onboarding](https://github.com/tellahq/opensession/blob/main/packages/core/opensession-server/src/server/claude-accounts.ts). The token is stored in the account Durable Object only, never in local storage or a sandbox, and is redacted from diagnostics, HTTP/WebSocket transcripts and child answers. Tokens are not refreshed by Dolly: replace them manually when expired or revoked. Disconnect removes the local token, not the provider grant or any already-authorized request.
 
-**This is not Open Session's exact transport.** [Open Session's Anthropic runtime](https://github.com/tellahq/opensession/blob/main/packages/core/opensession-server/src/server/pi-model-runtime.ts) uses the first-party Claude Agent SDK and CLI. Those subprocesses cannot run in a Worker. Dolly uses Pi's pinned native Anthropic HTTP/SSE adapter against `https://api.anthropic.com`, with subscription-token handling supplied by Pi. This is experimental: Anthropic may reject the token, client or Worker-originated traffic. No live success is implied by unit tests or a saved token.
+**This is not Open Session's exact transport.** [Open Session's Anthropic runtime](https://github.com/tellahq/opensession/blob/main/packages/core/opensession-server/src/server/pi-model-runtime.ts) uses the first-party Claude Agent SDK and CLI. Those subprocesses cannot run in a Worker. Dolly uses Pi's pinned native Anthropic HTTP/SSE adapter against `https://api.anthropic.com`, with subscription-token handling supplied by Pi. Agent sessions, child agents and the Slack mention classifier (Claude Haiku, as in Open Session) all run through it from the deployed Worker. An expired or revoked token fails like any provider error; replace it.
 
-**Test connection** makes one real inference request from the deployed Worker through the same adapter as agent sessions: Haiku 4.5 by default, a 32-output-token cap, a 30-second deadline, no tool execution and no retries or credential refresh. It consumes subscription usage. The result reports success/failure, model, duration, HTTP status/content type, and available request/Ray IDs. HTML failures are summarized instead of printing raw markup; JSON provider errors are redacted and bounded. A 401/403 JSON error can indicate token/client policy rather than the HTML edge block seen with Codex. A successful text probe proves that small request only; it does not prove every model, long run or tool operation will work.
+**Test connection** makes one real inference request from the deployed Worker through the same adapter as agent sessions: Haiku 4.5 by default, a 32-output-token cap, a 30-second deadline, no tool execution and no retries or credential refresh. It consumes subscription usage. The result reports success/failure, model, duration, HTTP status/content type, and available request/Ray IDs. HTML failures are summarized instead of printing raw markup; JSON provider errors are redacted and bounded. A 401/403 JSON error can indicate token/client policy rather than the HTML edge block seen with Codex. It is a quick token check, not a prerequisite for creating sessions.
 
 The authenticated API is `GET /api/auth/anthropic` for configured status, `PUT` with `{"token":"..."}` to save/replace, `DELETE` to disconnect, and `POST /api/auth/anthropic/test` with `{}` or `{"model":"claude-sonnet-4-6"}` for an explicit probe. Saving does not contact Anthropic; only the test or an agent turn sends model traffic. The test never creates a conversation.
 

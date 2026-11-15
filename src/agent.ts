@@ -47,6 +47,16 @@ import {
 import { gitRoute, checkedPush } from "./git-transport";
 import { WebhookSetup } from "./github-webhook";
 import { admitGitHub, githubDelivery, GitHubThreads } from "./github-inbox";
+import { admitSlack, slackDelivery } from "./slack-inbox";
+import { SlackHostService } from "./slack-host";
+import { configureSlack, readSlackProfile, removeSlack, SlackSetup, slackStatus } from "./slack";
+import {
+  isExternalSlackSender,
+  parseSlackEvent,
+  slackEventSenderTeam,
+  slackPromptText,
+  verifySlackSignature,
+} from "./slack-events";
 import { GitHub } from "./github";
 import { GitHubRequest, GitHubAccounts, GitHubSetup, GitHubReply } from "./github-contracts";
 import {
@@ -94,11 +104,22 @@ export class Agent extends DurableObject<Env> {
   private readonly credentials: Credentials;
   private readonly papercuts: Papercuts;
   private readonly services: Layer.Layer<Account | CodexProtocol | GitHub | GitHubAuth>;
+  private readonly slackServices: Layer.Layer<SlackHostService>;
   private readonly githubTask = githubDelivery((event, text) =>
     Effect.flatMap(GitHub, (github) => github.reply(event, text)).pipe(
       Effect.provide(this.services),
     ),
   );
+  private readonly slackTask = slackDelivery({
+    prepare: (input, isNew) =>
+      Effect.flatMap(SlackHostService, (host) => host.prepare(input, isNew)).pipe(
+        Effect.provide(this.slackServices),
+      ),
+    reply: (input, text) =>
+      Effect.flatMap(SlackHostService, (host) => host.reply(input, text)).pipe(
+        Effect.provide(this.slackServices),
+      ),
+  });
   private readonly alarmPermit = Semaphore.makeUnsafe(1);
   private readonly checkpointTask = workspaceCheckpoint(
     (sandboxId, turnId) => this.env.SANDBOX.getByName(sandboxId).checkpoint(turnId),
@@ -116,6 +137,11 @@ export class Agent extends DurableObject<Env> {
       GitHub.layer(ctx.storage, env),
       GitHubAuth.layer(ctx.storage),
     );
+    this.slackServices = SlackHostService.layer({
+      storage: ctx.storage,
+      credentials: this.credentials,
+      screenshots: env.SCREENSHOTS,
+    }).pipe(Layer.provide(this.services));
     void ctx.blockConcurrencyWhile(() => Effect.runPromise(this.initialize()));
   }
 
@@ -376,7 +402,7 @@ export class Agent extends DurableObject<Env> {
     const extension = defineExtension({
       name: "sandbox",
       tools,
-      tasks: [...coordinationTasks, this.githubTask, this.checkpointTask],
+      tasks: [...coordinationTasks, this.githubTask, this.slackTask, this.checkpointTask],
       hooks: [
         hook(GenerationTask, {
           afterRun: async (run, api, context) => {
@@ -875,6 +901,151 @@ export class Agent extends DurableObject<Env> {
           }).pipe(Effect.as({ status: 503 as const })),
         ),
       ),
+    );
+  }
+
+  slackStatus(publicBaseUrl: string) {
+    return this.githubRun(
+      Effect.gen({ self: this }, function* () {
+        const ingress = yield* attempt("github.ingress.read", () =>
+          this.ctx.storage.get<string>("github:ingress"),
+        );
+
+        return yield* slackStatus(this.ctx.storage, { ingress: ingress ?? "", publicBaseUrl });
+      }),
+    );
+  }
+
+  slackConfigure(input: typeof SlackSetup.Type) {
+    return this.githubRun(
+      Schema.decodeUnknownEffect(SlackSetup)(input).pipe(
+        Effect.mapError(
+          () =>
+            new OperationError({
+              operation: "slack.setup",
+              message: "Invalid Slack settings",
+              details: null,
+            }),
+        ),
+        Effect.flatMap((parsed) => configureSlack(this.ctx.storage, parsed)),
+      ),
+    );
+  }
+
+  slackRemove() {
+    return this.githubRun(removeSlack(this.ctx.storage));
+  }
+
+  /** Slack's Events API. Every request must carry a valid v0 signature; without a profile all fail closed. */
+  slackEvents(body: ArrayBuffer, timestamp: string, signature: string) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const profile = yield* readSlackProfile(this.ctx.storage);
+
+        if (!profile) return { status: 401 as const };
+
+        const valid = yield* verifySlackSignature(
+          profile.signingSecret,
+          body,
+          timestamp,
+          signature,
+          yield* Clock.currentTimeMillis,
+        );
+
+        if (!valid) return { status: 401 as const };
+        const parsed = parseSlackEvent(body);
+
+        if (parsed.type === "challenge")
+          return { status: 200 as const, challenge: parsed.challenge };
+
+        if (parsed.type === "ignored" || !profile.enabled) return { status: 200 as const };
+        const event = parsed.event;
+
+        // Slack Connect partners must not start, steer or answer sessions.
+        if (
+          isExternalSlackSender({
+            senderTeamId: slackEventSenderTeam(event),
+            homeTeamId: profile.teamId,
+            sharedChannel: parsed.sharedChannel,
+          })
+        )
+          return { status: 200 as const };
+
+        const codex = yield* this.credentials.get("openai-codex");
+        const claude = yield* this.credentials.get("anthropic");
+
+        if (Option.isNone(codex) && Option.isNone(claude)) return { status: 503 as const };
+
+        const model = Option.isSome(codex)
+          ? { provider: "openai-codex", modelId: this.env.CODEX_MODEL }
+          : { provider: "anthropic", modelId: DEFAULT_CLAUDE_MODEL };
+
+        const text = slackPromptText(event.text ?? "", profile.botUserId);
+
+        const files = (event.files ?? []).flatMap((file) =>
+          file.url_private && file.mimetype
+            ? [
+                {
+                  id: file.id,
+                  name: file.name ?? file.id,
+                  mimetype: file.mimetype,
+                  size: file.size ?? 0,
+                  url: file.url_private,
+                },
+              ]
+            : [],
+        );
+
+        if (!text && !files.length) return { status: 200 as const };
+        yield* this.arm({ active: true });
+
+        yield* admitSlack(
+          this.harness,
+          this.slackTask,
+          {
+            kind: parsed.kind,
+            channel: event.channel,
+            ts: event.ts,
+            threadTs: event.thread_ts ?? event.ts,
+            user: event.user,
+            text: text.slice(0, 16_384),
+            reply: event.thread_ts !== undefined,
+            files,
+          },
+          { allowedUserId: profile.allowedUserId, model },
+        );
+
+        return { status: 200 as const };
+      }).pipe(
+        Effect.catchTag("OperationError", (error) =>
+          Effect.logError({
+            event: "slack_ingress_failed",
+            error: exceptionDetails(error),
+            details: error.details,
+          }).pipe(Effect.as({ status: 503 as const })),
+        ),
+      ),
+    );
+  }
+
+  /** Block Kit actions and modal submissions: signed like events. */
+  slackActions(body: ArrayBuffer, timestamp: string, signature: string) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const profile = yield* readSlackProfile(this.ctx.storage);
+
+        if (!profile) return { status: 401 as const };
+
+        const valid = yield* verifySlackSignature(
+          profile.signingSecret,
+          body,
+          timestamp,
+          signature,
+          yield* Clock.currentTimeMillis,
+        );
+
+        return { status: valid ? (200 as const) : (401 as const) };
+      }).pipe(Effect.catchTag("OperationError", () => Effect.succeed({ status: 503 as const }))),
     );
   }
 

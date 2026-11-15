@@ -37,6 +37,7 @@ export default defineConfig({
     },
     exports: {
       GitHubIngress: exports.worker(),
+      SlackIngress: exports.worker(),
       WorkspaceOutbound: exports.worker(),
       PreviewOutbound: exports.worker(),
       Agent: exports.durableObject({ storage: "sqlite" }),

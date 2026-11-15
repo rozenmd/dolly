@@ -16,6 +16,7 @@ import { Route as SettingsAccountRouteImport } from './routes/settings/account'
 import { Route as SettingsGithubRouteImport } from './routes/settings/github'
 import { Route as SettingsModelsRouteImport } from './routes/settings/models'
 import { Route as SettingsRepositoriesRouteImport } from './routes/settings/repositories'
+import { Route as SettingsSlackRouteImport } from './routes/settings/slack'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -52,6 +53,11 @@ const SettingsRepositoriesRoute = SettingsRepositoriesRouteImport.update({
   path: '/repositories',
   getParentRoute: () => SettingsRoute,
 } as any)
+const SettingsSlackRoute = SettingsSlackRouteImport.update({
+  id: '/slack',
+  path: '/slack',
+  getParentRoute: () => SettingsRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -60,6 +66,7 @@ export interface FileRoutesByFullPath {
   '/settings/github': typeof SettingsGithubRoute
   '/settings/models': typeof SettingsModelsRoute
   '/settings/repositories': typeof SettingsRepositoriesRoute
+  '/settings/slack': typeof SettingsSlackRoute
   '/settings/': typeof SettingsIndexRoute
 }
 export interface FileRoutesByTo {
@@ -68,6 +75,7 @@ export interface FileRoutesByTo {
   '/settings/github': typeof SettingsGithubRoute
   '/settings/models': typeof SettingsModelsRoute
   '/settings/repositories': typeof SettingsRepositoriesRoute
+  '/settings/slack': typeof SettingsSlackRoute
   '/settings': typeof SettingsIndexRoute
 }
 export interface FileRoutesById {
@@ -78,6 +86,7 @@ export interface FileRoutesById {
   '/settings/github': typeof SettingsGithubRoute
   '/settings/models': typeof SettingsModelsRoute
   '/settings/repositories': typeof SettingsRepositoriesRoute
+  '/settings/slack': typeof SettingsSlackRoute
   '/settings/': typeof SettingsIndexRoute
 }
 export interface FileRouteTypes {
@@ -89,6 +98,7 @@ export interface FileRouteTypes {
     | '/settings/github'
     | '/settings/models'
     | '/settings/repositories'
+    | '/settings/slack'
     | '/settings/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -97,6 +107,7 @@ export interface FileRouteTypes {
     | '/settings/github'
     | '/settings/models'
     | '/settings/repositories'
+    | '/settings/slack'
     | '/settings'
   id:
     | '__root__'
@@ -106,6 +117,7 @@ export interface FileRouteTypes {
     | '/settings/github'
     | '/settings/models'
     | '/settings/repositories'
+    | '/settings/slack'
     | '/settings/'
   fileRoutesById: FileRoutesById
 }
@@ -165,6 +177,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsRepositoriesRouteImport
       parentRoute: typeof SettingsRoute
     }
+    '/settings/slack': {
+      id: '/settings/slack'
+      path: '/slack'
+      fullPath: '/settings/slack'
+      preLoaderRoute: typeof SettingsSlackRouteImport
+      parentRoute: typeof SettingsRoute
+    }
   }
 }
 
@@ -173,6 +192,7 @@ interface SettingsRouteChildren {
   SettingsGithubRoute: typeof SettingsGithubRoute
   SettingsModelsRoute: typeof SettingsModelsRoute
   SettingsRepositoriesRoute: typeof SettingsRepositoriesRoute
+  SettingsSlackRoute: typeof SettingsSlackRoute
   SettingsIndexRoute: typeof SettingsIndexRoute
 }
 
@@ -181,6 +201,7 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsGithubRoute: SettingsGithubRoute,
   SettingsModelsRoute: SettingsModelsRoute,
   SettingsRepositoriesRoute: SettingsRepositoriesRoute,
+  SettingsSlackRoute: SettingsSlackRoute,
   SettingsIndexRoute: SettingsIndexRoute,
 }
 
