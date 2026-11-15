@@ -11,6 +11,28 @@ LOCKFILES = {
     "bun": ("bun.lock", "bun.lockb"),
 }
 
+# Corepack is deliberately unused: its downloader is unreliable in the sandbox.
+# npx fetches the exact declared release from the npm registry instead.
+VERSION = re.compile(r"(\d+)\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
+
+
+def npx(package, binary):
+    return ["npx", "--yes", "--package=" + package, "--", binary]
+
+
+def declared_version(name, declared):
+    match = re.fullmatch(re.escape(name) + r"@([^+]+)(?:\+.*)?", declared)
+    if not match or not VERSION.fullmatch(match[1]):
+        raise RuntimeError(name + " packageManager must specify an exact version")
+    return match[1]
+
+
+def installed(binary):
+    try:
+        return subprocess.check_output([binary, "--version"], text=True, timeout=30).strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
 
 def selected_manager():
     package = json.loads(Path("package.json").read_text())
@@ -26,22 +48,19 @@ def selected_manager():
         name = matches[0] if matches else "npm"
     if name not in LOCKFILES:
         raise RuntimeError("Automatic dependency setup does not support " + name)
-    if name in {"pnpm", "yarn"} or (name == "npm" and declared):
-        command = ["corepack", name]
-    elif name == "bun":
-        command = ["bun"]
-        if declared:
-            match = re.fullmatch(r"bun@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)", declared)
-            if not match:
-                raise RuntimeError("Bun packageManager must specify an exact version")
-            try:
-                installed = subprocess.check_output(["bun", "--version"], text=True, timeout=30).strip()
-            except (OSError, subprocess.SubprocessError):
-                installed = ""
-            if installed != match[1]:
-                command = ["npx", "--yes", "--package=bun@" + match[1], "--", "bun"]
+    version = declared_version(name, declared) if declared else None
+    if name == "pnpm":
+        command = npx("pnpm@" + (version or "latest"), "pnpm")
+    elif name == "yarn":
+        # Yarn 2+ is published as @yarnpkg/cli-dist; the yarn package is Classic.
+        if version and int(VERSION.fullmatch(version)[1]) >= 2:
+            command = npx("@yarnpkg/cli-dist@" + version, "yarn")
+        else:
+            command = npx("yarn@" + (version or "1"), "yarn")
+    elif version and installed(name) != version:
+        command = npx(name + "@" + version, name)
     else:
-        command = ["npm"]
+        command = [name]
     return name, command
 
 

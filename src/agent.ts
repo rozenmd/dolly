@@ -23,7 +23,7 @@ import {
   type Wake,
 } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
-import { obj, str } from "@earendil-works/pi-schema";
+import { int, obj, opt, str } from "@earendil-works/pi-schema";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -218,10 +218,14 @@ export class Agent extends DurableObject<Env> {
     const readFile = {
       name: "read_file",
       description:
-        "Read a UTF-8 file in the active repository's sandbox, maximum 64 KiB. Relative paths use /workspace/repo, or /workspace when no repo is selected. Use workspace attach to work in another repo.",
-      parameters: obj({ path: str() }),
+        "Read a UTF-8 file in the active repository's sandbox. Returns up to 2000 lines or 50 KiB from offset (1-based line, default 1), or fewer with limit; longer files end with a note giving the offset to continue from. Relative paths use /workspace/repo, or /workspace when no repo is selected. Use workspace attach to work in another repo.",
+      parameters: obj({
+        path: str(),
+        offset: opt(int({ minimum: 1, description: "1-based line to start from" })),
+        limit: opt(int({ minimum: 1, maximum: 2000, description: "Maximum lines to return" })),
+      }),
       replay: "safe",
-      execute: ({ path }: { path: string }, api) =>
+      execute: ({ path, offset, limit }: { path: string; offset?: number; limit?: number }, api) =>
         Effect.runPromise(
           rpc("sandbox.readFile", async () => {
             const workspace = await this.prepareWorkspace(api.conversationId);
@@ -232,6 +236,7 @@ export class Agent extends DurableObject<Env> {
               path.startsWith("/")
                 ? path
                 : `${workspace ? "/workspace/repo" : "/workspace"}/${path}`,
+              { offset, limit },
             );
           }).pipe(Effect.map((text) => ({ output: [{ type: "text", text }] }))),
         ),
@@ -247,7 +252,7 @@ export class Agent extends DurableObject<Env> {
       name: "github",
       description:
         "Publish screenshot evidence with upload_screenshot: repository, PR number, image (the r2:// reference returned in preview screenshot text), and caption (e.g. Before — desktop 1280×800). This explicitly copies that image to a PUBLIC R2 URL, expiring after 30 days, and posts an embedded image in a PR discussion comment. Only publish when the user has requested PR screenshots/evidence; inspect for secrets or private data first. Other conversation images remain private. Check comment_url: null means the upload succeeded but commenting failed; report comment_error and preserve the returned URL/markdown. Never claim a PR was updated in that case. " +
-        "Read UTF-8 files from any public GitHub repository using read_file with a full owner/repository, path and ref, and discover paths with list_files (repository, ref, optional directory path, page) instead of guessing; it lists one directory level, directories end in / and can be listed in turn; no App connection, approved account or sandbox checkout is needed for public reads. Private reads and all writes require the connected App and an approved account. List App repositories, create dolly/* branches, write files with an expected sha, and open pull requests without sandbox credentials. Review pull requests: read_pull_request (metadata, head SHA), list_pull_request_files (paged diff patches), list_pull_request_comments (discussion, inline threads, reviews) and read_pull_request_checks work anonymously for public repos. Workflow: read the PR, list its files, optionally check out the head SHA in the sandbox, then create_review with commit_id set to that head SHA and inline comments anchored by path, line and side (RIGHT for new or context lines, LEFT for removed lines; start_line for ranges). Lines must fall inside the diff hunks. Use event PENDING to leave the review unsubmitted for a human, COMMENT to publish; approvals and change requests are not available. reply_to_review_comment answers an existing thread. Never merges, closes or edits pull requests and never writes the default branch. Mutations are not automatically replayed; inspect GitHub (list_pull_request_comments) after an interrupted write before trying again, to avoid duplicate reviews.",
+        "Read UTF-8 files from any public GitHub repository using read_file with a full owner/repository, path and ref; reads return up to 2000 lines or 50 KiB from an optional 1-based offset (limit for fewer), and nextOffset says where to continue. Discover paths with list_files (repository, ref, optional directory path, page) instead of guessing; it lists one directory level, directories end in / and can be listed in turn; no App connection, approved account or sandbox checkout is needed for public reads. Private reads and all writes require the connected App and an approved account. List App repositories, create dolly/* branches, write files with an expected sha, and open pull requests without sandbox credentials. Review pull requests: read_pull_request (metadata, head SHA), list_pull_request_files (paged diff patches), list_pull_request_comments (discussion, inline threads, reviews) and read_pull_request_checks work anonymously for public repos. Workflow: read the PR, list its files, optionally check out the head SHA in the sandbox, then create_review with commit_id set to that head SHA and inline comments anchored by path, line and side (RIGHT for new or context lines, LEFT for removed lines; start_line for ranges). Lines must fall inside the diff hunks. Use event PENDING to leave the review unsubmitted for a human, COMMENT to publish; approvals and change requests are not available. reply_to_review_comment answers an existing thread. Never merges, closes or edits pull requests and never writes the default branch. Mutations are not automatically replayed; inspect GitHub (list_pull_request_comments) after an interrupted write before trying again, to avoid duplicate reviews.",
       parameters: githubSchema,
       replay: "unsafe",
       executionMode: "sequential",
@@ -1112,6 +1117,7 @@ export class Agent extends DurableObject<Env> {
 
     if (!workspace) return { error: "Select a repository using workspace checkout first" };
     const sandbox = this.env.SANDBOX.getByName(workspace.sandboxId);
+    const push = `git push origin HEAD:${shellQuote(`refs/heads/${workspace.branch}`)}`;
 
     switch (input.action) {
       case "checkout":
@@ -1126,8 +1132,20 @@ export class Agent extends DurableObject<Env> {
       case "commit":
         return sandbox.run(`git add -A && git commit -m ${shellQuote(input.message)}`);
       case "push":
-        return sandbox.run(`git push origin HEAD:${shellQuote(`refs/heads/${workspace.branch}`)}`);
+        return sandbox.run(push);
       case "open_pull_request": {
+        // GitHub rejects a pull request for a branch it has not seen with a bare 422.
+        const pushed = await sandbox.run(push);
+
+        if (pushed.exitCode !== 0)
+          return {
+            ok: false,
+            code: "push_failed",
+            message: `Could not push ${workspace.branch} before opening the pull request`,
+            stdout: pushed.stdout,
+            stderr: pushed.stderr,
+          };
+
         const base = await Effect.runPromise(
           Effect.flatMap(GitHub, (github) => github.authorize(workspace.repository, false)).pipe(
             Effect.map((result) => result.defaultBranch),

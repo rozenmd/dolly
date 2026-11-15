@@ -14,6 +14,7 @@ import {
   shellQuote,
 } from "./workspace";
 import { attempt, OperationError } from "./operations";
+import { LineWindow, describeWindow, type FileRange } from "./file-window";
 import { exceptionDetails, redact } from "./diagnostics";
 import type { Env } from "./env";
 import { PREVIEW_TTL_MS, PreviewPort } from "./preview";
@@ -50,7 +51,7 @@ type ContainerInitialization = InitializationTiming & {
 /** Drain output without retaining unbounded bytes. Scoped cancellation releases the stream reader. */
 export const readBounded = Effect.fn("Sandbox.readBounded")(function* (
   stream: ReadableStream<Uint8Array> | null,
-  options: { readonly limit: number; readonly overflow: "truncate" | "fail" },
+  options: { readonly limit: number },
 ) {
   if (!stream) return "";
 
@@ -66,14 +67,6 @@ export const readBounded = Effect.fn("Sandbox.readBounded")(function* (
 
           if (chunk.done) return new TextDecoder().decode(bytes.subarray(0, retained));
 
-          if (options.overflow === "fail" && retained + chunk.value.byteLength > options.limit) {
-            return yield* new OperationError({
-              operation: "sandbox.file.read",
-              message: "File exceeds 64 KiB; use a shell command to read a range",
-              details: { limit: options.limit },
-            });
-          }
-
           const prefix = chunk.value.subarray(0, bytes.length - retained);
           bytes.set(prefix, retained);
           retained += prefix.length;
@@ -87,6 +80,46 @@ export const readBounded = Effect.fn("Sandbox.readBounded")(function* (
         Effect.ensuring(Effect.sync(() => reader.releaseLock())),
       ),
   );
+});
+
+/** Stream a file through a line window, cancelling the read once the window is full. */
+export const readWindow = Effect.fn("Sandbox.readWindow")(function* (
+  stream: ReadableStream<Uint8Array> | null,
+  range: FileRange,
+) {
+  const window = new LineWindow(range);
+
+  if (stream)
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() => stream.getReader()),
+      (reader) =>
+        Effect.gen(function* () {
+          const decoder = new TextDecoder();
+
+          while (true) {
+            const chunk = yield* attempt("sandbox.stream.read", () => reader.read());
+
+            if (chunk.done) {
+              window.push(decoder.decode());
+
+              return;
+            }
+
+            if (window.push(decoder.decode(chunk.value, { stream: true }))) return;
+          }
+        }),
+      (reader) =>
+        attempt("sandbox.stream.cancel", () => reader.cancel()).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning({ event: "stream_cleanup_failed", error: exceptionDetails(cause) }),
+          ),
+          Effect.ensuring(Effect.sync(() => reader.releaseLock())),
+        ),
+    );
+
+  const complete = !window.done;
+
+  return describeWindow(window.finish(), complete ? window.totalLines : undefined);
 });
 
 interface SandboxState extends DurableObjectState {
@@ -394,8 +427,8 @@ export class Sandbox extends DurableObject<Env> {
       (process) =>
         Effect.all(
           {
-            stdout: readBounded(process.stdout, { limit: 32_768, overflow: "truncate" }),
-            stderr: readBounded(process.stderr, { limit: 32_768, overflow: "truncate" }),
+            stdout: readBounded(process.stdout, { limit: 32_768 }),
+            stderr: readBounded(process.stderr, { limit: 32_768 }),
             exitCode: attempt("sandbox.exit", () => process.exitCode).pipe(
               Effect.tap(() =>
                 Effect.sync(() => {
@@ -837,7 +870,8 @@ export class Sandbox extends DurableObject<Env> {
     );
   }
 
-  readFile(path: string) {
+  /** Read a line window (default: the first 2,000 lines or 50 KiB), noting how to continue. */
+  readFile(path: string, range: FileRange = {}) {
     return this.runWorkspaceOperation(
       this.permit.withPermit(
         Effect.gen({ self: this }, function* () {
@@ -854,7 +888,7 @@ export class Sandbox extends DurableObject<Env> {
               new Files(container).readFile(path, { signal }),
             );
 
-            return yield* readBounded(response.body, { limit: 65_536, overflow: "fail" });
+            return yield* readWindow(response.body, range);
           }).pipe(Effect.timeout("60 seconds"));
         }),
       ),
@@ -1021,7 +1055,7 @@ export class Sandbox extends DurableObject<Env> {
         });
 
         logs = await Effect.runPromise(
-          readBounded(response.body, { limit: 32_768, overflow: "truncate" }).pipe(
+          readBounded(response.body, { limit: 32_768 }).pipe(
             Effect.timeout("5 seconds"),
           ),
         );
@@ -1120,10 +1154,10 @@ export class Sandbox extends DurableObject<Env> {
                 checkpoint: Effect.succeed(checkpoint),
                 checkpointError: Effect.succeed(checkpointError),
                 initialization: Effect.succeed(this.initialization),
-                stdout: readBounded(process.stdout, { limit: 32_768, overflow: "truncate" }).pipe(
+                stdout: readBounded(process.stdout, { limit: 32_768 }).pipe(
                   Effect.map(redact),
                 ),
-                stderr: readBounded(process.stderr, { limit: 32_768, overflow: "truncate" }).pipe(
+                stderr: readBounded(process.stderr, { limit: 32_768 }).pipe(
                   Effect.map(redact),
                 ),
                 exitCode: attempt("sandbox.diagnostics.exit", () => process.exitCode),

@@ -24,6 +24,7 @@ import {
 } from "./github-webhook";
 import { exceptionDetails } from "./diagnostics";
 import { integrationJson } from "./integration-http";
+import { describeWindow, windowText } from "./file-window";
 import { budgetPatches, invalidAnchors, REVIEW_FOOTER } from "./github-review";
 import { attempt, OperationError } from "./operations";
 import { MAX_IMAGE_BYTES } from "./images";
@@ -64,7 +65,7 @@ const FileResponse = Schema.Struct({
   type: Schema.Literal("file"),
   path: Schema.String,
   sha: Sha,
-  encoding: Schema.Literal("base64"),
+  encoding: Schema.Literals(["base64", "none"]),
   content: Schema.String,
   size: Schema.Number,
 });
@@ -944,16 +945,37 @@ function makeGitHub(
 
       const file = yield* readApi(op.repository, path).pipe(Effect.flatMap(decode(FileResponse)));
 
-      if (file.size > 32_768 || file.content.replace(/\s/g, "").length > 43_692)
-        return { ok: false, code: "file_too_large", message: "File exceeds 32 KiB" };
+      // GitHub inlines content only up to 1 MB; larger files need a sandbox checkout.
+      if (!file.content && file.size > 0)
+        return {
+          ok: false,
+          code: "file_too_large",
+          message: "GitHub does not inline files over 1 MB; check out the repository and read it there",
+        };
 
-      const content = yield* attempt("github.file.decode", async () =>
+      const text = yield* attempt("github.file.decode", async () =>
         new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
           Uint8Array.from(atob(file.content.replace(/\s/g, "")), (char) => char.charCodeAt(0)),
         ),
       );
 
-      return { ok: true, result: { kind: "file", path: file.path, sha: file.sha, content } };
+      const window = windowText(text, { offset: op.offset, limit: op.limit });
+      const described = describeWindow(window, window.totalLines);
+      const note = described.slice(window.text.length).trim();
+      const partial = window.startLine > 1 || window.nextOffset !== undefined || window.lineCut;
+
+      return {
+        ok: true,
+        result: {
+          kind: "file",
+          path: file.path,
+          sha: file.sha,
+          content: window.text,
+          ...(partial ? { lines: `${window.startLine}-${window.endLine}` } : {}),
+          ...(window.nextOffset === undefined ? {} : { nextOffset: window.nextOffset }),
+          ...(note ? { note } : {}),
+        },
+      };
     }
 
     if (op.action === "list_files") {
