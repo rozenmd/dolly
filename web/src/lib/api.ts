@@ -117,6 +117,8 @@ function messageText(message: typeof Message.Type) {
 }
 
 const ToolArguments = Schema.Struct({
+  action: Schema.optional(Schema.String),
+  repository: Schema.optional(Schema.String),
   command: Schema.optional(Schema.String),
   path: Schema.optional(Schema.String),
   file_path: Schema.optional(Schema.String),
@@ -125,19 +127,27 @@ const ToolArguments = Schema.Struct({
   url: Schema.optional(Schema.String),
 });
 
-/** The most recognisable argument of a tool call, such as its command or file path. */
-function stepDetail(block: typeof Block.Type) {
-  const args = Option.getOrUndefined(Schema.decodeUnknownOption(ToolArguments)(block.arguments));
+const OperationArguments = Schema.Struct({ operation: Schema.Unknown });
 
-  return (
-    args?.command ??
-    args?.path ??
-    args?.file_path ??
-    args?.pattern ??
-    args?.query ??
-    args?.url ??
-    ""
+/**
+ * The most recognisable arguments of a tool call, such as its command or file
+ * path, prefixed by the action for multi-action tools (`checkout owner/repo`).
+ */
+function stepDetail(block: typeof Block.Type) {
+  const nested = Option.getOrUndefined(
+    Schema.decodeUnknownOption(OperationArguments)(block.arguments),
   );
+
+  const args = Option.getOrUndefined(
+    Schema.decodeUnknownOption(ToolArguments)(nested?.operation ?? block.arguments),
+  );
+
+  if (!args) return "";
+
+  const target =
+    args.command ?? args.path ?? args.file_path ?? args.pattern ?? args.query ?? args.url;
+
+  return [args.action, args.repository, target].filter(Boolean).join(" ");
 }
 
 /** Groups a flat Pi transcript into prompt/response turns, folding tool calls into steps. */
