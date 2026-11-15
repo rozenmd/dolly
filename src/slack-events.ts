@@ -3,7 +3,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { attempt } from "./operations";
 
-/** Open Session caps Slack request bodies at 1 MiB. */
+/** Slack request bodies are capped at 1 MiB. */
 export const MAX_SLACK_BYTES = 1_048_576;
 
 /** Slack request timestamps must be within five minutes. */
@@ -72,7 +72,6 @@ export const SlackDelivery = Schema.Struct({
 
 export type SlackDelivery = typeof SlackDelivery.Type;
 
-/** Copied from Open Session's event-routing.ts. */
 export function shouldHandleAppMention(event: SlackMessageEvent) {
   return event.type === "app_mention" && !event.subtype && !event.bot_id;
 }

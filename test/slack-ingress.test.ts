@@ -309,7 +309,7 @@ it("saves Slack settings through auth.test and never returns the credentials", a
   expect(manifest.oauth_config.scopes.bot).toContain("assistant:write");
 });
 
-it("turns a DM into a session, replies in its thread, and gates senders like Open Session", async () => {
+it("turns a DM into a session, replies in its thread, and gates who may start and steer sessions", async () => {
   const { posted, models } = fakeServices("{}");
 
   expect((await post("/slack/events", dm("100.1", "<@UBOT> what is **this**?"))).status).toBe(200);

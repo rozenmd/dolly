@@ -1,6 +1,5 @@
 /**
- * The Slack app manifest Dolly needs, copied from Open Session's
- * `src/frontend/lib/slack-manifest.ts`. Slack reads every scope, event and URL from it;
+ * The Slack app manifest Dolly needs. Slack reads every scope, event and URL from it;
  * a manifest cannot carry credentials, so the bot token and signing secret are pasted
  * after the app exists.
  */

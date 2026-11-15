@@ -422,7 +422,7 @@ const SlackStatus = Schema.Struct({
 
 type SlackStatus = typeof SlackStatus.Type;
 
-/** Open Session's Slack setup: create the app from a manifest, then paste the two credentials. */
+/** Slack setup: create the app from a manifest, then paste the two credentials. */
 export function SlackSettings() {
   const [status, setStatus] = useState<SlackStatus | null>(null);
   const [enabled, setEnabled] = useState(true);

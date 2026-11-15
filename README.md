@@ -372,19 +372,19 @@ Payloads are capped at 256 KiB and command text at 16,384 characters. There are 
 
 ## Connect Slack
 
-Dolly's Slack bot is a port of [Open Session's Slack agent](https://github.com/tellahq/opensession/blob/main/docs/setup/slack.md): the same app manifest, bot scopes, event subscriptions, signature checks, sender rules and mention routing.
+DM Dolly or @-mention it in a channel to start or continue a session from Slack. Each Slack thread maps to one session, and the agent's answer is posted back into the thread.
 
 **Set it up.** Save the `dolly-ingress` URL under **Settings → GitHub** first, then open **Settings → Slack**:
 
-1. Choose **Create Slack app**. Slack opens its create-app form pre-filled from Dolly's manifest (`src/slack-manifest.ts`, copied from Open Session): bot scopes, the bot events below, interactivity, the assistant surface, the Dolly hostname for link unfurls, and the two request URLs on the ingress Worker, `/slack/events` and `/slack/actions`.
+1. Choose **Create Slack app**. Slack opens its create-app form pre-filled from Dolly's manifest (`src/slack-manifest.ts`): bot scopes, the bot events below, interactivity, the assistant surface, the Dolly hostname for link unfurls, and the two request URLs on the ingress Worker, `/slack/events` and `/slack/actions`.
 2. Create the app and install it to your workspace.
 3. Paste the `xoxb-…` bot token (**OAuth & Permissions**) and the signing secret (**Basic Information**). Set **Allowed Slack member ID** to your own member ID, choose a **Default repository**, enable Slack and **Save**. Saving calls `auth.test` to check the token and record your workspace; the token and secret are stored in the account Durable Object and never returned by the API.
 4. Slack verifies the events URL when the app is created, before Dolly has the signing secret, so that first check fails. After saving, open **Event Subscriptions** in Slack and choose **Retry**.
 5. Invite the bot to channels whose history it should read, then test a DM and an @-mention.
 
-**Transport.** HTTP Events API only, through the public ingress Worker, which forwards just these two routes to the private `SlackIngress` entrypoint. Every request needs a valid Slack v0 signature over the exact body with a timestamp within five minutes; without saved credentials every request is rejected with 401. Bodies are capped at 1 MiB. Each DM or mention is durably admitted before Slack is acknowledged, and Slack's retries are deduplicated by message timestamp. Socket Mode is not implemented (Open Session keeps it opt-in and manual too).
+**Transport.** Slack's HTTP Events API, through the public ingress Worker, which forwards just these two routes to the private `SlackIngress` entrypoint. Every request needs a valid Slack v0 signature over the exact body with a timestamp within five minutes; without saved credentials every request is rejected with 401. Bodies are capped at 1 MiB. Each DM or mention is durably admitted before Slack is acknowledged, and Slack's retries are deduplicated by message timestamp. Socket Mode is not used: the ingress Worker is already public.
 
-**Who can drive it**, as in Open Session:
+**Who can drive it.**
 
 - An ordinary DM or mention is accepted only from the allowed member. With no allowed member set, every member of your workspace is admitted.
 - A DM reply, or a mention in a channel thread, that belongs to a thread already linked to a session steers that session, whoever sends it.
@@ -393,29 +393,22 @@ Dolly's Slack bot is a port of [Open Session's Slack agent](https://github.com/t
 **What triggers what.**
 
 - A new top-level **DM** starts a code session in the default repository; replies in that thread continue it.
-- An **@-mention** in a channel is classified by one no-tools Claude Haiku call, using Open Session's prompt: an explicit PR pass (**review**, **auto-fix**, **simplify** or **adversarial** review) on a numbered PR; otherwise an **ask** (read-only question) or a **code** task. A second Haiku call picks the enrolled repository from the channel, message and thread context. PR passes start on `refs/pull/<number>/head` of the default repository. If Claude is not connected or the classifier fails, the mention falls back to a code task in the default repository, as Open Session fails open.
+- An **@-mention** in a channel is classified by one no-tools Claude Haiku call: an explicit PR pass (**review**, **auto-fix**, **simplify** or **adversarial** review) on a numbered PR; otherwise an **ask** (read-only question) or a **code** task. A second Haiku call picks the enrolled repository from the channel, message and thread context. PR passes start on `refs/pull/<number>/head` of the default repository. If Claude is not connected or the classifier fails, the mention becomes a code task in the default repository.
 - A mention in a thread already linked to a session continues it.
 - The agent's final text (after its last tool call) is posted back into the thread as Slack mrkdwn. Failures are posted as `Run failed: …`. Posting retries with backoff.
 - Up to six image attachments per message (4 MiB each) are passed to the model.
 
 Sessions use Codex when connected, otherwise Claude Sonnet.
 
-**Not ported yet.** Some of Open Session's Slack behaviour depends on subsystems Dolly does not have yet, and does not work:
+**Limitations.**
 
-- Worktree channels and their hooks.
-- Watched-channel automations, `retrigger` and scheduling.
-- Channel memory (`remember`, `list_memory`, `forget`).
-- Teammate asks and the admin and session-control tools.
-- Live progress cards and assistant-thread status.
-- Session-link unfurls and suggested prompts. The manifest still subscribes to `link_shared` and `assistant_thread_started`, but Dolly ignores those events.
-- Block Kit actions. `/slack/actions` verifies signatures and acknowledges, but runs nothing.
-- Non-image attachments and response-media uploads.
-- The extra Slack-loop tools.
-
-Two more differences:
-
-- Open Session's ask mode is enforced by its session policy. Dolly's is an instruction to the agent, not a tool restriction.
-- Dolly's auto-fix and simplify passes push a new branch and open a pull request against the PR's branch, rather than pushing to the PR branch.
+- Replies arrive when the turn ends; there is no live progress in Slack.
+- Channel messages that do not mention the bot are ignored.
+- Link unfurls and assistant suggested prompts are not implemented yet. The manifest subscribes to `link_shared` and `assistant_thread_started`, but Dolly ignores those events.
+- Interactive actions are not implemented yet. `/slack/actions` verifies signatures and acknowledges, but runs nothing.
+- Non-image attachments are ignored, and replies are text only.
+- Ask mode is an instruction to the agent, not a tool restriction.
+- Auto-fix and simplify passes push a new branch and open a pull request against the PR's branch, rather than pushing to the PR branch.
 
 ## API
 

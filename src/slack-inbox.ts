@@ -122,7 +122,7 @@ export function slackDelivery(host: SlackHost) {
                   };
                 const entry = await tx.entry(AssistantEntry, settled.answer);
 
-                // Only the text after the last tool call is posted, as in Open Session.
+                // Only the text after the last tool call is posted.
                 const messages = (entry?.model ?? []).filter(
                   (message) => message.role === "assistant",
                 );
@@ -208,8 +208,7 @@ export function slackDelivery(host: SlackHost) {
 export const slackThreadKey = (channel: string, threadTs: string) => `${channel}:${threadTs}`;
 
 /**
- * Durably admit one Slack message before acknowledging Slack, as Open Session's event inbox
- * does. A message in a thread already linked to a session steers it even when the sender is
+ * Durably admit one Slack message before acknowledging Slack. A message in a thread already linked to a session steers it even when the sender is
  * not the allowed user; anything else must come from the allowed user (when one is set).
  */
 export const admitSlack = Effect.fn("Slack.admit")(function* (

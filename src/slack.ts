@@ -22,7 +22,7 @@ export const SlackProfile = Schema.Struct({
   enabled: Schema.Boolean,
   botToken: BotToken,
   signingSecret: SigningSecret,
-  /** Unset means every sender admitted by routing may drive Dolly, as in Open Session. */
+  /** Unset means every sender admitted by routing may drive Dolly. */
   allowedUserId: Schema.NullOr(SlackId),
   defaultRepository: Schema.NullOr(Repository),
   teamId: Schema.String,
@@ -180,7 +180,7 @@ const Replies = Schema.Struct({
   ),
 });
 
-/** Bounded earlier thread text for routing a mention, as Open Session's classifier receives. */
+/** Bounded earlier thread text for routing a mention. */
 export const slackThreadContext = Effect.fn("Slack.threadContext")(function* (
   token: string,
   channel: string,
@@ -204,7 +204,7 @@ export const slackThreadContext = Effect.fn("Slack.threadContext")(function* (
     .slice(-1500);
 });
 
-/** Image attachments are read with the bot token. Open Session inlines at most six, skipping any over 4 MiB. */
+/** Image attachments are read with the bot token: at most six, skipping any over 4 MiB. */
 export const MAX_SLACK_IMAGES = 6;
 export const MAX_SLACK_IMAGE_BYTES = 4 * 1024 * 1024;
 

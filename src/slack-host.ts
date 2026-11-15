@@ -62,7 +62,7 @@ function makeSlackHost(
             mimeType: file.mimetype,
             data: Buffer.from(bytes).toString("base64"),
           })),
-          // Open Session skips an image it cannot inline rather than failing the message.
+          // Skip an image that cannot be inlined rather than failing the message.
           Effect.orElseSucceed(() => null),
         ),
     ).pipe(

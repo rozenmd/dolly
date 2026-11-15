@@ -1,5 +1,5 @@
 /**
- * Fast intent gate for Slack mentions, ported from Open Session's mention-intent.ts.
+ * Fast intent gate for Slack mentions.
  * One no-tools Claude Haiku call decides whether the mention is an explicit PR pass
  * (review / auto-fix / simplify / adversarial) on a specific PR, otherwise whether it is
  * an "ask" or a "code" task, and which enrolled repository it targets.
@@ -108,7 +108,7 @@ const isPrNumber = Schema.is(PrNumber);
 const isAsk = Schema.is(Schema.Literal("ask"));
 const isName = Schema.is(Schema.String);
 
-/** The first JSON object in a model reply, as Open Session's classifier reads it. */
+/** The first JSON object in a model reply. */
 const firstJson = (text: string | null) => text?.match(/\{[\s\S]*?\}/)?.[0] ?? "";
 
 const decodeIntent = (text: string | null) =>
@@ -187,11 +187,11 @@ export function prActionPrompt(
   return `${instruction}\n\nOriginal Slack request:\n${request}`;
 }
 
-/** Ask-mode guard: Open Session answers these read-only in the main checkout. */
+/** Ask-mode guard: questions are answered read-only. */
 export const ASK_MODE_NOTE =
   "This is a read-only question. Answer it by reading code and running read-only commands. Do not edit files, commit, push, create branches, open pull requests or post reviews.";
 
-/** Transport instructions only, as in Open Session's session-reply.ts. */
+/** Transport instructions only; repository policy comes from the ordinary session. */
 export const SLACK_SESSION_NOTE =
   "This turn came from Slack. Your final reply is delivered to that thread automatically; do not post it yourself. " +
   "Use the same session tools and repository workflow as in Dolly. " +
