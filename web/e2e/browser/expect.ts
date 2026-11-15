@@ -1,4 +1,5 @@
 import { expect as vitestExpect } from "vite-plus/test";
+import type { Json } from "./cdp";
 import { Locator, VISIBLE } from "./locator";
 import { Page, sleep } from "./page";
 
@@ -14,7 +15,7 @@ const one = async <T>(
   locator: Locator,
   elements: string[],
   declaration: string,
-  args: unknown[] = [],
+  args: Json[] = [],
 ): Promise<T | undefined> => {
   if (elements.length > 1)
     throw new Error(`strict mode violation: ${locator} resolved to ${elements.length} elements`);
@@ -80,7 +81,7 @@ class LocatorAssertions {
     declaration: string,
     pass: (value: any) => boolean,
     options?: Options,
-    args: unknown[] = [],
+    args: Json[] = [],
   ) {
     return this.check(
       name,

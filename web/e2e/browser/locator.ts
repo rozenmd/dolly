@@ -1,3 +1,4 @@
+import type { Json } from "./cdp";
 import type { Page } from "./page";
 import { sleep } from "./page";
 
@@ -164,7 +165,7 @@ export class Locator {
 
     const call = async (
       declaration: string,
-      args: { value?: unknown; objectId?: string }[],
+      args: { value?: Json; objectId?: string }[],
       returnByValue = false,
     ) => {
       const result = await session.send("Runtime.callFunctionOn", {
@@ -327,7 +328,7 @@ export class Locator {
   }
 
   /** @internal */
-  async callOn<T>(objectId: string, declaration: string, args: unknown[] = []): Promise<T> {
+  async callOn<T>(objectId: string, declaration: string, args: Json[] = []): Promise<T> {
     const result = await this.page.session.send("Runtime.callFunctionOn", {
       functionDeclaration: declaration,
       objectId,
@@ -500,13 +501,16 @@ export class Locator {
     });
   }
 
-  async evaluate<R, A>(fn: (element: any, arg: A) => R, arg?: A): Promise<Awaited<R>> {
+  async evaluate<R, A extends Json = null>(
+    fn: (element: HTMLElement, arg: A) => R,
+    arg?: A,
+  ): Promise<Awaited<R>> {
     return this.single("evaluate", async (id) => ({
       done: true,
       value: await this.callOn<Awaited<R>>(
         id,
         `function (arg) { return (${fn.toString()})(this, arg); }`,
-        [arg],
+        [arg ?? null],
       ),
     }));
   }
