@@ -571,5 +571,5 @@ it("stores the requested thinking level and changes it for an existing session",
   expect(await level()).toBe("xhigh");
 
   const plain = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
-  expect((await plain.json<{ thinkingLevel: string }>()).thinkingLevel).toBe("low");
+  expect((await plain.json<{ thinkingLevel: string }>()).thinkingLevel).toBe("medium");
 });

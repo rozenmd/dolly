@@ -569,8 +569,8 @@ for (const repository of ["octocat/project", ""]) {
     await expect(dialog).not.toBeVisible();
     expect(creates).toEqual([
       config
-        ? { model: source.model, thinkingLevel: "low", workspace: config }
-        : { model: source.model, thinkingLevel: "low" },
+        ? { model: source.model, thinkingLevel: "medium", workspace: config }
+        : { model: source.model, thinkingLevel: "medium" },
     ]);
     expect(messages).toHaveLength(2);
     expect(messages[0]).toEqual(messages[1]);
@@ -644,7 +644,7 @@ test("enrolls an App repository and anchors a new workspace to its default branc
   await dialog.getByRole("button", { name: "Create", exact: true }).click();
   await expect(dialog).not.toBeVisible();
   expect(created).toEqual({
-    thinkingLevel: "low",
+    thinkingLevel: "medium",
     workspace: { repository: "octocat/project", ref: "develop" },
   });
 });
