@@ -158,11 +158,13 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     return turn;
   }
 
-  function addStep(turn: Turn, id: string, step: Step) {
+  // A group is keyed by its first tool call, which keeps the same id while a
+  // message streams live and after it is saved, so the UI never remounts it.
+  function addStep(turn: Turn, step: Step) {
     const last = turn.items.at(-1);
 
     if (last?.kind === "steps") last.steps.push(step);
-    else turn.items.push({ kind: "steps", id, steps: [step] });
+    else turn.items.push({ kind: "steps", id: `steps-${step.id}`, steps: [step] });
 
     turn.steps += 1;
     calls.set(step.id, step);
@@ -234,7 +236,7 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 
       if (step) Object.assign(step, { output, status, ...imageOutput });
       else
-        addStep(turn, id, {
+        addStep(turn, {
           id: message.toolCallId ?? id,
           name: message.toolName ?? "tool",
           detail: "",
@@ -256,7 +258,7 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
       const blockId = `${id}-${index}`;
 
       if (block.type === "toolCall" && block.name)
-        addStep(turn, blockId, {
+        addStep(turn, {
           id: block.id ?? blockId,
           name: block.name,
           detail: stepDetail(block),
@@ -292,7 +294,7 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 
     if (step) Object.assign(step, { status, output: tool.output ?? step.output });
     else if (status !== "done")
-      addStep(current("live"), `live-${tool.callId}`, {
+      addStep(current("live"), {
         id: tool.callId,
         name: tool.name,
         detail: "",
