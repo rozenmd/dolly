@@ -3,11 +3,24 @@
  * flattened target sessions. It works with any CDP endpoint: a local Chrome, a
  * container such as chromedp/headless-shell, or Cloudflare Browser Run.
  */
+import * as Schema from "effect/Schema";
+
+/** A JSON value, as CDP sends and receives. */
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly Json[]
+  | { readonly [key: string]: Json | undefined };
+
+export type CdpParams = { readonly [key: string]: Json | undefined };
+
 type Message = {
   id?: number;
   method?: string;
-  params?: Record<string, unknown>;
-  result?: Record<string, unknown>;
+  params?: CdpParams;
+  result?: CdpParams;
   error?: { message: string; data?: string };
   sessionId?: string;
 };
@@ -59,13 +72,12 @@ export class CdpConnection {
   }
 
   static async connect(url: string, token?: string) {
-    // SAFETY: Node's WebSocket (undici) accepts an init object with headers, which
-    // Browser Run needs for its API token; the DOM typings only allow protocols.
-    const init = {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    } as unknown as string[];
-
-    const socket = new WebSocket(url, init);
+    // Node's WebSocket (undici) takes an init object with headers, which Browser Run needs
+    // for its API token; the DOM constructor signature only admits protocols.
+    const socket: WebSocket = Reflect.construct(WebSocket, [
+      url,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    ]);
 
     await new Promise<void>((resolve, reject) => {
       socket.addEventListener("open", () => resolve(), { once: true });
@@ -79,7 +91,7 @@ export class CdpConnection {
     return new CdpConnection(socket);
   }
 
-  send<T = any>(method: string, params: Record<string, unknown> = {}, sessionId?: string) {
+  send<T = any>(method: string, params: CdpParams = {}, sessionId?: string) {
     if (this.closed) return Promise.reject(new Error(`${method}: browser connection closed`));
     const id = ++this.nextId;
 
@@ -112,7 +124,7 @@ export class CdpSession {
     readonly sessionId: string,
   ) {}
 
-  send<T = any>(method: string, params: Record<string, unknown> = {}) {
+  send<T = any>(method: string, params: CdpParams = {}) {
     return this.connection.send<T>(method, params, this.sessionId);
   }
 
@@ -137,7 +149,9 @@ export async function browserWebSocket(endpoint: string) {
   const response = await fetch(new URL("/json/version", endpoint));
 
   if (!response.ok) throw new Error(`${endpoint}/json/version returned HTTP ${response.status}`);
-  const { webSocketDebuggerUrl } = (await response.json()) as { webSocketDebuggerUrl: string };
+  const { webSocketDebuggerUrl } = Schema.decodeUnknownSync(
+    Schema.Struct({ webSocketDebuggerUrl: Schema.String }),
+  )(await response.json());
   // Containers report their internal address; keep the host the caller reached.
   const reported = new URL(webSocketDebuggerUrl);
   reported.host = new URL(endpoint).host;
