@@ -416,21 +416,32 @@ const SlackStatus = Schema.Struct({
   eventsUrl: Schema.NullOr(Schema.String),
   actionsUrl: Schema.NullOr(Schema.String),
   createAppUrl: Schema.NullOr(Schema.String),
-  scopes: Schema.Array(Schema.Struct({ label: Schema.String, items: Schema.Array(Schema.String) })),
-  events: Schema.Array(Schema.String),
+  manifest: Schema.NullOr(Schema.String),
 });
 
 type SlackStatus = typeof SlackStatus.Type;
 
-/** Slack setup: create the app from a manifest, then paste the two credentials. */
+const loadSlack = async () =>
+  Schema.decodeUnknownSync(Schema.fromJsonString(SlackStatus))(
+    await request("/integrations/slack"),
+  );
+
+/**
+ * Slack setup in the order Slack hands things out: create the app from Dolly's manifest,
+ * install it, then copy the two credentials Slack generates into Dolly.
+ */
 export function SlackSettings() {
+  const { github, update } = useSettings();
   const [status, setStatus] = useState<SlackStatus | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [ingress, setIngress] = useState(github.ingress ?? "");
   const [enabled, setEnabled] = useState(true);
   const [botToken, setBotToken] = useState("");
   const [signingSecret, setSigningSecret] = useState("");
   const [allowedUserId, setAllowedUserId] = useState("");
   const [defaultRepository, setDefaultRepository] = useState("");
   const [saved, setSaved] = useState(false);
+  const [copied, setCopied] = useState(false);
   const { pending, run, alert } = useAction();
 
   function load(next: SlackStatus) {
@@ -441,14 +452,29 @@ export function SlackSettings() {
   }
 
   useEffect(() => {
+    loadSlack().then(load, (cause) =>
+      setLoadError(cause instanceof Error ? cause.message : "Could not load Slack settings."),
+    );
+  }, []);
+
+  function saveIngress(event: FormEvent) {
+    event.preventDefault();
     void run(async () => {
-      load(
-        Schema.decodeUnknownSync(Schema.fromJsonString(SlackStatus))(
-          await request("/integrations/slack"),
+      const result = Schema.decodeUnknownSync(
+        Schema.fromJsonString(Schema.Struct({ ingress: Schema.String })),
+      )(
+        await request(
+          "/integrations/github/ingress",
+          { url: ingressHook(ingress) },
+          undefined,
+          "PUT",
         ),
       );
-    }, "Could not load Slack settings.");
-  }, []);
+
+      update({ ...github, ingress: result.ingress });
+      load(await loadSlack());
+    }, "Could not save the ingress URL.");
+  }
 
   function save(event: FormEvent) {
     event.preventDefault();
@@ -468,81 +494,132 @@ export function SlackSettings() {
       await request("/integrations/slack", body, undefined, "PUT");
       setBotToken("");
       setSigningSecret("");
-      load(
-        Schema.decodeUnknownSync(Schema.fromJsonString(SlackStatus))(
-          await request("/integrations/slack"),
-        ),
-      );
+      load(await loadSlack());
       setSaved(true);
     }, "Could not save Slack settings.");
   }
 
+  const connected = status?.configured ?? false;
+
   return (
     <Section
       title="Slack"
-      description="DMs and @-mentions start or continue dolly sessions in a Slack thread."
+      description="DM dolly or @-mention it in a channel to start or continue a session in that thread."
     >
-      <div className="connection-row">
-        <span className={`status-dot ${status?.configured && status.enabled ? "idle" : ""}`} />
-        <span className="connection-label">
-          Slack app
-          <span className="muted">
-            {status?.configured
-              ? `${status.enabled ? "Enabled" : "Disabled"} in ${status.teamName ?? "your workspace"}`
-              : "Not connected"}
+      {loadError && (
+        <p role="alert" className="error-text">
+          {loadError}
+        </p>
+      )}
+      {connected && status && (
+        <div className="connection-row">
+          <span className={`status-dot ${status.enabled ? "idle" : ""}`} />
+          <span className="connection-label">
+            Slack
+            <span className="muted">
+              {status.enabled ? "Connected" : "Disabled"} to {status.teamName ?? "your workspace"}
+            </span>
           </span>
-        </span>
+        </div>
+      )}
+
+      <section className="settings-card" aria-labelledby="slack-step-create">
+        <h2 id="slack-step-create" className="settings-step">
+          1. Create the Slack app
+        </h2>
         {status?.createAppUrl ? (
-          <a
-            className="secondary-button"
-            href={status.createAppUrl}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Create Slack app
-          </a>
-        ) : null}
-      </div>
-      {status && !status.createAppUrl && (
-        <p className="field-help settings-note">
-          Save the ingress URL under GitHub first; Slack sends events to the same ingress Worker.
+          <>
+            <p className="field-help">
+              Slack opens with everything filled in: permissions, events and the URLs dolly listens
+              on. Pick your workspace, choose <strong>Next</strong>, then <strong>Create</strong>.
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  void navigator.clipboard.writeText(status.manifest ?? "").then(() => {
+                    setCopied(true);
+                  });
+                }}
+              >
+                {copied ? "Copied" : "Copy manifest"}
+              </button>
+              <a
+                className="primary-button"
+                href={status.createAppUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Create Slack app
+              </a>
+            </div>
+          </>
+        ) : status ? (
+          <form className="settings-inline-form" onSubmit={saveIngress}>
+            <p className="field-help">
+              Slack needs dolly's public ingress URL first: the <code>dolly-ingress</code> Worker
+              that also receives GitHub webhooks.
+            </p>
+            <label htmlFor="slack-ingress">Ingress URL</label>
+            <Input
+              id="slack-ingress"
+              type="url"
+              required
+              placeholder="https://dolly-ingress.example.workers.dev"
+              value={ingress}
+              onChange={(event) => setIngress(event.target.value)}
+            />
+            <div className="modal-actions">
+              <button type="submit" className="primary-button" disabled={pending}>
+                Continue
+              </button>
+            </div>
+          </form>
+        ) : (
+          !loadError && <p className="field-help">Loading…</p>
+        )}
+      </section>
+
+      <form className="settings-card" onSubmit={save} aria-labelledby="slack-step-connect">
+        <h2 id="slack-step-connect" className="settings-step">
+          2. Install it and connect dolly
+        </h2>
+        <p className="field-help">
+          Slack generates these two values once the app exists. Paste them here.
         </p>
-      )}
-      {status?.eventsUrl && (
-        <p className="field-help settings-note">
-          Slack sends events to {status.eventsUrl} and actions to {status.actionsUrl}. Create the
-          app from the manifest, install it to your workspace, then paste its credentials below.
-          Invite the bot to channels whose history it should read.
-        </p>
-      )}
-      <form className="settings-card" onSubmit={save}>
         <label htmlFor="slack-bot-token">Bot token</label>
         <Input
           id="slack-bot-token"
           name="botToken"
           type="password"
           autoComplete="off"
-          placeholder={status?.configured ? "Saved — paste to replace" : "xoxb-…"}
+          placeholder={connected ? "Saved — paste to replace" : "xoxb-…"}
           value={botToken}
           onChange={(event) => setBotToken(event.target.value)}
-          required={!status?.configured}
+          required={!connected}
         />
-        <p className="field-help">From OAuth &amp; Permissions after installing the app.</p>
+        <p className="field-help">
+          In your new app, open <strong>Install App</strong> and choose{" "}
+          <strong>Install to Workspace</strong>, then copy the <strong>Bot User OAuth Token</strong>
+          .
+        </p>
         <label htmlFor="slack-signing-secret">Signing secret</label>
         <Input
           id="slack-signing-secret"
           name="signingSecret"
           type="password"
           autoComplete="off"
-          placeholder={status?.configured ? "Saved — paste to replace" : ""}
+          placeholder={connected ? "Saved — paste to replace" : ""}
           value={signingSecret}
           onChange={(event) => setSigningSecret(event.target.value)}
-          required={!status?.configured}
+          required={!connected}
         />
         <p className="field-help">
-          From Basic Information. Every Slack request must be signed with it.
+          <strong>Basic Information</strong> → <strong>App Credentials</strong> →{" "}
+          <strong>Signing Secret</strong> (choose Show).
         </p>
-        <label htmlFor="slack-allowed-user">Allowed Slack member ID</label>
+        <label htmlFor="slack-allowed-user">Your Slack member ID</label>
         <Input
           id="slack-allowed-user"
           name="allowedUserId"
@@ -551,8 +628,9 @@ export function SlackSettings() {
           onChange={(event) => setAllowedUserId(event.target.value)}
         />
         <p className="field-help">
-          Only this member's DMs and mentions start sessions. Anyone in your workspace can reply in
-          a thread already linked to a session. Leave empty to admit every member of your workspace.
+          In Slack, open your profile, choose <strong>⋮</strong> then{" "}
+          <strong>Copy member ID</strong>. Only you can start sessions; anyone in your workspace can
+          reply in a thread that already has one. Leave empty to let everyone start sessions.
         </p>
         <label htmlFor="slack-default-repository">Default repository</label>
         <Input
@@ -563,8 +641,7 @@ export function SlackSettings() {
           onChange={(event) => setDefaultRepository(event.target.value)}
         />
         <p className="field-help">
-          Enrolled repository for DMs and for mentions the router cannot place. Empty starts
-          sessions with no repository.
+          An enrolled repository for DMs, and for mentions dolly cannot match to a repository.
         </p>
         <label className="checkbox-row">
           <input
@@ -574,9 +651,8 @@ export function SlackSettings() {
           />
           Enable Slack
         </label>
-        {saved && <p className="field-help">Saved.</p>}
         <div className="modal-actions">
-          {status?.configured && (
+          {connected && (
             <button
               type="button"
               className="secondary-button"
@@ -591,11 +667,7 @@ export function SlackSettings() {
 
                 void run(async () => {
                   await request("/integrations/slack", undefined, undefined, "DELETE");
-                  load(
-                    Schema.decodeUnknownSync(Schema.fromJsonString(SlackStatus))(
-                      await request("/integrations/slack"),
-                    ),
-                  );
+                  load(await loadSlack());
                 }, "Could not disconnect Slack.");
               }}
             >
@@ -606,20 +678,26 @@ export function SlackSettings() {
             Save
           </button>
         </div>
+        {saved && <p className="field-help">Saved.</p>}
       </form>
-      {status && (
-        <details className="settings-card">
-          <summary>Bot scopes and events</summary>
-          {status.scopes.map((group) => (
-            <p key={group.label} className="field-help">
-              <strong>{group.label}:</strong> {group.items.join(", ")}
-            </p>
-          ))}
-          <p className="field-help">
-            <strong>Events:</strong> {status.events.join(", ")}
-          </p>
-        </details>
-      )}
+
+      <section className="settings-card" aria-labelledby="slack-step-verify">
+        <h2 id="slack-step-verify" className="settings-step">
+          3. Finish in Slack
+        </h2>
+        <p className="field-help">
+          Slack checks the events URL before dolly has the signing secret, so the first check fails.
+          After saving, open <strong>Event Subscriptions</strong> in your app and choose{" "}
+          <strong>Retry</strong>
+          {status?.eventsUrl ? (
+            <>
+              {" "}
+              next to <code>{status.eventsUrl}</code>
+            </>
+          ) : null}
+          . Then invite the bot to channels it should read and send it a DM.
+        </p>
+      </section>
       {alert}
     </Section>
   );

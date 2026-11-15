@@ -4,7 +4,12 @@ import { Repository } from "./github-contracts";
 import { integrationJson } from "./integration-http";
 import { attempt, OperationError } from "./operations";
 import { SlackId } from "./slack-events";
-import { SLACK_BOT_EVENTS, SLACK_SCOPE_GROUPS, slackCreateAppUrl } from "./slack-manifest";
+import {
+  buildSlackManifest,
+  SLACK_BOT_EVENTS,
+  SLACK_SCOPE_GROUPS,
+  slackCreateAppUrl,
+} from "./slack-manifest";
 
 const BotToken = Schema.String.check(Schema.isPattern(/^xoxb-[A-Za-z0-9-]{10,250}$/));
 const SigningSecret = Schema.String.check(Schema.isPattern(/^[a-f0-9]{32,64}$/));
@@ -136,6 +141,11 @@ export const slackStatus = Effect.fn("Slack.status")(function* (
   const profile = yield* readSlackProfile(storage);
   const webhookBaseUrl = urls.ingress.replace(/\/hooks\/github$/, "");
 
+  const manifestOptions =
+    webhookBaseUrl && urls.publicBaseUrl
+      ? { webhookBaseUrl, publicBaseUrl: urls.publicBaseUrl, appName: "Dolly" }
+      : null;
+
   return {
     configured: profile !== null,
     enabled: profile?.enabled ?? false,
@@ -145,10 +155,9 @@ export const slackStatus = Effect.fn("Slack.status")(function* (
     botUserId: profile?.botUserId ?? null,
     eventsUrl: webhookBaseUrl ? `${webhookBaseUrl}/slack/events` : null,
     actionsUrl: webhookBaseUrl ? `${webhookBaseUrl}/slack/actions` : null,
-    createAppUrl:
-      webhookBaseUrl && urls.publicBaseUrl
-        ? slackCreateAppUrl({ webhookBaseUrl, publicBaseUrl: urls.publicBaseUrl, appName: "Dolly" })
-        : null,
+    createAppUrl: manifestOptions ? slackCreateAppUrl(manifestOptions) : null,
+    /** Pretty JSON for Slack's "From a manifest" box, when the pre-filled link is not used. */
+    manifest: manifestOptions ? JSON.stringify(buildSlackManifest(manifestOptions), null, 2) : null,
     scopes: SLACK_SCOPE_GROUPS,
     events: SLACK_BOT_EVENTS,
   };

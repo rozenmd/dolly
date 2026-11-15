@@ -8,16 +8,16 @@ import type { Env } from "./env";
 
 export const slackRoutes = new Hono<{ Bindings: Env }>();
 
-slackRoutes.get("/api/integrations/slack", async (c) =>
-  c.json(
-    await Effect.runPromise(
-      rpc(
-        "slack.status",
-        async () => await c.env.AGENT.getByName("owner").slackStatus(new URL(c.req.url).origin),
-      ),
+slackRoutes.get("/api/integrations/slack", async (c) => {
+  const result = await Effect.runPromise(
+    rpc(
+      "slack.status",
+      async () => await c.env.AGENT.getByName("owner").slackStatus(new URL(c.req.url).origin),
     ),
-  ),
-);
+  );
+
+  return c.json(result, "error" in result ? 500 : 200);
+});
 
 slackRoutes.put("/api/integrations/slack", async (c) => {
   const parsed = await Effect.runPromise(
