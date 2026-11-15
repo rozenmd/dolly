@@ -378,9 +378,9 @@ Payloads are capped at 256 KiB and command text at 16,384 characters. There are 
 
 DM Dolly or @-mention it in a channel to start or continue a session from Slack. Each Slack thread maps to one session, and the agent's answer is posted back into the thread.
 
-**Set it up.** Save the `dolly-ingress` URL under **Settings → GitHub** first, then open **Settings → Slack**:
+**Set it up** in **Settings → Slack**. If the `dolly-ingress` URL is not saved yet, the page asks for it first.
 
-1. Choose **Create Slack app**. Slack opens its create-app form pre-filled from Dolly's manifest (`src/slack-manifest.ts`): bot scopes, the bot events below, interactivity, the assistant surface, the Dolly hostname for link unfurls, and the two request URLs on the ingress Worker, `/slack/events` and `/slack/actions`.
+1. Choose **Create Slack app**. Slack opens its create-app form pre-filled from Dolly's manifest (`src/slack-manifest.ts`; **Copy manifest** gives the same JSON for Slack's "From a manifest" box): bot scopes, the bot events below, interactivity, the assistant surface, the Dolly hostname for link unfurls, and the two request URLs on the ingress Worker, `/slack/events` and `/slack/actions`.
 2. Create the app and install it to your workspace.
 3. Paste the `xoxb-…` bot token (**OAuth & Permissions**) and the signing secret (**Basic Information**). Set **Allowed Slack member ID** to your own member ID, choose a **Default repository**, enable Slack and **Save**. Saving calls `auth.test` to check the token and record your workspace; the token and secret are stored in the account Durable Object and never returned by the API.
 4. Slack verifies the events URL when the app is created, before Dolly has the signing secret, so that first check fails. After saving, open **Event Subscriptions** in Slack and choose **Retry**.

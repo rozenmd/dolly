@@ -307,6 +307,7 @@ it("saves Slack settings through auth.test and never returns the credentials", a
   );
   expect(manifest.features.unfurl_domains).toEqual(["dolly.example.com"]);
   expect(manifest.oauth_config.scopes.bot).toContain("assistant:write");
+  expect(JSON.parse(body.manifest)).toEqual(manifest);
 });
 
 it("turns a DM into a session, replies in its thread, and gates who may start and steer sessions", async () => {

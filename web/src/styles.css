@@ -1867,6 +1867,16 @@ select.input {
   gap: 8px;
 }
 
-.settings-note {
-  margin-bottom: 16px;
+.settings-step {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.settings-inline-form {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-card .primary-button {
+  text-decoration: none;
 }
