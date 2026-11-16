@@ -92,10 +92,37 @@ export type Step = {
   status: "pending" | "running" | "done" | "error";
   /** The file a step reads or writes, shown as a file label instead of raw detail. */
   file?: { prefix: string; path: string };
+  /** Lines a file tool added and removed, from its result (`+added -removed`). */
+  diff?: DiffStats;
   /** When the model issued the call and when its result arrived, for the step's duration. */
   startedAt?: number;
   endedAt?: number;
 };
+
+export type DiffStats = { added: number; removed: number };
+
+const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+
+/** A file tool's result, such as write_file's or edit_file's `{ path, added, removed }`. */
+const DiffResult = Schema.fromJsonString(Schema.Struct({ added: Count, removed: Count }));
+
+function stepDiff(output: string) {
+  const result = Option.getOrUndefined(Schema.decodeUnknownOption(DiffResult)(output));
+
+  return result && { added: result.added, removed: result.removed };
+}
+
+/** Total lines added and removed by steps, or undefined when no step changed a file. */
+export function diffTotal(steps: readonly Step[]): DiffStats | undefined {
+  const diffs = steps.flatMap((step) => (step.diff ? [step.diff] : []));
+
+  if (diffs.length === 0) return undefined;
+
+  return {
+    added: diffs.reduce((sum, diff) => sum + diff.added, 0),
+    removed: diffs.reduce((sum, diff) => sum + diff.removed, 0),
+  };
+}
 
 export type TurnItem =
   | { kind: "text"; id: string; text: string }
@@ -372,11 +399,16 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
       turn.answer = { id: tail.id, text: tail.text };
     }
 
-    if (!turn.running)
-      for (const item of turn.items)
-        if (item.kind === "steps")
-          for (const step of item.steps)
-            if (step.status === "running" || step.status === "pending") step.status = "done";
+    for (const item of turn.items)
+      if (item.kind === "steps")
+        for (const step of item.steps) {
+          if (!turn.running && (step.status === "running" || step.status === "pending"))
+            step.status = "done";
+
+          const diff = step.status === "done" ? stepDiff(step.output) : undefined;
+
+          if (diff) step.diff = diff;
+        }
   }
 
   return turns;
