@@ -81,7 +81,7 @@ Record:
 
 - Changed behavior, exercised scenarios, commands and observed results.
 - Which boundaries were real, locally simulated, fixture-backed or mocked.
-- Relevant side effects and desktop/phone before/after screenshots or an interaction recording for visible UI changes.
+- Relevant side effects and desktop/phone before/after screenshots or an interaction recording for visible UI changes. These must be embedded in the PR description, not just captured: upload with `github` `upload_screenshot`, then add the returned images to the body with `update_pull_request`. See the verify skill.
 - Failed, skipped or unavailable scenarios and remaining live-system gaps.
 
 Preserve evidence after cleaning up only owned test resources. Never report an

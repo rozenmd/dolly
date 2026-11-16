@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Verify changes to Dolly itself with static checks and integration-first behavioral proof. Use when changing this repository or choosing verification coverage; not for workloads Dolly runs.
+description: Verify Dolly changes with static checks and integration-first proof. Use when changing this repository, choosing verification, or opening/updating a PR (UI PRs need before/after screenshots in the PR description); not for workloads Dolly runs.
 ---
 
 # Verify Dolly changes
@@ -15,12 +15,27 @@ description: Verify changes to Dolly itself with static checks and integration-f
 - **Stop only when you are truly blocked.** If a fix needs access, credentials, network hosts or a product decision you don't have, stop and tell the user exactly what is blocked and what you need. Do not quietly continue past the failure.
 - **Fix it in the current branch.** If the fix is large, ask the user whether it should go in a separate PR first; until they answer, the work is not done.
 
+## Non-negotiable: a UI PR is not open until its screenshots are in its description
+
+**If a PR changes anything visible in `web/`, opening it includes embedding desktop and phone before/after screenshots in the PR description, in the same turn.** Taking screenshots and leaving them in your own conversation does not count: reviewers cannot see them.
+
+- **This is the maintainer's standing request for PR screenshots.** The `github` tool publishes screenshots only when the user or repository guidance asks for them. This rule is that request, for every PR with a visible UI change. Do not wait to be asked.
+- **How:**
+  1. Capture with `preview` `screenshot`. It returns an `r2://screenshots/...` reference.
+  2. Open the PR, then call `github` `upload_screenshot` once per image with the repository, PR number, that reference and a caption like `Before — desktop 1440×900`. It publishes the image and returns `image_url` and `markdown`; it posts nothing to the PR.
+  3. Call `github` `read_pull_request`, then `update_pull_request` with the **whole** existing body plus a `## Screenshots` section. Lay the images out as a table, with rows for desktop and phone (and any extra states) and columns for Before and After, using the returned markdown. `body` replaces the description, so never send only the new section.
+- **Don't post screenshots as comments.** The description is the one place reviewers look for them.
+- **The minimum set:** before and after at desktop (1440×900) and phone (390×844), plus any other state the change introduces, such as open/closed, overlay or empty. Capture "before" from `main` before you change anything, or by stashing your change and rebuilding.
+- **Only upload screenshots of the final code.** If you change the UI after capturing, capture again. Look at every image first: no broken layouts, stale builds, secrets or private data. Use fixture data, not real accounts.
+- **If you can't capture or upload, you are blocked.** Say so to the user and in the PR body, and don't describe the PR as finished.
+- **Before you report the PR as done,** read the PR back with `github` `read_pull_request` and confirm the description has the `## Screenshots` table, with every image URL in it and the rest of the body intact.
+
 1. Name the changed behavior, affected callers and observable pass condition. Reproduce a bug through the affected boundary before fixing it; establish a known-good baseline for a refactor.
 2. Run `pnpm verify` for formatting, lint and root/infra/web typechecks. It does not run tests, build, deploy or contact live product services. Inspect the diff after any generation commands. `pnpm check` is not the static-only equivalent: it also runs frontend unit tests.
 3. Prove changed behavior primarily with integration tests through real boundaries: HTTP handlers, Durable Objects/storage, built Worker routing, containers, Git, turn-end checkpoint recovery and dependency caching. Choose the affected scenarios and relevant failure cases; widen coverage for shared contracts. Add or extend integration coverage when the existing harness does not exercise the change.
 4. Use a small number of browser or live end-to-end journeys for critical behavior that needs them. Existing browser tests (`web/e2e`, driven over CDP) intercept API/WebSocket traffic: they prove browser interactions against fixtures, not real backend operations. Static checks and mocked internal behavior are not integration proof.
 5. Record the scenario, commands, observed output and side effects. State which boundaries were real, simulated or mocked. For visible UI changes, capture desktop and phone before/after screenshots or an interaction recording; this is required, not optional, and a broken screenshot tool is a blocker to report, not a step to skip. Preserve evidence and clean up only resources the run created.
-6. Report results and gaps in the PR. Failed, skipped, unavailable or unexercised scenarios are unverified, not passes. Fix every failure, including pre-existing and inherited ones (see the non-negotiable rule above). Never claim live-system proof from local or fixture-backed tests.
+6. Report results and gaps in the PR. For visible UI changes, embed the screenshots in the PR description as soon as it is open (see "A UI PR is not open until its screenshots are in its description" above). Failed, skipped, unavailable or unexercised scenarios are unverified, not passes. Fix every failure, including pre-existing and inherited ones (see the non-negotiable rule above). Never claim live-system proof from local or fixture-backed tests.
 
 ## Coverage policy
 
