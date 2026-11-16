@@ -7,9 +7,10 @@ import { headers, signIn } from "./session";
 import { Live, Snapshot } from "../src/transcript";
 
 /**
- * A long tool-using turn outgrows Pi's 50-entry transcript window, so its prompt
- * leaves a freshly opened window. Its final answer must still be the newest entry, with
- * the run settled and no failure, over both the HTTP read and the live WebSocket.
+ * A long tool-using turn outgrows Pi's default 50-entry transcript window. A freshly
+ * opened view must still start at the turn's prompt, and its final answer must be the
+ * newest entry, with the run settled and no failure, over both the HTTP read and the
+ * live WebSocket.
  */
 
 const token = `sk-ant-oat01-${"a".repeat(64)}`;
@@ -142,6 +143,31 @@ function expectFinalAnswer(snapshot: typeof Snapshot.Type) {
   });
 }
 
+/** The window starts at the turn's prompt, though the turn holds more than 50 entries. */
+function expectPrompt(snapshot: typeof Snapshot.Type) {
+  expect(snapshot.entries.length).toBeGreaterThan(50);
+  expect(snapshot.entries[0]?.kind).toBe("pi.user");
+  expect(snapshot.entries[0]?.model?.[0]).toMatchObject({ role: "user", content: "Explore" });
+}
+
+async function openStream(id: string) {
+  const stream = await SELF.fetch(`https://worker/api/sessions/${id}/events`, {
+    headers: { ...headers, Upgrade: "websocket", Origin: "https://worker" },
+  });
+
+  const socket = stream.webSocket;
+
+  if (!socket) throw new Error("Expected a session WebSocket");
+  const updates: string[] = [];
+
+  socket.addEventListener("message", (event) => {
+    updates.push(String(event.data));
+  });
+  socket.accept();
+
+  return { socket, updates };
+}
+
 async function claudeSession() {
   const saved = await SELF.fetch("https://worker/api/auth/anthropic", {
     method: "PUT",
@@ -184,7 +210,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-it("keeps the final answer of a long turn whose prompt left the transcript window", async () => {
+it("keeps the prompt and final answer of a long turn in a freshly opened view", async () => {
   const model = longTurnModel();
   const id = await claudeSession();
   await prompt(id);
@@ -195,9 +221,7 @@ it("keeps the final answer of a long turn whose prompt left the transcript windo
   await expect.poll(async () => settled(await read()), { timeout: 30_000 }).toBe(true);
   expect(model.rounds()).toBe(ROUNDS + 1);
   const snapshot = await read();
-  // A freshly opened view holds the newest 50 entries, which no longer reach the prompt.
-  expect(snapshot.before).toBeDefined();
-  expect(snapshot.entries.some((entry) => entry.kind === "pi.user")).toBe(false);
+  expectPrompt(snapshot);
   expectFinalAnswer(snapshot);
 });
 
@@ -205,19 +229,7 @@ it("streams the final answer of a long turn over the live WebSocket", async () =
   const model = longTurnModel();
   const id = await claudeSession();
 
-  const stream = await SELF.fetch(`https://worker/api/sessions/${id}/events`, {
-    headers: { ...headers, Upgrade: "websocket", Origin: "https://worker" },
-  });
-
-  const socket = stream.webSocket;
-
-  if (!socket) throw new Error("Expected a session WebSocket");
-  const updates: string[] = [];
-
-  socket.addEventListener("message", (event) => {
-    updates.push(String(event.data));
-  });
-  socket.accept();
+  const { socket, updates } = await openStream(id);
 
   try {
     await expect.poll(() => updates.length).toBeGreaterThan(0);
@@ -229,5 +241,17 @@ it("streams the final answer of a long turn over the live WebSocket", async () =
     expectFinalAnswer(decode(updates.at(-1) ?? ""));
   } finally {
     socket.close();
+  }
+
+  // Reopening the view, as a page reload does, starts it at the prompt again.
+  const reopened = await openStream(id);
+
+  try {
+    await expect.poll(() => reopened.updates.length).toBeGreaterThan(0);
+    const snapshot = decode(reopened.updates[0] ?? "");
+    expectPrompt(snapshot);
+    expectFinalAnswer(snapshot);
+  } finally {
+    reopened.socket.close();
   }
 });
