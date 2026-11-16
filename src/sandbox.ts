@@ -510,6 +510,7 @@ export class Sandbox extends DurableObject<Env> {
     cwd: string,
     timeout = 60,
     initializingContainer?: Container,
+    env: Readonly<Record<string, string>> = {},
   ) {
     // Initialization probes must not recursively re-enter container() when a
     // lazy container startup fails.
@@ -533,6 +534,7 @@ export class Sandbox extends DurableObject<Env> {
           cwd,
           signal,
           env: {
+            ...env,
             GIT_TERMINAL_PROMPT: "0",
             GIT_CONFIG_NOSYSTEM: "1",
             GIT_SSL_CAINFO: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
@@ -983,7 +985,8 @@ export class Sandbox extends DurableObject<Env> {
     return setup;
   }
 
-  run(command: string) {
+  /** `env` adds variables such as the agent's git identity; it cannot override the fixed git and TLS settings. */
+  run(command: string, env: Readonly<Record<string, string>> = {}) {
     return this.runWorkspaceOperation(
       this.permit.withPermit(
         Effect.gen({ self: this }, function* () {
@@ -993,7 +996,13 @@ export class Sandbox extends DurableObject<Env> {
 
           if (workspace) yield* this.prepareWorkspace(workspace);
 
-          return yield* this.execute(command, workspace ? "/workspace/repo" : "/workspace");
+          return yield* this.execute(
+            command,
+            workspace ? "/workspace/repo" : "/workspace",
+            60,
+            undefined,
+            env,
+          );
         }),
       ),
     );

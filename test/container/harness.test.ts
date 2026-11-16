@@ -139,6 +139,10 @@ mkdir -p remotes/another-owner
         expect(instructions).toContain("Fixture repository verification");
         expect(instructions).toContain(".agents/skills/verify/SKILL.md");
         expect(instructions).not.toContain("Fixture full skill instructions");
+        // The owner is credited as co-author; the agent adds the trailer itself.
+        expect(instructions).toContain(
+          "Commit trailers: Co-authored-by: octocat <1+octocat@users.noreply.github.com>",
+        );
       }
 
       const call = calls[generation++];
@@ -194,6 +198,13 @@ mkdir -p remotes/another-owner
     if (url.hostname === "api.github.com") {
       if (url.pathname.endsWith("/installation")) return Response.json({ id: 7 });
 
+      // The bot user's id makes its noreply address link commits to the bot account.
+      if (url.pathname === "/users/fixture%5Bbot%5D") {
+        expect(new Headers(init?.headers).has("Authorization")).toBe(false);
+
+        return Response.json({ id: 9001, login: "fixture[bot]" });
+      }
+
       if (url.pathname.endsWith("/access_tokens")) {
         expect(JSON.parse(String(init?.body)).repositories).toEqual(["project"]);
 
@@ -210,9 +221,14 @@ mkdir -p remotes/another-owner
         expect(
           // The mock runs inside the Agent: create its RPC stub in that I/O context.
           await env.SANDBOX.getByName(remoteName).run(
-            `git --git-dir=remotes/another-owner/project.git log -1 --format=%s refs/heads/${pull.head}`,
+            `git --git-dir=remotes/another-owner/project.git log -1 --format='%s|%an|%ae|%cn|%ce' refs/heads/${pull.head}`,
           ),
-        ).toMatchObject({ exitCode: 0, stdout: "Fix answer\n" });
+        ).toMatchObject({
+          exitCode: 0,
+          // The App's bot authors and commits; no run carries the owner's own git identity.
+          stdout:
+            "Fix answer|fixture[bot]|9001+fixture[bot]@users.noreply.github.com|fixture[bot]|9001+fixture[bot]@users.noreply.github.com\n",
+        });
         opened = true;
 
         return Response.json({
