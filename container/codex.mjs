@@ -16,10 +16,29 @@ function toml(value) {
   return JSON.stringify(value);
 }
 
+function diagnosticText(text, token = "") {
+  let safe = String(text);
+
+  if (token) safe = safe.split(token).join("[redacted]");
+
+  return safe
+    .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted JWT]")
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(
+      /((?:access_token|refresh_token|id_token|authorization)["'\s]*[:=]["'\s]*)([^"'\s,}]+)/gi,
+      "$1[redacted]",
+    )
+    .slice(-8192);
+}
+
 // Each Pi generation gets an ephemeral CLI thread. Dolly's durable transcript and
 // tool scheduler remain authoritative, including after eviction or cancellation.
 // Only an access token enters this container, never the rotating refresh token.
-export async function runCodex(request, emit, { signal, binary = "codex", config = {} } = {}) {
+export async function runCodex(
+  request,
+  emit,
+  { signal, binary = "codex", config = {}, onDiagnostic = () => {} } = {},
+) {
   const home = await mkdtemp(join(tmpdir(), "dolly-codex-"));
   // CLI model defaults can force Code Mode and native subagents even when their
   // feature flags are off. This transport uses Dolly's durable tools instead.
@@ -95,6 +114,11 @@ export async function runCodex(request, emit, { signal, binary = "codex", config
   let child;
   let lines;
   let timer;
+  let stage = "prepare";
+  let stderr = "";
+  let exitCode = null;
+  let exitSignal = null;
+  const stderrDecoder = new TextDecoder();
   const pending = new Map();
   let sequence = 0;
   let finished = false;
@@ -157,11 +181,17 @@ export async function runCodex(request, emit, { signal, binary = "codex", config
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
-    // Drain diagnostics but never forward stderr: it can contain provider secrets.
-    child.stderr.resume();
+    // Retain a bounded tail, redact it before logging, and never send it to the model.
+    child.stderr.on("data", (chunk) => {
+      stderr = (stderr + stderrDecoder.decode(chunk, { stream: true })).slice(-65536);
+    });
     child.stdin.on("error", () => fail(new Error("Codex CLI transport closed")));
     child.on("error", () => fail(new Error("Unable to start Codex CLI")));
-    child.on("exit", () => fail(new Error("Codex CLI exited before completing the request")));
+    child.on("exit", (code, termination) => {
+      exitCode = code;
+      exitSignal = termination;
+      fail(new Error("Codex CLI exited before completing the request"));
+    });
     signal?.addEventListener("abort", abort, { once: true });
     timer = setTimeout(() => {
       fail(new Error("Codex CLI request timed out"));
@@ -171,6 +201,7 @@ export async function runCodex(request, emit, { signal, binary = "codex", config
 
     const rpc = (method, params) =>
       new Promise((resolve, reject) => {
+        stage = method;
         const id = ++sequence;
         pending.set(id, { resolve, reject });
         send({ id, method, params });
@@ -217,7 +248,12 @@ export async function runCodex(request, emit, { signal, binary = "codex", config
           const waiter = pending.get(message.id);
           pending.delete(message.id);
 
-          if (message.error) waiter?.reject(new Error("Codex CLI rejected an app-server request"));
+          if (message.error)
+            waiter?.reject(
+              new Error(
+                `Codex app-server error ${message.error.code}: ${diagnosticText(message.error.message, request.accessToken)}`,
+              ),
+            );
           else waiter?.resolve(message.result);
 
           return;
@@ -295,10 +331,18 @@ export async function runCodex(request, emit, { signal, binary = "codex", config
 
           emit({ type: "dolly.codex.usage", headers });
         } else if (message.method === "turn/completed") {
-          if (params.turn.status !== "completed") throw new Error("Codex turn failed");
+          if (params.turn.status !== "completed")
+            throw new Error(
+              `Codex turn ${params.turn.status}: ${diagnosticText(params.turn.error?.message ?? "No error detail", request.accessToken)}`,
+            );
           complete();
         } else if (message.method === "error" && !params.willRetry) {
-          throw new Error("Codex inference failed; check the account's access and usage limits");
+          throw new Error(
+            `Codex inference failed: ${diagnosticText(
+              params.error?.message ?? "No error detail",
+              request.accessToken,
+            )}`,
+          );
         }
       } catch (error) {
         fail(error);
@@ -349,6 +393,16 @@ export async function runCodex(request, emit, { signal, binary = "codex", config
       summary: body.reasoning?.summary,
     });
     await turn;
+  } catch (error) {
+    onDiagnostic({
+      event: "codex_cli_failed",
+      stage,
+      message: diagnosticText(error.message, request.accessToken),
+      stderr: diagnosticText(stderr, request.accessToken),
+      exitCode,
+      signal: exitSignal,
+    });
+    throw error;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", abort);
@@ -373,6 +427,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const abort = new AbortController();
   process.on("SIGTERM", () => abort.abort());
   let input = "";
+  let token = "";
 
   for await (const chunk of process.stdin) {
     input += chunk;
@@ -381,14 +436,26 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
 
   try {
+    const request = JSON.parse(input);
+
+    token = request.accessToken;
     await runCodex(
-      JSON.parse(input),
+      request,
       (event) => {
         process.stdout.write(`data: ${JSON.stringify(event)}\n\n`);
       },
-      { signal: abort.signal },
+      {
+        signal: abort.signal,
+        onDiagnostic: (diagnostic) => process.stderr.write(`${JSON.stringify(diagnostic)}\n`),
+      },
     );
-  } catch {
+  } catch (error) {
+    process.stderr.write(
+      `${JSON.stringify({
+        event: "codex_bridge_failed",
+        message: diagnosticText(error.message, token),
+      })}\n`,
+    );
     // Don't serialize raw exceptions or stderr, which may contain credentials.
     process.stdout.write(
       `data: ${JSON.stringify({

@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { expect, it } from "vite-plus/test";
+import { afterEach, expect, it, vi } from "vite-plus/test";
 import type { Codex } from "../../src/codex";
 import { zstdCompressSync } from "node:zlib";
 import { runInDurableObject } from "cloudflare:test";
@@ -12,7 +12,10 @@ declare global {
   }
 }
 
+afterEach(() => vi.restoreAllMocks());
+
 it("runs the Codex bridge through its real container without exposing malformed credentials", async () => {
+  const logs = vi.spyOn(console, "error");
   const codex = env.CODEX_CONTAINER.getByName(crypto.randomUUID());
   const url = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -33,6 +36,12 @@ it("runs the Codex bridge through its real container without exposing malformed 
 
   expect(text).toContain("Codex CLI request failed");
   expect(text).not.toContain(secret);
+  await expect.poll(() => JSON.stringify(logs.mock.calls)).toContain("codex_cli_exit");
+  const logged = JSON.stringify(logs.mock.calls);
+
+  expect(logged).toContain("codex_bridge_failed");
+  expect(logged).toContain('"exitCode":1');
+  expect(logged).not.toContain(secret);
 
   const compressed = await codex.fetch(url, {
     method: "POST",

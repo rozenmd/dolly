@@ -4,6 +4,50 @@ import type { StreamFunction, StreamOptions, Api } from "@earendil-works/pi-ai";
 import type { Env } from "./env";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
+import { exceptionDetails, redact } from "./diagnostics";
+
+async function logCodexExit(
+  process: ExecProcess,
+  requestId: string,
+  token: string,
+  startedAt: number,
+) {
+  const reader = process.stderr?.getReader();
+  const decoder = new TextDecoder();
+  let stderr = "";
+
+  try {
+    if (reader)
+      while (true) {
+        const next = await reader.read();
+
+        if (next.done) break;
+
+        stderr = (stderr + decoder.decode(next.value, { stream: true })).slice(-65536);
+      }
+
+    const exitCode = await process.exitCode;
+
+    const details = {
+      event: "codex_cli_exit",
+      requestId,
+      exitCode,
+      elapsedMs: Date.now() - startedAt,
+      diagnostic: redact(stderr, [token]).slice(-16384),
+    };
+
+    if (exitCode === 0 && !stderr) console.info(details);
+    else console.error(details);
+  } catch (cause) {
+    console.error({
+      event: "codex_diagnostics_failed",
+      requestId,
+      error: exceptionDetails(cause, [token]),
+    });
+  } finally {
+    reader?.releaseLock();
+  }
+}
 
 const CodexUsageEvent = Schema.Struct({
   type: Schema.Literal("dolly.codex.usage"),
@@ -150,9 +194,24 @@ export class Codex extends DurableObject<Env> {
         : bytes;
 
     const body: unknown = JSON.parse(new TextDecoder().decode(decoded));
-    await this.startContainer(container);
-    const controller = new AbortController();
+    const startedAt = Date.now();
     const id = request.headers.get("x-dolly-request-id") ?? crypto.randomUUID();
+
+    console.info({ event: "codex_container_start", requestId: id, running: container.running });
+
+    try {
+      await this.startContainer(container);
+    } catch (cause) {
+      console.error({
+        event: "codex_container_start_failed",
+        requestId: id,
+        elapsedMs: Date.now() - startedAt,
+        error: exceptionDetails(cause, [accessToken]),
+      });
+      throw cause;
+    }
+
+    const controller = new AbortController();
     const cancellation = this.requests.get(id) ?? controller;
     const abort = () => controller.abort();
 
@@ -176,20 +235,23 @@ export class Codex extends DurableObject<Env> {
         ).body!,
         signal: controller.signal,
       });
-    } catch {
+    } catch (cause) {
       request.signal.removeEventListener("abort", abort);
       cancellation.signal.removeEventListener("abort", abort);
       this.requests.delete(id);
 
       if (controller.signal.aborted) return new Response(null, { status: 499 });
 
+      console.error({
+        event: "codex_process_start_failed",
+        requestId: id,
+        error: exceptionDetails(cause, [accessToken]),
+      });
       throw new Error("Unable to start Codex container process");
     }
 
     if (!process.stdout) throw new Error("Codex CLI stdout is unavailable");
-    // Drain stderr without retaining or logging credentials. The bridge emits
-    // bounded, credential-free failures in its SSE stream instead.
-    this.ctx.waitUntil(process.stderr?.pipeTo(new WritableStream()) ?? Promise.resolve());
+    this.ctx.waitUntil(logCodexExit(process, id, accessToken, startedAt));
     const reader = process.stdout.getReader();
 
     const cleanup = async (cancel = false) => {

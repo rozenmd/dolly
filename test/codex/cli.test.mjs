@@ -249,10 +249,34 @@ test("official CLI replays Dolly history, streams text, and returns tools to Dol
     );
 
     mode = "error";
+    const diagnostics = [];
+
     await assert.rejects(
-      runCodex({ accessToken, body, timeoutMs: 15_000 }, () => {}, { binary, config }),
+      runCodex({ accessToken, body, timeoutMs: 15_000 }, () => {}, {
+        binary,
+        config,
+        onDiagnostic: (entry) => diagnostics.push(entry),
+      }),
       (error) => !error.message.includes(accessToken) && /Codex/.test(error.message),
     );
+    assert.equal(diagnostics[0].event, "codex_cli_failed");
+    assert.equal(diagnostics[0].stage, "turn/start");
+    assert.match(diagnostics[0].message, /403/);
+    assert.ok(!JSON.stringify(diagnostics).includes(accessToken));
+
+    const startupDiagnostics = [];
+
+    await assert.rejects(
+      runCodex({ accessToken, body, timeoutMs: 15_000 }, () => {}, {
+        binary,
+        config: { ...config, tools: { update_plan: false } },
+        onDiagnostic: (entry) => startupDiagnostics.push(entry),
+      }),
+      /exited/,
+    );
+    assert.equal(startupDiagnostics[0].exitCode, 1);
+    assert.match(startupDiagnostics[0].stderr, /invalid type/);
+    assert.ok(!JSON.stringify(startupDiagnostics).includes(accessToken));
 
     mode = "stall";
     const controller = new AbortController();
