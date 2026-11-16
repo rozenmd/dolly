@@ -30,7 +30,7 @@ import {
 } from "@heroicons/react/24/outline";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { QueuedMessage, Step, Turn } from "../lib/api";
+import { diffTotal, type DiffStats, type QueuedMessage, type Step, type Turn } from "../lib/api";
 import { ago, duration } from "../lib/time";
 import { formatToolOutput, oneLine } from "../lib/tool-output";
 import { IconButton, Textarea } from "./ui";
@@ -229,6 +229,11 @@ function WorkLog({ turn, now }: { turn: Turn; now: number }) {
   const elapsed =
     started !== undefined && turn.endedAt !== undefined ? duration(turn.endedAt - started) : "";
 
+  const changed = useMemo(
+    () => diffTotal(turn.items.flatMap((item) => (item.kind === "steps" ? item.steps : []))),
+    [turn.items],
+  );
+
   return (
     <details className="work-log" {...disclosure}>
       <summary>
@@ -237,6 +242,7 @@ function WorkLog({ turn, now }: { turn: Turn; now: number }) {
         <span className="work-meta">
           {[!turn.running && elapsed, stepCount(turn.steps)].filter(Boolean).join(" · ")}
         </span>
+        {changed && <DiffStat diff={changed} />}
       </summary>
       <div className="work-timeline">
         {turn.items.map((item) =>
@@ -259,12 +265,14 @@ function StepGroup({ id, steps, now }: { id: string; steps: readonly Step[]; now
   const running = steps.some((step) => step.status === "running");
   const failed = steps.some((step) => step.status === "error");
   const disclosure = useDisclosure(id, true);
+  const changed = useMemo(() => diffTotal(steps), [steps]);
 
   return (
     <details className="step-group" {...disclosure}>
       <summary>
         <ChevronRightIcon className="disclosure" />
         <span>{stepCount(steps.length)}</span>
+        {changed && <DiffStat diff={changed} />}
         {running && <span className="status-dot working" aria-label="Running" />}
         {failed && <ExclamationCircleIcon className="step-error" aria-label="A step failed" />}
       </summary>
@@ -296,6 +304,7 @@ function StepDetails({ step, now }: { step: Step; now: number }) {
         ) : (
           step.detail && <code className="step-detail">{oneLine(step.detail)}</code>
         )}
+        {step.diff && <DiffStat diff={step.diff} />}
         {output.exitCode !== undefined && <span className="step-exit">exit {output.exitCode}</span>}
         {elapsed && <span className="step-time">{elapsed}</span>}
       </summary>
@@ -338,6 +347,21 @@ function stepElapsed(step: Step, now: number) {
   return ms < 1000 ? "<1s" : duration(ms);
 }
 
+/** Lines added and removed, as `+12 -3`; zero counts are left out. */
+function DiffStat({ diff }: { diff: DiffStats }) {
+  if (diff.added === 0 && diff.removed === 0) return null;
+
+  return (
+    <span
+      className="diff-stat"
+      aria-label={`${diff.added} ${diff.added === 1 ? "line" : "lines"} added, ${diff.removed} removed`}
+    >
+      {diff.added > 0 && <span className="diff-added">+{diff.added}</span>}
+      {diff.removed > 0 && <span className="diff-removed">-{diff.removed}</span>}
+    </span>
+  );
+}
+
 const toolIcons = new Map(
   Object.entries({
     shell: CommandLineIcon,
@@ -345,6 +369,8 @@ const toolIcons = new Map(
     read_file: DocumentTextIcon,
     edit: PencilIcon,
     write: PencilIcon,
+    edit_file: PencilIcon,
+    write_file: PencilIcon,
     github: CodeBracketIcon,
     workspace: FolderIcon,
     preview: EyeIcon,
