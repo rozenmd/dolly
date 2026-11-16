@@ -19,12 +19,12 @@ description: Verify Dolly changes with static checks and integration-first proof
 
 **If a PR changes anything visible in `web/`, opening it includes embedding desktop and phone before/after screenshots in the PR description, in the same turn.** Taking screenshots and leaving them in your own conversation does not count: reviewers cannot see them.
 
-- **This is the maintainer's standing request for PR screenshots.** The `github` tool only publishes screenshots "when the user has requested PR screenshots/evidence". For this repository, the request is already made, by this rule, for every PR with a visible UI change. Do not wait to be asked.
+- **This is the maintainer's standing request for PR screenshots.** The `github` tool publishes screenshots only when the user or repository guidance asks for them. This rule is that request, for every PR with a visible UI change. Do not wait to be asked.
 - **How:**
   1. Capture with `preview` `screenshot`. It returns an `r2://screenshots/...` reference.
-  2. Open the PR, then call `github` `upload_screenshot` once per image with the repository, PR number, that reference and a caption like `Before — desktop 1440×900`. Keep the `image_url` and `markdown` it returns. The upload succeeds even if its comment fails (`comment_url` is `null`), and the URL is still usable.
+  2. Open the PR, then call `github` `upload_screenshot` once per image with the repository, PR number, that reference and a caption like `Before — desktop 1440×900`. It publishes the image and returns `image_url` and `markdown`; it posts nothing to the PR.
   3. Call `github` `read_pull_request`, then `update_pull_request` with the **whole** existing body plus a `## Screenshots` section. Lay the images out as a table, with rows for desktop and phone (and any extra states) and columns for Before and After, using the returned markdown. `body` replaces the description, so never send only the new section.
-- **The tool also posts a comment.** `upload_screenshot` always adds one comment per image, and there is no tool to delete comments. The description is the record reviewers read; mention in your reply that the comments can be deleted.
+- **Don't post screenshots as comments.** The description is the one place reviewers look for them.
 - **The minimum set:** before and after at desktop (1440×900) and phone (390×844), plus any other state the change introduces, such as open/closed, overlay or empty. Capture "before" from `main` before you change anything, or by stashing your change and rebuilding.
 - **Only upload screenshots of the final code.** If you change the UI after capturing, capture again. Look at every image first: no broken layouts, stale builds, secrets or private data. Use fixture data, not real accounts.
 - **If you can't capture or upload, you are blocked.** Say so to the user and in the PR body, and don't describe the PR as finished.
