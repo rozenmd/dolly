@@ -10,6 +10,8 @@ import { redact } from "./diagnostics";
 import { attempt } from "./operations";
 import { observeUsage } from "./usage";
 
+type AnthropicStream = typeof streamSimple;
+
 type ProbeObservation = {
   value: {
     status: number;
@@ -26,7 +28,10 @@ export const AnthropicSetup = Schema.Struct({
 export const AnthropicProbe = Schema.Struct({ model: Schema.optional(AnthropicModel) });
 
 /** Eager HTTP adapter: never load the Node-only interactive OAuth flow or run a CLI in the Worker. */
-export function claudeProvider(onHeaders?: (headers: Record<string, string>) => void) {
+export function claudeProvider(
+  onHeaders?: (headers: Record<string, string>) => void,
+  wrapStream: (fn: AnthropicStream) => AnthropicStream = (fn) => fn,
+) {
   const provider = anthropicProvider();
 
   return createProvider({
@@ -38,9 +43,9 @@ export function claudeProvider(onHeaders?: (headers: Record<string, string>) => 
     api: onHeaders
       ? {
           stream: observeUsage(stream, onHeaders),
-          streamSimple: observeUsage(streamSimple, onHeaders),
+          streamSimple: wrapStream(observeUsage(streamSimple, onHeaders)),
         }
-      : { stream, streamSimple },
+      : { stream, streamSimple: wrapStream(streamSimple) },
   });
 }
 

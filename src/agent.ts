@@ -10,6 +10,7 @@ import {
   createRegistry,
   defineExtension,
   InboxDoc,
+  ProviderDoc,
   GenerationTask,
   hook,
   runEndTask,
@@ -49,6 +50,7 @@ import {
 import { gitRoute, checkedPush } from "./git-transport";
 import { BROWSER_SESSION_MS, MAX_BROWSER_SESSIONS } from "./browser-workspace";
 import { WebhookSetup } from "./github-webhook";
+import { STEER_TOOL_SKIP, SteerInterrupts, steerInterrupts, steerQueued } from "./steer-interrupt";
 import { admitGitHub, githubDelivery, GitHubThreads } from "./github-inbox";
 import { admitSlack, slackDelivery } from "./slack-inbox";
 import { SlackHostService } from "./slack-host";
@@ -160,6 +162,7 @@ export class Agent extends DurableObject<Env> {
         Effect.provide(this.slackServices),
       ),
   });
+  private readonly steerInterrupts = new SteerInterrupts();
   private readonly alarmPermit = Semaphore.makeUnsafe(1);
   private readonly checkpointTask = workspaceCheckpoint(
     (sandboxId, turnId) => this.env.SANDBOX.getByName(sandboxId).checkpoint(turnId),
@@ -201,7 +204,9 @@ export class Agent extends DurableObject<Env> {
         // Load the SSE adapter with the Worker, not in an evictable generation request.
         api: {
           stream: observeUsage(stream, this.usageObserver("openai-codex")),
-          streamSimple: observeUsage(streamSimple, this.usageObserver("openai-codex")),
+          streamSimple: this.steerInterrupts.wrap(
+            observeUsage(streamSimple, this.usageObserver("openai-codex")),
+          ),
         },
         auth: {
           oauth: {
@@ -230,7 +235,9 @@ export class Agent extends DurableObject<Env> {
         },
       }),
     );
-    models.setProvider(claudeProvider(this.usageObserver("anthropic")));
+    models.setProvider(
+      claudeProvider(this.usageObserver("anthropic"), (fn) => this.steerInterrupts.wrap(fn)),
+    );
 
     const shell = {
       name: "shell",
@@ -555,9 +562,19 @@ export class Agent extends DurableObject<Env> {
                 }
               : undefined;
           },
-          beforeRequest: async ({ messages }) => ({
-            messages: await resolveImages(this.env.SCREENSHOTS, messages),
-          }),
+          beforeRequest: async ({ messages }, api, context) => {
+            // Lets a steer cut this request short while it is only thinking (steer-interrupt.ts).
+            const provider = await api.snapshot(ProviderDoc, api.conversationId, context);
+
+            if (provider)
+              this.steerInterrupts.bind(
+                provider.sessionId,
+                String(api.conversationId),
+                steerInterrupts(await api.snapshot(InboxDoc, api.conversationId, context)),
+              );
+
+            return { messages: await resolveImages(this.env.SCREENSHOTS, messages) };
+          },
           afterResponse: async (message, api) => {
             if (message.stopReason === "error")
               await this.capturePapercut(
@@ -568,6 +585,13 @@ export class Agent extends DurableObject<Env> {
           },
         }),
         hook(ToolTask, {
+          // Sequential rounds start calls one at a time: once a steer waits, skip the rest so it
+          // lands at this round's boundary instead of behind stale work.
+          beforeTool: async (call, api, context) =>
+            call.parent === undefined &&
+            steerQueued(await api.snapshot(InboxDoc, api.conversationId, context))
+              ? { block: STEER_TOOL_SKIP }
+              : undefined,
           afterTool: async (call, result, api) => {
             const message = toolFailure(result);
 
@@ -625,7 +649,12 @@ export class Agent extends DurableObject<Env> {
         {
           models,
           registry,
-          settings: { extensions: [extension], stream: { transport: "sse", timeoutMs: 120_000 } },
+          settings: {
+            extensions: [extension],
+            stream: { transport: "sse", timeoutMs: 120_000 },
+            // Every waiting steer joins at the next boundary, not one per step.
+            steeringMode: "all",
+          },
           conversationCreated: async (tx, conversation) => {
             await indexSession(tx, conversation.id);
             await configure(tx, conversation.id, {
@@ -1951,8 +1980,17 @@ export class Agent extends DurableObject<Env> {
 
             item.mode = "steer";
 
-            return { state: "steering" };
+            return { state: "steering", interrupts: steerInterrupts(inbox) };
           }, BACKGROUND_CONTEXT),
+        ).pipe(
+          Effect.map((result) => {
+            if (!("state" in result)) return result;
+
+            // A response still only thinking is cut short so the steer is answered now.
+            if (result.interrupts) this.steerInterrupts.interrupt(String(conversation.value.id));
+
+            return { state: result.state };
+          }),
         );
       }),
     );
