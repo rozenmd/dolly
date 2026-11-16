@@ -208,7 +208,8 @@ mkdir -p remotes/another-owner
 
         expect(pull.base).toBe("main");
         expect(
-          await remote.run(
+          // The mock runs inside the Agent: create its RPC stub in that I/O context.
+          await env.SANDBOX.getByName(remoteName).run(
             `git --git-dir=remotes/another-owner/project.git log -1 --format=%s refs/heads/${pull.head}`,
           ),
         ).toMatchObject({ exitCode: 0, stdout: "Fix answer\n" });

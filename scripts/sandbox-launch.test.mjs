@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,7 +43,8 @@ process.exit(${exitCode});
 
     assert.equal(result.status, exitCode, result.stdout + result.stderr);
     assert.deepEqual(JSON.parse(readFileSync(output, "utf8")), {
-      cwd: checkout,
+      // process.cwd() resolves host symlinks (e.g. macOS /var -> /private/var).
+      cwd: realpathSync(checkout),
       args: [
         "exec",
         "vp",

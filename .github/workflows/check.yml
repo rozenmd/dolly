@@ -3,25 +3,48 @@ on:
   push:
     branches: [main]
   pull_request_target:
+  merge_group:
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
-  verify:
+  plan:
     # Evaluate the PR gate from the base branch, before checking out PR code.
     if: github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      base: ${{ steps.plan.outputs.base }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select affected suites
+        id: plan
+        run: node scripts/ci-plan.mjs
+        env:
+          CI_BASE: ${{ github.event.pull_request.base.sha }}
+  verify:
+    if: github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd'
+    needs: plan
+    name: verify (${{ matrix.suite }}, ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        suite: [unit, worker, sandbox]
+        include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
@@ -29,8 +52,6 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - if: matrix.suite == 'unit'
-        run: pnpm run check && pnpm test
       - name: Start Chromium over CDP
         if: matrix.suite == 'worker'
         run: |
@@ -46,9 +67,13 @@ jobs:
           done
           docker logs dolly-ci-browser
           exit 1
-      - if: matrix.suite == 'worker'
-        run: pnpm run test:worker
+      - name: Run suite
+        run: node scripts/ci-run.mjs "$CI_SUITE"
         env:
+          CI_SUITE: ${{ matrix.suite }}
+          CI_MODE: ${{ matrix.mode }}
+          CI_SHARD: ${{ matrix.shard }}
+          CI_BASE: ${{ needs.plan.outputs.base }}
           BROWSER_CDP_URL: http://127.0.0.1:9222
       - name: Stop Chromium
         if: always() && matrix.suite == 'worker'
@@ -56,19 +81,22 @@ jobs:
           if docker container inspect dolly-ci-browser > /dev/null 2>&1; then
             docker rm --force dolly-ci-browser
           fi
-      # Keep these on the same runner: build reuses the rootless Docker daemon.
-      - if: matrix.suite == 'sandbox'
-        run: pnpm run test:sandbox
-      - if: matrix.suite == 'sandbox'
-        run: pnpm run build
+      - name: Record shard timings
+        if: always() && (matrix.suite == 'root' || matrix.suite == 'sandbox')
+        uses: actions/upload-artifact@v4
+        with:
+          name: timings-${{ matrix.suite }}-${{ strategy.job-index }}
+          path: ci-results-*.json
+          retention-days: 14
   # Preserve the existing required status while waiting for every suite.
   check:
     if: always() && github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd'
-    needs: verify
+    needs: [plan, verify]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
       - name: Require all suites to pass
         env:
+          PLAN: ${{ needs.plan.result }}
           RESULT: ${{ needs.verify.result }}
-        run: test "$RESULT" = success
+        run: test "$PLAN" = success && test "$RESULT" = success

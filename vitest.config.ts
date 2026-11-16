@@ -1,5 +1,6 @@
 import { defineConfig } from "vite-plus";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
+import { TimingSequencer } from "./scripts/ci-sequencer";
 
 export default defineConfig({
   plugins: [
@@ -22,6 +23,7 @@ export default defineConfig({
     }),
   ],
   test: {
+    sequence: { sequencer: TimingSequencer },
     include: ["test/*.test.ts"],
     // Avoid oversized warm-module WebSocket frames (workers-sdk#16349).
     fsModuleCache: false,
