@@ -337,6 +337,8 @@ describe("session transcript", () => {
                 detail: "pnpm test",
                 output: "3 tests passed",
                 status: "done",
+                startedAt: 2000,
+                endedAt: 3000,
               },
             ],
           },

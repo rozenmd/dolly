@@ -1091,7 +1091,7 @@ test("cancelling ChatGPT sign-in ignores an approval that was already in flight"
   await expect(page.getByRole("heading", { name: "Connect a model" })).toBeVisible();
 });
 
-test("keeps steps open while the agent works and respects a step group the user closes", async ({
+test("keeps steps collapsed while the agent works and respects what the user opens or closes", async ({
   page,
 }) => {
   await page.addInitScript(() =>
@@ -1145,9 +1145,13 @@ test("keeps steps open while the agent works and respects a step group the user 
 
   const group = page.locator("details.step-group");
   const steps = page.locator("details.step");
-  await expect(page.getByText("Linting")).toBeVisible();
+  await expect(steps.first().locator("> summary")).toContainText("pnpm lint");
   await expect(group).toHaveJSProperty("open", true);
+  // Steps are one-line rows until the user opens one.
+  await expect(steps.first()).toHaveJSProperty("open", false);
+  await steps.first().locator("> summary").click();
   await expect(steps.first()).toHaveJSProperty("open", true);
+  await expect(page.getByText("Linting")).toBeVisible();
 
   // A flash is a close (then a reopen), or a remount that replaces the element.
   // Record every close from here on so one can't slip between assertions, and
@@ -1184,12 +1188,13 @@ test("keeps steps open while the agent works and respects a step group the user 
     generation: { message: { role: "assistant", content: [call("call-2", "pnpm test")] } },
     tools: [{ callId: "call-2", name: "bash", status: "running", output: "Testing" }],
   });
-  await expect(page.getByText("Testing")).toBeVisible();
+  await expect(steps.nth(1).locator("> summary")).toContainText("pnpm test");
   await expect(group).toHaveCount(1);
   await expect(group).toHaveJSProperty("open", true);
   await expect(steps).toHaveCount(2);
+  // The step the user opened stays open; the new one starts collapsed.
   await expect(steps.nth(0)).toHaveJSProperty("open", true);
-  await expect(steps.nth(1)).toHaveJSProperty("open", true);
+  await expect(steps.nth(1)).toHaveJSProperty("open", false);
 
   // Nothing opened or closed on its own while the agent worked.
   const body = page.locator("body");
