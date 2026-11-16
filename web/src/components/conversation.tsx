@@ -99,6 +99,7 @@ export function Conversation({
 
 function TurnView({ turn, now }: { turn: Turn; now: number }) {
   const started = turn.prompt?.at ?? turn.startedAt;
+  const silent = !turn.running && !turn.answer && !turn.failure && turn.items.length > 0;
 
   return (
     <section className="turn">
@@ -125,6 +126,11 @@ function TurnView({ turn, now }: { turn: Turn; now: number }) {
       {turn.items.length > 0 && <WorkLog turn={turn} />}
       {turn.answer && (
         <Answer id={turn.answer.id} text={turn.answer.text} at={turn.endedAt} now={now} />
+      )}
+      {silent && (
+        <p className="run-notice" role="status">
+          The agent finished without a final reply. Its last messages are in the work log above.
+        </p>
       )}
       {turn.failure && (
         <div className="run-failure" role={turn.failure.reason === "aborted" ? "status" : "alert"}>
@@ -199,9 +205,10 @@ function useDisclosure(id: string) {
 }
 
 function WorkLog({ turn }: { turn: Turn }) {
-  // The work log is opened once when it appears (if running or failed) and is
-  // otherwise left entirely to the user.
-  const [open, setOpen] = useState(() => turn.running || Boolean(turn.failure));
+  // The work log is opened once when it appears (if running, failed, or
+  // finished without a final reply, so nothing the agent wrote is hidden) and
+  // is otherwise left entirely to the user.
+  const [open, setOpen] = useState(() => turn.running || Boolean(turn.failure) || !turn.answer);
 
   const disclosure = {
     open,

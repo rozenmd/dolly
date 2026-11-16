@@ -154,6 +154,18 @@ class LocatorAssertions {
     );
   }
 
+  /** A primitive DOM property such as a <details> element's `open`. */
+  toHaveJSProperty(name: string, expected: string | number | boolean, options?: Options) {
+    return this.property(
+      "toHaveJSProperty",
+      String(expected),
+      "function (name) { return this[name] ?? null; }",
+      (value) => value === expected,
+      options,
+      [name],
+    );
+  }
+
   toHaveCSS(property: string, expected: string | RegExp, options?: Options) {
     return this.property(
       "toHaveCSS",

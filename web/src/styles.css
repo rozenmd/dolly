@@ -1671,6 +1671,13 @@ span.step-status.step-running::before {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.run-notice {
+  margin: 16px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--amber);
+  border-radius: 10px;
+  background: var(--surface);
+}
 .retry-status {
   color: var(--amber);
   overflow-wrap: anywhere;
