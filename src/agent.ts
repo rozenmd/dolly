@@ -1730,16 +1730,26 @@ export class Agent extends DurableObject<Env> {
   }
 
   async archiveSession(id: string, archived: boolean) {
+    return this.updateSession(id, { archived });
+  }
+
+  /** Persist the owner's sidebar choices for one session: archive state and "keep in sidebar". */
+  async updateSession(id: string, patch: { archived?: boolean; kept?: boolean }) {
     const conversation = await Effect.runPromise(this.conversation(id));
 
     if (Option.isNone(conversation)) return undefined;
     const key = `session-meta:${conversation.value.id}`;
-    await this.ctx.storage.transaction(async (tx) => {
-      const metadata = await tx.get<{ createdAt?: number }>(key);
-      await tx.put(key, { ...metadata, archived });
-    });
 
-    return { archived };
+    return this.ctx.storage.transaction(async (tx) => {
+      const metadata = await tx.get<{ archived?: boolean; kept?: boolean; createdAt?: number }>(
+        key,
+      );
+
+      const next = { archived: false, ...metadata, ...patch };
+      await tx.put(key, next);
+
+      return patch.kept === undefined ? { archived: next.archived } : patch;
+    });
   }
 
   /** Import browser-only archive state once, without overwriting later server changes. */

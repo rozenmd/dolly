@@ -46,7 +46,7 @@ function lastPromptAt(entries: readonly EntryRecord[]): number {
 
 const LIVE_STATUSES = ["running", "waiting", "sleeping"] as const;
 
-type Metadata = { archived: boolean; createdAt?: number };
+type Metadata = { archived: boolean; kept?: boolean; createdAt?: number };
 
 /** Discover history, not just sessions created after this feature was deployed. */
 export async function listSessions(
@@ -194,6 +194,9 @@ export async function listSessions(
 
       updatedAt = Math.max(updatedAt, metadata?.createdAt ?? 0);
 
+      // Spawned children are owned by a task in their parent conversation.
+      const parent = record.owner?.conversationId;
+
       sessions.push({
         id: aliases.get(record.id) ?? String(record.id),
         model: agent.model?.modelId ?? "Existing session",
@@ -203,6 +206,8 @@ export async function listSessions(
         ref: workspace?.config?.ref,
         updatedAt,
         archived: metadata?.archived ?? false,
+        ...(parent && { parentId: aliases.get(parent) ?? String(parent) }),
+        ...(parent && metadata?.kept && { kept: true }),
         running: page.running.has(record.id),
         pullRequest,
       });

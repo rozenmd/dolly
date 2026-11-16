@@ -417,6 +417,7 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 export type ApiBody = {
   sessions?: readonly SavedSession[];
   archived?: boolean;
+  kept?: boolean;
   content?: string;
   requestId?: string;
   images?: readonly { mimeType: string; data: string }[];

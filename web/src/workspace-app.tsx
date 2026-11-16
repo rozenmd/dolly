@@ -5,6 +5,7 @@ import { Bars3Icon, CheckIcon, ChevronRightIcon, LinkIcon } from "@heroicons/rea
 import {
   ArchiveBoxIcon,
   ArrowUturnLeftIcon,
+  InboxArrowDownIcon,
   DocumentDuplicateIcon,
   PlusIcon,
 } from "@heroicons/react/24/outline";
@@ -33,6 +34,15 @@ import { ago } from "./lib/time";
 import { watchSession } from "./lib/session-stream";
 import { imagesBody, type Attachment } from "./lib/images";
 import { sessionList } from "./lib/session-list";
+import {
+  belongsInSidebar,
+  groupThreads,
+  sessionThreads,
+  sidebarSelection,
+  THREAD_STATE_LABEL,
+  threadState,
+  threadStatusLine,
+} from "./lib/session-threads";
 import { effortName, modelName } from "./components/model-select";
 import { SidePanel, SidePanelToggle } from "./components/side-panel";
 import { useSidePanel } from "./lib/side-panel";
@@ -77,8 +87,17 @@ export function WorkspaceApp() {
         // The open session streams live state; others rely on the polled list.
         running: item.id === selected && snapshot ? running : Boolean(item.running),
         pullRequest: item.pullRequest,
+        parentId: item.parentId,
+        kept: item.kept,
       }))
     : [];
+
+  // Spawned sessions live with their parent, not in the sidebar (see lib/session-threads).
+  const sidebarRows = rows.filter(belongsInSidebar);
+
+  const parent = session?.parentId
+    ? sessions.find((item) => item.id === session.parentId)
+    : undefined;
 
   async function loadAuth() {
     setAuthError("");
@@ -165,7 +184,12 @@ export function WorkspaceApp() {
         }
 
         save(saved);
-        setSelected((current) => current || sessionList(saved, "", Date.now()).active[0]?.id || "");
+        setSelected(
+          (current) =>
+            current ||
+            sessionList(saved.filter(belongsInSidebar), "", Date.now()).active[0]?.id ||
+            "",
+        );
 
         setModal(!signedIn && !claude.connected ? "codex" : saved.length ? null : "new");
       },
@@ -312,12 +336,30 @@ export function WorkspaceApp() {
     if (!target.archived && selected === id) {
       select(
         sessionList(
-          sessions.filter((item) => item.id !== id),
+          sessions.filter((item) => item.id !== id && belongsInSidebar(item)),
           "",
           Date.now(),
         ).active[0]?.id || "",
       );
     }
+  }
+
+  /** opensession's "Keep in sidebar": a spawned session gets a row of its own. */
+  async function toggleKept(id: string) {
+    const target = sessions.find((item) => item.id === id);
+
+    if (!target?.parentId) return;
+    const kept = !target.kept;
+
+    try {
+      await request(`/sessions/${encodeURIComponent(id)}`, { kept }, undefined, "PUT");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not update the sidebar.");
+
+      return;
+    }
+
+    updateSessions((current) => current.map((item) => (item.id === id ? { ...item, kept } : item)));
   }
 
   async function setThinkingLevel(level: string) {
@@ -454,8 +496,8 @@ export function WorkspaceApp() {
         Skip to conversation
       </a>
       <Sidebar
-        rows={rows}
-        selected={selected}
+        rows={sidebarRows}
+        selected={sidebarSelection(sessions, selected)}
         connected={connected}
         open={mobileOpen}
         feed={feed}
@@ -491,9 +533,32 @@ export function WorkspaceApp() {
                 <ChevronRightIcon className="breadcrumb-chevron" />
               </>
             )}
+            {session && !feed && parent && (
+              <>
+                <button
+                  type="button"
+                  className="breadcrumb-parent"
+                  title={`Spawned by ${parent.title || "Untitled session"}`}
+                  onClick={() => select(parent.id)}
+                >
+                  {parent.title || "Untitled session"}
+                </button>
+                <ChevronRightIcon className="breadcrumb-chevron" />
+              </>
+            )}
             <h1>{feed ? "Feed" : session ? session.title || "Untitled session" : "dolly"}</h1>
           </div>
           <div className="header-actions">
+            {session && !feed && session.parentId && (
+              <IconButton
+                label={session.kept ? "Remove from sidebar" : "Keep in sidebar"}
+                aria-pressed={Boolean(session.kept)}
+                className={session.kept ? "pressed" : ""}
+                onClick={() => void toggleKept(session.id)}
+              >
+                <InboxArrowDownIcon />
+              </IconButton>
+            )}
             {session && !feed && (
               <IconButton
                 label={session.archived ? "Restore session" : "Archive session"}
@@ -524,7 +589,13 @@ export function WorkspaceApp() {
               <FeedView rows={rows.filter((row) => !row.archived)} onSelect={select} />
             ) : session ? (
               <>
-                <Conversation turns={turns} sessionId={session.id} loading={loading} />
+                <Conversation
+                  turns={turns}
+                  sessionId={session.id}
+                  loading={loading}
+                  thread={(id) => rows.find((row) => row.id === id)}
+                  onOpenThread={select}
+                />
                 <Composer
                   draftKey={selected}
                   onSend={send}
@@ -560,6 +631,11 @@ export function WorkspaceApp() {
             session={session}
             running={running}
             failure={turns.at(-1)?.failure?.reason}
+            threads={sessionThreads(
+              rows.filter((row) => !row.archived),
+              session.id,
+            )}
+            onOpenThread={select}
           />
         </SidePanel>
       )}
@@ -655,20 +731,81 @@ function FeedView({
   );
 }
 
+type ThreadRow = {
+  id: string;
+  title: string;
+  updatedAt: number;
+  running: boolean;
+  pullRequest?: SavedSession["pullRequest"];
+};
+
+/** The threads a session handed work to, grouped by where they stand (opensession's Threads panel). */
+function ThreadsSection({
+  threads,
+  onOpen,
+}: {
+  threads: readonly ThreadRow[];
+  onOpen: (id: string) => void;
+}) {
+  const now = Date.now();
+  const shipped = threads.filter((thread) => threadState(thread) === "shipped").length;
+
+  return (
+    <section aria-label="Threads">
+      <h2>
+        Threads <span className="thread-count">{threads.length}</span>
+      </h2>
+      <p className="thread-summary">
+        {shipped} shipped · {threads.length - shipped} open
+      </p>
+      {groupThreads(threads).map((group) => (
+        <section
+          key={group.state}
+          className="thread-group"
+          aria-label={THREAD_STATE_LABEL[group.state]}
+        >
+          <h3>
+            {THREAD_STATE_LABEL[group.state]} <span>{group.threads.length}</span>
+          </h3>
+          <ul className="thread-list">
+            {group.threads.map((thread) => (
+              <li key={thread.id}>
+                <button type="button" className="thread-row" onClick={() => onOpen(thread.id)}>
+                  <span className={`thread-dot ${group.state}`} aria-hidden="true" />
+                  <span className="thread-text">
+                    <span className="thread-title">{thread.title}</span>
+                    <span className="thread-status">{threadStatusLine(thread)}</span>
+                  </span>
+                  <span className="thread-time">{ago(thread.updatedAt, now)}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </section>
+  );
+}
+
 function SessionDetails({
   session,
   running,
   failure,
+  threads,
+  onOpenThread,
 }: {
   session: SavedSession;
   running: boolean;
   failure?: string;
+  threads: readonly ThreadRow[];
+  onOpenThread: (id: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const github = /^[\w.-]+\/[\w.-]+$/.test(session.repository);
 
   return (
     <div className="details-list">
+      {threads.length > 0 && <ThreadsSection threads={threads} onOpen={onOpenThread} />}
       <section>
         <h2>Status</h2>
         <p>
