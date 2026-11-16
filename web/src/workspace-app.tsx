@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
-import { Bars3Icon, CheckIcon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
+import { Bars3Icon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
 import {
   ArchiveBoxIcon,
   ArrowUturnLeftIcon,
   InboxArrowDownIcon,
-  DocumentDuplicateIcon,
   PlusIcon,
 } from "@heroicons/react/24/outline";
 import { Sidebar } from "./components/sidebar";
@@ -34,18 +33,9 @@ import { ago } from "./lib/time";
 import { watchSession } from "./lib/session-stream";
 import { imagesBody, type Attachment } from "./lib/images";
 import { sessionList } from "./lib/session-list";
-import {
-  belongsInSidebar,
-  groupThreads,
-  sessionThreads,
-  sidebarSelection,
-  THREAD_STATE_LABEL,
-  threadState,
-  threadStatusLine,
-} from "./lib/session-threads";
-import { effortName, modelName } from "./components/model-select";
-import { SidePanel, SidePanelToggle } from "./components/side-panel";
-import { useSidePanel } from "./lib/side-panel";
+import { belongsInSidebar, sessionThreads, sidebarSelection } from "./lib/session-threads";
+import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-summary";
+import { useSessionSummary } from "./lib/session-summary";
 
 const storageKey = "dolly.sessions.v1";
 
@@ -72,7 +62,8 @@ export function WorkspaceApp() {
   const [loading, setLoading] = useState(false);
   const connected = Boolean(auth?.user);
   const session = connected ? sessions.find((item) => item.id === selected) : undefined;
-  const panel = useSidePanel(session?.id ?? "");
+  const summary = useSessionSummary();
+  const summaryShown = Boolean(session && !feed && summary.open);
   const running = Boolean(snapshot && liveFromSnapshot(snapshot)?.run);
   const turns = snapshot ? turnsFromSnapshot(snapshot) : [];
   const queued = snapshot ? queueFromSnapshot(snapshot) : [];
@@ -514,7 +505,11 @@ export function WorkspaceApp() {
           setMobileOpen(false);
         }}
       />
-      <main id="main-content" className="main-panel">
+      <main
+        id="main-content"
+        ref={summary.paneRef}
+        className={`main-panel ${summaryShown && summary.standing ? "summary-standing" : ""}`}
+      >
         <header className="workspace-header">
           <div className="breadcrumb">
             <IconButton
@@ -570,9 +565,7 @@ export function WorkspaceApp() {
             <IconButton label="New session" onClick={newSession}>
               <PlusIcon />
             </IconButton>
-            {session && !feed && !panel.open && (
-              <SidePanelToggle open={false} onClick={() => panel.setOpen(true)} />
-            )}
+            {session && !feed && <SessionSummaryToggle summary={summary} />}
           </div>
         </header>
         <div className="content-layout">
@@ -624,10 +617,9 @@ export function WorkspaceApp() {
             )}
           </div>
         </div>
-      </main>
-      {session && !feed && panel.open && (
-        <SidePanel panel={panel} label="Session details">
-          <SessionDetails
+        {session && summaryShown && (
+          <SessionSummaryCard
+            summary={summary}
             session={session}
             running={running}
             failure={turns.at(-1)?.failure?.reason}
@@ -637,8 +629,8 @@ export function WorkspaceApp() {
             )}
             onOpenThread={select}
           />
-        </SidePanel>
-      )}
+        )}
+      </main>
       {modal === "codex" && (
         <Modal title="Connect a model" onClose={() => setModal(null)}>
           <h3>ChatGPT subscription</h3>
@@ -727,133 +719,6 @@ function FeedView({
             ))}
         </ul>
       )}
-    </div>
-  );
-}
-
-type ThreadRow = {
-  id: string;
-  title: string;
-  updatedAt: number;
-  running: boolean;
-  pullRequest?: SavedSession["pullRequest"];
-};
-
-/** The threads a session handed work to, grouped by where they stand (opensession's Threads panel). */
-function ThreadsSection({
-  threads,
-  onOpen,
-}: {
-  threads: readonly ThreadRow[];
-  onOpen: (id: string) => void;
-}) {
-  const now = Date.now();
-  const shipped = threads.filter((thread) => threadState(thread) === "shipped").length;
-
-  return (
-    <section aria-label="Threads">
-      <h2>
-        Threads <span className="thread-count">{threads.length}</span>
-      </h2>
-      <p className="thread-summary">
-        {shipped} shipped · {threads.length - shipped} open
-      </p>
-      {groupThreads(threads).map((group) => (
-        <section
-          key={group.state}
-          className="thread-group"
-          aria-label={THREAD_STATE_LABEL[group.state]}
-        >
-          <h3>
-            {THREAD_STATE_LABEL[group.state]} <span>{group.threads.length}</span>
-          </h3>
-          <ul className="thread-list">
-            {group.threads.map((thread) => (
-              <li key={thread.id}>
-                <button type="button" className="thread-row" onClick={() => onOpen(thread.id)}>
-                  <span className={`thread-dot ${group.state}`} aria-hidden="true" />
-                  <span className="thread-text">
-                    <span className="thread-title">{thread.title}</span>
-                    <span className="thread-status">{threadStatusLine(thread)}</span>
-                  </span>
-                  <span className="thread-time">{ago(thread.updatedAt, now)}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ))}
-    </section>
-  );
-}
-
-function SessionDetails({
-  session,
-  running,
-  failure,
-  threads,
-  onOpenThread,
-}: {
-  session: SavedSession;
-  running: boolean;
-  failure?: string;
-  threads: readonly ThreadRow[];
-  onOpenThread: (id: string) => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const github = /^[\w.-]+\/[\w.-]+$/.test(session.repository);
-
-  return (
-    <div className="details-list">
-      {threads.length > 0 && <ThreadsSection threads={threads} onOpen={onOpenThread} />}
-      <section>
-        <h2>Status</h2>
-        <p>
-          <span className={`status-dot ${running ? "working" : failure ? "failed" : "idle"}`} />
-          {running ? "Working" : failure === "aborted" ? "Stopped" : failure ? "Failed" : "Idle"}
-        </p>
-      </section>
-      <section>
-        <h2>Repository</h2>
-        {session.repository ? (
-          <p>
-            <RepoBadge repository={session.repository} />
-            {github ? (
-              <a href={`https://github.com/${session.repository}`} target="_blank" rel="noreferrer">
-                {session.repository}
-              </a>
-            ) : (
-              session.repository
-            )}
-          </p>
-        ) : (
-          <p className="muted">None</p>
-        )}
-      </section>
-      <section>
-        <h2>Model</h2>
-        <p title={session.model}>
-          {modelName(session.model)}
-          {session.thinkingLevel ? ` · ${effortName(session.thinkingLevel)} effort` : ""}
-        </p>
-      </section>
-      <section>
-        <h2>Session</h2>
-        <p>
-          <code>{session.id}</code>
-          <IconButton
-            label={copied ? "Session ID copied" : "Copy session ID"}
-            onClick={() =>
-              void navigator.clipboard.writeText(session.id).then(
-                () => setCopied(true),
-                () => setCopied(false),
-              )
-            }
-          >
-            {copied ? <CheckIcon /> : <DocumentDuplicateIcon />}
-          </IconButton>
-        </p>
-      </section>
     </div>
   );
 }

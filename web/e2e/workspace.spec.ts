@@ -452,8 +452,7 @@ for (const outcome of ["answered", "failed", "retrying"] as const) {
       await expect(page.getByRole("alert")).toContainText(
         "The selected model is unavailable for this account",
       );
-      await page.getByRole("button", { name: "Toggle side panel" }).click();
-      await expect(page.getByRole("complementary", { name: "Session details" })).toContainText(
+      await expect(page.getByRole("complementary", { name: "Session summary" })).toContainText(
         "Failed",
       );
       await page.reload();
@@ -466,8 +465,7 @@ for (const outcome of ["answered", "failed", "retrying"] as const) {
         "Provider is temporarily unavailable",
       );
       await expect(page.getByRole("alert")).toHaveCount(0);
-      await page.getByRole("button", { name: "Toggle side panel" }).click();
-      await expect(page.getByRole("complementary", { name: "Session details" })).toContainText(
+      await expect(page.getByRole("complementary", { name: "Session summary" })).toContainText(
         "Working",
       );
     }

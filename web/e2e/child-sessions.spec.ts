@@ -185,8 +185,8 @@ test("keeps spawned sessions out of the sidebar and shows them with their parent
   await expect(workspaces).not.toContainText("Bump the SDK");
   await expect(workspaces).not.toContainText("Read the CI logs");
 
-  // The side panel lists every descendant, grouped by where it stands.
-  await page.getByRole("button", { name: "Toggle side panel" }).click();
+  // The summary card, open by default on a wide window, lists every descendant
+  // grouped by where it stands.
   const threads = page.getByRole("region", { name: "Threads", exact: true });
   await expect(threads).toContainText("1 shipped · 3 open");
   await expect(threads.getByRole("region", { name: "Ready to ship" })).toContainText(

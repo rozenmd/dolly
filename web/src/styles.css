@@ -981,123 +981,198 @@ select.input {
   height: 12px;
 }
 
-/* Side panel: a full-height right column, resizable from its left edge, that
-   becomes an overlay with a scrim from 920px down. */
-.side-panel {
+/* Session summary: a floating card at the top right of the conversation pane.
+   Where the pane has room it stands beside the transcript, which steps aside
+   for it; on a narrower pane it is an overlay. */
+.main-panel {
   position: relative;
+}
+.main-panel.summary-standing .content-layout {
+  padding-right: 324px;
+}
+.session-summary {
+  position: absolute;
+  top: 64px;
+  right: 12px;
+  z-index: 10;
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
-  width: var(--panel-w, 32%);
-  min-width: 320px;
-  max-width: max(480px, calc(100vw - 620px));
-  min-height: 0;
-  background: var(--sidebar);
-  border-left: 1px solid var(--line);
-  transition:
-    width 280ms ease,
-    min-width 280ms ease;
+  width: 300px;
+  max-width: calc(100% - 24px);
+  max-height: calc(100% - 76px);
+  overflow-y: auto;
+  padding: 8px 0;
+  border-radius: 18px;
+  background: color-mix(in srgb, #2a2a2a 82%, transparent);
+  backdrop-filter: blur(32px) saturate(1.6);
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 7%),
+    0 4px 16px rgb(0 0 0 / 22%);
 }
-body.resizing-panel .side-panel {
-  transition: none;
+/* Over the transcript, the card needs a solid surface to stay legible. */
+.session-summary.overlay {
+  background: color-mix(in srgb, #2a2a2a 97%, transparent);
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 9%),
+    0 16px 40px rgb(0 0 0 / 50%);
 }
-body.resizing-panel {
-  cursor: col-resize;
-  user-select: none;
-}
-/* Only when an action opened the panel: it grows from the window's right edge
-   while the conversation gives way. Switching sessions shows it in place. */
-.side-panel.entering {
-  overflow: hidden;
-  transition:
-    width 280ms ease,
-    min-width 280ms ease,
-    opacity 280ms ease;
-}
-@starting-style {
-  .side-panel.entering {
-    width: 0;
-    min-width: 0;
-    opacity: 0;
-  }
-}
-.side-panel-resize {
-  position: absolute;
-  top: 0;
-  left: -3px;
-  z-index: 6;
-  width: 7px;
-  height: 100%;
-  cursor: col-resize;
-  touch-action: none;
-}
-.side-panel-resize::after {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 3px;
-  width: 2px;
-  background: transparent;
-  transition: background-color 120ms ease;
-}
-body:not(.resizing-panel) .side-panel-resize:hover::after,
-.side-panel-resize:focus-visible::after {
-  background: rgb(255 255 255 / 18%);
-}
-body.resizing-panel .side-panel-resize::after {
-  background: var(--faint);
-}
-.side-panel-resize:focus-visible {
-  outline: none;
-}
-.side-panel-top {
+.summary-band {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  height: 52px;
-  flex-shrink: 0;
-  padding: 0 14px;
-  border-bottom: 1px solid var(--line);
+  gap: 10px;
+  margin: 0 8px 4px;
+  padding: 9px 8px 9px 10px;
+  border-radius: 14px;
+  background: rgb(255 255 255 / 4%);
 }
-.side-panel-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
+.summary-band.pr-open {
+  background: rgb(63 185 80 / 12%);
 }
-.side-panel-scrim {
-  display: none;
+.summary-band.pr-merged {
+  background: rgb(163 113 247 / 14%);
 }
-.details-list {
+.summary-band.pr-closed {
+  background: rgb(248 81 73 / 12%);
+}
+.summary-band-text {
   display: flex;
+  flex: 1;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px 18px;
+  gap: 2px;
+  min-width: 0;
 }
-.details-list h2 {
+.summary-headline {
+  font-size: 14px;
+  font-weight: 600;
+}
+.summary-pull {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
   color: var(--muted);
-  font-size: 13px;
-  margin-bottom: 4px;
+  font-size: 12px;
+  text-decoration: none;
 }
-.details-list p {
+.summary-pull:hover {
+  color: var(--text);
+}
+.summary-pull svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+.summary-pull span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.summary-band.pr-open .summary-pull svg {
+  color: #3fb950;
+}
+.summary-band.pr-merged .summary-pull svg {
+  color: #a371f7;
+}
+.summary-band.pr-closed .summary-pull svg {
+  color: #f85149;
+}
+.summary-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 9px;
+  background: rgb(255 255 255 / 10%);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.summary-action:hover {
+  background: rgb(255 255 255 / 16%);
+}
+.summary-band.pr-open .summary-action {
+  background: #2ea043;
+  color: #fff;
+}
+.summary-band.pr-open .summary-action:hover {
+  background: #3fb950;
+}
+.summary-action svg {
+  width: 14px;
+  height: 14px;
+}
+.summary-section {
+  display: flex;
+  align-items: center;
+  height: 22px;
+  margin-top: 10px;
+  padding: 0 16px;
+  color: var(--faint);
+  font-size: 13px;
+  font-weight: 500;
+}
+.summary-row {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  min-height: 24px;
-}
-.details-list a {
+  min-height: 31px;
+  margin: 0 8px;
+  padding: 0 8px;
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--text);
   text-decoration: none;
 }
-.details-list a:hover {
-  text-decoration: underline;
+.summary-row.link:hover {
+  background: rgb(255 255 255 / 6%);
 }
-.details-list code {
+.summary-rail {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--faint);
+}
+.summary-rail > svg {
+  width: 18px;
+  height: 18px;
+}
+.summary-label {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+code.summary-label {
   font-size: 12px;
   color: #cfcfcf;
+}
+.summary-value {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.summary-value .added {
+  color: #3fb950;
+}
+.summary-value .removed {
+  color: #f85149;
+}
+.summary-row .summary-copy {
+  width: 24px;
+  height: 24px;
+  margin-right: -4px;
+}
+.summary-copy svg {
+  width: 15px;
+  height: 15px;
 }
 
 /* Threads: spawned sessions, shown with their parent instead of in the sidebar */
@@ -1106,10 +1181,20 @@ body.resizing-panel .side-panel-resize::after {
   color: var(--faint);
   font-weight: 400;
 }
-.details-list p.thread-summary {
-  min-height: 0;
+.summary-threads .thread-summary {
+  margin-left: auto;
   color: var(--faint);
   font-size: 12px;
+  font-weight: 400;
+}
+.summary-threads .summary-section {
+  gap: 6px;
+}
+.summary-threads .thread-group {
+  padding: 0 8px;
+}
+.summary-threads .thread-group h3 {
+  padding: 0 8px;
 }
 .thread-group h3 {
   margin: 8px 0 2px;
@@ -1134,8 +1219,7 @@ body.resizing-panel .side-panel-resize::after {
   text-align: left;
 }
 .thread-row {
-  margin: 0 -8px;
-  width: calc(100% + 16px);
+  width: 100%;
 }
 .thread-row:hover,
 .thread-card:hover {
@@ -1539,29 +1623,6 @@ body.resizing-panel .side-panel-resize::after {
 .mobile-only {
   display: none;
 }
-@media (max-width: 920px) {
-  .side-panel {
-    position: fixed;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 30;
-    width: min(480px, 94vw);
-    min-width: 0;
-    max-width: none;
-    box-shadow: -12px 0 32px rgb(0 0 0 / 50%);
-  }
-  .side-panel-resize {
-    display: none;
-  }
-  .side-panel-scrim {
-    display: block;
-    position: fixed;
-    inset: 0;
-    z-index: 25;
-    background: rgb(0 0 0 / 45%);
-  }
-}
 @media (max-width: 760px) {
   .mobile-only {
     display: inline-grid;
@@ -1599,11 +1660,10 @@ body.resizing-panel .side-panel-resize::after {
   .breadcrumb-parent + .breadcrumb-chevron {
     display: inline;
   }
-  .side-panel-top {
-    padding: 0 8px;
-  }
-  .side-panel-body {
-    padding-bottom: env(safe-area-inset-bottom);
+  .session-summary {
+    top: 56px;
+    left: 12px;
+    width: auto;
   }
   .conversation-content {
     padding: 20px 16px 24px;
