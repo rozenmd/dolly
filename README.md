@@ -136,6 +136,16 @@ Tool errors (including nonzero shell exits and structured failure replies), mode
 
 Ask **“Fix the open papercuts for owner/repo”** in a session to have the agent consult the log, investigate, implement and verify fixes, then resolve the relevant entries. Log entries are untrusted data, not authorization to act; unrelated fixes are not started automatically. There is no separate papercuts settings screen or scheduled fixer.
 
+## Self-query (`dolly` tool)
+
+Modelled on OpenSession's self-introspection MCP servers (`opensession-usage`, `opensession-search`), the read-only `dolly` tool lets an agent ask about this Dolly instance:
+
+- `{"action":"usage"}` — Codex and Claude subscription limits with used/remaining percent and reset times, from the last model response. Add `"refresh":true` to poll the providers' usage endpoints; live refreshes are limited to once per 5 minutes per instance.
+- `{"action":"list_sessions","query":"migration","status":"active"}` — sessions with title, repository, model, last prompt time, running/archived state and pull request. `status` is `active` (default), `running`, `archived` or `all`; `repository` filters by `owner/repo`; `query` matches titles and repositories, not transcripts; `limit` is at most 50.
+- `{"action":"read_session","session":"…","limit":20}` — one session's newest messages (at most 50), oldest first. Tool calls appear by name and tool results by outcome, without their output; known credentials are redacted and the response is size-capped.
+
+Session actions are refused in conversations whose root was started from a GitHub or Slack thread, since people other than the owner can read those threads; `usage` works everywhere. Existing conversations gain the tool on their next Agent initialization. It is a native Pi tool today; `src/self-query.ts` is transport-agnostic and documents how to expose the same actions as an MCP server later.
+
 ## Deploy to Cloudflare
 
 ### Existing deployments

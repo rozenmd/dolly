@@ -19,6 +19,7 @@ import {
   type ConversationId,
   type ConversationView,
   type Cursor,
+  type EntryRecord,
   type ToolRegistration,
   type Wake,
 } from "@earendil-works/pi-durable";
@@ -100,6 +101,14 @@ import type { PullRequestState, SavedSession } from "./session-contracts";
 import { PreviewOutbound, PreviewRequest, PreviewToolInput } from "./preview";
 import { capturePreview } from "./browser-preview";
 import { workspaceCheckpoint } from "./workspace-checkpoint";
+import {
+  selfQuery,
+  selfQueryDescription,
+  SelfQueryRequest,
+  type SessionTail,
+  type TranscriptMessage,
+} from "./self-query";
+import { SlackThreads } from "./slack-inbox";
 
 const DEFAULT_MODEL_KEY = "settings:default-model";
 
@@ -361,12 +370,32 @@ export class Agent extends DurableObject<Env> {
       },
     } satisfies ToolRegistration;
 
+    const selfQuerySchema = Schema.toJsonSchemaDocument(SelfQueryRequest).schema;
+
+    if (!Predicate.isObject(selfQuerySchema))
+      return yield* Effect.die("Self-query schema must be an object");
+
+    // Native Pi tool for now; self-query.ts documents how it upgrades to an MCP server later.
+    const selfQueryTool = {
+      name: "dolly",
+      description: selfQueryDescription,
+      parameters: selfQuerySchema,
+      replay: "safe",
+      execute: async (input: typeof SelfQueryRequest.Type, api) => {
+        const parsed = Schema.decodeUnknownSync(SelfQueryRequest)(input);
+        const result = await selfQuery(parsed, this.selfQueryDeps(api.conversationId));
+
+        return { output: [{ type: "text", text: JSON.stringify(result) }] };
+      },
+    } satisfies ToolRegistration;
+
     const tools = [
       shell,
       readFile,
       githubTool,
       workspaceTool,
       papercutsTool,
+      selfQueryTool,
       {
         name: "preview",
         description:
@@ -667,6 +696,31 @@ export class Agent extends DurableObject<Env> {
         this.ctx.storage.put("migration:preview-tools", true),
       );
     }
+
+    if (
+      !(yield* attempt("dolly.migration.read", () => this.ctx.storage.get("migration:dolly-tool")))
+    )
+      yield* attempt("dolly.tools.update", () =>
+        this.harness
+          .commit(async (tx) => {
+            let cursor: Cursor | undefined;
+
+            do {
+              const page = await tx.scanConversations({}, 100, cursor);
+
+              for (const conversation of page.items) {
+                const agent = await tx.doc(AgentDoc, conversation.id);
+
+                for (const names of [agent.tools, agent.modelTools])
+                  if (Array.isArray(names) && !names.includes(selfQueryTool.name))
+                    names.push(selfQueryTool.name);
+              }
+
+              cursor = page.next;
+            } while (cursor);
+          }, BACKGROUND_CONTEXT)
+          .then(() => this.ctx.storage.put("migration:dolly-tool", true)),
+      );
 
     yield* this.arm(this.harness.wake());
     this.harness.resume();
@@ -1580,6 +1634,104 @@ export class Agent extends DurableObject<Env> {
     return { imported: true };
   }
 
+  /** The `dolly` tool's view of this instance, for one calling conversation (see self-query.ts). */
+  private selfQueryDeps(caller: ConversationId) {
+    return {
+      usage: (refresh: boolean) => this.usage(refresh),
+      sessions: () => this.sessions(),
+      sessionTail: (session: string, limit: number) => this.sessionTail(session, limit),
+      canReadSessions: () => this.startedFromWeb(caller).catch(() => false),
+      lastUsageRefresh: () => this.ctx.storage.get<number>("self-query:usage-refresh"),
+      markUsageRefresh: (at: number) => this.ctx.storage.put("self-query:usage-refresh", at),
+      now: () => Date.now(),
+    };
+  }
+
+  /**
+   * Whether a conversation's root was started from the web app rather than a GitHub or Slack
+   * thread. Intake threads can be read by people other than the owner, so session history stays
+   * out of them; child sessions inherit their root's answer.
+   */
+  private async startedFromWeb(conversationId: ConversationId) {
+    const root = await this.harness.commit(async (tx) => {
+      let record = await tx.conversation(conversationId);
+
+      while (record?.owner) record = await tx.conversation(record.owner.conversationId);
+
+      return record?.id;
+    }, BACKGROUND_CONTEXT);
+
+    if (root === undefined) return false;
+
+    const [github, slack] = await Promise.all([
+      this.harness.snapshot(GitHubThreads, BACKGROUND_CONTEXT),
+      this.harness.snapshot(SlackThreads, BACKGROUND_CONTEXT),
+    ]);
+
+    return ![github, slack].some((state) =>
+      Object.values(state?.threads ?? {}).some((thread) => thread.id === root),
+    );
+  }
+
+  /** One session's metadata and newest transcript messages, redacted, for the `dolly` tool. */
+  private async sessionTail(id: string, limit: number): Promise<SessionTail | undefined> {
+    const conversation = Option.getOrUndefined(await Effect.runPromise(this.conversation(id)));
+
+    if (!conversation) return undefined;
+
+    const [sessions, secrets] = await Promise.all([
+      this.sessions(),
+      Effect.runPromise(this.credentials.secrets),
+    ]);
+
+    // Listed by conversation ID, or by the public alias the web app created it with.
+    const session = sessions.find((candidate) => candidate.id === String(conversation.id)) ??
+      (await this.aliasedSession(sessions, conversation.id)) ?? {
+        id,
+        model: "Unknown",
+        title: "Untitled session",
+        repository: "",
+        updatedAt: 0,
+      };
+
+    const messages: TranscriptMessage[] = [];
+    let cursor: Cursor | undefined;
+    let scanned = 0;
+
+    // Newest first, until enough messages or a bounded number of entries.
+    do {
+      const page = await conversation.entries(
+        { order: "descending" },
+        50,
+        cursor,
+        BACKGROUND_CONTEXT,
+      );
+
+      for (const entry of page.items)
+        for (const message of [...(entry.model ?? [])].reverse()) {
+          const shown = transcriptMessage(message, secrets);
+
+          if (shown) messages.push(shown);
+        }
+
+      scanned += page.items.length;
+      cursor = page.next;
+    } while (cursor && messages.length <= limit && scanned < 500);
+
+    return {
+      session,
+      messages: messages.slice(0, limit).reverse(),
+      more: messages.length > limit || cursor !== undefined,
+    };
+  }
+
+  /** A listed session whose public alias points at this conversation. */
+  private async aliasedSession(sessions: readonly SavedSession[], conversationId: ConversationId) {
+    for (const candidate of sessions)
+      if ((await this.ctx.storage.get(`session:${candidate.id}`)) === conversationId)
+        return candidate;
+  }
+
   private conversation = Effect.fn("Agent.conversation")(function* (this: Agent, id: string) {
     const conversationId = yield* attempt("session.read", () =>
       this.ctx.storage.get<ConversationId>(`session:${id}`),
@@ -1887,4 +2039,38 @@ export class Agent extends DurableObject<Env> {
       }),
     );
   }
+}
+
+type PiMessage = NonNullable<EntryRecord["model"]>[number];
+
+/** A transcript message for read_session: visible text and tool names, no reasoning or output. */
+function transcriptMessage(
+  message: PiMessage,
+  secrets: readonly string[],
+): TranscriptMessage | undefined {
+  const at = "timestamp" in message ? message.timestamp : undefined;
+
+  if (message.role === "toolResult")
+    return {
+      role: "toolResult",
+      at,
+      toolResult: { tool: message.toolName, isError: message.isError },
+    };
+
+  if (message.role !== "user" && message.role !== "assistant") return undefined;
+
+  const blocks = Predicate.isString(message.content) ? [] : message.content;
+
+  const text = Predicate.isString(message.content)
+    ? message.content
+    : blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n\n");
+
+  const tools = blocks.flatMap((block) => (block.type === "toolCall" ? [block.name] : []));
+
+  return {
+    role: message.role,
+    at,
+    text: text.trim() ? redact(text, secrets) : undefined,
+    tools: tools.length ? tools : undefined,
+  };
 }

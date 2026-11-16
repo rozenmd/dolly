@@ -165,7 +165,8 @@ export async function listSessions(
                 .flatMap((block) => (block.type === "text" ? [block.text] : []))
                 .join("\n");
 
-          title = text.trim().split("\n")[0]?.slice(0, 80) ?? "";
+          // Redact before truncating: a secret cut at the limit would no longer match.
+          title = redact(text.trim().split("\n")[0] ?? "", secrets).slice(0, 80);
 
           if (title) break;
         }
@@ -197,7 +198,7 @@ export async function listSessions(
         id: aliases.get(record.id) ?? String(record.id),
         model: agent.model?.modelId ?? "Existing session",
         thinkingLevel: agent.thinkingLevel,
-        title: redact(title || "Untitled session", secrets),
+        title: title || "Untitled session",
         repository: workspace?.config?.repository ?? "",
         ref: workspace?.config?.ref,
         updatedAt,
