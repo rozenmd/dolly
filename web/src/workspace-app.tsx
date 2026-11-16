@@ -2,7 +2,12 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import { Bars3Icon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
-import { ArchiveBoxIcon, ArrowUturnLeftIcon, PlusIcon } from "@heroicons/react/24/outline";
+import {
+  ArchiveBoxIcon,
+  ArrowUturnLeftIcon,
+  InboxArrowDownIcon,
+  PlusIcon,
+} from "@heroicons/react/24/outline";
 import { Sidebar } from "./components/sidebar";
 import { Composer, Conversation } from "./components/conversation";
 import { IconButton, Input, Modal, RepoBadge } from "./components/ui";
@@ -28,6 +33,7 @@ import { ago } from "./lib/time";
 import { watchSession } from "./lib/session-stream";
 import { imagesBody, type Attachment } from "./lib/images";
 import { sessionList } from "./lib/session-list";
+import { belongsInSidebar, sessionThreads, sidebarSelection } from "./lib/session-threads";
 import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-summary";
 import { useSessionSummary } from "./lib/session-summary";
 
@@ -72,8 +78,17 @@ export function WorkspaceApp() {
         // The open session streams live state; others rely on the polled list.
         running: item.id === selected && snapshot ? running : Boolean(item.running),
         pullRequest: item.pullRequest,
+        parentId: item.parentId,
+        kept: item.kept,
       }))
     : [];
+
+  // Spawned sessions live with their parent, not in the sidebar (see lib/session-threads).
+  const sidebarRows = rows.filter(belongsInSidebar);
+
+  const parent = session?.parentId
+    ? sessions.find((item) => item.id === session.parentId)
+    : undefined;
 
   async function loadAuth() {
     setAuthError("");
@@ -160,7 +175,12 @@ export function WorkspaceApp() {
         }
 
         save(saved);
-        setSelected((current) => current || sessionList(saved, "", Date.now()).active[0]?.id || "");
+        setSelected(
+          (current) =>
+            current ||
+            sessionList(saved.filter(belongsInSidebar), "", Date.now()).active[0]?.id ||
+            "",
+        );
 
         setModal(!signedIn && !claude.connected ? "codex" : saved.length ? null : "new");
       },
@@ -307,12 +327,30 @@ export function WorkspaceApp() {
     if (!target.archived && selected === id) {
       select(
         sessionList(
-          sessions.filter((item) => item.id !== id),
+          sessions.filter((item) => item.id !== id && belongsInSidebar(item)),
           "",
           Date.now(),
         ).active[0]?.id || "",
       );
     }
+  }
+
+  /** opensession's "Keep in sidebar": a spawned session gets a row of its own. */
+  async function toggleKept(id: string) {
+    const target = sessions.find((item) => item.id === id);
+
+    if (!target?.parentId) return;
+    const kept = !target.kept;
+
+    try {
+      await request(`/sessions/${encodeURIComponent(id)}`, { kept }, undefined, "PUT");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not update the sidebar.");
+
+      return;
+    }
+
+    updateSessions((current) => current.map((item) => (item.id === id ? { ...item, kept } : item)));
   }
 
   async function setThinkingLevel(level: string) {
@@ -449,8 +487,8 @@ export function WorkspaceApp() {
         Skip to conversation
       </a>
       <Sidebar
-        rows={rows}
-        selected={selected}
+        rows={sidebarRows}
+        selected={sidebarSelection(sessions, selected)}
         connected={connected}
         open={mobileOpen}
         feed={feed}
@@ -490,9 +528,32 @@ export function WorkspaceApp() {
                 <ChevronRightIcon className="breadcrumb-chevron" />
               </>
             )}
+            {session && !feed && parent && (
+              <>
+                <button
+                  type="button"
+                  className="breadcrumb-parent"
+                  title={`Spawned by ${parent.title || "Untitled session"}`}
+                  onClick={() => select(parent.id)}
+                >
+                  {parent.title || "Untitled session"}
+                </button>
+                <ChevronRightIcon className="breadcrumb-chevron" />
+              </>
+            )}
             <h1>{feed ? "Feed" : session ? session.title || "Untitled session" : "dolly"}</h1>
           </div>
           <div className="header-actions">
+            {session && !feed && session.parentId && (
+              <IconButton
+                label={session.kept ? "Remove from sidebar" : "Keep in sidebar"}
+                aria-pressed={Boolean(session.kept)}
+                className={session.kept ? "pressed" : ""}
+                onClick={() => void toggleKept(session.id)}
+              >
+                <InboxArrowDownIcon />
+              </IconButton>
+            )}
             {session && !feed && (
               <IconButton
                 label={session.archived ? "Restore session" : "Archive session"}
@@ -521,7 +582,13 @@ export function WorkspaceApp() {
               <FeedView rows={rows.filter((row) => !row.archived)} onSelect={select} />
             ) : session ? (
               <>
-                <Conversation turns={turns} sessionId={session.id} loading={loading} />
+                <Conversation
+                  turns={turns}
+                  sessionId={session.id}
+                  loading={loading}
+                  thread={(id) => rows.find((row) => row.id === id)}
+                  onOpenThread={select}
+                />
                 <Composer
                   draftKey={selected}
                   onSend={send}
@@ -556,6 +623,11 @@ export function WorkspaceApp() {
             session={session}
             running={running}
             failure={turns.at(-1)?.failure?.reason}
+            threads={sessionThreads(
+              rows.filter((row) => !row.archived),
+              session.id,
+            )}
+            onOpenThread={select}
           />
         )}
       </main>

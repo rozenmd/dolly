@@ -17,7 +17,7 @@ import { exceptionDetails } from "./diagnostics";
 import { AnthropicSetup, AnthropicProbe } from "./anthropic";
 import type { Env } from "./env";
 import { PromptImage, MAX_IMAGES, MAX_PROMPT_BYTES } from "./images";
-import { SavedSession } from "./session-contracts";
+import { SavedSession, SessionUpdate } from "./session-contracts";
 
 export { Agent } from "./agent";
 
@@ -375,12 +375,14 @@ app.put("/api/sessions/:id", (c) =>
     c,
     Effect.gen(function* () {
       const input = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
-        Effect.flatMap(Schema.decodeUnknownEffect(Schema.Struct({ archived: Schema.Boolean }))),
-        Effect.mapError(() => new InvalidInput({ message: "Expected an archived boolean" })),
+        Effect.flatMap(Schema.decodeUnknownEffect(SessionUpdate)),
+        Effect.mapError(
+          () => new InvalidInput({ message: "Expected an archived or kept boolean" }),
+        ),
       );
 
-      const result = yield* rpc("sessions.archive", async () =>
-        owner(c).archiveSession(c.req.param("id"), input.archived),
+      const result = yield* rpc("sessions.update", async () =>
+        owner(c).updateSession(c.req.param("id"), input),
       );
 
       return result ? c.json(result) : c.json({ error: "Session not found" }, 404);

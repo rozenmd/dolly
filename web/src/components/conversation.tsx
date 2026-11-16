@@ -36,6 +36,26 @@ import { formatToolOutput, oneLine } from "../lib/tool-output";
 import { IconButton, Textarea } from "./ui";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import type { Attachment } from "../lib/images";
+import {
+  spawnedThreadId,
+  THREAD_STATE_LABEL,
+  threadState,
+  threadStatusLine,
+} from "../lib/session-threads";
+
+/** What a thread card shows about a spawned session, from the session list. */
+export type ThreadCardSession = {
+  id: string;
+  title: string;
+  updatedAt: number;
+  running: boolean;
+  pullRequest?: { number: number; state?: "open" | "draft" | "merged" | "closed" };
+};
+
+type ThreadLookup = {
+  thread?: (id: string) => ThreadCardSession | undefined;
+  onOpenThread?: (id: string) => void;
+};
 
 function Prose({ text }: { text: string }) {
   return (
@@ -49,11 +69,13 @@ export function Conversation({
   turns,
   sessionId,
   loading,
+  thread,
+  onOpenThread,
 }: {
   turns: readonly Turn[];
   sessionId: string;
   loading: boolean;
-}) {
+} & ThreadLookup) {
   const scroll = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const [now, setNow] = useState(Date.now);
@@ -98,7 +120,13 @@ export function Conversation({
         )}
         <DisclosureChoices.Provider value={choices}>
           {turns.map((turn) => (
-            <TurnView key={turn.id} turn={turn} now={now} />
+            <TurnView
+              key={turn.id}
+              turn={turn}
+              now={now}
+              thread={thread}
+              onOpenThread={onOpenThread}
+            />
           ))}
         </DisclosureChoices.Provider>
       </div>
@@ -106,9 +134,20 @@ export function Conversation({
   );
 }
 
-function TurnView({ turn, now }: { turn: Turn; now: number }) {
+function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number } & ThreadLookup) {
   const started = turn.prompt?.at ?? turn.startedAt;
   const silent = !turn.running && !turn.answer && !turn.failure && turn.items.length > 0;
+
+  // Threads this turn started stay visible as cards even when the work log is folded.
+  const spawned = turn.items.flatMap((item) =>
+    item.kind === "steps"
+      ? item.steps.flatMap((step) => {
+          const id = spawnedThreadId(step.name, step.status, step.output);
+
+          return id ? [{ step: step.id, id }] : [];
+        })
+      : [],
+  );
 
   return (
     <section className="turn">
@@ -133,6 +172,13 @@ function TurnView({ turn, now }: { turn: Turn; now: number }) {
         </article>
       )}
       {turn.items.length > 0 && <WorkLog turn={turn} now={now} />}
+      {spawned.length > 0 && onOpenThread && (
+        <div className="thread-cards">
+          {spawned.map(({ step, id }) => (
+            <ThreadCard key={step} id={id} session={thread?.(id)} onOpen={onOpenThread} />
+          ))}
+        </div>
+      )}
       {turn.answer && (
         <Answer id={turn.answer.id} text={turn.answer.text} at={turn.endedAt} now={now} />
       )}
@@ -165,6 +211,39 @@ function TurnView({ turn, now }: { turn: Turn; now: number }) {
         </p>
       )}
     </section>
+  );
+}
+
+/** A spawned session, live from the polled session list, opening it on click. */
+function ThreadCard({
+  id,
+  session,
+  onOpen,
+}: {
+  id: string;
+  session?: ThreadCardSession;
+  onOpen: (id: string) => void;
+}) {
+  const state = session ? threadState(session) : undefined;
+  const line = session ? threadStatusLine(session) : "";
+
+  return (
+    <button type="button" className="thread-card" onClick={() => onOpen(id)}>
+      <span className={`thread-dot ${state ?? "pending"}`} aria-hidden="true" />
+      <span className="thread-text">
+        <span className="thread-title">{session?.title ?? "Thread"}</span>
+        <span className="thread-status">
+          {state ? (
+            <>
+              <strong>{THREAD_STATE_LABEL[state]}</strong>
+              {line !== THREAD_STATE_LABEL[state] && ` · ${line}`}
+            </>
+          ) : (
+            "Thread"
+          )}
+        </span>
+      </span>
+    </button>
   );
 }
 

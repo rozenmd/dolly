@@ -10,6 +10,13 @@ import {
 } from "@heroicons/react/24/outline";
 import type { SavedSession } from "../lib/api";
 import type { SessionSummary as SummaryState } from "../lib/session-summary";
+import {
+  groupThreads,
+  THREAD_STATE_LABEL,
+  threadState,
+  threadStatusLine,
+} from "../lib/session-threads";
+import { ago } from "../lib/time";
 import { effortName, modelName } from "./model-select";
 import { PullRequestIcon } from "./sidebar";
 import { IconButton, RepoBadge } from "./ui";
@@ -22,6 +29,62 @@ const PULL_HEADLINES = {
   merged: "Merged",
   closed: "Closed",
 } as const;
+
+export type ThreadRow = {
+  id: string;
+  title: string;
+  updatedAt: number;
+  running: boolean;
+  pullRequest?: SavedSession["pullRequest"];
+};
+
+/** The threads a session handed work to, grouped by where they stand (opensession's Threads panel). */
+function ThreadsBand({
+  threads,
+  onOpen,
+}: {
+  threads: readonly ThreadRow[];
+  onOpen: (id: string) => void;
+}) {
+  const now = Date.now();
+  const shipped = threads.filter((thread) => threadState(thread) === "shipped").length;
+
+  return (
+    <section aria-label="Threads" className="summary-threads">
+      <h2 className="summary-section">
+        Threads <span className="thread-count">{threads.length}</span>
+        <span className="thread-summary">
+          {shipped} shipped · {threads.length - shipped} open
+        </span>
+      </h2>
+      {groupThreads(threads).map((group) => (
+        <section
+          key={group.state}
+          className="thread-group"
+          aria-label={THREAD_STATE_LABEL[group.state]}
+        >
+          <h3>
+            {THREAD_STATE_LABEL[group.state]} <span>{group.threads.length}</span>
+          </h3>
+          <ul className="thread-list">
+            {group.threads.map((thread) => (
+              <li key={thread.id}>
+                <button type="button" className="thread-row" onClick={() => onOpen(thread.id)}>
+                  <span className={`thread-dot ${group.state}`} aria-hidden="true" />
+                  <span className="thread-text">
+                    <span className="thread-title">{thread.title}</span>
+                    <span className="thread-status">{threadStatusLine(thread)}</span>
+                  </span>
+                  <span className="thread-time">{ago(thread.updatedAt, now)}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </section>
+  );
+}
 
 /** The header button that shows and hides the summary card. */
 export function SessionSummaryToggle({ summary }: { summary: SummaryState }) {
@@ -78,7 +141,8 @@ function Row({
  * A floating card at the top right of the conversation pane that summarises
  * the session, modelled on Open Session's workspace summary: the pull request
  * and where it stands in a tinted band at the top, then quiet rows for the
- * agent's status, the diff size, the repository, the model and the session ID.
+ * agent's status and the diff size, the threads it spawned, then the
+ * repository, the model and the session ID.
  *
  * On a pane with room it stands beside the transcript, which steps aside for
  * it. On a narrower pane it is an overlay that closes on Escape or the next
@@ -89,11 +153,15 @@ export function SessionSummaryCard({
   session,
   running,
   failure,
+  threads,
+  onOpenThread,
 }: {
   summary: SummaryState;
   session: SavedSession;
   running: boolean;
   failure?: string;
+  threads: readonly ThreadRow[];
+  onOpenThread: (id: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const { setOpen, standing } = summary;
@@ -197,6 +265,7 @@ export function SessionSummaryCard({
           }
         />
       )}
+      {threads.length > 0 && <ThreadsBand threads={threads} onOpen={onOpenThread} />}
       <h2 className="summary-section">Session</h2>
       {session.repository && (
         <Row
