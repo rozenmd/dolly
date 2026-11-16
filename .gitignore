@@ -13,3 +13,4 @@ web/test-results/
 !infra/.env.example
 .vitest/
 __pycache__/
+ci-results*.json
