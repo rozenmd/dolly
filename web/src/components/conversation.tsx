@@ -16,9 +16,18 @@ import {
   ChevronRightIcon,
   ExclamationCircleIcon,
   StopIcon,
-  XMarkIcon,
 } from "@heroicons/react/16/solid";
-import { DocumentDuplicateIcon, Square2StackIcon } from "@heroicons/react/24/outline";
+import {
+  CodeBracketIcon,
+  CommandLineIcon,
+  DocumentDuplicateIcon,
+  DocumentTextIcon,
+  EyeIcon,
+  FolderIcon,
+  PencilIcon,
+  UsersIcon,
+  WrenchIcon,
+} from "@heroicons/react/24/outline";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { QueuedMessage, Step, Turn } from "../lib/api";
@@ -123,7 +132,7 @@ function TurnView({ turn, now }: { turn: Turn; now: number }) {
           </div>
         </article>
       )}
-      {turn.items.length > 0 && <WorkLog turn={turn} />}
+      {turn.items.length > 0 && <WorkLog turn={turn} now={now} />}
       {turn.answer && (
         <Answer id={turn.answer.id} text={turn.answer.text} at={turn.endedAt} now={now} />
       )}
@@ -184,13 +193,13 @@ function failureReason(reason: string) {
 const DisclosureChoices = createContext<Map<string, boolean>>(new Map());
 
 /**
- * Disclosure state for a step <details>. It starts open and only the user
- * opens or closes it afterwards: run status never toggles it, so it can't
- * flash while the agent works.
+ * Disclosure state for a step <details>. It starts in its default state and
+ * only the user opens or closes it afterwards: run status never toggles it, so
+ * it can't flash while the agent works.
  */
-function useDisclosure(id: string) {
+function useDisclosure(id: string, initial: boolean) {
   const choices = useContext(DisclosureChoices);
-  const [open, setOpen] = useState(() => choices.get(id) ?? true);
+  const [open, setOpen] = useState(() => choices.get(id) ?? initial);
 
   return {
     open,
@@ -204,7 +213,7 @@ function useDisclosure(id: string) {
   };
 }
 
-function WorkLog({ turn }: { turn: Turn }) {
+function WorkLog({ turn, now }: { turn: Turn; now: number }) {
   // The work log is opened once when it appears (if running, failed, or
   // finished without a final reply, so nothing the agent wrote is hidden) and
   // is otherwise left entirely to the user.
@@ -234,7 +243,7 @@ function WorkLog({ turn }: { turn: Turn }) {
           item.kind === "text" ? (
             <Prose key={item.id} text={item.text} />
           ) : (
-            <StepGroup key={item.id} id={item.id} steps={item.steps} />
+            <StepGroup key={item.id} id={item.id} steps={item.steps} now={now} />
           ),
         )}
       </div>
@@ -246,15 +255,15 @@ function stepCount(count: number) {
   return count === 0 ? "" : `${count} ${count === 1 ? "step" : "steps"}`;
 }
 
-function StepGroup({ id, steps }: { id: string; steps: readonly Step[] }) {
+function StepGroup({ id, steps, now }: { id: string; steps: readonly Step[]; now: number }) {
   const running = steps.some((step) => step.status === "running");
   const failed = steps.some((step) => step.status === "error");
-  const disclosure = useDisclosure(id);
+  const disclosure = useDisclosure(id, true);
 
   return (
     <details className="step-group" {...disclosure}>
       <summary>
-        <Square2StackIcon />
+        <ChevronRightIcon className="disclosure" />
         <span>{stepCount(steps.length)}</span>
         {running && <span className="status-dot working" aria-label="Running" />}
         {failed && <ExclamationCircleIcon className="step-error" aria-label="A step failed" />}
@@ -262,7 +271,7 @@ function StepGroup({ id, steps }: { id: string; steps: readonly Step[] }) {
       <ol>
         {steps.map((step) => (
           <li key={step.id}>
-            <StepDetails step={step} />
+            <StepDetails step={step} now={now} />
           </li>
         ))}
       </ol>
@@ -270,22 +279,25 @@ function StepGroup({ id, steps }: { id: string; steps: readonly Step[] }) {
   );
 }
 
-function StepDetails({ step }: { step: Step }) {
-  const disclosure = useDisclosure(`step-${step.id}`);
+/** One row per tool call, collapsed to a single line until the user opens it. */
+function StepDetails({ step, now }: { step: Step; now: number }) {
+  const disclosure = useDisclosure(`step-${step.id}`, false);
   const output = useMemo(() => formatToolOutput(step.output), [step.output]);
   const failed = step.status === "error" || output.exitCode !== undefined || output.failed;
+  const elapsed = stepElapsed(step, now);
 
   return (
     <details className="step" {...disclosure}>
-      <summary>
-        <StepStatus status={step.status} failed={Boolean(failed)} />
+      <summary title={step.detail || undefined}>
+        <StepIcon name={step.name} status={step.status} failed={Boolean(failed)} />
         <span className="step-name">{step.name}</span>
-        {step.detail && (
-          <code className="step-detail" title={step.detail}>
-            {oneLine(step.detail)}
-          </code>
+        {step.file ? (
+          <FileLabel prefix={step.file.prefix} path={step.file.path} />
+        ) : (
+          step.detail && <code className="step-detail">{oneLine(step.detail)}</code>
         )}
         {output.exitCode !== undefined && <span className="step-exit">exit {output.exitCode}</span>}
+        {elapsed && <span className="step-time">{elapsed}</span>}
       </summary>
       <div className="step-body">
         {output.sections.length ? (
@@ -314,20 +326,89 @@ function StepDetails({ step }: { step: Step }) {
   );
 }
 
-function StepStatus({ status, failed }: { status: Step["status"]; failed: boolean }) {
-  if (status === "running" || status === "pending")
-    return (
-      <span
-        className={`step-status step-${status}`}
-        aria-label={status === "running" ? "Running" : "Queued"}
-      />
-    );
+function stepElapsed(step: Step, now: number) {
+  if (step.startedAt === undefined) return "";
 
-  return failed ? (
-    <XMarkIcon className="step-status step-error" aria-label="Failed" />
-  ) : (
-    <CheckIcon className="step-status step-done" aria-label="Done" />
+  const end = step.endedAt ?? (step.status === "running" ? now : undefined);
+
+  if (end === undefined) return "";
+
+  const ms = Math.max(0, end - step.startedAt);
+
+  return ms < 1000 ? "<1s" : duration(ms);
+}
+
+const toolIcons = new Map(
+  Object.entries({
+    shell: CommandLineIcon,
+    bash: CommandLineIcon,
+    read_file: DocumentTextIcon,
+    edit: PencilIcon,
+    write: PencilIcon,
+    github: CodeBracketIcon,
+    workspace: FolderIcon,
+    preview: EyeIcon,
+    spawn_task: UsersIcon,
+    send_to_session: UsersIcon,
+    wait_for_task: UsersIcon,
+    list_children: UsersIcon,
+    task_status: UsersIcon,
+    cancel_task: UsersIcon,
+  }),
+);
+
+/** The tool's icon, tinted by status: amber while running, red on failure. */
+function StepIcon({
+  name,
+  status,
+  failed,
+}: {
+  name: string;
+  status: Step["status"];
+  failed: boolean;
+}) {
+  const Icon = toolIcons.get(name) ?? WrenchIcon;
+  const state = status === "running" || status === "pending" ? status : failed ? "error" : "done";
+
+  const label = { running: "Running", pending: "Queued", error: "Failed", done: "Done" }[state];
+
+  return <Icon className={`step-status step-${state}`} aria-label={label} />;
+}
+
+/** A file path as a type badge, a dimmed directory and the file name. */
+function FileLabel({ prefix, path }: { prefix: string; path: string }) {
+  const slash = path.lastIndexOf("/");
+  const directory = path.slice(0, slash + 1);
+  const name = path.slice(slash + 1);
+  const dot = name.lastIndexOf(".");
+  const extension = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+
+  return (
+    <span className="step-file">
+      {prefix && <code className="step-file-prefix">{prefix}</code>}
+      {extension && (
+        <span className={`file-badge file-${fileKind(extension)}`}>{extension.toUpperCase()}</span>
+      )}
+      <span className="step-file-path">
+        {directory && <span className="step-file-dir">{directory}</span>}
+        <span className="step-file-name">{name}</span>
+      </span>
+    </span>
   );
+}
+
+const fileKinds: Record<string, string> = Object.fromEntries(
+  Object.entries({
+    ts: ["ts", "tsx", "mts", "cts"],
+    js: ["js", "jsx", "mjs", "cjs"],
+    sh: ["sh", "bash", "zsh"],
+    data: ["json", "jsonc", "yml", "yaml", "toml"],
+    style: ["css", "scss", "html"],
+  }).flatMap(([kind, extensions]) => extensions.map((extension) => [extension, kind])),
+);
+
+function fileKind(extension: string) {
+  return fileKinds[extension] ?? "other";
 }
 
 function stepPlaceholder(status: Step["status"]) {

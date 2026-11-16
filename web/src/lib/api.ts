@@ -90,6 +90,11 @@ export type Step = {
   output: string;
   images?: string[];
   status: "pending" | "running" | "done" | "error";
+  /** The file a step reads or writes, shown as a file label instead of raw detail. */
+  file?: { prefix: string; path: string };
+  /** When the model issued the call and when its result arrived, for the step's duration. */
+  startedAt?: number;
+  endedAt?: number;
 };
 
 export type TurnItem =
@@ -133,7 +138,7 @@ const OperationArguments = Schema.Struct({ operation: Schema.Unknown });
  * The most recognisable arguments of a tool call, such as its command or file
  * path, prefixed by the action for multi-action tools (`checkout owner/repo`).
  */
-function stepDetail(block: typeof Block.Type) {
+function stepArguments(block: typeof Block.Type) {
   const nested = Option.getOrUndefined(
     Schema.decodeUnknownOption(OperationArguments)(block.arguments),
   );
@@ -142,12 +147,25 @@ function stepDetail(block: typeof Block.Type) {
     Schema.decodeUnknownOption(ToolArguments)(nested?.operation ?? block.arguments),
   );
 
-  if (!args) return "";
+  return args;
+}
+
+function stepDetail(block: typeof Block.Type): Pick<Step, "detail" | "file"> {
+  const args = stepArguments(block);
+
+  if (!args) return { detail: "" };
 
   const target =
     args.command ?? args.path ?? args.file_path ?? args.pattern ?? args.query ?? args.url;
 
-  return [args.action, args.repository, target].filter(Boolean).join(" ");
+  const prefix = [args.action, args.repository].filter(Boolean).join(" ");
+  const detail = [prefix, target].filter(Boolean).join(" ");
+  const path = args.file_path ?? args.path;
+
+  // Preview's `path` is a URL path, not a file.
+  return args.command === undefined && path && block.name !== "preview"
+    ? { detail, file: { prefix, path } }
+    : { detail };
 }
 
 /** Groups a flat Pi transcript into prompt/response turns, folding tool calls into steps. */
@@ -244,16 +262,19 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 
       const imageOutput = images.length ? { images } : {};
 
-      if (step) Object.assign(step, { output, status, ...imageOutput });
-      else
-        addStep(turn, {
-          id: message.toolCallId ?? id,
-          name: message.toolName ?? "tool",
-          detail: "",
-          output,
-          status,
-          ...imageOutput,
-        });
+      const target: Step = step ?? {
+        id: message.toolCallId ?? id,
+        name: message.toolName ?? "tool",
+        detail: "",
+        output,
+        status,
+      };
+
+      Object.assign(target, { output, status, ...imageOutput });
+
+      if (message.timestamp !== undefined) target.endedAt = message.timestamp;
+
+      if (!step) addStep(turn, target);
 
       return;
     }
@@ -267,15 +288,18 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     for (const [index, block] of message.content.entries()) {
       const blockId = `${id}-${index}`;
 
-      if (block.type === "toolCall" && block.name)
-        addStep(turn, {
+      if (block.type === "toolCall" && block.name) {
+        const step: Step = {
           id: block.id ?? blockId,
           name: block.name,
-          detail: stepDetail(block),
+          ...stepDetail(block),
           output: "",
           status: "running",
-        });
-      else if (block.text) {
+        };
+
+        if (message.timestamp !== undefined) step.startedAt = message.timestamp;
+        addStep(turn, step);
+      } else if (block.text) {
         const last = turn.items.at(-1);
 
         if (last?.kind === "text") last.text += `\n\n${block.text}`;
