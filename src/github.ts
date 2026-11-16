@@ -248,6 +248,9 @@ const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) =>
     ),
   );
 
+/** The only pull request fields update_pull_request may send. */
+type PullRequestEdit = { title?: string; body?: string };
+
 type GitHubBody =
   | {
       repositories?: readonly string[];
@@ -256,6 +259,7 @@ type GitHubBody =
   | { body: string }
   | { ref: string; sha: string }
   | { head: string; base: string; title: string; body: string }
+  | PullRequestEdit
   | { message: string; branch: string; content: string; sha?: string }
   | { url: string; content_type: "json"; secret: string; insecure_ssl: "0" }
   | {
@@ -1249,6 +1253,36 @@ function makeGitHub(
             comments: op.comments.length,
           },
         },
+      };
+    }
+
+    if (op.action === "update_pull_request") {
+      // Only the title and description are sent, so state, base and merging cannot change.
+      const changes: PullRequestEdit = {};
+
+      if (op.title !== undefined) changes.title = op.title;
+
+      if (op.body !== undefined) changes.body = op.body;
+
+      if (changes.title === undefined && changes.body === undefined)
+        return {
+          ok: false,
+          code: "nothing_to_update",
+          message: "Supply a title, a body or both to update the pull request",
+        };
+
+      const token = yield* tokenFor(connected, op.repository, "write");
+
+      const pull = yield* api(
+        `/repos/${op.repository}/pulls/${op.number}`,
+        token,
+        changes,
+        "PATCH",
+      ).pipe(Effect.flatMap(decode(PullResponse)));
+
+      return {
+        ok: true,
+        result: { kind: "pull_request", number: pull.number, url: pull.html_url },
       };
     }
 

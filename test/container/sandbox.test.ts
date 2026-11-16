@@ -272,6 +272,69 @@ it("executes commands and uses Sandbox 1.0 Files in isolated containers", async 
   expect(await second.run("test ! -e /workspace/proof.txt")).toMatchObject({ exitCode: 0 });
 });
 
+it("writes and edits files through Sandbox Files with line diff stats and clear failures", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+
+  try {
+    expect(await sandbox.writeFile("/workspace/notes/new/todo.md", "one\ntwo\nthree\n")).toEqual({
+      change: { path: "/workspace/notes/new/todo.md", created: true, added: 3, removed: 0 },
+    });
+    expect(await sandbox.run("stat -c %U notes/new/todo.md; cat notes/new/todo.md")).toMatchObject({
+      stdout: "node\none\ntwo\nthree\n",
+      exitCode: 0,
+    });
+    expect(
+      await sandbox.writeFile("/workspace/notes/new/todo.md", "one\n2\nthree\nfour\n"),
+    ).toEqual({
+      change: { path: "/workspace/notes/new/todo.md", created: false, added: 2, removed: 1 },
+    });
+    expect(
+      await sandbox.editFile("/workspace/notes/new/todo.md", {
+        old_string: "2\nthree\n",
+        new_string: "two\n",
+      }),
+    ).toEqual({
+      change: { path: "/workspace/notes/new/todo.md", replacements: 1, added: 1, removed: 2 },
+    });
+    expect(await sandbox.readFile("/workspace/notes/new/todo.md")).toBe("one\ntwo\nfour\n");
+
+    await sandbox.writeFile("/workspace/repeat.txt", "x = 1\nx = 1\n");
+    expect(
+      await sandbox.editFile("/workspace/repeat.txt", { old_string: "x = 1", new_string: "x = 2" }),
+    ).toEqual({
+      refused: expect.stringContaining("old_string matches 2 places in /workspace/repeat.txt"),
+    });
+    expect(
+      await sandbox.editFile("/workspace/repeat.txt", { old_string: "y", new_string: "z" }),
+    ).toEqual({
+      refused: expect.stringContaining("old_string was not found in /workspace/repeat.txt"),
+    });
+    expect(
+      await sandbox.editFile("/workspace/missing.txt", { old_string: "a", new_string: "b" }),
+    ).toEqual({ refused: "/workspace/missing.txt does not exist; use write_file to create it" });
+    expect(
+      await sandbox.editFile("/workspace/notes", { old_string: "a", new_string: "b" }),
+    ).toEqual({
+      refused: expect.stringContaining("/workspace/notes is a directory, not a regular file"),
+    });
+    expect(await sandbox.readFile("/workspace/repeat.txt")).toBe("x = 1\nx = 1\n");
+    expect(
+      await sandbox.editFile("/workspace/repeat.txt", {
+        old_string: "x = 1",
+        new_string: "x = 2",
+        replace_all: true,
+      }),
+    ).toEqual({ change: { path: "/workspace/repeat.txt", replacements: 2, added: 2, removed: 2 } });
+
+    expect(await sandbox.run("printf '\\377\\376' > binary.bin")).toMatchObject({ exitCode: 0 });
+    expect(
+      await sandbox.editFile("/workspace/binary.bin", { old_string: "a", new_string: "b" }),
+    ).toEqual({ refused: expect.stringContaining("/workspace/binary.bin is not UTF-8 text") });
+  } finally {
+    await sandbox.restart();
+  }
+});
+
 it("keeps repository-less workspaces ephemeral", async () => {
   const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
 

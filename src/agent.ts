@@ -24,7 +24,7 @@ import {
   type Wake,
 } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
-import { int, obj, opt, str } from "@earendil-works/pi-schema";
+import { bool, int, obj, opt, str } from "@earendil-works/pi-schema";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -95,6 +95,7 @@ import { exceptionDetails, redact } from "./diagnostics";
 import { Papercuts, PapercutRequest, papercutsPrompt, toolFailure } from "./papercuts";
 import { attempt, rpc, OperationError } from "./operations";
 import type { Env } from "./env";
+import type { FileResult } from "./sandbox";
 import { resolveImages, storeImages, type PromptImage } from "./images";
 import { listSessions } from "./session-list";
 import type { PullRequestState, SavedSession } from "./session-contracts";
@@ -248,6 +249,32 @@ export class Agent extends DurableObject<Env> {
         ),
     } satisfies ToolRegistration;
 
+    // Relative file tool paths resolve like shell's working directory.
+    const sandboxFile = async (conversationId: ConversationId, path: string) => {
+      const workspace = await this.prepareWorkspace(conversationId);
+
+      return {
+        sandbox: this.env.SANDBOX.getByName(workspace?.sandboxId ?? String(conversationId)),
+        path: path.startsWith("/")
+          ? path
+          : `${workspace ? "/workspace/repo" : "/workspace"}/${path}`,
+      };
+    };
+
+    // A refused edit is a tool error the model can correct, not a sandbox failure.
+    const fileOutput = (result: FileResult) =>
+      "refused" in result
+        ? Effect.fail(
+            new OperationError({
+              operation: "sandbox.file",
+              message: result.refused,
+              details: null,
+            }),
+          )
+        : Effect.succeed({
+            output: [{ type: "text" as const, text: JSON.stringify(result.change) }],
+          });
+
     const readFile = {
       name: "read_file",
       description:
@@ -261,17 +288,56 @@ export class Agent extends DurableObject<Env> {
       execute: ({ path, offset, limit }: { path: string; offset?: number; limit?: number }, api) =>
         Effect.runPromise(
           rpc("sandbox.readFile", async () => {
-            const workspace = await this.prepareWorkspace(api.conversationId);
+            const file = await sandboxFile(api.conversationId, path);
 
-            return this.env.SANDBOX.getByName(
-              workspace?.sandboxId ?? String(api.conversationId),
-            ).readFile(
-              path.startsWith("/")
-                ? path
-                : `${workspace ? "/workspace/repo" : "/workspace"}/${path}`,
-              { offset, limit },
-            );
+            return file.sandbox.readFile(file.path, { offset, limit });
           }).pipe(Effect.map((text) => ({ output: [{ type: "text", text }] }))),
+        ),
+    } satisfies ToolRegistration;
+
+    const writeFile = {
+      name: "write_file",
+      description:
+        "Create or overwrite a UTF-8 file in the active repository's sandbox with exactly content, creating missing parent directories. Relative paths use /workspace/repo, or /workspace when no repo is selected. Prefer edit_file for changes to existing files; read a file before replacing it. Returns path, created, and the lines added and removed.",
+      parameters: obj({ path: str({ minLength: 1 }), content: str() }),
+      replay: "unsafe",
+      executionMode: "sequential",
+      execute: ({ path, content }: { path: string; content: string }, api) =>
+        Effect.runPromise(
+          rpc("sandbox.writeFile", async () => {
+            const file = await sandboxFile(api.conversationId, path);
+
+            return file.sandbox.writeFile(file.path, content);
+          }).pipe(Effect.flatMap(fileOutput)),
+        ),
+    } satisfies ToolRegistration;
+
+    const editFile = {
+      name: "edit_file",
+      description:
+        "Edit an existing UTF-8 file in the active repository's sandbox by replacing old_string with new_string. old_string must match the file exactly, including whitespace and indentation, and must be unique unless replace_all is true; the edit fails without changing the file when it is missing or ambiguous, so read the file first and include enough surrounding lines. Relative paths use /workspace/repo, or /workspace when no repo is selected. Returns path, replacements, and the lines added and removed.",
+      parameters: obj({
+        path: str({ minLength: 1 }),
+        old_string: str({ minLength: 1, description: "Exact text to replace" }),
+        new_string: str({ description: "Replacement text" }),
+        replace_all: opt(bool({ description: "Replace every match instead of exactly one" })),
+      }),
+      replay: "unsafe",
+      executionMode: "sequential",
+      execute: (
+        input: { path: string; old_string: string; new_string: string; replace_all?: boolean },
+        api,
+      ) =>
+        Effect.runPromise(
+          rpc("sandbox.editFile", async () => {
+            const file = await sandboxFile(api.conversationId, input.path);
+
+            return file.sandbox.editFile(file.path, {
+              old_string: input.old_string,
+              new_string: input.new_string,
+              replace_all: input.replace_all,
+            });
+          }).pipe(Effect.flatMap(fileOutput)),
         ),
     } satisfies ToolRegistration;
 
@@ -285,7 +351,7 @@ export class Agent extends DurableObject<Env> {
       name: "github",
       description:
         "Publish screenshot evidence with upload_screenshot: repository, PR number, image (the r2:// reference returned in preview screenshot text), and caption (e.g. Before — desktop 1280×800). This explicitly copies that image to a PUBLIC R2 URL, expiring after 30 days, and posts an embedded image in a PR discussion comment. Only publish when the user has requested PR screenshots/evidence; inspect for secrets or private data first. Other conversation images remain private. Check comment_url: null means the upload succeeded but commenting failed; report comment_error and preserve the returned URL/markdown. Never claim a PR was updated in that case. " +
-        "Read UTF-8 files from any public GitHub repository using read_file with a full owner/repository, path and ref; reads return up to 2000 lines or 50 KiB from an optional 1-based offset (limit for fewer), and nextOffset says where to continue. Discover paths with list_files (repository, ref, optional directory path, page) instead of guessing; it lists one directory level, directories end in / and can be listed in turn; no App connection, approved account or sandbox checkout is needed for public reads. Private reads and all writes require the connected App and an approved account. List App repositories, create dolly/* branches, write files with an expected sha, and open pull requests without sandbox credentials. Review pull requests: read_pull_request (metadata, head SHA), list_pull_request_files (paged diff patches), list_pull_request_comments (discussion, inline threads, reviews) and read_pull_request_checks work anonymously for public repos. Workflow: read the PR, list its files, optionally check out the head SHA in the sandbox, then create_review with commit_id set to that head SHA and inline comments anchored by path, line and side (RIGHT for new or context lines, LEFT for removed lines; start_line for ranges). Lines must fall inside the diff hunks. Use event PENDING to leave the review unsubmitted for a human, COMMENT to publish; approvals and change requests are not available. reply_to_review_comment answers an existing thread. Never merges, closes or edits pull requests and never writes the default branch. Mutations are not automatically replayed; inspect GitHub (list_pull_request_comments) after an interrupted write before trying again, to avoid duplicate reviews.",
+        "Read UTF-8 files from any public GitHub repository using read_file with a full owner/repository, path and ref; reads return up to 2000 lines or 50 KiB from an optional 1-based offset (limit for fewer), and nextOffset says where to continue. Discover paths with list_files (repository, ref, optional directory path, page) instead of guessing; it lists one directory level, directories end in / and can be listed in turn; no App connection, approved account or sandbox checkout is needed for public reads. Private reads and all writes require the connected App and an approved account. List App repositories, create dolly/* branches, write files with an expected sha, and open pull requests without sandbox credentials. Review pull requests: read_pull_request (metadata, head SHA), list_pull_request_files (paged diff patches), list_pull_request_comments (discussion, inline threads, reviews) and read_pull_request_checks work anonymously for public repos. Workflow: read the PR, list its files, optionally check out the head SHA in the sandbox, then create_review with commit_id set to that head SHA and inline comments anchored by path, line and side (RIGHT for new or context lines, LEFT for removed lines; start_line for ranges). Lines must fall inside the diff hunks. Use event PENDING to leave the review unsubmitted for a human, COMMENT to publish; approvals and change requests are not available. reply_to_review_comment answers an existing thread. update_pull_request edits only a pull request's title and/or body (repository, number, title?, body?); body replaces the whole description, so read_pull_request first to keep what should stay. Never merges, closes, reopens or retargets pull requests and never writes the default branch. Mutations are not automatically replayed; inspect GitHub (list_pull_request_comments) after an interrupted write before trying again, to avoid duplicate reviews.",
       parameters: githubSchema,
       replay: "unsafe",
       executionMode: "sequential",
@@ -311,7 +377,7 @@ export class Agent extends DurableObject<Env> {
     const workspaceTool = {
       name: "workspace",
       description:
-        "Work across repositories in this conversation. Always supply action. checkout/attach require repository (optional ref), commit requires message, and open_pull_request requires title and body. Checkout returns as soon as Git is ready; dependencies and cache publication continue in the background. Use wait_for_dependencies before builds, tests, preview startup or editing dependency inputs; it returns ready or warning with setup errors. When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or disturbing other live checkouts. Shell, read_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. diagnostics works even when checkout fails and reports the last saved turn and any save error. Files are saved once at the end of an answered agent turn, not after each command. restart bypasses checkout, discards changes since the last successful save, and restores that snapshot on the next repository tool. Use only after explicit user confirmation and supply discardUncheckpointed=true. Missing or expired snapshots fail closed; no saved snapshot means a fresh checkout of the configured ref. Mutations are not automatically replayed; inspect state after interruption.",
+        "Work across repositories in this conversation. Always supply action. checkout/attach require repository (optional ref), commit requires message, and open_pull_request requires title and body. Checkout returns as soon as Git is ready; dependencies and cache publication continue in the background. Use wait_for_dependencies before builds, tests, preview startup or editing dependency inputs; it returns ready or warning with setup errors. When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or disturbing other live checkouts. Shell, read_file, write_file, edit_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. diagnostics works even when checkout fails and reports the last saved turn and any save error. Files are saved once at the end of an answered agent turn, not after each command. restart bypasses checkout, discards changes since the last successful save, and restores that snapshot on the next repository tool. Use only after explicit user confirmation and supply discardUncheckpointed=true. Missing or expired snapshots fail closed; no saved snapshot means a fresh checkout of the configured ref. Mutations are not automatically replayed; inspect state after interruption.",
       parameters: workspaceSchema,
       replay: "unsafe",
       executionMode: "sequential",
@@ -392,6 +458,8 @@ export class Agent extends DurableObject<Env> {
     const tools = [
       shell,
       readFile,
+      writeFile,
+      editFile,
       githubTool,
       workspaceTool,
       papercutsTool,

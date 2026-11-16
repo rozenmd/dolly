@@ -1399,6 +1399,7 @@ it("blocks revoked accounts from authenticated reads, writes, and Git transport"
       title: "Update",
       body: "Details",
     },
+    { action: "update_pull_request" as const, repository, number: 8, body: "Details" },
   ]) {
     expect(await (await execute(op)).json()).toMatchObject({
       ok: false,
@@ -1643,6 +1644,116 @@ it("posts inline reviews only against the current head and diff, and never appro
     expect(
       (await post("/api/integrations/github/execute", { operation: { ...review, event } })).ok,
     ).toBe(false);
+});
+
+it("edits only pull request titles and descriptions through the App, never state or base", async () => {
+  const update = {
+    action: "update_pull_request" as const,
+    repository,
+    number: 49,
+    title: "Clearer title",
+  };
+
+  // Edits are writes: they need a connected App even for public repositories.
+  const fetch = vi.spyOn(globalThis, "fetch");
+  expect(await (await execute(update)).json()).toEqual({
+    ok: false,
+    code: "provider_error",
+    message: "Connect a GitHub App first",
+  });
+  expect(fetch).not.toHaveBeenCalled();
+  vi.restoreAllMocks();
+
+  await connect();
+  const writes: Array<{ method?: string; path: string; body: unknown }> = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const path = new URL(String(url)).pathname;
+
+    if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (path.endsWith("/access_tokens")) {
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        repositories: ["project"],
+        permissions: { pull_requests: "write" },
+      });
+
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+    }
+
+    if (path === "/repos/example/project/pulls/49" && init?.method === "PATCH") {
+      expect(new Headers(init.headers).get("Authorization")).toBe(
+        "Bearer private-installation-token",
+      );
+      writes.push({ method: init.method, path, body: JSON.parse(String(init.body)) });
+
+      return Response.json({
+        ...pullDetails,
+        html_url: "https://github.com/example/project/pull/49",
+      });
+    }
+
+    throw new Error(`Unexpected GitHub request ${init?.method} ${path}`);
+  });
+
+  expect(await (await execute(update)).json()).toEqual({
+    ok: true,
+    result: {
+      kind: "pull_request",
+      number: 49,
+      url: "https://github.com/example/project/pull/49",
+    },
+  });
+  expect(
+    await (
+      await execute({ action: "update_pull_request", repository, number: 49, body: "" })
+    ).json(),
+  ).toMatchObject({ ok: true, result: { kind: "pull_request", number: 49 } });
+  // Fields outside the contract are dropped before GitHub sees the request.
+  expect(
+    (
+      await post("/api/integrations/github/execute", {
+        operation: { ...update, body: "New description", state: "closed", base: "main" },
+      })
+    ).status,
+  ).toBe(200);
+
+  expect(writes).toEqual([
+    { method: "PATCH", path: "/repos/example/project/pulls/49", body: { title: "Clearer title" } },
+    { method: "PATCH", path: "/repos/example/project/pulls/49", body: { body: "" } },
+    {
+      method: "PATCH",
+      path: "/repos/example/project/pulls/49",
+      body: { title: "Clearer title", body: "New description" },
+    },
+  ]);
+  writes.length = 0;
+
+  expect(
+    await (await execute({ action: "update_pull_request", repository, number: 49 })).json(),
+  ).toMatchObject({ ok: false, code: "nothing_to_update" });
+
+  for (const invalid of [
+    { ...update, title: "" },
+    { ...update, title: "x".repeat(201) },
+    { ...update, body: "x".repeat(32_769) },
+    { ...update, number: 0 },
+    { ...update, repository: "not-a-repository" },
+  ]) {
+    const response = await post("/api/integrations/github/execute", { operation: invalid });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid GitHub operation" });
+  }
+
+  expect(await (await execute({ ...update, repository: "stranger/project" })).json()).toMatchObject(
+    {
+      ok: false,
+      message: expect.stringContaining("GitHub repository owner is not allowed. Add stranger"),
+    },
+  );
+  expect(writes).toEqual([]);
 });
 
 it("publishes selected screenshots to public R2 and embeds them in a PR comment", async () => {

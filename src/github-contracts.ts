@@ -29,6 +29,10 @@ const Side = Schema.Literals(["LEFT", "RIGHT"]);
 
 const CommentBody = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(65_536));
 
+const PullTitle = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200));
+
+const PullBody = Schema.String.check(Schema.isMaxLength(32_768));
+
 /** An inline review comment anchored with GitHub's line/side model (never the deprecated position). */
 export const ReviewComment = Schema.Struct({
   path: Path,
@@ -100,8 +104,17 @@ export const GitHubRequest = Schema.Struct({
       repository: Repository,
       branch: Branch,
       base: Ref,
-      title: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
-      body: Schema.String.check(Schema.isMaxLength(32_768)),
+      title: PullTitle,
+      body: PullBody,
+    }),
+    Schema.Struct({
+      /** Edits only the title and/or description; state, base and merging are never touched. */
+      action: Schema.Literal("update_pull_request"),
+      repository: Repository,
+      number: PullNumber,
+      title: Schema.optional(PullTitle),
+      /** Replaces the whole description; read_pull_request first to keep what should stay. */
+      body: Schema.optional(PullBody),
     }),
     Schema.Struct({
       action: Schema.Literal("upload_screenshot"),

@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { Files } from "@cloudflare/sandbox";
+import { Files, SandboxFileError } from "@cloudflare/sandbox";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -15,6 +15,7 @@ import {
 } from "./workspace";
 import { attempt, OperationError } from "./operations";
 import { LineWindow, describeWindow, type FileRange } from "./file-window";
+import { applyEdit, diffStats, MAX_EDIT_BYTES, type DiffStats, type Edit } from "./file-edit";
 import { exceptionDetails, redact } from "./diagnostics";
 import type { Env } from "./env";
 import { PREVIEW_TTL_MS, PreviewPort } from "./preview";
@@ -120,6 +121,132 @@ export const readWindow = Effect.fn("Sandbox.readWindow")(function* (
   const complete = !window.done;
 
   return describeWindow(window.finish(), complete ? window.totalLines : undefined);
+});
+
+/** The container filesystem operations the file tools use. */
+type FileSystem = Pick<Files, "stat" | "readFile" | "writeFile" | "mkdir">;
+
+/** A file tool result: the file's absolute path and its line-level change. */
+export type FileChange = DiffStats & {
+  readonly path: string;
+  /** write_file only: the file did not exist before. */
+  readonly created?: boolean;
+  /** edit_file only: how many matches of old_string were replaced. */
+  readonly replacements?: number;
+};
+
+/**
+ * A file tool request the model can correct (a missing or ambiguous match, a
+ * directory, binary or oversized file). It is returned as data rather than thrown
+ * across RPC, which is reserved for sandbox and transport failures.
+ */
+class FileRefusal extends Schema.TaggedError<FileRefusal>()("FileRefusal", {
+  message: Schema.String,
+}) {}
+
+/** A completed change, or why the request was refused without touching the file. */
+export type FileResult = { readonly change: FileChange } | { readonly refused: string };
+
+const refuse = (message: string) => new FileRefusal({ message });
+
+const fileResult = (operation: Effect.Effect<FileChange, FileRefusal | OperationError>) =>
+  operation.pipe(
+    Effect.map((change): FileResult => ({ change })),
+    Effect.catchTag("FileRefusal", (refusal) =>
+      Effect.succeed<FileResult>({ refused: refusal.message }),
+    ),
+  );
+
+/** A file's metadata, or null when nothing exists at the path. */
+async function statIfPresent(files: FileSystem, path: string, signal: AbortSignal) {
+  try {
+    return await files.stat(path, { signal });
+  } catch (cause) {
+    if (SandboxFileError.is(cause) && cause.code === "ENOENT") return null;
+
+    throw cause;
+  }
+}
+
+/** A whole UTF-8 file for editing, or null when it does not exist yet. */
+const readText = Effect.fn("Sandbox.readText")(function* (files: FileSystem, path: string) {
+  const stat = yield* attempt("sandbox.file.stat", (signal) => statIfPresent(files, path, signal));
+
+  if (!stat) return null;
+
+  if (stat.type !== "file") return yield* refuse(`${path} is a ${stat.type}, not a regular file`);
+
+  if (stat.size > BigInt(MAX_EDIT_BYTES))
+    return yield* refuse(
+      `${path} is larger than ${MAX_EDIT_BYTES / 1024 / 1024} MiB; change it with shell instead`,
+    );
+
+  const response = yield* attempt("sandbox.file.open", (signal) =>
+    files.readFile(path, { signal }),
+  );
+
+  const bytes = yield* attempt("sandbox.file.read", () => response.arrayBuffer());
+
+  // ignoreBOM keeps a byte-order mark in the text, so rewriting the file preserves it.
+  return yield* attempt("sandbox.file.decode", async () =>
+    new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes),
+  ).pipe(Effect.mapError(() => refuse(`${path} is not UTF-8 text; change it with shell instead`)));
+});
+
+const writeText = Effect.fn("Sandbox.writeText")(function* (
+  files: FileSystem,
+  path: string,
+  content: string,
+) {
+  yield* attempt("sandbox.file.write", (signal) => files.writeFile(path, content, { signal }));
+});
+
+const writeChange = Effect.fn("Sandbox.writeChange")(function* (
+  files: FileSystem,
+  path: string,
+  content: string,
+) {
+  const before = yield* readText(files, path);
+  const parent = path.slice(0, path.lastIndexOf("/"));
+
+  if (before === null && parent)
+    yield* attempt("sandbox.file.mkdir", (signal) =>
+      files.mkdir(parent, { recursive: true, signal }),
+    );
+
+  yield* writeText(files, path, content);
+
+  const change: FileChange = {
+    path,
+    created: before === null,
+    ...diffStats(before ?? "", content),
+  };
+
+  return change;
+});
+
+const editChange = Effect.fn("Sandbox.editChange")(function* (
+  files: FileSystem,
+  path: string,
+  edit: Edit,
+) {
+  const before = yield* readText(files, path);
+
+  if (before === null) return yield* refuse(`${path} does not exist; use write_file to create it`);
+
+  const edited = applyEdit(before, path, edit);
+
+  if (!edited.ok) return yield* refuse(edited.message);
+
+  yield* writeText(files, path, edited.text);
+
+  const change: FileChange = {
+    path,
+    replacements: edited.replacements,
+    ...diffStats(before, edited.text),
+  };
+
+  return change;
 });
 
 interface SandboxState extends DurableObjectState {
@@ -870,8 +997,15 @@ export class Sandbox extends DurableObject<Env> {
     );
   }
 
-  /** Read a line window (default: the first 2,000 lines or 50 KiB), noting how to continue. */
-  readFile(path: string, range: FileRange = {}) {
+  /** The running container's filesystem, with native Linux semantics. */
+  private files = Effect.fn("Sandbox.files")(function* (this: Sandbox) {
+    const files: FileSystem = new Files(yield* this.container());
+
+    return files;
+  });
+
+  /** Run a file operation in the prepared workspace, as shell commands are. */
+  private fileOperation<A>(operation: (files: FileSystem) => Effect.Effect<A, OperationError>) {
     return this.runWorkspaceOperation(
       this.permit.withPermit(
         Effect.gen({ self: this }, function* () {
@@ -881,18 +1015,31 @@ export class Sandbox extends DurableObject<Env> {
 
           if (workspace) yield* this.prepareWorkspace(workspace);
 
-          const container = yield* this.container();
+          const files = yield* this.files();
 
-          return yield* Effect.gen(function* () {
-            const response = yield* attempt("sandbox.file.open", (signal) =>
-              new Files(container).readFile(path, { signal }),
-            );
-
-            return yield* readWindow(response.body, range);
-          }).pipe(Effect.timeout("60 seconds"));
+          return yield* operation(files).pipe(Effect.timeout("60 seconds"));
         }),
       ),
     );
+  }
+
+  /** Read a line window (default: the first 2,000 lines or 50 KiB), noting how to continue. */
+  readFile(path: string, range: FileRange = {}) {
+    return this.fileOperation((files) =>
+      attempt("sandbox.file.open", (signal) => files.readFile(path, { signal })).pipe(
+        Effect.flatMap((response) => readWindow(response.body, range)),
+      ),
+    );
+  }
+
+  /** Create or replace a UTF-8 file, creating missing parent directories. */
+  writeFile(path: string, content: string) {
+    return this.fileOperation((files) => fileResult(writeChange(files, path, content)));
+  }
+
+  /** Replace an exact, unambiguous string in an existing UTF-8 file. */
+  editFile(path: string, edit: Edit) {
+    return this.fileOperation((files) => fileResult(editChange(files, path, edit)));
   }
 
   /** Read only the ready active checkout; never start a container just to build a prompt. */
