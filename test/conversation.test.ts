@@ -422,10 +422,20 @@ it.each([
           : new Uint8Array(encoded);
 
       const request = Schema.decodeUnknownSync(
-        Schema.fromJsonString(Schema.Struct({ model: Schema.String })),
+        Schema.fromJsonString(
+          Schema.Struct({
+            model: Schema.String,
+            tools: Schema.Array(
+              Schema.Struct({ type: Schema.Literal("function"), name: Schema.String }),
+            ),
+            input: Schema.Array(Schema.Struct({ type: Schema.optional(Schema.String) })),
+          }),
+        ),
       )(new TextDecoder().decode(bytes));
 
       expect(request.model).toBe(expectedModel);
+      expect(request.tools.some((tool) => tool.name === "shell")).toBe(true);
+      expect(request.input.some((item) => item.type === "additional_tools")).toBe(false);
 
       const message = {
         type: "message",

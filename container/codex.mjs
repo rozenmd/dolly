@@ -380,9 +380,27 @@ export async function runCodex(
 
     const threadId = started.thread.id;
 
-    const history = (body.input ?? []).map((item) =>
-      item.type === "function_call" ? { ...item, name: `dolly_${item.name}` } : item,
-    );
+    const history = (body.input ?? []).map((item) => {
+      if (item.type === "function_call") return { ...item, name: `dolly_${item.name}` };
+
+      // Responses accepts EasyInputMessage (no type, possibly string content).
+      // app-server injection instead requires fully tagged ResponseItem messages.
+      if (item.role && (!item.type || item.type === "message"))
+        return {
+          ...item,
+          type: "message",
+          content: Array.isArray(item.content)
+            ? item.content
+            : [
+                {
+                  type: item.role === "assistant" ? "output_text" : "input_text",
+                  text: item.content,
+                },
+              ],
+        };
+
+      return item;
+    });
 
     await rpc("thread/inject_items", { threadId, items: history });
     emit({ type: "response.created", response: { id: responseId, status: "in_progress" } });

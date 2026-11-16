@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { zstdDecompressSync } from "node:zlib";
-import type { StreamFunction, StreamOptions, Api } from "@earendil-works/pi-ai";
+import type { StreamFunction, StreamOptions } from "@earendil-works/pi-ai";
 import type { Env } from "./env";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
@@ -55,11 +55,11 @@ const CodexUsageEvent = Schema.Struct({
 });
 
 /** Route only Codex inference to the CLI; login and refresh retain their owner. */
-export function containerCodex<TApi extends Api, TOptions extends StreamOptions>(
+export function containerCodex<TOptions extends StreamOptions>(
   env: Env,
-  stream: StreamFunction<TApi, TOptions>,
+  stream: StreamFunction<"openai-codex-responses", TOptions>,
   onUsage?: (headers: Record<string, string>) => void,
-): StreamFunction<TApi, TOptions> {
+): StreamFunction<"openai-codex-responses", TOptions> {
   return (model, context, options) => {
     const onProviderStreamEvent: NonNullable<StreamOptions["onProviderStreamEvent"]> = async (
       event,
@@ -72,7 +72,12 @@ export function containerCodex<TApi extends Api, TOptions extends StreamOptions>
     };
 
     return stream(
-      model,
+      {
+        ...model,
+        // The CLI owns tool declarations. Ask Pi for the current flat tool set,
+        // rather than Responses-only additional_tools/tool_search history items.
+        compat: { ...model.compat, supportsAdditionalTools: false, supportsToolSearch: false },
+      },
       context,
       Object.assign({}, options, {
         transport: "sse",

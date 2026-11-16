@@ -128,8 +128,8 @@ test("official CLI replays Dolly history, streams text, and returns tools to Dol
     model: "gpt-6-luna",
     instructions: "You are Dolly.",
     input: [
+      { role: "developer", content: "Mid-conversation Dolly instructions." },
       {
-        type: "message",
         role: "user",
         content: [{ type: "input_text", text: "Original user request" }],
       },
@@ -158,6 +158,7 @@ test("official CLI replays Dolly history, streams text, and returns tools to Dol
     assert.match(requests[0].headers["user-agent"], /dolly\/0\.157\.0/);
     assert.equal(requests[0].headers.authorization, `Bearer ${accessToken}`);
     assert.match(JSON.stringify(requests[0].body.input), /Original user request/);
+    assert.match(JSON.stringify(requests[0].body.input), /Mid-conversation Dolly instructions/);
     assert.ok(JSON.stringify(requests[0].body).includes("dolly_shell"));
 
     const advertised =
