@@ -166,7 +166,7 @@ it("holds the deployment-wide cap in the owner Agent", async () => {
   for (let index = 0; index < MAX_BROWSER_SESSIONS; index++)
     leases.push(await agent.acquireBrowser());
 
-  expect(leases.every((lease) => typeof lease === "string")).toBe(true);
+  expect(leases).toEqual(Array.from({ length: MAX_BROWSER_SESSIONS }, () => expect.any(String)));
   expect(await agent.acquireBrowser()).toBeNull();
   await agent.releaseBrowser(String(leases[0]));
   const again = await agent.acquireBrowser();
