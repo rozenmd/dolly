@@ -118,7 +118,15 @@ it("persists session PR creation without a transcript and retains it after failu
         : Response.json({ number: 8, html_url: "https://github.com/example/project/pull/8" });
 
     if (path.endsWith("/pulls/8"))
-      return Response.json({ state: "open", draft: false, merged: false });
+      return Response.json({
+        state: "open",
+        draft: false,
+        merged: false,
+        title: "Fix",
+        additions: 12,
+        deletions: 3,
+        changed_files: 2,
+      });
 
     if (path === "/repos/example/project") return Response.json({ default_branch: "main" });
     throw new Error(`Unexpected GitHub path ${path}`);
@@ -157,6 +165,10 @@ it("persists session PR creation without a transcript and retains it after failu
     number: 8,
     url: "https://github.com/example/project/pull/8",
     state: "open",
+    title: "Fix",
+    additions: 12,
+    deletions: 3,
+    changedFiles: 2,
   };
 
   const sessions = () => env.AGENT.getByName("owner").sessions();

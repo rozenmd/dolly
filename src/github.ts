@@ -29,6 +29,7 @@ import { budgetPatches, invalidAnchors, REVIEW_FOOTER } from "./github-review";
 import { attempt, OperationError } from "./operations";
 import { MAX_IMAGE_BYTES } from "./images";
 import type { Env } from "./env";
+import type { PullRequestState, PullRequestSummary } from "./session-contracts";
 
 import {
   GITHUB_APP_GRANT_PERMISSIONS,
@@ -93,6 +94,10 @@ const PullStateResponse = Schema.Struct({
   draft: Schema.optional(Schema.Boolean),
   merged: Schema.optional(Schema.Boolean),
   merged_at: Schema.optional(Schema.NullOr(Schema.String)),
+  title: Schema.optional(Schema.String),
+  additions: Schema.optional(Schema.Number),
+  deletions: Schema.optional(Schema.Number),
+  changed_files: Schema.optional(Schema.Number),
 });
 
 const FILES_PER_PAGE = 30;
@@ -1529,7 +1534,8 @@ function makeGitHub(
     return { token, defaultBranch: info.default_branch };
   });
 
-  const pullRequestState = Effect.fn("GitHub.pullRequestState")(function* (
+  /** One read of a pull request: its state plus what the session summary shows. */
+  const pullRequestSummary = Effect.fn("GitHub.pullRequestSummary")(function* (
     repository: string,
     number: number,
   ) {
@@ -1540,18 +1546,31 @@ function makeGitHub(
       Effect.flatMap(decode(PullStateResponse)),
     );
 
-    if (pull.merged || pull.merged_at) return "merged" as const;
+    const state: PullRequestState =
+      pull.merged || pull.merged_at
+        ? "merged"
+        : pull.state === "closed"
+          ? "closed"
+          : pull.draft
+            ? "draft"
+            : "open";
 
-    if (pull.state === "closed") return "closed" as const;
+    const summary: PullRequestSummary = {
+      state,
+      title: pull.title,
+      additions: pull.additions,
+      deletions: pull.deletions,
+      changedFiles: pull.changed_files,
+    };
 
-    return pull.draft ? ("draft" as const) : ("open" as const);
+    return summary;
   });
 
   return {
     status,
     botIdentity,
     clientId,
-    pullRequestState,
+    pullRequestSummary,
     configureIngress,
     accounts,
     configureAccounts,

@@ -1,13 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
-import { Bars3Icon, CheckIcon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
-import {
-  ArchiveBoxIcon,
-  ArrowUturnLeftIcon,
-  DocumentDuplicateIcon,
-  PlusIcon,
-} from "@heroicons/react/24/outline";
+import { Bars3Icon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
+import { ArchiveBoxIcon, ArrowUturnLeftIcon, PlusIcon } from "@heroicons/react/24/outline";
 import { Sidebar } from "./components/sidebar";
 import { Composer, Conversation } from "./components/conversation";
 import { IconButton, Input, Modal, RepoBadge } from "./components/ui";
@@ -33,9 +28,8 @@ import { ago } from "./lib/time";
 import { watchSession } from "./lib/session-stream";
 import { imagesBody, type Attachment } from "./lib/images";
 import { sessionList } from "./lib/session-list";
-import { effortName, modelName } from "./components/model-select";
-import { SidePanel, SidePanelToggle } from "./components/side-panel";
-import { useSidePanel } from "./lib/side-panel";
+import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-summary";
+import { useSessionSummary } from "./lib/session-summary";
 
 const storageKey = "dolly.sessions.v1";
 
@@ -62,7 +56,8 @@ export function WorkspaceApp() {
   const [loading, setLoading] = useState(false);
   const connected = Boolean(auth?.user);
   const session = connected ? sessions.find((item) => item.id === selected) : undefined;
-  const panel = useSidePanel(session?.id ?? "");
+  const summary = useSessionSummary();
+  const summaryShown = Boolean(session && !feed && summary.open);
   const running = Boolean(snapshot && liveFromSnapshot(snapshot)?.run);
   const turns = snapshot ? turnsFromSnapshot(snapshot) : [];
   const queued = snapshot ? queueFromSnapshot(snapshot) : [];
@@ -472,7 +467,11 @@ export function WorkspaceApp() {
           setMobileOpen(false);
         }}
       />
-      <main id="main-content" className="main-panel">
+      <main
+        id="main-content"
+        ref={summary.paneRef}
+        className={`main-panel ${summaryShown && summary.standing ? "summary-standing" : ""}`}
+      >
         <header className="workspace-header">
           <div className="breadcrumb">
             <IconButton
@@ -505,9 +504,7 @@ export function WorkspaceApp() {
             <IconButton label="New session" onClick={newSession}>
               <PlusIcon />
             </IconButton>
-            {session && !feed && !panel.open && (
-              <SidePanelToggle open={false} onClick={() => panel.setOpen(true)} />
-            )}
+            {session && !feed && <SessionSummaryToggle summary={summary} />}
           </div>
         </header>
         <div className="content-layout">
@@ -553,16 +550,15 @@ export function WorkspaceApp() {
             )}
           </div>
         </div>
-      </main>
-      {session && !feed && panel.open && (
-        <SidePanel panel={panel} label="Session details">
-          <SessionDetails
+        {session && summaryShown && (
+          <SessionSummaryCard
+            summary={summary}
             session={session}
             running={running}
             failure={turns.at(-1)?.failure?.reason}
           />
-        </SidePanel>
-      )}
+        )}
+      </main>
       {modal === "codex" && (
         <Modal title="Connect a model" onClose={() => setModal(null)}>
           <h3>ChatGPT subscription</h3>
@@ -651,72 +647,6 @@ function FeedView({
             ))}
         </ul>
       )}
-    </div>
-  );
-}
-
-function SessionDetails({
-  session,
-  running,
-  failure,
-}: {
-  session: SavedSession;
-  running: boolean;
-  failure?: string;
-}) {
-  const [copied, setCopied] = useState(false);
-  const github = /^[\w.-]+\/[\w.-]+$/.test(session.repository);
-
-  return (
-    <div className="details-list">
-      <section>
-        <h2>Status</h2>
-        <p>
-          <span className={`status-dot ${running ? "working" : failure ? "failed" : "idle"}`} />
-          {running ? "Working" : failure === "aborted" ? "Stopped" : failure ? "Failed" : "Idle"}
-        </p>
-      </section>
-      <section>
-        <h2>Repository</h2>
-        {session.repository ? (
-          <p>
-            <RepoBadge repository={session.repository} />
-            {github ? (
-              <a href={`https://github.com/${session.repository}`} target="_blank" rel="noreferrer">
-                {session.repository}
-              </a>
-            ) : (
-              session.repository
-            )}
-          </p>
-        ) : (
-          <p className="muted">None</p>
-        )}
-      </section>
-      <section>
-        <h2>Model</h2>
-        <p title={session.model}>
-          {modelName(session.model)}
-          {session.thinkingLevel ? ` · ${effortName(session.thinkingLevel)} effort` : ""}
-        </p>
-      </section>
-      <section>
-        <h2>Session</h2>
-        <p>
-          <code>{session.id}</code>
-          <IconButton
-            label={copied ? "Session ID copied" : "Copy session ID"}
-            onClick={() =>
-              void navigator.clipboard.writeText(session.id).then(
-                () => setCopied(true),
-                () => setCopied(false),
-              )
-            }
-          >
-            {copied ? <CheckIcon /> : <DocumentDuplicateIcon />}
-          </IconButton>
-        </p>
-      </section>
     </div>
   );
 }

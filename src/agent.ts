@@ -104,7 +104,7 @@ import type { Env } from "./env";
 import type { FileResult } from "./sandbox";
 import { resolveImages, storeImages, type PromptImage } from "./images";
 import { listSessions } from "./session-list";
-import type { PullRequestState, SavedSession } from "./session-contracts";
+import type { PullRequestSummary, SavedSession } from "./session-contracts";
 import { PreviewOutbound, PreviewRequest, PreviewToolInput } from "./preview";
 import { capturePreview } from "./browser-preview";
 import { workspaceCheckpoint } from "./workspace-checkpoint";
@@ -1691,40 +1691,42 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
-  private pullStates = new Map<string, { state: PullRequestState; checked: number }>();
+  private pullSummaries = new Map<string, { summary: PullRequestSummary; checked: number }>();
 
   async sessions() {
     const secrets = await Effect.runPromise(this.credentials.secrets);
     const sessions = await listSessions(this.harness, this.ctx.storage, secrets);
     const now = Date.now();
 
-    // Ask GitHub for PR state, cached briefly so sidebar polling stays within rate limits.
+    // Ask GitHub for PR state, title and diff size, cached briefly so sidebar
+    // polling stays within rate limits.
     return Promise.all(
       sessions.map(async (session) => {
         const pull = session.pullRequest;
 
         if (!pull) return session;
         const key = `${pull.repository}#${pull.number}`;
-        let cached = this.pullStates.get(key);
-        const ttl = cached?.state === "merged" || cached?.state === "closed" ? 600_000 : 60_000;
+        let cached = this.pullSummaries.get(key);
+        const state = cached?.summary.state;
+        const ttl = state === "merged" || state === "closed" ? 600_000 : 60_000;
 
         if (!cached || now - cached.checked > ttl) {
-          const state = await Effect.runPromise(
+          const summary = await Effect.runPromise(
             Effect.flatMap(GitHub, (github) =>
-              github.pullRequestState(pull.repository, pull.number),
+              github.pullRequestSummary(pull.repository, pull.number),
             ).pipe(
               Effect.provide(this.services),
               Effect.orElseSucceed(() => undefined),
             ),
           ).catch(() => undefined);
 
-          if (state) {
-            cached = { state, checked: now };
-            this.pullStates.set(key, cached);
+          if (summary) {
+            cached = { summary, checked: now };
+            this.pullSummaries.set(key, cached);
           }
         }
 
-        return cached ? { ...session, pullRequest: { ...pull, state: cached.state } } : session;
+        return cached ? { ...session, pullRequest: { ...pull, ...cached.summary } } : session;
       }),
     );
   }
