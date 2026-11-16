@@ -1,9 +1,29 @@
+import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env";
+import { previewRequest } from "./preview";
 
 /** The reserved sandbox host that brokers Cloudflare Browser Run over the DevTools protocol. */
 export const BROWSER_HOST = "browser.workspace";
 
 const BROWSER_PATH = "/devtools/browser";
+
+/** Inside a brokered browser, this host serves the sandbox port chosen with ?port=. */
+export const SANDBOX_HOST = "sandbox.workspace";
+
+/** Forwards a brokered browser's requests for http://sandbox.workspace to one container port. */
+export class SandboxOutbound extends WorkerEntrypoint<Env, { sandbox: string; port: number }> {
+  override async fetch(request: Request) {
+    const forwarded = previewRequest(request, SANDBOX_HOST);
+
+    if (!forwarded) return new Response("Not found", { status: 404 });
+    const { sandbox, port } = this.ctx.props;
+
+    return this.env.SANDBOX.get(this.env.SANDBOX.idFromString(sandbox)).browserFetch(
+      forwarded,
+      port,
+    );
+  }
+}
 
 /** Browser Run sessions the deployment may hold open through the broker at once. */
 export const MAX_BROWSER_SESSIONS = 4;
@@ -26,13 +46,16 @@ const closeCode = (code: number) =>
  * Chrome. `http://browser.workspace` behaves like a Chrome DevTools endpoint: /json/version
  * names a browser WebSocket, and each connection to it launches a fresh Browser Run session
  * through the Worker's binding. Network guardrails match the preview tool: only the
- * workspace's configured hosts are reachable from the browser itself.
+ * workspace's configured hosts are reachable from the browser itself. Connecting with
+ * `?port=N` also lets the browser open http://sandbox.workspace, served from port N of this
+ * workspace's container, with the application's credentials stripped.
  */
 export async function browserRoute(
   request: Request,
   browser: Env["BROWSER"],
   networkHosts: readonly string[],
   leases: BrowserLeases,
+  sandboxHost: (port: number) => Fetcher | undefined,
 ) {
   const url = new URL(request.url);
 
@@ -50,6 +73,19 @@ export async function browserRoute(
 
   if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket")
     return new Response("Expected a WebSocket upgrade", { status: 426 });
+
+  const requested = url.searchParams.get("port");
+  const port = requested === null ? undefined : Number(requested);
+
+  if (port !== undefined && !(Number.isInteger(port) && port >= 1024 && port <= 65535))
+    return new Response("port must be an integer from 1024 to 65535", { status: 400 });
+
+  // Guardrails block navigation before any client-side interception, so a page must load
+  // from a host Browser Run routes through the Worker: the sandbox, when a port is given.
+  const sandbox = port === undefined ? undefined : sandboxHost(port);
+
+  if (port !== undefined && !sandbox)
+    return new Response("This workspace has no sandbox to serve", { status: 409 });
 
   const lease = await leases.acquireBrowser();
 
@@ -72,6 +108,7 @@ export async function browserRoute(
     const connection = await browser.launch({
       keepAlive: 60_000,
       guardrails: { allowedDomains: [...networkHosts] },
+      outboundByHost: sandbox ? { [SANDBOX_HOST]: sandbox } : {},
     });
 
     const reply = await connection.webSocket.fetch("https://browser-binding.invalid", {

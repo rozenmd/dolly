@@ -1,7 +1,7 @@
 import { env, exports as entrypoints } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { expect, it, vi } from "vite-plus/test";
-import { browserRoute, MAX_BROWSER_SESSIONS } from "../src/browser-workspace";
+import { browserRoute, MAX_BROWSER_SESSIONS, type SandboxOutbound } from "../src/browser-workspace";
 import type { WorkspaceOutbound } from "../src/git-transport";
 import { workspaceConfig } from "../src/workspace";
 
@@ -45,8 +45,12 @@ function fixture() {
   return { browser: browserBindingMock({ launch }), launch, fetch, browsers, leases, open };
 }
 
-const upgrade = () =>
-  new Request("http://browser.workspace/devtools/browser", { headers: { Upgrade: "websocket" } });
+const upgrade = (query = "") =>
+  new Request(`http://browser.workspace/devtools/browser${query}`, {
+    headers: { Upgrade: "websocket" },
+  });
+
+const noSandbox = () => undefined;
 
 const next = (socket: WebSocket) =>
   new Promise<string>((resolve) =>
@@ -81,7 +85,7 @@ it("serves a DevTools version document naming the brokered browser WebSocket", a
 
 it("relays a fresh Browser Run session with clean upgrade headers and releases it on close", async () => {
   const { browser, launch, browsers, leases, open } = fixture();
-  const response = await browserRoute(upgrade(), browser, ["example.com"], leases);
+  const response = await browserRoute(upgrade(), browser, ["example.com"], leases, noSandbox);
 
   expect(response.status).toBe(101);
   // A relayed pair carries no upstream headers, so strict clients see one Upgrade header.
@@ -89,6 +93,7 @@ it("relays a fresh Browser Run session with clean upgrade headers and releases i
   expect(launch).toHaveBeenCalledWith({
     keepAlive: 60_000,
     guardrails: { allowedDomains: ["example.com"] },
+    outboundByHost: {},
   });
   expect(open.size).toBe(1);
 
@@ -113,9 +118,9 @@ it("caps concurrent sessions without launching more browsers", async () => {
   const { browser, launch, leases } = fixture();
 
   for (let index = 0; index < MAX_BROWSER_SESSIONS; index++)
-    expect((await browserRoute(upgrade(), browser, [], leases)).status).toBe(101);
+    expect((await browserRoute(upgrade(), browser, [], leases, noSandbox)).status).toBe(101);
 
-  const refused = await browserRoute(upgrade(), browser, [], leases);
+  const refused = await browserRoute(upgrade(), browser, [], leases, noSandbox);
 
   expect(refused.status).toBe(429);
   expect(await refused.text()).toContain("close one and retry");
@@ -131,7 +136,9 @@ it("releases the lease when Browser Run fails to launch", async () => {
     }),
   });
 
-  await expect(browserRoute(upgrade(), failing, [], leases)).rejects.toThrow("unavailable");
+  await expect(browserRoute(upgrade(), failing, [], leases, noSandbox)).rejects.toThrow(
+    "unavailable",
+  );
   expect(open.size).toBe(0);
 });
 
@@ -144,7 +151,9 @@ it("launches nothing for requests that are not a browser WebSocket", async () =>
     ["https://browser.workspace/devtools/browser", { headers: { Upgrade: "websocket" } }, 400],
     ["http://browser.workspace:9222/devtools/browser", { headers: { Upgrade: "websocket" } }, 400],
   ] as const)
-    expect((await browserRoute(new Request(url, init), browser, [], leases)).status).toBe(status);
+    expect(
+      (await browserRoute(new Request(url, init), browser, [], leases, noSandbox)).status,
+    ).toBe(status);
 
   expect(launch).not.toHaveBeenCalled();
   expect(leases.acquireBrowser).not.toHaveBeenCalled();
@@ -164,4 +173,60 @@ it("holds the deployment-wide cap in the owner Agent", async () => {
   expect(again).toEqual(expect.any(String));
 
   for (const lease of [...leases.slice(1), again]) await agent.releaseBrowser(String(lease));
+});
+
+it("routes http://sandbox.workspace to the requested container port", async () => {
+  const { browser, launch, leases } = fixture();
+  // SAFETY: Only identity is checked; Browser Run is mocked and never calls this Fetcher.
+  const sandbox = {} as Fetcher;
+  const ports: number[] = [];
+
+  const response = await browserRoute(upgrade("?port=8787"), browser, [], leases, (port) => {
+    ports.push(port);
+
+    return sandbox;
+  });
+
+  expect(response.status).toBe(101);
+  expect(ports).toEqual([8787]);
+  expect(launch).toHaveBeenCalledWith({
+    keepAlive: 60_000,
+    guardrails: { allowedDomains: [] },
+    outboundByHost: { "sandbox.workspace": sandbox },
+  });
+
+  for (const [query, status] of [
+    ["?port=80", 400],
+    ["?port=70000", 400],
+    ["?port=abc", 400],
+  ] as const)
+    expect((await browserRoute(upgrade(query), browser, [], leases, noSandbox)).status).toBe(
+      status,
+    );
+
+  expect((await browserRoute(upgrade("?port=3000"), browser, [], leases, noSandbox)).status).toBe(
+    409,
+  );
+  expect(launch).toHaveBeenCalledTimes(1);
+});
+
+it("serves sandbox.workspace only from a running container, without credentials or other hosts", async () => {
+  const stub = env.SANDBOX.getByName(crypto.randomUUID());
+
+  const result = await runInDurableObject(stub, async (_, state) => {
+    // SAFETY: src/index.ts exports SandboxOutbound; mint its loopback in the owning DO.
+    const loopback = entrypoints as Cloudflare.Exports & {
+      SandboxOutbound: LoopbackForExport<typeof SandboxOutbound>;
+    };
+
+    const outbound = loopback.SandboxOutbound({ props: { sandbox: String(state.id), port: 8787 } });
+
+    return {
+      stopped: (await outbound.fetch("http://sandbox.workspace/")).status,
+      elsewhere: (await outbound.fetch("http://example.com/")).status,
+      port: (await outbound.fetch("http://sandbox.workspace:9000/")).status,
+    };
+  });
+
+  expect(result).toEqual({ stopped: 503, elsewhere: 404, port: 404 });
 });

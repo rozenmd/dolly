@@ -678,7 +678,8 @@ test("first run creates the GitHub App from dolly with the ingress URL filled in
       setup = route.request().postDataJSON();
 
       return route.fulfill({
-        json: { connected: false, setupUrl: "http://127.0.0.1:3000/api/setup/github/test-state" },
+        // Same-origin: Browser Run blocks navigation to local addresses.
+        json: { connected: false, setupUrl: "/api/setup/github/test-state" },
       });
     }
 

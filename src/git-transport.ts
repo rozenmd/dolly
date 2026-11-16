@@ -2,7 +2,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env";
 import type { WorkspaceConfig } from "./workspace";
 import { dependencyCache } from "./dependency-cache";
-import { BROWSER_HOST, browserRoute } from "./browser-workspace";
+import { BROWSER_HOST, browserRoute, SandboxOutbound } from "./browser-workspace";
 
 const packageRegistries = new Set([
   "registry.npmjs.org",
@@ -110,7 +110,7 @@ export async function checkedPush(body: ReadableStream<Uint8Array> | null, branc
 /** Only a Sandbox can mint this per-conversation capability through ctx.exports. */
 export class WorkspaceOutbound extends WorkerEntrypoint<
   Env,
-  WorkspaceConfig & { dependencyCacheToken?: string }
+  WorkspaceConfig & { dependencyCacheToken?: string; sandbox?: string }
 > {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -132,6 +132,18 @@ export class WorkspaceOutbound extends WorkerEntrypoint<
         this.env.BROWSER,
         this.ctx.props.networkHosts ?? [],
         this.env.AGENT.getByName("owner"),
+        (port) => {
+          const sandbox = this.ctx.props.sandbox;
+
+          if (!sandbox) return undefined;
+
+          // SAFETY: src/index.ts exports SandboxOutbound alongside this entrypoint.
+          const exports = this.ctx.exports as Cloudflare.Exports & {
+            SandboxOutbound: LoopbackForExport<typeof SandboxOutbound>;
+          };
+
+          return exports.SandboxOutbound({ props: { sandbox, port } });
+        },
       );
 
     if (

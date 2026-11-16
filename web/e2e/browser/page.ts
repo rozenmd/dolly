@@ -93,7 +93,7 @@ const desktopPointer = `(() => {
   for (const feature of ["hover", "pointer"])
     current[feature] = values[feature].find((value) => matchMedia("(" + feature + ": " + value + ")").matches);
   const swap = (text) =>
-    text.replace(/(\s*(any-)?(hover|pointer)s*:s*([a-z]+)s*)/g, (token, any, feature, value) => {
+    text.replace(/\\(\\s*(any-)?(hover|pointer)\\s*:\\s*([a-z]+)\\s*\\)/g, (token, any, feature, value) => {
       const want = desired[feature];
       const now = current[feature];
       if (value === want) return "(" + (any ?? "") + feature + ": " + now + ")";
