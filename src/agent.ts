@@ -31,6 +31,7 @@ import * as Option from "effect/Option";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Predicate from "effect/Predicate";
+import { promptWindow } from "./transcript-window";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
 import {
   ConversationWorkspace,
@@ -1700,7 +1701,11 @@ export class Agent extends DurableObject<Env> {
 
     if (Option.isNone(conversation)) return new Response("Session not found", { status: 404 });
 
-    const view = await conversation.value.watch(BACKGROUND_CONTEXT);
+    const view = await conversation.value.watch(
+      BACKGROUND_CONTEXT,
+      await promptWindow(conversation.value),
+    );
+
     const { 0: client, 1: server } = new WebSocketPair();
     server.accept();
     let stopped = false;
@@ -1758,7 +1763,9 @@ export class Agent extends DurableObject<Env> {
         if (Option.isNone(conversation)) return undefined;
 
         return yield* Effect.acquireUseRelease(
-          attempt("pi.watch", () => conversation.value.watch(BACKGROUND_CONTEXT)),
+          attempt("pi.watch", async () =>
+            conversation.value.watch(BACKGROUND_CONTEXT, await promptWindow(conversation.value)),
+          ),
           (view) => this.serializeTranscript(view.value),
           (view) => attempt("pi.watch.stop", () => view.stop()).pipe(Effect.orDie),
         );
