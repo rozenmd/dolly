@@ -575,6 +575,38 @@ function makeGitHub(
     ),
   );
 
+  // Only a resolved id is remembered: a transient lookup failure must not pin the id-less address.
+  let bot: { login: string; identity: { name: string; email: string } } | undefined;
+
+  /**
+   * The git author and committer for agent commits: the App's bot user, with GitHub's noreply
+   * address so commits link to the bot account. Null when no App is connected; the checkout's
+   * own git config then decides.
+   */
+  const botIdentity = Effect.gen(function* () {
+    const raw = yield* attempt("github.read", () => storage.get("github:connected"));
+
+    if (raw === undefined) return null;
+    const login = `${(yield* decode(Connected)(raw)).app.slug}[bot]`;
+
+    if (bot?.login === login) return bot.identity;
+
+    const id = yield* api(`/users/${encodeURIComponent(login)}`, "").pipe(
+      Effect.flatMap(decode(Schema.Struct({ id: Schema.Number }))),
+      Effect.map((user) => user.id),
+      Effect.orElseSucceed(() => undefined),
+    );
+
+    const identity = {
+      name: login,
+      email: `${id ? `${id}+` : ""}${login}@users.noreply.github.com`,
+    };
+
+    if (id) bot = { login, identity };
+
+    return identity;
+  });
+
   const status = Effect.gen(function* () {
     const raw = yield* attempt("github.status", () => storage.get("github:connected"));
 
@@ -1535,6 +1567,7 @@ function makeGitHub(
 
   return {
     status,
+    botIdentity,
     clientId,
     pullRequestState,
     configureIngress,

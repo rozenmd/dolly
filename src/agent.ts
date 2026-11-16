@@ -92,6 +92,11 @@ import {
 } from "./usage";
 import { CodexProtocol, startLogin, pollLogin, logout } from "./codex-login";
 import { GitHubAuth } from "./github-auth";
+import {
+  agentGitIdentityEnv,
+  commitAttributionPrompt,
+  githubNoreplyIdentity,
+} from "./git-identity";
 import { exceptionDetails, redact } from "./diagnostics";
 import { Papercuts, PapercutRequest, papercutsPrompt, toolFailure } from "./papercuts";
 import { attempt, rpc, OperationError } from "./operations";
@@ -241,7 +246,7 @@ export class Agent extends DurableObject<Env> {
 
             const result = await this.env.SANDBOX.getByName(
               workspace?.sandboxId ?? String(api.conversationId),
-            ).run(command);
+            ).run(command, await this.agentGitEnv());
 
             return { ...result, workspaceSetup: workspace?.setup };
           }).pipe(
@@ -600,6 +605,9 @@ export class Agent extends DurableObject<Env> {
             return "Skill inventory unavailable; prepare the active checkout and inspect its skill files before claiming a skill is missing.";
           }
         }),
+        section("commit-attribution", async () =>
+          commitAttributionPrompt(await this.commitCoauthor()),
+        ),
         section("papercuts", () => papercutsPrompt),
       ],
     });
@@ -843,6 +851,29 @@ export class Agent extends DurableObject<Env> {
         yield* this.arm(this.harness.wake());
       }),
     );
+  }
+
+  /** The person agent commits credit: this instance's single owner, at their GitHub noreply address. */
+  private commitCoauthor() {
+    return Effect.runPromise(
+      Effect.flatMap(GitHubAuth, (auth) => auth.owner).pipe(
+        Effect.map(Option.match({ onNone: () => null, onSome: githubNoreplyIdentity })),
+        Effect.orElseSucceed(() => null),
+        Effect.provide(this.services),
+      ),
+    );
+  }
+
+  /** Bot author and committer plus the owner co-author, for sandbox commands that may commit. */
+  private async agentGitEnv() {
+    const bot = await Effect.runPromise(
+      Effect.flatMap(GitHub, (github) => github.botIdentity).pipe(
+        Effect.orElseSucceed(() => null),
+        Effect.provide(this.services),
+      ),
+    );
+
+    return agentGitIdentityEnv(bot, await this.commitCoauthor());
   }
 
   private githubRun<A>(program: Effect.Effect<A, OperationError, GitHub | GitHubAuth>) {
@@ -1290,7 +1321,10 @@ export class Agent extends DurableObject<Env> {
       case "diff":
         return sandbox.run("git diff --binary HEAD");
       case "commit":
-        return sandbox.run(`git add -A && git commit -m ${shellQuote(input.message)}`);
+        return sandbox.run(
+          `git add -A && git commit -m ${shellQuote(input.message)}`,
+          await this.agentGitEnv(),
+        );
       case "push":
         return sandbox.run(push);
       case "open_pull_request": {
