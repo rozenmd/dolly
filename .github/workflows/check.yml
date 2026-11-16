@@ -31,10 +31,31 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - if: matrix.suite == 'unit'
         run: pnpm run check && pnpm test
-      - if: matrix.suite == 'worker'
-        run: pnpm --dir web exec playwright install --with-deps chromium
+      - name: Start Chromium over CDP
+        if: matrix.suite == 'worker'
+        run: |
+          docker run --detach --rm --name dolly-ci-browser \
+            --publish 127.0.0.1:9222:9222 \
+            chromedp/headless-shell:stable \
+            --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4
+          for _ in {1..30}; do
+            if curl --fail --silent --max-time 2 http://127.0.0.1:9222/json/version > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs dolly-ci-browser
+          exit 1
       - if: matrix.suite == 'worker'
         run: pnpm run test:worker
+        env:
+          BROWSER_CDP_URL: http://127.0.0.1:9222
+      - name: Stop Chromium
+        if: always() && matrix.suite == 'worker'
+        run: |
+          if docker container inspect dolly-ci-browser > /dev/null 2>&1; then
+            docker rm --force dolly-ci-browser
+          fi
       # Keep these on the same runner: build reuses the rootless Docker daemon.
       - if: matrix.suite == 'sandbox'
         run: pnpm run test:sandbox

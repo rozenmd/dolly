@@ -46,8 +46,10 @@ const documentOrder = `(nodes) => [...new Set(nodes)].sort((a, b) =>
   a === b ? 0 : a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)`;
 
 const IN_PAGE = {
+  // A selector starting with a combinator (e.g. "> summary") is relative to the scope, as in Playwright.
   css: `function (selector, ...scopes) {
-    return (${documentOrder})(scopes.flatMap((scope) => [...scope.querySelectorAll(selector)]));
+    const relative = /^\\s*[>+~]/.test(selector) ? ":scope " + selector : selector;
+    return (${documentOrder})(scopes.flatMap((scope) => [...scope.querySelectorAll(relative)]));
   }`,
   // The deepest elements whose text matches, as Playwright's getByText.
   text: `function (match, ...scopes) {
