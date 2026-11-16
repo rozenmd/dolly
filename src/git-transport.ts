@@ -2,6 +2,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env";
 import type { WorkspaceConfig } from "./workspace";
 import { dependencyCache } from "./dependency-cache";
+import { BROWSER_HOST, browserRoute } from "./browser-workspace";
 
 const packageRegistries = new Set([
   "registry.npmjs.org",
@@ -124,6 +125,9 @@ export class WorkspaceOutbound extends WorkerEntrypoint<
 
     if (url.hostname === "github.workspace" && url.protocol === "http:")
       return this.env.AGENT.getByName("owner").gitTransport(request, this.ctx.props);
+
+    if (url.hostname === BROWSER_HOST)
+      return browserRoute(request, this.env.BROWSER, this.ctx.props.networkHosts ?? []);
 
     if (
       url.protocol !== "https:" ||
