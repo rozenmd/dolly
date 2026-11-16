@@ -6,7 +6,6 @@ import {
   ArchiveBoxIcon,
   ArrowUturnLeftIcon,
   DocumentDuplicateIcon,
-  ListBulletIcon,
   PlusIcon,
 } from "@heroicons/react/24/outline";
 import { Sidebar } from "./components/sidebar";
@@ -35,6 +34,8 @@ import { watchSession } from "./lib/session-stream";
 import { imagesBody, type Attachment } from "./lib/images";
 import { sessionList } from "./lib/session-list";
 import { effortName, modelName } from "./components/model-select";
+import { SidePanel, SidePanelToggle } from "./components/side-panel";
+import { useSidePanel } from "./lib/side-panel";
 
 const storageKey = "dolly.sessions.v1";
 
@@ -48,7 +49,6 @@ export function WorkspaceApp() {
   const [snapshot, setSnapshot] = useState<typeof Snapshot.Type | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [feed, setFeed] = useState(false);
-  const [details, setDetails] = useState(false);
   const [modal, setModal] = useState<"codex" | "new" | "import" | null>(null);
   const navigate = useNavigate();
   const [codex, setCodex] = useState<boolean | null>(null);
@@ -62,6 +62,7 @@ export function WorkspaceApp() {
   const [loading, setLoading] = useState(false);
   const connected = Boolean(auth?.user);
   const session = connected ? sessions.find((item) => item.id === selected) : undefined;
+  const panel = useSidePanel(session?.id ?? "");
   const running = Boolean(snapshot && liveFromSnapshot(snapshot)?.run);
   const turns = snapshot ? turnsFromSnapshot(snapshot) : [];
   const queued = snapshot ? queueFromSnapshot(snapshot) : [];
@@ -90,8 +91,6 @@ export function WorkspaceApp() {
   }
 
   useEffect(() => {
-    setDetails(window.matchMedia("(min-width: 1180px)").matches);
-
     // GitHub App setup returns here, with an error in the query when it failed.
     const url = new URL(window.location.href);
     const failed = url.searchParams.get("github");
@@ -506,15 +505,8 @@ export function WorkspaceApp() {
             <IconButton label="New session" onClick={newSession}>
               <PlusIcon />
             </IconButton>
-            {session && !feed && (
-              <IconButton
-                label="Toggle session details"
-                aria-pressed={details}
-                className={details ? "pressed" : ""}
-                onClick={() => setDetails(!details)}
-              >
-                <ListBulletIcon />
-              </IconButton>
+            {session && !feed && !panel.open && (
+              <SidePanelToggle open={false} onClick={() => panel.setOpen(true)} />
             )}
           </div>
         </header>
@@ -560,15 +552,17 @@ export function WorkspaceApp() {
               </div>
             )}
           </div>
-          {session && !feed && details && (
-            <SessionDetails
-              session={session}
-              running={running}
-              failure={turns.at(-1)?.failure?.reason}
-            />
-          )}
         </div>
       </main>
+      {session && !feed && panel.open && (
+        <SidePanel panel={panel} label="Session details">
+          <SessionDetails
+            session={session}
+            running={running}
+            failure={turns.at(-1)?.failure?.reason}
+          />
+        </SidePanel>
+      )}
       {modal === "codex" && (
         <Modal title="Connect a model" onClose={() => setModal(null)}>
           <h3>ChatGPT subscription</h3>
@@ -674,7 +668,7 @@ function SessionDetails({
   const github = /^[\w.-]+\/[\w.-]+$/.test(session.repository);
 
   return (
-    <aside className="details-card" aria-label="Session details">
+    <div className="details-list">
       <section>
         <h2>Status</h2>
         <p>
@@ -723,7 +717,7 @@ function SessionDetails({
           </IconButton>
         </p>
       </section>
-    </aside>
+    </div>
   );
 }
 

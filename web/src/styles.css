@@ -444,8 +444,6 @@ select.input {
   display: flex;
   flex: 1;
   min-height: 0;
-  gap: 16px;
-  padding-right: 16px;
 }
 .conversation-panel {
   display: flex;
@@ -969,38 +967,116 @@ select.input {
   height: 12px;
 }
 
-/* Details card */
-.details-card {
-  align-self: flex-start;
-  width: 300px;
+/* Side panel: a full-height right column, resizable from its left edge, that
+   becomes an overlay with a scrim from 920px down. */
+.side-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
   flex-shrink: 0;
+  width: var(--panel-w, 32%);
+  min-width: 320px;
+  max-width: max(480px, calc(100vw - 620px));
+  min-height: 0;
+  background: var(--sidebar);
+  border-left: 1px solid var(--line);
+  transition:
+    width 280ms ease,
+    min-width 280ms ease;
+}
+body.resizing-panel .side-panel {
+  transition: none;
+}
+body.resizing-panel {
+  cursor: col-resize;
+  user-select: none;
+}
+/* Only when an action opened the panel: it grows from the window's right edge
+   while the conversation gives way. Switching sessions shows it in place. */
+.side-panel.entering {
+  overflow: hidden;
+  transition:
+    width 280ms ease,
+    min-width 280ms ease,
+    opacity 280ms ease;
+}
+@starting-style {
+  .side-panel.entering {
+    width: 0;
+    min-width: 0;
+    opacity: 0;
+  }
+}
+.side-panel-resize {
+  position: absolute;
+  top: 0;
+  left: -3px;
+  z-index: 6;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+.side-panel-resize::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 3px;
+  width: 2px;
+  background: transparent;
+  transition: background-color 120ms ease;
+}
+body:not(.resizing-panel) .side-panel-resize:hover::after,
+.side-panel-resize:focus-visible::after {
+  background: rgb(255 255 255 / 18%);
+}
+body.resizing-panel .side-panel-resize::after {
+  background: var(--faint);
+}
+.side-panel-resize:focus-visible {
+  outline: none;
+}
+.side-panel-top {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  height: 52px;
+  flex-shrink: 0;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+.side-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.side-panel-scrim {
+  display: none;
+}
+.details-list {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding: 14px 16px;
-  border-radius: 14px;
-  background: #212121;
-  border: 1px solid var(--line);
+  padding: 16px 18px;
 }
-.details-card h2 {
+.details-list h2 {
   color: var(--muted);
   font-size: 13px;
   margin-bottom: 4px;
 }
-.details-card p {
+.details-list p {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
   min-height: 24px;
 }
-.details-card a {
+.details-list a {
   text-decoration: none;
 }
-.details-card a:hover {
+.details-list a:hover {
   text-decoration: underline;
 }
-.details-card code {
+.details-list code {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -1353,16 +1429,27 @@ select.input {
 .mobile-only {
   display: none;
 }
-@media (max-width: 1179px) {
-  .details-card {
-    position: absolute;
-    top: 52px;
-    right: 16px;
-    z-index: 5;
-    box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
+@media (max-width: 920px) {
+  .side-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    width: min(480px, 94vw);
+    min-width: 0;
+    max-width: none;
+    box-shadow: -12px 0 32px rgb(0 0 0 / 50%);
   }
-  .content-layout {
-    position: relative;
+  .side-panel-resize {
+    display: none;
+  }
+  .side-panel-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 25;
+    background: rgb(0 0 0 / 45%);
   }
 }
 @media (max-width: 760px) {
@@ -1399,14 +1486,11 @@ select.input {
   .breadcrumb .repo-badge {
     display: none;
   }
-  .content-layout {
-    padding-right: 0;
+  .side-panel-top {
+    padding: 0 8px;
   }
-  .details-card {
-    top: 0;
-    left: 12px;
-    right: 12px;
-    width: auto;
+  .side-panel-body {
+    padding-bottom: env(safe-area-inset-bottom);
   }
   .conversation-content {
     padding: 20px 16px 24px;
