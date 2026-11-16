@@ -154,13 +154,13 @@ class LocatorAssertions {
     );
   }
 
-  /** A primitive DOM property such as a <details> element's `open`. */
-  toHaveJSProperty(name: string, expected: string | number | boolean, options?: Options) {
+  /** A JSON-serializable DOM property such as a <details> element's `open`. */
+  toHaveJSProperty(name: string, expected: Json, options?: Options) {
     return this.property(
       "toHaveJSProperty",
-      String(expected),
-      "function (name) { return this[name] ?? null; }",
-      (value) => value === expected,
+      JSON.stringify(expected),
+      "function (name) { return JSON.stringify(this[name] ?? null); }",
+      (value) => value === JSON.stringify(expected),
       options,
       [name],
     );

@@ -47,6 +47,7 @@ import {
   type WorkspaceConfig,
 } from "./workspace";
 import { gitRoute, checkedPush } from "./git-transport";
+import { BROWSER_SESSION_MS, MAX_BROWSER_SESSIONS } from "./browser-workspace";
 import { WebhookSetup } from "./github-webhook";
 import { admitGitHub, githubDelivery, GitHubThreads } from "./github-inbox";
 import { admitSlack, slackDelivery } from "./slack-inbox";
@@ -228,7 +229,7 @@ export class Agent extends DurableObject<Env> {
     const shell = {
       name: "shell",
       description:
-        "Run a shell command in the active repository's isolated Linux checkout. Commands start in /workspace/repo (or /workspace when no repo is selected), so no cd is needed. Dependency setup runs in the background: use workspace action wait_for_dependencies before builds, tests, starting a dev server, or changing dependency inputs; file reads and ordinary shell commands do not wait. Use workspace checkout to switch repositories in this same conversation; other live checkouts are preserved. Git credentials stay outside the container. Only configured network hosts are reachable. Output is capped at 32 KiB per stream and time at 60 seconds. Repository files are snapshotted once after the agent turn answers, not after each command. Changes since the last successful turn-end save can be lost on container shutdown or restart. Push important work to GitHub for long-term storage.",
+        "Run a shell command in the active repository's isolated Linux checkout. Commands start in /workspace/repo (or /workspace when no repo is selected), so no cd is needed. Dependency setup runs in the background: use workspace action wait_for_dependencies before builds, tests, starting a dev server, or changing dependency inputs; file reads and ordinary shell commands do not wait. Use workspace checkout to switch repositories in this same conversation; other live checkouts are preserved. Git credentials stay outside the container. Only configured network hosts are reachable. For browser automation or browser tests, use the Chrome DevTools endpoint at http://browser.workspace (Cloudflare Browser Run; /json/version names its WebSocket) instead of installing a browser. Output is capped at 32 KiB per stream and time at 60 seconds. Repository files are snapshotted once after the agent turn answers, not after each command. Changes since the last successful turn-end save can be lost on container shutdown or restart. Push important work to GitHub for long-term storage.",
       parameters: obj({ command: str() }),
       replay: "unsafe",
       executionMode: "sequential",
@@ -1264,6 +1265,27 @@ export class Agent extends DurableObject<Env> {
     if (Option.isNone(conversation)) return { error: "Session not found" };
 
     return this.runWorkspace(conversation.value.id, input);
+  }
+
+  /** In memory: an evicted Agent also drops the Worker invocations relaying those sessions. */
+  private readonly browserLeases = new Map<string, number>();
+
+  /** Reserve one of the deployment's brokered Browser Run sessions, or null at the cap. */
+  async acquireBrowser() {
+    const now = Date.now();
+
+    for (const [lease, expires] of this.browserLeases)
+      if (expires <= now) this.browserLeases.delete(lease);
+
+    if (this.browserLeases.size >= MAX_BROWSER_SESSIONS) return null;
+    const lease = crypto.randomUUID();
+    this.browserLeases.set(lease, now + BROWSER_SESSION_MS);
+
+    return lease;
+  }
+
+  async releaseBrowser(lease: string) {
+    this.browserLeases.delete(lease);
   }
 
   gitTransport(request: Request, workspace: WorkspaceConfig) {
