@@ -495,3 +495,62 @@ it.each([
   },
   15000,
 );
+
+it("lists spawned sessions with their parent and persists keeping one in the sidebar", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+  const parent = await root();
+  const child = await spawn(parent, "Investigate the flaky test\nDetails");
+  await expect.poll(async () => (await receipt(parent, child.taskId)).status).toBe("terminal");
+  const grandchild = await spawn(child.id, "Read the logs");
+  await expect
+    .poll(async () => (await receipt(child.id, grandchild.taskId)).status)
+    .toBe("terminal");
+
+  const list = async () => {
+    const response = await SELF.fetch("https://worker/api/sessions", { headers });
+    expect(response.status).toBe(200);
+
+    const sessions =
+      await response.json<{ id: string; parentId?: string; kept?: boolean; title: string }[]>();
+
+    return new Map(sessions.map((session) => [session.id, session]));
+  };
+
+  let sessions = await list();
+  expect(sessions.get(parent)).not.toHaveProperty("parentId");
+  expect(sessions.get(child.id)).toMatchObject({
+    parentId: parent,
+    title: "Investigate the flaky test",
+  });
+  expect(sessions.get(child.id)).not.toHaveProperty("kept");
+  expect(sessions.get(grandchild.id)).toMatchObject({ parentId: child.id });
+
+  const keep = await SELF.fetch(`https://worker/api/sessions/${child.id}`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ kept: true }),
+  });
+
+  expect(keep.status).toBe(200);
+  expect(await keep.json()).toEqual({ kept: true });
+
+  const archive = await SELF.fetch(`https://worker/api/sessions/${child.id}`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ archived: true }),
+  });
+
+  expect(await archive.json()).toEqual({ archived: true });
+  await abortAllDurableObjects();
+  sessions = await list();
+  // Archiving does not forget the keep choice, and both survive eviction.
+  expect(sessions.get(child.id)).toMatchObject({ parentId: parent, kept: true, archived: true });
+
+  const invalid = await SELF.fetch(`https://worker/api/sessions/${child.id}`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({}),
+  });
+
+  expect(invalid.status).toBe(400);
+});
