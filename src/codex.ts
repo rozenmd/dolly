@@ -99,6 +99,25 @@ export function containerCodex<TApi extends Api, TOptions extends StreamOptions>
 /** Isolated inference container: no checkout, refresh token, or public route. */
 export class Codex extends DurableObject<Env> {
   private readonly requests = new Map<string, AbortController>();
+  private starting?: Promise<void>;
+
+  private startContainer(container: Container) {
+    // Cold starts can exceed the DO input gate's 30-second deadline. Share the
+    // startup promise without blocking incoming cancellation or resetting the DO.
+    this.starting ??= (async () => {
+      if (!container.running)
+        container.start({
+          image: container.images.codex,
+          instance: "basic",
+          enableInternet: true,
+        });
+      await container.setInactivityTimeout(300_000);
+    })().finally(() => {
+      this.starting = undefined;
+    });
+
+    return this.starting;
+  }
 
   cancel(id: string) {
     const controller = this.requests.get(id) ?? new AbortController();
@@ -131,17 +150,7 @@ export class Codex extends DurableObject<Env> {
         : bytes;
 
     const body: unknown = JSON.parse(new TextDecoder().decode(decoded));
-    await this.ctx.blockConcurrencyWhile(async () => {
-      if (!container.running)
-        container.start({
-          image: container.images.codex,
-          instance: "basic",
-          // This container has no repository code or refresh credentials.
-          // Inference goes directly from the official CLI, not through Worker fetch.
-          enableInternet: true,
-        });
-      await container.setInactivityTimeout(300_000);
-    });
+    await this.startContainer(container);
     const controller = new AbortController();
     const id = request.headers.get("x-dolly-request-id") ?? crypto.randomUUID();
     const cancellation = this.requests.get(id) ?? controller;
