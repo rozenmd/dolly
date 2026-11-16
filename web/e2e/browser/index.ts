@@ -46,7 +46,9 @@ beforeEach(async () => {
 
   if (!connection || connection.closed)
     connection = await CdpConnection.connect(endpoint, process.env.BROWSER_CDP_TOKEN);
-  current = await Page.create(connection, baseURL, process.env.E2E_SERVER_URL ?? baseURL);
+  // Pages may load from a different origin than the server (see setup.ts); requests to it
+  // are served from the server.
+  current = await Page.create(connection, process.env.E2E_PAGE_URL ?? baseURL, baseURL);
 });
 
 afterEach(async (context) => {

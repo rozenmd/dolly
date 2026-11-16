@@ -14,7 +14,7 @@ const app = {
 const signedIn = { github: app, ownerClaimed: true, user: { login: "octocat" } };
 
 for (const width of [1280, 320]) {
-  test(`shows live progress and a ticking timer at ${width}px without manual expansion`, async ({
+  test(`shows live activity and a ticking timer at ${width}px with tool output collapsed by default`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 800 });
@@ -78,6 +78,11 @@ for (const width of [1280, 320]) {
       tools: [{ callId: "test", name: "shell", status: "running", output: "Tests 3/10 passed" }],
     });
     await expect(status).toContainText("Running shell");
+    const step = page.locator("details.step");
+    await expect(step.locator("> summary")).toBeVisible();
+    await expect(step).toHaveJSProperty("open", false);
+    await expect(page.getByText("Tests 3/10 passed")).not.toBeVisible();
+    await step.locator("> summary").click();
     await expect(page.getByText("Tests 3/10 passed")).toBeVisible();
     await page.screenshot({ path: test.info().outputPath(`live-progress-${width}.png`) });
     push({
@@ -678,7 +683,8 @@ test("first run creates the GitHub App from dolly with the ingress URL filled in
       setup = route.request().postDataJSON();
 
       return route.fulfill({
-        json: { connected: false, setupUrl: "http://127.0.0.1:3000/api/setup/github/test-state" },
+        // Same-origin: Browser Run blocks navigation to local addresses.
+        json: { connected: false, setupUrl: "/api/setup/github/test-state" },
       });
     }
 

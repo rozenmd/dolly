@@ -415,7 +415,7 @@ export class Sandbox extends DurableObject<Env> {
 
         if (workspace) {
           const outbound = this.loopback.WorkspaceOutbound({
-            props: workspace,
+            props: { ...workspace, sandbox: String(this.ctx.id) },
           });
 
           yield* this.timeInitialization(
@@ -777,10 +777,12 @@ export class Sandbox extends DurableObject<Env> {
     const token = crypto.randomUUID();
 
     const setupOutbound = this.loopback.WorkspaceOutbound({
-      props: { ...workspace, dependencyCacheToken: token },
+      props: { ...workspace, dependencyCacheToken: token, sandbox: String(this.ctx.id) },
     });
 
-    const ordinaryOutbound = this.loopback.WorkspaceOutbound({ props: workspace });
+    const ordinaryOutbound = this.loopback.WorkspaceOutbound({
+      props: { ...workspace, sandbox: String(this.ctx.id) },
+    });
 
     return yield* Effect.acquireUseRelease(
       attempt("workspace.cache.enable", () => container.interceptAllOutboundHttp(setupOutbound)),
@@ -1241,7 +1243,22 @@ export class Sandbox extends DurableObject<Env> {
     const preview = this.livePreview(token);
 
     if (!preview) return new Response("Preview is unavailable or expired", { status: 404 });
-    // Do not call container(): a browser request must never resurrect a workspace.
+
+    return this.portFetch(request, preview.port);
+  }
+
+  /**
+   * Serve a brokered Browser Run page from a port in this workspace's running container.
+   * Never starts a container: a browser request must not resurrect a workspace.
+   */
+  async browserFetch(request: Request, port: number) {
+    if (!this.ctx.container?.running)
+      return new Response("The workspace container is not running", { status: 503 });
+
+    return this.portFetch(request, port);
+  }
+
+  private portFetch(request: Request, port: number) {
     const url = new URL(request.url);
     url.protocol = "http:";
     // Use an internal host accepted by dev servers, rather than disabling host checks.
@@ -1249,7 +1266,7 @@ export class Sandbox extends DurableObject<Env> {
     const headers = new Headers(request.headers);
     headers.set("Host", "localhost");
 
-    return this.ctx.container!.getTcpPort(preview.port).fetch(
+    return this.ctx.container!.getTcpPort(port).fetch(
       new Request(url, {
         method: request.method,
         headers,

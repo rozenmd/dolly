@@ -78,6 +78,52 @@ const bootstrap = `(() => {
   };
 })();`;
 
+/**
+ * Make CSS hover/pointer media queries behave as on a desktop with a mouse. Headless Chrome
+ * without input devices (such as Cloudflare Browser Run, which takes no launch flags) matches
+ * (hover: none), and CDP cannot emulate these features. Each query token is swapped for one
+ * that evaluates the way a desktop would in this browser: a desktop value becomes the value
+ * the browser currently matches, and the browser's current value becomes the desktop one.
+ * Stylesheets are rewritten as they load. JavaScript matchMedia() calls are not covered.
+ */
+const desktopPointer = `(() => {
+  const desired = { hover: "hover", pointer: "fine" };
+  const values = { hover: ["none", "hover"], pointer: ["none", "coarse", "fine"] };
+  const current = {};
+  for (const feature of ["hover", "pointer"])
+    current[feature] = values[feature].find((value) => matchMedia("(" + feature + ": " + value + ")").matches);
+  const swap = (text) =>
+    text.replace(/\\(\\s*(any-)?(hover|pointer)\\s*:\\s*([a-z]+)\\s*\\)/g, (token, any, feature, value) => {
+      const want = desired[feature];
+      const now = current[feature];
+      if (value === want) return "(" + (any ?? "") + feature + ": " + now + ")";
+      if (value === now) return "(" + (any ?? "") + feature + ": " + want + ")";
+      return token;
+    });
+  const seen = new WeakSet();
+  const rewrite = (rules) => {
+    for (const rule of rules) {
+      if (rule instanceof CSSMediaRule && !seen.has(rule)) {
+        seen.add(rule);
+        const text = rule.media.mediaText;
+        const swapped = swap(text);
+        if (swapped !== text) rule.media.mediaText = swapped;
+      }
+      if (rule.cssRules) rewrite(rule.cssRules);
+    }
+  };
+  const all = () => {
+    for (const sheet of document.styleSheets) {
+      try {
+        rewrite(sheet.cssRules);
+      } catch {}
+    }
+  };
+  document.addEventListener("DOMContentLoaded", all);
+  document.addEventListener("load", all, true);
+  new MutationObserver(all).observe(document, { childList: true, subtree: true });
+})();`;
+
 type Glob = string | RegExp;
 
 /** Playwright-style URL globs: ** spans slashes, * does not. */
@@ -398,6 +444,13 @@ export class Page {
       session.send("Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }] }),
       this.setViewportSize({ width: 1280, height: 720 }),
     ]);
+
+    const desktop = await this.evaluate(
+      () => matchMedia("(hover: hover)").matches && matchMedia("(pointer: fine)").matches,
+    );
+
+    if (!desktop)
+      await session.send("Page.addScriptToEvaluateOnNewDocument", { source: desktopPointer });
   }
 
   async close() {
