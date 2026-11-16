@@ -157,8 +157,8 @@ it("promotes the original queued input atomically without duplication or crossin
   }
 });
 
-it.each([20, null])(
-  "sets new and existing conversations to 100 turns (old limit: %s)",
+it.each([20, 100])(
+  "leaves new and existing conversations without a turn limit (old limit: %s)",
   async (maxTurns) => {
     const created = await SELF.fetch("https://worker/api/sessions", {
       method: "POST",
@@ -176,9 +176,9 @@ it.each([20, null])(
       if (!conversationId) throw new Error("Session missing");
 
       const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
-      expect((await conversation!.agent(BACKGROUND_CONTEXT)).maxTurns).toBe(100);
+      expect((await conversation!.agent(BACKGROUND_CONTEXT)).maxTurns).toBeUndefined();
       await harness.commit((tx) => configure(tx, conversationId, { maxTurns }), BACKGROUND_CONTEXT);
-      await state.storage.delete("migration:100-turns");
+      await state.storage.delete("migration:unlimited-turns");
     });
 
     await abortAllDurableObjects();
@@ -191,8 +191,8 @@ it.each([20, null])(
       if (!conversationId) throw new Error("Session missing");
 
       const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
-      expect((await conversation!.agent(BACKGROUND_CONTEXT)).maxTurns).toBe(100);
-      expect(await state.storage.get("migration:100-turns")).toBe(true);
+      expect((await conversation!.agent(BACKGROUND_CONTEXT)).maxTurns).toBeUndefined();
+      expect(await state.storage.get("migration:unlimited-turns")).toBe(true);
     });
   },
 );

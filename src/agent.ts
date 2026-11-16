@@ -670,7 +670,6 @@ export class Agent extends DurableObject<Env> {
                 ),
               },
               thinkingLevel: DEFAULT_THINKING_LEVEL,
-              maxTurns: 100,
               tools,
             });
           },
@@ -718,10 +717,10 @@ export class Agent extends DurableObject<Env> {
       if (end.kind === "failed") this.ctx.abort("Harness storage failed");
     });
 
-    // Existing conversations persist their old limit; raise it before resuming work.
+    // Existing conversations persist their old turn limit; clear it so runs are unbounded.
     if (
       !(yield* attempt("session.turn-limit.read", () =>
-        this.ctx.storage.get("migration:100-turns"),
+        this.ctx.storage.get("migration:unlimited-turns"),
       ))
     ) {
       yield* attempt("pi.turn-limit.update", () =>
@@ -732,7 +731,7 @@ export class Agent extends DurableObject<Env> {
             const page = await tx.scanConversations({}, 100, cursor);
 
             for (const conversation of page.items) {
-              await configure(tx, conversation.id, { maxTurns: 100 });
+              await configure(tx, conversation.id, { maxTurns: null });
             }
 
             cursor = page.next;
@@ -740,7 +739,7 @@ export class Agent extends DurableObject<Env> {
         }, BACKGROUND_CONTEXT),
       );
       yield* attempt("session.turn-limit.migrated", () =>
-        this.ctx.storage.put("migration:100-turns", true),
+        this.ctx.storage.put("migration:unlimited-turns", true),
       );
     }
 
