@@ -43,12 +43,12 @@ printf '%s' 'module.exports = 42;' > packages/helper/index.js
 printf '%s\\n' node_modules/ > .gitignore
 git init
 git add .
-corepack pnpm install --lockfile-only
+npx --yes --package=pnpm@12.18.0 -- pnpm install --lockfile-only
 grep -q 'get-caller-file:' pnpm-lock.yaml
 ${setup}
 node -e 'if(!require("is-number")(42) || typeof require("get-caller-file") !== "function" || require("@cache/helper") !== 42) process.exit(1)'
-printf '#!/bin/sh\\nif [ "$2" = "--version" ]; then exec /usr/local/bin/corepack "$@"; fi\\nexit 87\\n' > /workspace/no-install/corepack
-chmod +x /workspace/no-install/corepack
+printf '#!/bin/sh\\nfor last; do :; done\\nif [ "$last" = "--version" ]; then exec %s "$@"; fi\\nexit 87\\n' "$(command -v npx)" > /workspace/no-install/npx
+chmod +x /workspace/no-install/npx
 cp pnpm-lock.yaml original-lock.yaml
 python3 -c 'import shutil; shutil.rmtree("node_modules")'
 PATH="/workspace/no-install:$PATH" ${setup}
@@ -181,26 +181,28 @@ const managers: {
   {
     name: "npm with a declared version",
     manager: "npm@11.0.0",
-    bootstrap: "corepack npm install --package-lock-only",
+    bootstrap: "npx --yes --package=npm@11.0.0 -- npm install --package-lock-only",
     lockfile: "package-lock.json",
   },
   {
     name: "Yarn Classic",
     manager: "yarn@1.22.22",
-    bootstrap: "corepack yarn install",
+    bootstrap: "npx --yes --package=yarn@1.22.22 -- yarn install",
     lockfile: "yarn.lock",
   },
   {
     name: "Yarn modern node-modules",
     manager: "yarn@4.18.1",
-    bootstrap: "YARN_ENABLE_GLOBAL_CACHE=false corepack yarn install",
+    bootstrap:
+      "YARN_ENABLE_GLOBAL_CACHE=false npx --yes --package=@yarnpkg/cli-dist@4.18.1 -- yarn install",
     lockfile: "yarn.lock",
     config: "nodeLinker: node-modules\n",
   },
   {
     name: "Yarn modern PnP",
     manager: "yarn@4.18.1",
-    bootstrap: "YARN_ENABLE_GLOBAL_CACHE=false corepack yarn install",
+    bootstrap:
+      "YARN_ENABLE_GLOBAL_CACHE=false npx --yes --package=@yarnpkg/cli-dist@4.18.1 -- yarn install",
     lockfile: "yarn.lock",
     config: "pnpEnableInlining: false\npnpEnableEsmLoader: true\n",
     pnp: true,
@@ -223,7 +225,7 @@ const managers: {
   },
   {
     name: "pnpm inferred from pnpm-lock.yaml",
-    bootstrap: "corepack pnpm install --lockfile-only",
+    bootstrap: "npx --yes --package=pnpm@latest -- pnpm install --lockfile-only",
     lockfile: "pnpm-lock.yaml",
   },
 ];
@@ -293,7 +295,7 @@ import shutil, shlex
 from dependency_cache import cache_paths
 for path in cache_paths(Path.cwd()):
     shutil.rmtree(path) if path.is_dir() else path.unlink()
-for executable in ("corepack", "npm", "npx", "bun"):
+for executable in ("npm", "npx", "bun"):
     real = shutil.which(executable)
     if not real:
         continue

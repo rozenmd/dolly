@@ -4,7 +4,7 @@ FROM node:24-trixie-slim
 COPY --from=sandbox-tools /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 COPY --from=bun-tools /usr/local/bin/bun /usr/local/bin/bun
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates python3 curl util-linux procps tini zstd && rm -rf /var/lib/apt/lists/* \
-    && corepack enable && mkdir -p /workspace /run/sandbox && chown node:node /workspace /run/sandbox && chmod 700 /run/sandbox
+    && mkdir -p /workspace /run/sandbox && chown node:node /workspace /run/sandbox && chmod 700 /run/sandbox
 COPY container/checkout.sh /usr/local/lib/dolly-checkout.sh
 COPY container/setup.py /usr/local/lib/dolly-setup.py
 COPY container/dependency_cache.py /usr/local/lib/dependency_cache.py

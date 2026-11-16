@@ -23,7 +23,7 @@
     "lint:fix": "vp lint --fix --deny-warnings",
     "typecheck": "tsrs --noEmit && pnpm --dir infra typecheck",
     "test:integration:worker": "vp -C . build --config test/worker/vite.config.ts && vp test run --config vitest.worker.config.ts && WEB_TEST_ACCESS=required vp test run --config vitest.worker.config.ts",
-    "test:worker": "pnpm run test:integration:worker && pnpm --dir web exec playwright test --config playwright.worker.config.ts"
+    "test:worker": "pnpm run test:integration:worker && pnpm --dir web test:e2e"
   },
   "dependencies": {
     "@cloudflare/sandbox": "1.0.3",

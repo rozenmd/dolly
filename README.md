@@ -46,11 +46,14 @@ Attach screenshots by pasting, dropping files, or using the paperclip in either 
 ```sh
 pnpm check
 pnpm test
-pnpm --dir web exec playwright install chromium
-pnpm test:worker
+docker run -d --rm -p 9222:9222 chromedp/headless-shell:stable \
+  --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4
+BROWSER_CDP_URL=http://127.0.0.1:9222 pnpm test:worker
 pnpm build   # deployment dry runs, including the frontend and sandbox image
 pnpm deploy  # publish the combined Worker and frontend
 ```
+
+Browser tests drive Chrome over the DevTools protocol (no Playwright). Point `BROWSER_CDP_URL` at a browser container as above, or at a `wss://` endpoint such as Cloudflare Browser Run with `BROWSER_CDP_TOKEN`; alternatively set `BROWSER_EXECUTABLE` to a local Chrome. The test process serves every page request itself, so a remote browser needs no route to the local test Worker. See `web/e2e/browser/setup.ts`.
 
 The workspaces use Vite+ for development, builds, tests, linting, and formatting. Run the existing `pnpm` scripts (no global `vp` installation is needed); `pnpm exec vp toolchain` lists the bundled tool versions. The root `vite.config.ts` owns formatting and lint rules, including the custom anti-slop plugins, while the separate Vitest configs preserve the Worker and sandbox test environments.
 

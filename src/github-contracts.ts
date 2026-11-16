@@ -68,6 +68,9 @@ export const GitHubRequest = Schema.Struct({
       repository: Repository,
       path: Path,
       ref: Ref,
+      /** 1-based line to start from; reads return at most 2,000 lines or 50 KiB. */
+      offset: Schema.optional(LineNumber),
+      limit: Schema.optional(LineNumber.check(Schema.isLessThanOrEqualTo(2000))),
     }),
     Schema.Struct({
       action: Schema.Literal("list_files"),
@@ -157,6 +160,10 @@ export const GitHubResult = Schema.Union([
     path: Schema.String,
     sha: Sha,
     content: Schema.String,
+    /** Present when content is a window of a longer file. */
+    lines: Schema.optional(Schema.String),
+    nextOffset: Schema.optional(Schema.Number),
+    note: Schema.optional(Schema.String),
   }),
   Schema.Struct({ kind: Schema.Literal("branch"), name: Schema.String, sha: Sha }),
   Schema.Struct({ kind: Schema.Literal("commit"), sha: Sha }),

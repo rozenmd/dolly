@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./browser";
 
 const png =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";

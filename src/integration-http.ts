@@ -3,6 +3,62 @@ import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import { exceptionDetails, redact } from "./diagnostics";
 import { OperationError, attempt } from "./operations";
+import { Buffer } from "node:buffer";
+
+const ProviderError = Schema.Struct({
+  message: Schema.optional(Schema.String),
+  error: Schema.optional(Schema.String),
+  errors: Schema.optional(
+    Schema.Array(
+      Schema.Union([
+        Schema.String,
+        Schema.Struct({
+          message: Schema.optional(Schema.String),
+          field: Schema.optional(Schema.String),
+          code: Schema.optional(Schema.String),
+        }),
+      ]),
+    ),
+  ),
+});
+
+/** The provider's own explanation, e.g. GitHub's 422 validation errors, read from at most 4 KiB. */
+const errorReason = (response: Response) =>
+  attempt("integration.error", async () => {
+    const reader = response.body?.getReader();
+
+    if (!reader) return "";
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+
+    try {
+      while (size < 4096) {
+        const next = await reader.read();
+
+        if (next.done) break;
+        chunks.push(next.value);
+        size += next.value.byteLength;
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+
+    const text = new TextDecoder().decode(Buffer.concat(chunks).subarray(0, 4096));
+    const parsed = Schema.decodeUnknownOption(Schema.fromJsonString(ProviderError))(text);
+
+    if (Option.isNone(parsed)) return "";
+
+    const details = (parsed.value.errors ?? []).map((item) =>
+      Schema.is(Schema.String)(item)
+        ? item
+        : (item.message ?? [item.field, item.code].filter(Boolean).join(" ")),
+    );
+
+    return [parsed.value.message ?? parsed.value.error, ...details]
+      .filter(Boolean)
+      .join("; ")
+      .slice(0, 500);
+  }).pipe(Effect.catch(() => Effect.succeed("")));
 
 export const integrationJson = Effect.fn("Integration.request")(function* (
   url: string,
@@ -22,12 +78,16 @@ export const integrationJson = Effect.fn("Integration.request")(function* (
     );
 
     return yield* Effect.gen(function* () {
-      if (!response.ok)
+      if (!response.ok) {
+        const reason = yield* errorReason(response);
+
         return yield* new OperationError({
           operation: "integration.response",
-          message: `Provider returned HTTP ${response.status}`,
+          message: `Provider returned HTTP ${response.status}${reason ? `: ${reason}` : ""}`,
           details: { status: response.status },
         });
+      }
+
       const reader = response.body?.getReader();
 
       if (!reader)

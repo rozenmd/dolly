@@ -97,3 +97,29 @@ it("rejects provider redirects without forwarding credentials or accepting their
     fetch.mockRestore();
   }
 });
+
+it("includes the provider's explanation in HTTP errors without leaking credentials", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json(
+      {
+        message: "Validation Failed",
+        errors: [
+          { resource: "PullRequest", field: "head", code: "invalid" },
+          { message: "No commits between main and dolly/fix for private-provider-token" },
+        ],
+      },
+      { status: 422 },
+    ),
+  );
+
+  const error = await Effect.runPromise(
+    integrationJson("https://api.github.com/test", {
+      headers: { Authorization: "Bearer private-provider-token" },
+    }).pipe(Effect.flip),
+  );
+
+  expect(error.message).toMatch(
+    /^Provider returned HTTP 422: Validation Failed; head invalid; No commits between main and dolly\/fix for /,
+  );
+  expect(JSON.stringify(error)).not.toContain("private-provider-token");
+});

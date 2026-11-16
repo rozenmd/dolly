@@ -24,6 +24,7 @@ import {
 } from "./github-webhook";
 import { exceptionDetails } from "./diagnostics";
 import { integrationJson } from "./integration-http";
+import { describeWindow, windowText } from "./file-window";
 import { budgetPatches, invalidAnchors, REVIEW_FOOTER } from "./github-review";
 import { attempt, OperationError } from "./operations";
 import { MAX_IMAGE_BYTES } from "./images";
@@ -60,11 +61,22 @@ const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
 const RefResponse = Schema.Struct({ object: Schema.Struct({ sha: Sha }) });
 const RepoResponse = Schema.Struct({ default_branch: Schema.String });
 
+/** A read_file result; lines, nextOffset and note describe a window of a longer file. */
+type FileRead = {
+  kind: "file";
+  path: string;
+  sha: string;
+  content: string;
+  lines?: string;
+  nextOffset?: number;
+  note?: string;
+};
+
 const FileResponse = Schema.Struct({
   type: Schema.Literal("file"),
   path: Schema.String,
   sha: Sha,
-  encoding: Schema.Literal("base64"),
+  encoding: Schema.Literals(["base64", "none"]),
   content: Schema.String,
   size: Schema.Number,
 });
@@ -944,16 +956,39 @@ function makeGitHub(
 
       const file = yield* readApi(op.repository, path).pipe(Effect.flatMap(decode(FileResponse)));
 
-      if (file.size > 32_768 || file.content.replace(/\s/g, "").length > 43_692)
-        return { ok: false, code: "file_too_large", message: "File exceeds 32 KiB" };
+      // GitHub inlines content only up to 1 MB; larger files need a sandbox checkout.
+      if (!file.content && file.size > 0)
+        return {
+          ok: false,
+          code: "file_too_large",
+          message:
+            "GitHub does not inline files over 1 MB; check out the repository and read it there",
+        };
 
-      const content = yield* attempt("github.file.decode", async () =>
+      const text = yield* attempt("github.file.decode", async () =>
         new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
           Uint8Array.from(atob(file.content.replace(/\s/g, "")), (char) => char.charCodeAt(0)),
         ),
       );
 
-      return { ok: true, result: { kind: "file", path: file.path, sha: file.sha, content } };
+      const window = windowText(text, { offset: op.offset, limit: op.limit });
+      const note = describeWindow(window, window.totalLines).slice(window.text.length).trim();
+
+      const result: FileRead = {
+        kind: "file",
+        path: file.path,
+        sha: file.sha,
+        content: window.text,
+      };
+
+      if (window.startLine > 1 || window.nextOffset !== undefined || window.lineCut)
+        result.lines = `${window.startLine}-${window.endLine}`;
+
+      if (window.nextOffset !== undefined) result.nextOffset = window.nextOffset;
+
+      if (note) result.note = note;
+
+      return { ok: true, result };
     }
 
     if (op.action === "list_files") {

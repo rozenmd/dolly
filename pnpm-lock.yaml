@@ -305,9 +305,6 @@ importers:
         specifier: ^4.0.1
         version: 4.0.1(supports-color@10.2.2)
     devDependencies:
-      '@playwright/test':
-        specifier: ^1.56.0
-        version: 1.65.0
       '@types/node':
         specifier: ^24.0.0
         version: 24.19.2
@@ -1508,11 +1505,6 @@ packages:
   '@oxlint/plugins@1.93.0':
     resolution: {integrity: sha512-bKWQI1g9jn8bWUZsvhbOLfgva576Fbp1KwoTNSUCMdT9tlTAvQS2JkifX1UrhPPdyN4GHvM20HhvIMqqU1yotQ==}
     engines: {node: ^12.22.0 || ^14.17.0 || >=16.0.0}
-
-  '@playwright/test@1.65.0':
-    resolution: {integrity: sha512-iGURLGuKDLakSEl7Pgfv8h7f+XLT+V861Wfhz0zlEl5nyFuKUopdkFBPKqTllTUp06aOwPuH8iuUEb3yp3MpbQ==}
-    engines: {node: '>=20'}
-    hasBin: true
 
   '@polka/url@1.0.0-next.29':
     resolution: {integrity: sha512-wwQAWhWSuHaag8c4q/KN/vCoeOJYshAIvMQwD4GpSb3OiZklFfvAgmj0VCBBImRpuF/aFgIRzllXlVX93Jevww==}
@@ -4963,10 +4955,6 @@ snapshots:
 
   '@oxlint/plugins@1.93.0': {}
 
-  '@playwright/test@1.65.0':
-    dependencies:
-      playwright: 1.65.0
-
   '@polka/url@1.0.0-next.29': {}
 
   '@poppinss/colors@4.1.6':
@@ -6849,11 +6837,13 @@ snapshots:
 
   picomatch@4.0.7: {}
 
-  playwright-core@1.65.0: {}
+  playwright-core@1.65.0:
+    optional: true
 
   playwright@1.65.0:
     dependencies:
       playwright-core: 1.65.0
+    optional: true
 
   pngjs@7.0.0: {}
 

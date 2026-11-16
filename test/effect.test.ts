@@ -9,7 +9,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { Account, Credentials } from "../src/credentials";
 import { CodexProtocol, startLogin, pollLogin } from "../src/codex-login";
 import { OperationError } from "../src/operations";
-import { readBounded } from "../src/sandbox";
+import { readBounded, readWindow } from "../src/sandbox";
 
 it("releases the credential permit when its holder is interrupted", async () => {
   await runInDurableObject(env.AGENT.getByName(crypto.randomUUID()), async (_, state) => {
@@ -67,31 +67,70 @@ it("drains shell output while retaining only the configured byte prefix", async 
     },
   });
 
-  expect(
-    await Effect.runPromise(readBounded(stream, { limit: 32_768, overflow: "truncate" })),
-  ).toHaveLength(32_768);
+  expect(await Effect.runPromise(readBounded(stream, { limit: 32_768 }))).toHaveLength(32_768);
   expect(stream.locked).toBe(false);
 });
 
-it("fails oversized file reads and cancels the reader", async () => {
+const lines = (from: number, to: number) =>
+  Array.from({ length: to - from + 1 }, (_, index) => `line ${from + index}\n`).join("");
+
+const chunked = (text: string, onCancel = () => {}) => {
+  const bytes = new TextEncoder().encode(text);
+  let position = 0;
+
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (position >= bytes.length) return controller.close();
+      // Split mid-line and mid-character to exercise incremental decoding.
+      controller.enqueue(bytes.subarray(position, position + 4093));
+      position += 4093;
+    },
+    cancel: onCancel,
+  });
+};
+
+it("windows large file reads by line, stops reading early and says how to continue", async () => {
   let cancelled = false;
 
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(new Uint8Array(65_537));
-    },
-    cancel() {
-      cancelled = true;
-    },
+  const stream = chunked(lines(1, 100_000), () => {
+    cancelled = true;
   });
 
-  const failure = await Effect.runPromise(
-    Effect.flip(readBounded(stream, { limit: 65_536, overflow: "fail" })),
-  );
+  const first = await Effect.runPromise(readWindow(stream, {}));
 
-  expect(failure.operation).toBe("sandbox.file.read");
+  expect(first).toBe(`${lines(1, 2000)}\n[Showing lines 1-2000. Use offset=2001 to continue.]`);
   expect(cancelled).toBe(true);
   expect(stream.locked).toBe(false);
+
+  expect(await Effect.runPromise(readWindow(chunked(lines(1, 100_000)), { offset: 99_999 }))).toBe(
+    lines(99_999, 100_000),
+  );
+  expect(await Effect.runPromise(readWindow(chunked(lines(1, 10)), { offset: 3, limit: 2 }))).toBe(
+    `${lines(3, 4)}\n[Showing lines 3-4. Use offset=5 to continue.]`,
+  );
+  expect(await Effect.runPromise(readWindow(chunked(lines(1, 10)), { offset: 20 }))).toBe(
+    "\n[offset 20 is past the end of the file (10 lines).]",
+  );
+  expect(await Effect.runPromise(readWindow(chunked("é".repeat(10_000)), {}))).toBe(
+    "é".repeat(10_000),
+  );
+});
+
+it("caps reads by bytes and cuts a single oversized line", async () => {
+  const wide = `${"x".repeat(1000)}\n`.repeat(200);
+  const window = await Effect.runPromise(readWindow(chunked(wide), {}));
+
+  expect(window).toBe(
+    `${`${"x".repeat(1000)}\n`.repeat(51)}\n[Showing lines 1-51. Use offset=52 to continue.]`,
+  );
+
+  const minified = await Effect.runPromise(
+    readWindow(chunked(`short\n${"y".repeat(500_000)}\nnext\n`), { offset: 2 }),
+  );
+
+  expect(minified).toBe(
+    `${"y".repeat(51_200)}\n\n[Line 2 exceeds 50 KiB and was cut; use a shell command such as cut or head -c to read the rest.]\n[Showing lines 2-2. Use offset=3 to continue.]`,
+  );
 });
 
 it("cancels a pending reader when its Effect fiber is interrupted", async () => {
@@ -105,9 +144,7 @@ it("cancels a pending reader when its Effect fiber is interrupted", async () => 
 
   await Effect.runPromise(
     Effect.gen(function* () {
-      const fiber = yield* Effect.forkChild(
-        readBounded(stream, { limit: 32_768, overflow: "truncate" }),
-      );
+      const fiber = yield* Effect.forkChild(readBounded(stream, { limit: 32_768 }));
 
       yield* Effect.yieldNow;
       yield* Fiber.interrupt(fiber);

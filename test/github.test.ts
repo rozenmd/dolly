@@ -300,7 +300,7 @@ it.each([403, 429, 500])(
 
     expect(await readPublic(repository)).toMatchObject({
       ok: false,
-      message: `Provider returned HTTP ${status}`,
+      message: `Provider returned HTTP ${status}: x`,
     });
     expect(
       fetch.mock.calls.some(([input]) =>
@@ -310,21 +310,62 @@ it.each([403, 429, 500])(
   },
 );
 
-it("keeps the file size limit for anonymous public reads", async () => {
+it("reads large public files a window at a time", async () => {
+  const text = Array.from({ length: 5000 }, (_, index) => `line ${index + 1}\n`).join("");
+
   vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
     Response.json({
       type: "file",
       path: "README.md",
       sha,
       encoding: "base64",
-      content: btoa("x".repeat(32_769)),
-      size: 32_769,
+      content: btoa(text),
+      size: text.length,
+    }),
+  );
+
+  const read = async (range: { offset?: number; limit?: number } = {}) =>
+    (
+      await execute({ action: "read_file", repository, path: "README.md", ref: "main", ...range })
+    ).json<{ ok: boolean; result: { content: string; nextOffset?: number } }>();
+
+  const first = await read();
+
+  expect(first).toMatchObject({
+    ok: true,
+    result: {
+      kind: "file",
+      lines: "1-2000",
+      nextOffset: 2001,
+      note: "[Showing lines 1-2000. Use offset=2001 to continue.]",
+    },
+  });
+  expect(first.result.content).toBe(text.split("\n").slice(0, 2000).join("\n") + "\n");
+  expect(await read({ offset: 4999 })).toMatchObject({
+    ok: true,
+    result: { content: "line 4999\nline 5000\n", lines: "4999-5000" },
+  });
+  expect((await read({ offset: 4999 })).result).not.toHaveProperty("nextOffset");
+  expect(await read({ offset: 10, limit: 2 })).toMatchObject({
+    result: { content: "line 10\nline 11\n", nextOffset: 12 },
+  });
+});
+
+it("explains files GitHub will not inline", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json({
+      type: "file",
+      path: "huge.bin",
+      sha,
+      encoding: "none",
+      content: "",
+      size: 5_000_000,
     }),
   );
 
   expect(
     await (
-      await execute({ action: "read_file", repository, path: "README.md", ref: "main" })
+      await execute({ action: "read_file", repository, path: "huge.bin", ref: "main" })
     ).json(),
   ).toMatchObject({ ok: false, code: "file_too_large" });
 });
@@ -1334,7 +1375,7 @@ it("blocks revoked accounts from authenticated reads, writes, and Git transport"
 
   expect(await (await execute(operation)).json()).toMatchObject({
     ok: false,
-    message: "Provider returned HTTP 404",
+    message: "Provider returned HTTP 404: Not Found",
   });
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(new Headers(fetch.mock.calls[0][1]?.headers).has("Authorization")).toBe(false);

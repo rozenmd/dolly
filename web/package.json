@@ -7,7 +7,7 @@
     "build": "vp build",
     "typecheck": "tsc --noEmit",
     "test": "vp test run --config vitest.config.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "vp test run --config vitest.e2e.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
@@ -21,7 +21,6 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.56.0",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",

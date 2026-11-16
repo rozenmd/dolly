@@ -82,7 +82,7 @@ mkdir -p remotes/another-owner
     { name: "workspace", input: { action: "status" } },
     { name: "workspace", input: { action: "diff" } },
     { name: "workspace", input: { action: "commit", message: "Fix answer" } },
-    { name: "workspace", input: { action: "push" } },
+    // open_pull_request pushes the session branch itself before asking GitHub.
     {
       name: "workspace",
       input: { action: "open_pull_request", title: "Fix answer", body: "Tests passed" },
@@ -204,8 +204,15 @@ mkdir -p remotes/another-owner
       }
 
       if (url.pathname.endsWith("/pulls")) {
+        const pull = JSON.parse(String(init?.body));
+
+        expect(pull.base).toBe("main");
+        expect(
+          await remote.run(
+            `git --git-dir=remotes/another-owner/project.git log -1 --format=%s refs/heads/${pull.head}`,
+          ),
+        ).toMatchObject({ exitCode: 0, stdout: "Fix answer\n" });
         opened = true;
-        expect(JSON.parse(String(init?.body)).base).toBe("main");
 
         return Response.json({
           number: 1,
