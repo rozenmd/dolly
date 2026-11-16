@@ -24,7 +24,15 @@ beforeEach(async () => {
 
 afterEach(() => vi.restoreAllMocks());
 
-type SseEvent = { readonly type: string } & Record<string, unknown>;
+/** The Codex Responses stream events these tests send. */
+type SseEvent = {
+  readonly type: string;
+  readonly response?: object;
+  readonly output_index?: number;
+  readonly summary_index?: number;
+  readonly item?: object;
+  readonly delta?: string;
+};
 
 const encoder = new TextEncoder();
 
