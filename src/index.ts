@@ -23,6 +23,8 @@ export { Agent } from "./agent";
 
 export { Sandbox } from "./sandbox";
 
+export { Codex } from "./codex";
+
 export { PreviewOutbound } from "./preview";
 
 class InvalidInput extends Schema.TaggedError<InvalidInput>()("InvalidInput", {

@@ -440,6 +440,14 @@ it.each([
           type: "response.created",
           response: { id: "resp_test", status: "in_progress", output: [] },
         },
+        {
+          type: "dolly.codex.usage",
+          headers: {
+            "x-codex-primary-used-percent": "42",
+            "x-codex-primary-window-minutes": "300",
+            "x-codex-primary-reset-at": "1999999999",
+          },
+        },
         { type: "response.output_item.added", output_index: 0, item: { ...message, content: [] } },
         {
           type: "response.content_part.added",
@@ -518,6 +526,13 @@ it.each([
       )
       .toContain("Hello from Codex");
     expect(fetch).toHaveBeenCalledTimes(1);
+    await expect
+      .poll(() =>
+        runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+          state.storage.get("usage:openai-codex"),
+        ),
+      )
+      .toMatchObject({ windows: [{ usedPercent: 42 }] });
     await abortAllDurableObjects();
     const transcript = await SELF.fetch(`https://worker/api/sessions/${id}`, { headers });
     expect(transcript.status).toBe(200);

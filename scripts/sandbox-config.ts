@@ -15,7 +15,14 @@ export async function sandboxTestConfig() {
   const path = fileURLToPath(new URL("../.sandbox-test.wrangler.json", import.meta.url));
   // Exercise the backend directly; the separately built HTTP suite covers the web entrypoint.
   const config = convertToWranglerConfig(result.data);
-  config.main = "./src/index.ts";
+  config.main = "./test/model-worker.ts";
+
+  // Repository sandbox scenarios simulate inference at the CLI transport boundary.
+  const codexBinding = config.durable_objects?.bindings.find(
+    (binding: { name: string; class_name: string }) => binding.name === "CODEX",
+  );
+
+  if (codexBinding) codexBinding.class_name = "FixtureCodex";
   delete config.assets;
   await writeFile(path, JSON.stringify(config, null, 2));
 

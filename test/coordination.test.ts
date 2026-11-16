@@ -398,7 +398,7 @@ it.each(["child", "root"])(
 
     const queuedMessage = await queued.json<{ taskId: string }>();
     expect((await post(`${target === "child" ? child.id : parent}/abort`, {})).status).toBe(200);
-    expect(aborted).toBe(2);
+    await expect.poll(() => aborted).toBe(2);
     await expect
       .poll(async () => (await receipt(parent, queuedMessage.taskId)).status)
       .toBe("terminal");
@@ -461,9 +461,10 @@ it("bounds child message deliveries and validates authenticated HTTP inputs", as
   ).toBe(409);
 });
 
+// Agent initialization clears legacy maxTurns limits; long children must finish.
 it.each([
   { rounds: 21, result: { status: "answered", text: "Finished after 21 tool turns" } },
-  { rounds: 100, result: { status: "unanswered", reason: "turn_limit" } },
+  { rounds: 100, result: { status: "answered", text: "Finished after 100 tool turns" } },
 ])(
   "settles a child correctly after $rounds tool turns",
   async ({ rounds, result }) => {

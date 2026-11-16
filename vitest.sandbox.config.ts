@@ -9,6 +9,9 @@ export default defineConfig(async () => ({
       config: false,
       wrangler: { configPath: await sandboxTestConfig() },
       miniflare: {
+        durableObjects: {
+          CODEX_CONTAINER: { className: "Codex", useSQLite: true },
+        },
         bindings: {
           ACCESS_LOCAL_DEV: "true",
         },

@@ -13,6 +13,12 @@ const sandbox = defineContainer({
   images: { sandbox: { dockerfile: "./Dockerfile" } },
 });
 
+const codex = defineContainer({
+  name: "dolly-codex",
+  schedulingPolicy: "durable-object",
+  images: { codex: { dockerfile: "./container/codex.Dockerfile", buildContext: "." } },
+});
+
 export default defineConfig({
   worker: {
     name: workerName,
@@ -33,6 +39,7 @@ export default defineConfig({
       ACCESS_LOCAL_DEV: bindings.text("false"),
       AGENT: bindings.durableObject({ worker: workerName, exportName: "Agent" }),
       SANDBOX: bindings.durableObject({ worker: workerName, exportName: "Sandbox" }),
+      CODEX: bindings.durableObject({ worker: workerName, exportName: "Codex" }),
     },
     exports: {
       GitHubIngress: exports.worker(),
@@ -41,8 +48,9 @@ export default defineConfig({
       PreviewOutbound: exports.worker(),
       Agent: exports.durableObject({ storage: "sqlite" }),
       Sandbox: exports.durableObject({ storage: "sqlite", container: sandbox }),
+      Codex: exports.durableObject({ storage: "sqlite", container: codex }),
     },
     observability: { enabled: true },
   },
-  containers: [sandbox],
+  containers: [sandbox, codex],
 });

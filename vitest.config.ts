@@ -5,7 +5,7 @@ import { TimingSequencer } from "./scripts/ci-sequencer";
 export default defineConfig({
   plugins: [
     cloudflareTest({
-      main: "./src/index.ts",
+      main: "./test/model-worker.ts",
       miniflare: {
         compatibilityDate: "2026-11-10",
         compatibilityFlags: ["nodejs_compat"],
@@ -17,6 +17,7 @@ export default defineConfig({
         durableObjects: {
           AGENT: { className: "Agent", useSQLite: true },
           SANDBOX: { className: "Sandbox", useSQLite: true },
+          CODEX: { className: "FixtureCodex", useSQLite: true },
         },
       },
       config: false,

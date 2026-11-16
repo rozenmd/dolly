@@ -93,6 +93,7 @@ import {
   type ProviderUsage,
 } from "./usage";
 import { CodexProtocol, startLogin, pollLogin, logout } from "./codex-login";
+import { containerCodex } from "./codex";
 import { GitHubAuth } from "./github-auth";
 import {
   agentGitIdentityEnv,
@@ -203,9 +204,15 @@ export class Agent extends DurableObject<Env> {
         models: Object.values(OPENAI_CODEX_MODELS),
         // Load the SSE adapter with the Worker, not in an evictable generation request.
         api: {
-          stream: observeUsage(stream, this.usageObserver("openai-codex")),
+          stream: observeUsage(
+            containerCodex(this.env, stream, this.usageObserver("openai-codex")),
+            this.usageObserver("openai-codex"),
+          ),
           streamSimple: this.steerInterrupts.wrap(
-            observeUsage(streamSimple, this.usageObserver("openai-codex")),
+            observeUsage(
+              containerCodex(this.env, streamSimple, this.usageObserver("openai-codex")),
+              this.usageObserver("openai-codex"),
+            ),
           ),
         },
         auth: {

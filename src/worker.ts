@@ -7,6 +7,7 @@ import type { Env } from "./env";
 export {
   Agent,
   Sandbox,
+  Codex,
   GitHubIngress,
   SlackIngress,
   WorkspaceOutbound,

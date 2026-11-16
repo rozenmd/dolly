@@ -1,5 +1,6 @@
 import type { Agent } from "./agent";
 import type { Sandbox } from "./sandbox";
+import type { Codex } from "./codex";
 
 export interface Env {
   ASSETS: Fetcher;
@@ -13,4 +14,5 @@ export interface Env {
   ACCESS_LOCAL_DEV?: string;
   AGENT: DurableObjectNamespace<Agent>;
   SANDBOX: DurableObjectNamespace<Sandbox>;
+  CODEX: DurableObjectNamespace<Codex>;
 }
