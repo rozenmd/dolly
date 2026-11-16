@@ -109,7 +109,8 @@ When asked to attach PR evidence, Dolly can pass it to the `github` tool:
 ```
 
 This copies only the selected image to the separate **public** `dolly-pr-screenshots`
-R2 bucket and posts an embedded image in a PR discussion comment. Inspect screenshots
+R2 bucket and returns its URL. It posts nothing to the PR: Dolly embeds the returned
+markdown in the PR description with `update_pull_request`. Inspect screenshots
 for secrets/private data before publishing, including on private PRs: anyone with the
 image URL can view it. Ordinary conversation images and previews remain private.
 No Git commits, code-branch changes, or unsupported GitHub upload APIs are involved.
@@ -120,9 +121,10 @@ and GitHub may cache images. The managed domain is rate-limited by Cloudflare.
 Run `pnpm access:plan`, then `pnpm access:deploy` to provision and export the public URL;
 deploy the main Worker separately to activate the binding and tool.
 
-The action returns `image_url`, `markdown`, and `comment_url`. If commenting fails after
-upload, `comment_url` is null and `comment_error` explains why; the image URL is still
-usable. Do not report that the PR was updated or blindly repeat an interrupted upload.
+The action returns `image_url`, `markdown` (the image with its escaped caption as alt text)
+and `expires_in_days`. The PR must be open and the caller must have write access to the
+repository, but nothing on the PR changes until the description is updated. Do not
+blindly repeat an interrupted upload; each call publishes a new public copy.
 
 ## Papercuts
 

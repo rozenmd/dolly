@@ -689,33 +689,15 @@ function makeGitHub(
     const caption = op.caption.replace(/[\\`*_[\]<>!]/g, "\\$&").replace(/[\r\n]/g, " ");
     const markdown = `![${caption}](${imageUrl})`;
 
-    // Preserve the uploaded URL if commenting fails; don't imply the PR was updated.
-    return yield* api(`${root}/issues/${op.number}/comments`, token, {
-      body: `${markdown}\n\nScreenshot expires after 30 days.${REVIEW_FOOTER}`,
-    }).pipe(
-      Effect.flatMap(decode(IssueComment)),
-      Effect.map((comment) => ({
-        ok: true as const,
-        result: {
-          kind: "screenshot" as const,
-          data: { image_url: imageUrl, comment_url: comment.html_url, markdown },
-        },
-      })),
-      Effect.catchTag("OperationError", (error) =>
-        Effect.succeed({
-          ok: true as const,
-          result: {
-            kind: "screenshot" as const,
-            data: {
-              image_url: imageUrl,
-              comment_url: null,
-              markdown,
-              comment_error: error.message,
-            },
-          },
-        }),
-      ),
-    );
+    // Publishing only: the caller embeds the image where it belongs, normally the
+    // PR description via update_pull_request. Nothing is posted to the PR here.
+    return {
+      ok: true as const,
+      result: {
+        kind: "screenshot" as const,
+        data: { image_url: imageUrl, markdown, expires_in_days: 30 },
+      },
+    };
   });
 
   /** The App's OAuth client ID, which runs the device sign-in. Older setups did not store it. */
