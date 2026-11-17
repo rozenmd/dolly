@@ -8,7 +8,9 @@ import { WorkspaceOutbound } from "./git-transport";
 import {
   checkoutScript,
   checkoutDiagnosticsScript,
+  restoreNotice,
   type WorkspaceConfig,
+  type WorkspaceRestore,
   type WorkspaceSnapshot,
   type WorkspaceSetup,
   shellQuote,
@@ -411,6 +413,15 @@ export class Sandbox extends DurableObject<Env> {
           );
           this.initialized = false;
           this.prepared = false;
+
+          // The previous container held changes newer than the last save. They are
+          // gone now; record it so the next repository tool says so explicitly.
+          if (workspace)
+            yield* this.timeInitialization(
+              initialization,
+              "workspace.restore.record",
+              this.recordRestore(workspace, snapshot ?? null),
+            );
         }
 
         if (workspace) {
@@ -722,7 +733,7 @@ export class Sandbox extends DurableObject<Env> {
               container.snapshotContainer({ name: `workspace-${crypto.randomUUID()}` }),
             ).pipe(Effect.timeout("120 seconds"));
 
-            const saved = { id: snapshot.id, turnId };
+            const saved: WorkspaceSnapshot = { id: snapshot.id, turnId, savedAt: Date.now() };
             yield* this.publishSnapshot(saved);
             yield* Effect.logInfo({
               event: "workspace_checkpoint_succeeded",
@@ -760,7 +771,53 @@ export class Sandbox extends DurableObject<Env> {
       this.ctx.storage.transaction(async (tx) => {
         await tx.put("snapshot:checkpoint", snapshot);
         await tx.delete("snapshot:error");
+        // Runs under the foreground permit, so no change can land between the
+        // container snapshot and this acknowledgement.
+        await tx.delete("workspace:unsaved");
       }),
+    );
+  }
+
+  /** Called under the permit before a repository command or file write may change files. */
+  private markUnsaved() {
+    return attempt("workspace.unsaved", () =>
+      this.ctx.storage.transaction(async (tx) => {
+        if (!(await tx.get<number>("workspace:unsaved")))
+          await tx.put("workspace:unsaved", Date.now());
+      }),
+    );
+  }
+
+  private recordRestore(workspace: WorkspaceConfig, snapshot: WorkspaceSnapshot | null) {
+    return attempt("workspace.restore.record", () =>
+      this.ctx.storage.transaction(async (tx) => {
+        const unsavedSince = await tx.get<number>("workspace:unsaved");
+
+        if (!unsavedSince) return false;
+
+        const restore: WorkspaceRestore = {
+          restoredAt: Date.now(),
+          unsavedSince,
+          snapshot,
+          ref: workspace.ref,
+          branch: workspace.branch,
+        };
+
+        await tx.put("workspace:restored", restore);
+        await tx.delete("workspace:unsaved");
+
+        return true;
+      }),
+    ).pipe(
+      Effect.tap((recorded) =>
+        recorded
+          ? Effect.logWarning({
+              event: "workspace_restored_with_unsaved_changes",
+              sandboxId: String(this.ctx.id),
+              snapshotId: snapshot?.id ?? null,
+            })
+          : Effect.void,
+      ),
     );
   }
 
@@ -859,7 +916,7 @@ export class Sandbox extends DurableObject<Env> {
 
     await this.ctx.storage.setAlarm(Date.now() + 1000);
     this.ctx.waitUntil(
-      this.prepare(config).catch(async (error) => {
+      this.prepareSerialized(config).catch(async (error) => {
         await Effect.runPromise(this.setupStatus("failed", exceptionDetails(error).message));
       }),
     );
@@ -872,7 +929,7 @@ export class Sandbox extends DurableObject<Env> {
 
     if (config) {
       try {
-        await this.prepare(config);
+        await this.prepareSerialized(config);
       } catch (error) {
         await Effect.runPromise(this.setupStatus("failed", exceptionDetails(error).message));
       }
@@ -948,7 +1005,7 @@ export class Sandbox extends DurableObject<Env> {
     });
   }
 
-  prepare(config: WorkspaceConfig) {
+  private prepareSerialized(config: WorkspaceConfig) {
     return this.runWorkspaceOperation(
       this.permit
         .withPermit(this.prepareWorkspace(config))
@@ -958,6 +1015,24 @@ export class Sandbox extends DurableObject<Env> {
           ),
         ),
     );
+  }
+
+  /**
+   * Prepare for a repository tool. If a container replacement discarded unsaved
+   * changes since the previous tool, the notice is returned exactly once.
+   */
+  async prepare(config: WorkspaceConfig) {
+    const prepared = await this.prepareSerialized(config);
+
+    const restored = await this.ctx.storage.transaction(async (tx) => {
+      const restore = await tx.get<WorkspaceRestore>("workspace:restored");
+
+      if (restore) await tx.delete("workspace:restored");
+
+      return restore;
+    });
+
+    return { ...prepared, restored: restored ? restoreNotice(restored) : undefined };
   }
 
   async waitForDependencies() {
@@ -970,7 +1045,7 @@ export class Sandbox extends DurableObject<Env> {
         details: null,
       });
 
-    await this.prepare(config);
+    await this.prepareSerialized(config);
     await this.dependencySetup;
 
     const setup = await this.ctx.storage.get<WorkspaceSetup>("workspace:setup");
@@ -994,7 +1069,10 @@ export class Sandbox extends DurableObject<Env> {
             this.ctx.storage.get<WorkspaceConfig>("workspace"),
           );
 
-          if (workspace) yield* this.prepareWorkspace(workspace);
+          if (workspace) {
+            yield* this.prepareWorkspace(workspace);
+            yield* this.markUnsaved();
+          }
 
           return yield* this.execute(
             command,
@@ -1016,7 +1094,10 @@ export class Sandbox extends DurableObject<Env> {
   });
 
   /** Run a file operation in the prepared workspace, as shell commands are. */
-  private fileOperation<A>(operation: (files: FileSystem) => Effect.Effect<A, OperationError>) {
+  private fileOperation<A>(
+    operation: (files: FileSystem) => Effect.Effect<A, OperationError>,
+    writes = false,
+  ) {
     return this.runWorkspaceOperation(
       this.permit.withPermit(
         Effect.gen({ self: this }, function* () {
@@ -1025,6 +1106,8 @@ export class Sandbox extends DurableObject<Env> {
           );
 
           if (workspace) yield* this.prepareWorkspace(workspace);
+
+          if (workspace && writes) yield* this.markUnsaved();
 
           const files = yield* this.files();
 
@@ -1045,12 +1128,12 @@ export class Sandbox extends DurableObject<Env> {
 
   /** Create or replace a UTF-8 file, creating missing parent directories. */
   writeFile(path: string, content: string) {
-    return this.fileOperation((files) => fileResult(writeChange(files, path, content)));
+    return this.fileOperation((files) => fileResult(writeChange(files, path, content)), true);
   }
 
   /** Replace an exact, unambiguous string in an existing UTF-8 file. */
   editFile(path: string, edit: Edit) {
-    return this.fileOperation((files) => fileResult(editChange(files, path, edit)));
+    return this.fileOperation((files) => fileResult(editChange(files, path, edit)), true);
   }
 
   /** Read only the ready active checkout; never start a container just to build a prompt. */

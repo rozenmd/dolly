@@ -250,7 +250,7 @@ export class Agent extends DurableObject<Env> {
     const shell = {
       name: "shell",
       description:
-        "Run a shell command in the active repository's isolated Linux checkout. Commands start in /workspace/repo (or /workspace when no repo is selected), so no cd is needed. Dependency setup runs in the background: use workspace action wait_for_dependencies before builds, tests, starting a dev server, or changing dependency inputs; file reads and ordinary shell commands do not wait. Use workspace checkout to switch repositories in this same conversation; other live checkouts are preserved. Git credentials stay outside the container. Only configured network hosts are reachable. For browser automation or browser tests, use the Chrome DevTools endpoint at http://browser.workspace (Cloudflare Browser Run; /json/version names its WebSocket) instead of installing a browser. Output is capped at 32 KiB per stream and time at 60 seconds. Repository files are snapshotted once after the agent turn answers, not after each command. Changes since the last successful turn-end save can be lost on container shutdown or restart. Push important work to GitHub for long-term storage.",
+        "Run a shell command in the active repository's isolated Linux checkout. Commands start in /workspace/repo (or /workspace when no repo is selected), so no cd is needed. Dependency setup runs in the background: use workspace action wait_for_dependencies before builds, tests, starting a dev server, or changing dependency inputs; file reads and ordinary shell commands do not wait. Use workspace checkout to switch repositories in this same conversation; other live checkouts are preserved. Git credentials stay outside the container. Only configured network hosts are reachable. For browser automation or browser tests, use the Chrome DevTools endpoint at http://browser.workspace (Cloudflare Browser Run; /json/version names its WebSocket) instead of installing a browser. Output is capped at 32 KiB per stream and time at 60 seconds. Repository files are snapshotted once after the agent turn answers, not after each command. Changes since the last successful turn-end save can be lost on container shutdown or restart; if that happens, the next repository tool result starts with a WORKSPACE RESTORED notice (workspaceRestored) naming the snapshot, so re-check git status before continuing. Push important work to GitHub for long-term storage.",
       parameters: obj({ command: str() }),
       replay: "unsafe",
       executionMode: "sequential",
@@ -263,7 +263,12 @@ export class Agent extends DurableObject<Env> {
               workspace?.sandboxId ?? String(api.conversationId),
             ).run(command, await this.agentGitEnv());
 
-            return { ...result, workspaceSetup: workspace?.setup };
+            const output = { ...result, workspaceSetup: workspace?.setup };
+
+            // Lead with the notice when a container replacement discarded unsaved work.
+            return workspace?.restored
+              ? { workspaceRestored: workspace.restored, ...output }
+              : output;
           }).pipe(
             Effect.map((result) => ({ output: [{ type: "text", text: JSON.stringify(result) }] })),
           ),
@@ -279,21 +284,61 @@ export class Agent extends DurableObject<Env> {
         path: path.startsWith("/")
           ? path
           : `${workspace ? "/workspace/repo" : "/workspace"}/${path}`,
+        restored: workspace?.restored,
       };
     };
 
+    // A restore notice must reach the model even when the file operation then fails
+    // (typically because the file it expected was lost with the container).
+    const withRestoreNotice = async <A>(
+      restored: string | undefined,
+      operation: PromiseLike<A>,
+    ) => {
+      // Keep rpc()'s release of the Cloudflare RPC result handle working through the wrapper.
+      const wrap = (result: A) => ({
+        result,
+        restored,
+        [Symbol.dispose]: () => {
+          if (Predicate.hasProperty(result, Symbol.dispose)) {
+            const dispose = result[Symbol.dispose];
+
+            if (Predicate.isFunction(dispose)) dispose.call(result);
+          }
+        },
+      });
+
+      try {
+        return wrap(await operation);
+      } catch (error) {
+        if (!restored) throw error;
+        const details = exceptionDetails(error);
+
+        throw new OperationError({
+          operation: "sandbox.file",
+          message: `${restored}\n\n${details.message}`,
+          details,
+        });
+      }
+    };
+
+    const restoreOutput = (restored: string | undefined) =>
+      restored ? [{ type: "text" as const, text: restored }] : [];
+
     // A refused edit is a tool error the model can correct, not a sandbox failure.
-    const fileOutput = (result: FileResult) =>
+    const fileOutput = ({ result, restored }: { result: FileResult; restored?: string }) =>
       "refused" in result
         ? Effect.fail(
             new OperationError({
               operation: "sandbox.file",
-              message: result.refused,
+              message: restored ? `${restored}\n\n${result.refused}` : result.refused,
               details: null,
             }),
           )
         : Effect.succeed({
-            output: [{ type: "text" as const, text: JSON.stringify(result.change) }],
+            output: [
+              ...restoreOutput(restored),
+              { type: "text" as const, text: JSON.stringify(result.change) },
+            ],
           });
 
     const readFile = {
@@ -311,8 +356,15 @@ export class Agent extends DurableObject<Env> {
           rpc("sandbox.readFile", async () => {
             const file = await sandboxFile(api.conversationId, path);
 
-            return file.sandbox.readFile(file.path, { offset, limit });
-          }).pipe(Effect.map((text) => ({ output: [{ type: "text", text }] }))),
+            return withRestoreNotice(
+              file.restored,
+              file.sandbox.readFile(file.path, { offset, limit }),
+            );
+          }).pipe(
+            Effect.map(({ result, restored }) => ({
+              output: [...restoreOutput(restored), { type: "text" as const, text: result }],
+            })),
+          ),
         ),
     } satisfies ToolRegistration;
 
@@ -328,7 +380,10 @@ export class Agent extends DurableObject<Env> {
           rpc("sandbox.writeFile", async () => {
             const file = await sandboxFile(api.conversationId, path);
 
-            return file.sandbox.writeFile(file.path, content);
+            return withRestoreNotice<FileResult>(
+              file.restored,
+              file.sandbox.writeFile(file.path, content),
+            );
           }).pipe(Effect.flatMap(fileOutput)),
         ),
     } satisfies ToolRegistration;
@@ -353,11 +408,14 @@ export class Agent extends DurableObject<Env> {
           rpc("sandbox.editFile", async () => {
             const file = await sandboxFile(api.conversationId, input.path);
 
-            return file.sandbox.editFile(file.path, {
-              old_string: input.old_string,
-              new_string: input.new_string,
-              replace_all: input.replace_all,
-            });
+            return withRestoreNotice<FileResult>(
+              file.restored,
+              file.sandbox.editFile(file.path, {
+                old_string: input.old_string,
+                new_string: input.new_string,
+                replace_all: input.replace_all,
+              }),
+            );
           }).pipe(Effect.flatMap(fileOutput)),
         ),
     } satisfies ToolRegistration;
@@ -492,7 +550,11 @@ export class Agent extends DurableObject<Env> {
 
           const active = activeWorkspace(state, String(api.conversationId));
 
-          if (parsed.action === "start") await this.prepareWorkspace(api.conversationId);
+          const restored =
+            parsed.action === "start"
+              ? (await this.prepareWorkspace(api.conversationId))?.restored
+              : undefined;
+
           const sandboxId = active?.sandboxId ?? String(api.conversationId);
           const sandbox = this.env.SANDBOX.getByName(sandboxId);
 
@@ -528,7 +590,9 @@ export class Agent extends DurableObject<Env> {
               break;
           }
 
-          return { output: [{ type: "text", text: JSON.stringify(result) }] };
+          return {
+            output: [...restoreOutput(restored), { type: "text", text: JSON.stringify(result) }],
+          };
         },
       } satisfies ToolRegistration,
       ...coordination.tools(),
@@ -1281,7 +1345,12 @@ export class Agent extends DurableObject<Env> {
       ),
     );
 
-    return { ...active.config, sandboxId: active.sandboxId, setup: prepared.setup };
+    return {
+      ...active.config,
+      sandboxId: active.sandboxId,
+      setup: prepared.setup,
+      restored: prepared.restored,
+    };
   }
 
   private async runWorkspace(id: ConversationId, input: typeof WorkspaceRequest.Type) {
@@ -1334,55 +1403,62 @@ export class Agent extends DurableObject<Env> {
     const sandbox = this.env.SANDBOX.getByName(workspace.sandboxId);
     const push = `git push origin HEAD:${shellQuote(`refs/heads/${workspace.branch}`)}`;
 
-    switch (input.action) {
-      case "checkout":
-      case "attach":
-        return workspace;
-      case "status":
-        return sandbox.run("git status --short --branch");
-      case "wait_for_dependencies":
-        return sandbox.waitForDependencies();
-      case "diff":
-        return sandbox.run("git diff --binary HEAD");
-      case "commit":
-        return sandbox.run(
-          `git add -A && git commit -m ${shellQuote(input.message)}`,
-          await this.agentGitEnv(),
-        );
-      case "push":
-        return sandbox.run(push);
-      case "open_pull_request": {
-        // GitHub rejects a pull request for a branch it has not seen with a bare 422.
-        const pushed = await sandbox.run(push);
+    const result = await (async () => {
+      switch (input.action) {
+        case "checkout":
+        case "attach":
+          return workspace;
+        case "status":
+          return sandbox.run("git status --short --branch");
+        case "wait_for_dependencies":
+          return sandbox.waitForDependencies();
+        case "diff":
+          return sandbox.run("git diff --binary HEAD");
+        case "commit":
+          return sandbox.run(
+            `git add -A && git commit -m ${shellQuote(input.message)}`,
+            await this.agentGitEnv(),
+          );
+        case "push":
+          return sandbox.run(push);
+        case "open_pull_request": {
+          // GitHub rejects a pull request for a branch it has not seen with a bare 422.
+          const pushed = await sandbox.run(push);
 
-        if (pushed.exitCode !== 0)
-          return {
-            ok: false,
-            code: "push_failed",
-            message: `Could not push ${workspace.branch} before opening the pull request`,
-            stdout: pushed.stdout,
-            stderr: pushed.stderr,
-          };
+          if (pushed.exitCode !== 0)
+            return {
+              ok: false,
+              code: "push_failed",
+              message: `Could not push ${workspace.branch} before opening the pull request`,
+              stdout: pushed.stdout,
+              stderr: pushed.stderr,
+            };
 
-        const base = await Effect.runPromise(
-          Effect.flatMap(GitHub, (github) => github.authorize(workspace.repository, false)).pipe(
-            Effect.map((result) => result.defaultBranch),
-            Effect.provide(this.services),
-          ),
-        );
+          const base = await Effect.runPromise(
+            Effect.flatMap(GitHub, (github) => github.authorize(workspace.repository, false)).pipe(
+              Effect.map((result) => result.defaultBranch),
+              Effect.provide(this.services),
+            ),
+          );
 
-        return this.githubForSession(id, {
-          operation: {
-            action: "open_pull_request",
-            repository: workspace.repository,
-            branch: workspace.branch,
-            base,
-            title: input.title,
-            body: input.body,
-          },
-        });
+          return this.githubForSession(id, {
+            operation: {
+              action: "open_pull_request",
+              repository: workspace.repository,
+              branch: workspace.branch,
+              base,
+              title: input.title,
+              body: input.body,
+            },
+          });
+        }
       }
-    }
+    })();
+
+    // Say so before anything else when a container replacement discarded unsaved work.
+    return workspace.restored && input.action !== "checkout" && input.action !== "attach"
+      ? { workspaceRestored: workspace.restored, ...result }
+      : result;
   }
 
   async workspace(id: string, input: typeof WorkspaceRequest.Type) {

@@ -3,6 +3,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { expect, it } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import { checkoutDiagnosticsScript } from "../src/workspace";
+import type { Sandbox } from "../src/sandbox";
 
 const config = {
   repository: "owner/project",
@@ -270,5 +271,128 @@ it("can inspect an unstarted sandbox without invoking preparation or starting a 
       container: () => Effect.die("Diagnostics must not initialize a container"),
     });
     expect(await instance.diagnostics()).toMatchObject({ running: false });
+  });
+});
+
+/** A container whose crash the test controls: stopping it discards nothing but the flag. */
+function fakeContainer() {
+  const starts: Parameters<Container["start"]>[0][] = [];
+
+  const container = {
+    running: true,
+    images: { sandbox: "sandbox-image" },
+    starts,
+    start(options: Parameters<Container["start"]>[0]) {
+      starts.push(options);
+      container.running = true;
+    },
+    interceptAllOutboundHttp: async () => {},
+    interceptOutboundHttps: async () => {},
+    setInactivityTimeout: async () => {},
+    snapshotContainer: async () => ({ id: `snapshot-${starts.length}`, size: 1 }),
+  };
+
+  return container;
+}
+
+function withContainer(
+  instance: Sandbox,
+  state: DurableObjectState,
+  container: ReturnType<typeof fakeContainer>,
+) {
+  // Everything the Sandbox reads from its state after construction, plus the fake container.
+  const ctx = {
+    id: state.id,
+    storage: state.storage,
+    container,
+    waitUntil: (promise: Promise<unknown>) => state.waitUntil(promise),
+  };
+
+  // The container's filesystem; a real crash is simulated only by the running flag.
+  const files = new Map<string, string>();
+
+  const fileSystem = {
+    stat: async (path: string) =>
+      files.has(path) ? { type: "file", size: BigInt(files.get(path)!.length) } : null,
+    readFile: async (path: string) => new Response(files.get(path) ?? ""),
+    writeFile: async (path: string, content: string) => {
+      files.set(path, content);
+    },
+    mkdir: async () => {},
+  };
+
+  Object.defineProperty(instance, "ctx", { value: ctx });
+  Object.assign(instance, {
+    installDependencies: () => Effect.succeed(undefined),
+    execute: () => Effect.succeed({ stdout: "", stderr: "", exitCode: 0 }),
+    files: () => Effect.succeed(fileSystem),
+  });
+}
+
+it("tells the next repository tool, once, that a restart discarded unsaved changes", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance, state) => {
+    const container = fakeContainer();
+    withContainer(instance, state, container);
+    await state.storage.put("workspace", config);
+    await state.storage.put("snapshot:checkpoint", {
+      id: "turn-end-snapshot",
+      turnId: "turn-1",
+      savedAt: Date.parse("2026-01-02T03:04:05Z"),
+    });
+
+    // A live container (e.g. after Durable Object eviction) lost nothing.
+    expect((await instance.prepare(config)).restored).toBeUndefined();
+    await instance.run("printf work > unsaved.txt");
+
+    // The container stops mid-turn; the next tool restores the turn-end snapshot.
+    container.running = false;
+    const restored = (await instance.prepare(config)).restored;
+
+    expect(container.starts).toEqual([
+      expect.objectContaining({ containerSnapshot: { id: "turn-end-snapshot" } }),
+    ]);
+    expect(restored).toContain("WORKSPACE RESTORED");
+    expect(restored).toContain("snapshot turn-end-snapshot saved at 2026-01-02T03:04:05.000Z");
+    expect(restored).toContain("end of turn turn-1");
+    expect(restored).toContain("git fetch origin dolly/test");
+
+    // Reported once, not on every later tool call.
+    expect((await instance.prepare(config)).restored).toBeUndefined();
+
+    // Nothing unsaved since the restore: a later stop loses nothing and says nothing.
+    container.running = false;
+    expect((await instance.prepare(config)).restored).toBeUndefined();
+
+    // Saved work is not reported as lost.
+    await instance.writeFile("/workspace/repo/saved.txt", "saved");
+    expect(await instance.checkpoint("turn-2")).toMatchObject({ turnId: "turn-2" });
+    container.running = false;
+    expect((await instance.prepare(config)).restored).toBeUndefined();
+
+    // Reads do not count as changes; file writes do.
+    await instance.readFile("/workspace/repo/saved.txt");
+    container.running = false;
+    expect((await instance.prepare(config)).restored).toBeUndefined();
+    await instance.editFile("/workspace/repo/saved.txt", { old_string: "a", new_string: "b" });
+    container.running = false;
+    expect((await instance.prepare(config)).restored).toContain("WORKSPACE RESTORED");
+  });
+});
+
+it("says the checkout was recreated when unsaved work is lost before any save exists", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance, state) => {
+    const container = fakeContainer();
+    withContainer(instance, state, container);
+    await instance.prepare(config);
+    await instance.run("git commit --allow-empty -m unpushed");
+    container.running = false;
+
+    const { restored } = await instance.prepare(config);
+
+    expect(container.starts).toEqual([expect.objectContaining({ image: "sandbox-image" })]);
+    expect(restored).toContain("WORKSPACE RESTARTED");
+    expect(restored).toContain("recreated from main");
   });
 });
