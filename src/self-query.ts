@@ -60,6 +60,18 @@ export const SelfQueryRequest = Schema.Union([
 
 export type SelfQueryRequest = typeof SelfQueryRequest.Type;
 
+// What the model sees: a flat object, because a root union reaches it with no properties (see
+// tool-schema.ts). SelfQueryRequest stays the stricter, action-specific execution validator.
+export const SelfQueryToolInput = Schema.Struct({
+  action: Schema.Literals(["usage", "list_sessions", "read_session"]),
+  refresh: Schema.optional(Schema.Boolean),
+  query: Schema.optional(Schema.String),
+  repository: Schema.optional(Schema.String),
+  status: Schema.optional(Schema.Literals(["active", "running", "archived", "all"])),
+  session: Schema.optional(Schema.String),
+  limit: Limit(MAX_SESSIONS),
+});
+
 /** One transcript message as read_session reports it: text only, tool calls by name. */
 export type TranscriptMessage = {
   role: string;

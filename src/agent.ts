@@ -100,7 +100,14 @@ import {
   githubNoreplyIdentity,
 } from "./git-identity";
 import { exceptionDetails, redact } from "./diagnostics";
-import { Papercuts, PapercutRequest, papercutsPrompt, toolFailure } from "./papercuts";
+import {
+  Papercuts,
+  PapercutRequest,
+  PapercutToolInput,
+  papercutsPrompt,
+  toolFailure,
+} from "./papercuts";
+import { toolParameters } from "./tool-schema";
 import { attempt, rpc, OperationError } from "./operations";
 import type { Env } from "./env";
 import type { FileResult } from "./sandbox";
@@ -114,6 +121,7 @@ import {
   selfQuery,
   selfQueryDescription,
   SelfQueryRequest,
+  SelfQueryToolInput,
   type SessionTail,
   type TranscriptMessage,
 } from "./self-query";
@@ -355,10 +363,7 @@ export class Agent extends DurableObject<Env> {
     } satisfies ToolRegistration;
 
     const coordination = new Coordination(() => this.harness);
-    const githubSchema = Schema.toJsonSchemaDocument(GitHubRequest).schema;
-
-    if (!Predicate.isObject(githubSchema))
-      return yield* Effect.die("GitHub tool schema must be an object");
+    const githubSchema = toolParameters(GitHubRequest);
 
     const githubTool = {
       name: "github",
@@ -382,10 +387,7 @@ export class Agent extends DurableObject<Env> {
         ),
     } satisfies ToolRegistration;
 
-    const workspaceSchema = Schema.toJsonSchemaDocument(WorkspaceToolInput).schema;
-
-    if (!Predicate.isObject(workspaceSchema))
-      return yield* Effect.die("Workspace schema must be an object");
+    const workspaceSchema = toolParameters(WorkspaceToolInput);
 
     const workspaceTool = {
       name: "workspace",
@@ -408,10 +410,7 @@ export class Agent extends DurableObject<Env> {
         ),
     } satisfies ToolRegistration;
 
-    const papercutsSchema = Schema.toJsonSchemaDocument(PapercutRequest).schema;
-
-    if (!Predicate.isObject(papercutsSchema))
-      return yield* Effect.die("Papercuts schema must be an object");
+    const papercutsSchema = toolParameters(PapercutToolInput);
 
     const papercutsTool = {
       name: "papercuts",
@@ -449,10 +448,7 @@ export class Agent extends DurableObject<Env> {
       },
     } satisfies ToolRegistration;
 
-    const selfQuerySchema = Schema.toJsonSchemaDocument(SelfQueryRequest).schema;
-
-    if (!Predicate.isObject(selfQuerySchema))
-      return yield* Effect.die("Self-query schema must be an object");
+    const selfQuerySchema = toolParameters(SelfQueryToolInput);
 
     // Native Pi tool for now; self-query.ts documents how it upgrades to an MCP server later.
     const selfQueryTool = {
