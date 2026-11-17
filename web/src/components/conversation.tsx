@@ -343,7 +343,7 @@ function stepCount(count: number) {
 function StepGroup({ id, steps, now }: { id: string; steps: readonly Step[]; now: number }) {
   const running = steps.some((step) => step.status === "running");
   const failed = steps.some((step) => step.status === "error");
-  const disclosure = useDisclosure(id, true);
+  const disclosure = useDisclosure(id, false);
   const changed = useMemo(() => diffTotal(steps), [steps]);
 
   return (
