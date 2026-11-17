@@ -775,8 +775,15 @@ export class Page {
   private bridge(socket: WebSocketRoute) {
     const target = new URL(socket.url());
 
-    if (target.host === new URL(this.baseURL).host) target.host = new URL(this.origin).host;
-    target.protocol = target.protocol === "https:" || target.protocol === "wss:" ? "wss:" : "ws:";
+    // Sockets to the page's origin go to the server, whose scheme may differ (an
+    // https://sandbox.workspace page talks to an http:// test server).
+    const secure = (url: URL) => url.protocol === "https:" || url.protocol === "wss:";
+
+    if (target.host === new URL(this.baseURL).host) {
+      const origin = new URL(this.origin);
+      target.host = origin.host;
+      target.protocol = secure(origin) ? "wss:" : "ws:";
+    } else target.protocol = secure(target) ? "wss:" : "ws:";
     const upstream = new WebSocket(target);
 
     upstream.addEventListener("message", (event) => socket.send(String(event.data)));

@@ -127,11 +127,13 @@ export default async function setup() {
 
   if (process.env.BROWSER_CDP_URL && new URL(process.env.BROWSER_CDP_URL).hostname === BROKER) {
     // Dolly's Browser Run broker: Browser Run blocks navigation to local addresses, so pages
-    // load from http://sandbox.workspace, routed to the test server's port in this sandbox.
-    // The harness still serves every request itself.
-    const server = new URL(process.env.E2E_BASE_URL);
-    process.env.BROWSER_WS_ENDPOINT = `ws://${BROKER}/devtools/browser?port=${server.port || 80}`;
-    process.env.E2E_PAGE_URL = "http://sandbox.workspace";
+    // load from sandbox.workspace. The harness intercepts and serves every request itself,
+    // so the browser needs no route to the test server. Connect without ?port=: the deployed
+    // broker never answers a port-routed connection, which hung every test. Use https so
+    // the page is a secure context, as in production: http://sandbox.workspace has no
+    // crypto.randomUUID, which the composers need.
+    process.env.BROWSER_WS_ENDPOINT = `ws://${BROKER}/devtools/browser`;
+    process.env.E2E_PAGE_URL = "https://sandbox.workspace";
   } else if (process.env.BROWSER_CDP_URL)
     process.env.BROWSER_WS_ENDPOINT = await browserWebSocket(process.env.BROWSER_CDP_URL);
   else if (process.env.BROWSER_EXECUTABLE) {
