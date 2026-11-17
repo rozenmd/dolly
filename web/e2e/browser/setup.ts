@@ -98,7 +98,8 @@ export default async function setup() {
   if (!process.env.E2E_BASE_URL) {
     const url = "http://127.0.0.1:8787";
 
-    // The test Worker built by `pnpm test:integration:worker`.
+    // The test Worker built by `pnpm test:integration:worker`. It listens on all interfaces,
+    // as Dolly previews do, so sandbox port routing can reach it; tests still use loopback.
     const server = spawn(
       "pnpm",
       [
@@ -110,7 +111,7 @@ export default async function setup() {
         "--config",
         "test/worker/vite.config.ts",
         "--host",
-        "127.0.0.1",
+        "0.0.0.0",
         "--port",
         "8787",
         "--strictPort",
