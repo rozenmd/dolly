@@ -12,6 +12,16 @@ export const PapercutRequest = Schema.Union([
   Schema.Struct({ action: Schema.Literal("resolve"), id: Schema.String }),
 ]);
 
+// What the model sees: a flat object, because a root union reaches it with no properties (see
+// tool-schema.ts). PapercutRequest stays the stricter, action-specific execution validator.
+export const PapercutToolInput = Schema.Struct({
+  action: Schema.Literals(["log", "list", "resolve"]),
+  message: Schema.optional(Schema.String),
+  repository: Schema.optional(Schema.String),
+  status: Schema.optional(Schema.Literals(["open", "fixed"])),
+  id: Schema.optional(Schema.String),
+});
+
 export type Papercut = {
   id: string;
   conversation_id: string | null;
