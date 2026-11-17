@@ -463,7 +463,8 @@ it("bounds child message deliveries and validates authenticated HTTP inputs", as
 
 it.each([
   { rounds: 21, result: { status: "answered", text: "Finished after 21 tool turns" } },
-  { rounds: 100, result: { status: "unanswered", reason: "turn_limit" } },
+  // Runs are unbounded (agent.ts clears stored turn limits), so long tool loops still answer.
+  { rounds: 100, result: { status: "answered", text: "Finished after 100 tool turns" } },
 ])(
   "settles a child correctly after $rounds tool turns",
   async ({ rounds, result }) => {

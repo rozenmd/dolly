@@ -176,7 +176,37 @@ export function workspacePrompt(state: WorkspaceState | null | undefined) {
 /** Values are passed as shell arguments, never interpreted as source. */
 export const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
 
-export type WorkspaceSnapshot = { id: string; turnId?: string };
+export type WorkspaceSnapshot = { id: string; turnId?: string; savedAt?: number };
+
+/**
+ * Recorded when a stopped container is replaced while it had changes newer than the
+ * last save. Returned once, by the next repository tool, so the loss is never silent.
+ */
+export type WorkspaceRestore = {
+  restoredAt: number;
+  /** When the first unsaved change was made in the lost container. */
+  unsavedSince: number;
+  /** null when no save existed and the checkout was recreated from the configured ref. */
+  snapshot: WorkspaceSnapshot | null;
+  ref: string;
+  branch: string;
+};
+
+export function restoreNotice(restore: WorkspaceRestore) {
+  const since = new Date(restore.unsavedSince).toISOString();
+  const recovery = `Changes made since ${since} (uncommitted files and unpushed commits) are gone. Run git status and git log to see what remains, and redo lost edits before relying on them. Work you already pushed is still on GitHub: if a push is rejected because ${restore.branch} has moved on, run git fetch origin ${restore.branch} and rebase onto or reset to origin/${restore.branch}.`;
+
+  if (!restore.snapshot)
+    return `WORKSPACE RESTARTED: the sandbox container stopped and no saved snapshot existed, so the checkout was recreated from ${restore.ref}. ${recovery}`;
+
+  const saved = restore.snapshot.savedAt
+    ? ` saved at ${new Date(restore.snapshot.savedAt).toISOString()}`
+    : "";
+
+  const turn = restore.snapshot.turnId ? ` (end of turn ${restore.snapshot.turnId})` : "";
+
+  return `WORKSPACE RESTORED: the sandbox container stopped and was restored to snapshot ${restore.snapshot.id}${saved}${turn}. ${recovery}`;
+}
 
 export type WorkspaceSetup = {
   state: "queued" | "checkout" | "installing" | "ready" | "warning" | "failed";
