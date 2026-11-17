@@ -41,6 +41,7 @@ export default defineConfig({
       PreviewOutbound: exports.worker(),
       Agent: exports.durableObject({ storage: "sqlite" }),
       Sandbox: exports.durableObject({ storage: "sqlite", container: sandbox }),
+      Codex: exports.durableObject({ state: "deleted" }),
     },
     observability: { enabled: true },
   },
