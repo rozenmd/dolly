@@ -75,6 +75,14 @@ PY
 ${setup}
 ${check}
 PYTHONPATH=/usr/local/lib python3 - <<'PY'
+import shutil
+from package_manager import installed, selected_manager
+# Later shells must find the same release setup used, on the image's PATH.
+name, command = selected_manager()
+assert shutil.which(name) == "/usr/local/bin/" + name, shutil.which(name)
+assert installed([name], 120) == installed(command, 120) != ""
+PY
+PYTHONPATH=/usr/local/lib python3 - <<'PY'
 from pathlib import Path
 import shutil, shlex
 from dependency_cache import cache_paths

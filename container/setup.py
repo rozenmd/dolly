@@ -5,7 +5,7 @@ import subprocess
 import sys
 import fcntl
 from dependency_cache import eligible_key, publish, restore
-from package_manager import selected_manager, install_command
+from package_manager import selected_manager, install_command, install_shim
 
 # The DO may be evicted while its container remains alive. Join the original
 # attempt and replay its result instead of running two installers in one tree.
@@ -33,6 +33,11 @@ manifest = Path("package.json")
 if manifest.is_file():
     manager, executable = selected_manager()
     command = install_command(manager, executable)
+    try:
+        install_shim(manager, executable)
+    except OSError as error:
+        # A missing shim must not block dependency installation.
+        print(f"package_manager: could not add {manager} to PATH: {error}", file=sys.stderr)
     if manager == "yarn":
         # Keep modern Yarn's PnP archives inside the checkout, rather than in a
         # global store that would be absent in another session.
