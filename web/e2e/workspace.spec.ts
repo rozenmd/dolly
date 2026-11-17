@@ -78,6 +78,9 @@ for (const width of [1280, 320]) {
       tools: [{ callId: "test", name: "shell", status: "running", output: "Tests 3/10 passed" }],
     });
     await expect(status).toContainText("Running shell");
+    const group = page.locator("details.step-group");
+    await expect(group).toHaveJSProperty("open", false);
+    await group.locator("> summary").click();
     const step = page.locator("details.step");
     await expect(step.locator("> summary")).toBeVisible();
     await expect(step).toHaveJSProperty("open", false);
@@ -1097,9 +1100,7 @@ test("cancelling ChatGPT sign-in ignores an approval that was already in flight"
   await expect(page.getByRole("heading", { name: "Connect a model" })).toBeVisible();
 });
 
-test("keeps steps collapsed while the agent works and respects what the user opens or closes", async ({
-  page,
-}) => {
+test("starts steps collapsed and respects what the user opens or closes", async ({ page }) => {
   await page.addInitScript(() =>
     localStorage.setItem(
       "dolly.sessions.v1",
@@ -1151,8 +1152,12 @@ test("keeps steps collapsed while the agent works and respects what the user ope
 
   const group = page.locator("details.step-group");
   const steps = page.locator("details.step");
-  await expect(steps.first().locator("> summary")).toContainText("pnpm lint");
+  await expect(group.locator("> summary")).toContainText("1 step");
+  // Step groups start collapsed, even while their first step is running.
+  await expect(group).toHaveJSProperty("open", false);
+  await group.locator("> summary").click();
   await expect(group).toHaveJSProperty("open", true);
+  await expect(steps.first().locator("> summary")).toContainText("pnpm lint");
   // Steps are one-line rows until the user opens one.
   await expect(steps.first()).toHaveJSProperty("open", false);
   await steps.first().locator("> summary").click();
