@@ -1,8 +1,11 @@
 """Select the repository's installer without assuming it uses Dolly's toolchain."""
 import json
+import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
+import tempfile
 
 LOCKFILES = {
     "pnpm": ("pnpm-lock.yaml",),
@@ -27,9 +30,9 @@ def declared_version(name, declared):
     return match[1]
 
 
-def installed(binary):
+def installed(command, timeout=30):
     try:
-        return subprocess.check_output([binary, "--version"], text=True, timeout=30).strip()
+        return subprocess.check_output(command + ["--version"], text=True, timeout=timeout).strip()
     except (OSError, subprocess.SubprocessError):
         return ""
 
@@ -57,7 +60,7 @@ def selected_manager():
             command = npx("@yarnpkg/cli-dist@" + version, "yarn")
         else:
             command = npx("yarn@" + (version or "1"), "yarn")
-    elif version and installed(name) != version:
+    elif version and installed([name]) != version:
         command = npx(name + "@" + version, name)
     else:
         command = [name]
@@ -71,3 +74,43 @@ def install_command(name, command):
     if name in {"pnpm", "bun"}:
         return command + ["install"] + (["--frozen-lockfile"] if locked else [])
     return command + ["install"]
+
+
+def pinned(command):
+    """Replace a floating npx package (latest, yarn@1) with the version it resolves to."""
+    package = command[2].removeprefix("--package=") if command[:1] == ["npx"] else ""
+    if not package or VERSION.fullmatch(package.rpartition("@")[2]):
+        return command
+    version = installed(command, timeout=120)
+    if not VERSION.fullmatch(version):
+        return command
+    return command[:2] + ["--package=" + package.rpartition("@")[0] + "@" + version] + command[3:]
+
+
+def install_shim(name, command, directory=None):
+    """Put the selected manager on PATH, so later shells run the same pinned release.
+
+    Setup reaches npx-fetched managers only through npx; without a shim, `pnpm`
+    is missing and `yarn`/`bun` would run the image's unrelated releases.
+    """
+    if command == [name]:
+        return None
+    directory = Path(directory or os.environ.get("DOLLY_SHIM_DIR", "/usr/local/bin"))
+    command = pinned(command)
+    script = "#!/bin/sh\n"
+    if name == "yarn":
+        # Match setup: keep Yarn's archives in the checkout, not a global cache.
+        script += 'export YARN_ENABLE_GLOBAL_CACHE="${YARN_ENABLE_GLOBAL_CACHE:-false}"\n'
+    script += "exec " + shlex.join(command) + ' "$@"\n'
+    target = directory / name
+    # Replace atomically: the image's own yarn/bun may be running concurrently.
+    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix="." + name + "-")
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(script)
+        os.chmod(temporary, 0o755)
+        os.replace(temporary, target)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return target
