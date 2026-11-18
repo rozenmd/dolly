@@ -5,6 +5,10 @@ export const SavedSession = Schema.Struct({
   model: Schema.String,
   /** Pi thinking level; absent for sessions saved before it was reported. */
   thinkingLevel: Schema.optional(Schema.String),
+  /** `fast` asks OpenAI for priority processing; absent means standard. */
+  speed: Schema.optional(Schema.Literals(["standard", "fast"])),
+  /** Switch subscriptions when this one runs out; absent follows the owner's default. */
+  autoFallback: Schema.optional(Schema.Boolean),
   title: Schema.String,
   repository: Schema.String,
   updatedAt: Schema.Number,

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "./browser";
 import type { Live } from "../../src/transcript";
+import type { DefaultModel } from "../src/lib/api";
 
 const app = {
   connected: true,
@@ -210,7 +211,7 @@ test("queues a message while running and promotes it with Send now, including af
   expect(promotions).toBe(2);
 });
 
-test("one composer pill switches the session's model and effort, and rolls back a refusal", async ({
+test("one composer pill switches the session's model, effort, speed and fallback, rolls back a refusal, and saves and restores defaults", async ({
   page,
 }) => {
   await page.addInitScript(() =>
@@ -229,12 +230,32 @@ test("one composer pill switches the session's model and effort, and rolls back 
     ),
   );
   const changes: unknown[] = [];
+  const saved: unknown[] = [];
+
+  let defaults: DefaultModel = {
+    model: null,
+    effective: "gpt-6-luna",
+    thinkingLevel: "medium",
+    speed: "standard",
+    autoFallback: true,
+  };
+
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
 
     if (path === "/api/auth") return route.fulfill({ json: signedIn });
 
     if (path === "/api/auth/anthropic") return route.fulfill({ json: { connected: false } });
+
+    if (path === "/api/settings/model") {
+      if (route.request().method() === "PUT") {
+        const body = route.request().postDataJSON();
+        saved.push(body);
+        defaults = { ...defaults, ...body, effective: body.model ?? defaults.effective };
+      }
+
+      return route.fulfill({ json: defaults });
+    }
 
     if (path === "/api/sessions/pill/settings") {
       const body = route.request().postDataJSON();
@@ -265,24 +286,63 @@ test("one composer pill switches the session's model and effort, and rolls back 
   const menu = page.getByRole("menu", { name: "Model settings" });
   await expect(menu).toContainText("GPT-6 Luna");
   await menu.getByRole("menuitem", { name: /^Model/ }).click();
-  await page.getByRole("option", { name: "GPT-6 Sol" }).click();
-  await expect(pill).toHaveText("GPT-6 SolMedium");
+  await page.getByRole("option", { name: "GPT-6.2 Sol" }).click();
+  await expect(pill).toHaveText("GPT-6.2 SolMedium");
 
   await pill.click();
   await menu.getByRole("menuitem", { name: /^Effort/ }).click();
   await page.getByRole("option", { name: "Extra high" }).click();
-  await expect(pill).toHaveText("GPT-6 SolExtra high");
+  await expect(pill).toHaveText("GPT-6.2 SolExtra high");
 
   await pill.click();
   await menu.getByRole("menuitem", { name: /^Model/ }).click();
   await page.getByRole("option", { name: "Claude Opus 5.5" }).click();
   await expect(page.getByRole("alert")).toContainText("Connect your Claude subscription first");
-  await expect(pill).toHaveText("GPT-6 SolExtra high");
+  await expect(pill).toHaveText("GPT-6.2 SolExtra high");
+
+  // Speed and auto-fallback live in the same menu; auto-fallback toggles in place.
+  await pill.click();
+  await menu.getByRole("menuitem", { name: /^Speed/ }).click();
+  await page.getByRole("option", { name: /^Fast/ }).click();
+  await expect(pill).toHaveAttribute("data-speed", "fast");
+  await pill.click();
+  const fallback = menu.getByRole("menuitemcheckbox", { name: /^Auto-fallback/ });
+  await expect(fallback).toHaveAttribute("aria-checked", "true");
+  await fallback.click();
+  await expect(fallback).toHaveAttribute("aria-checked", "false");
+
+  // Set as default saves every setting; the menu then shows it as the default.
+  await menu.getByRole("menuitem", { name: "Set as default" }).click();
+  await expect.poll(() => saved.length).toBe(1);
+  await pill.click();
+  await expect(menu.getByRole("menuitem", { name: "Set as default" })).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  await expect(menu.getByRole("menuitem", { name: "Reset to default" })).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+
+  // Changing a setting enables Reset, which restores the saved defaults in one request.
+  await menu.getByRole("menuitem", { name: /^Effort/ }).click();
+  await page.getByRole("option", { name: "Low" }).click();
+  await expect(pill).toHaveText("GPT-6.2 SolLow");
+  await pill.click();
+  await menu.getByRole("menuitem", { name: "Reset to default" }).click();
+  await expect(pill).toHaveText("GPT-6.2 SolExtra high");
 
   expect(changes).toEqual([
-    { model: "gpt-6-sol" },
+    { model: "gpt-6.2-sol" },
     { thinkingLevel: "xhigh" },
     { model: "claude-opus-5-5" },
+    { speed: "fast" },
+    { autoFallback: false },
+    { thinkingLevel: "low" },
+    { model: "gpt-6.2-sol", thinkingLevel: "xhigh", speed: "fast", autoFallback: false },
+  ]);
+  expect(saved).toEqual([
+    { model: "gpt-6.2-sol", thinkingLevel: "xhigh", speed: "fast", autoFallback: false },
   ]);
 });
 
@@ -332,7 +392,15 @@ test("connects Claude without ChatGPT, explicitly tests Worker inference, and st
     }
 
     if (path === "/api/settings/model")
-      return route.fulfill({ json: { model: null, effective: "claude-sonnet-5-5" } });
+      return route.fulfill({
+        json: {
+          model: null,
+          effective: "claude-sonnet-5-5",
+          thinkingLevel: "medium",
+          speed: "standard",
+          autoFallback: true,
+        },
+      });
 
     if (path === "/api/integrations/github/repositories")
       return route.fulfill({ json: { repositories: [] } });
@@ -638,10 +706,8 @@ for (const repository of ["octocat/project", ""]) {
       "data-value",
       repository,
     );
-    await expect(dialog.getByRole("button", { name: /^Model:/ })).toHaveAttribute(
-      "data-model",
-      source.model,
-    );
+    // Model settings start from the owner's defaults, not the open session.
+    await expect(dialog.getByRole("button", { name: /^Model:/ })).toHaveAttribute("data-model", "");
     await expect(dialog.getByLabel("Workspace name")).toHaveCount(0);
     await expect(dialog.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
     expect(creates).toHaveLength(0);
@@ -652,11 +718,8 @@ for (const repository of ["octocat/project", ""]) {
     await expect(dialog.getByLabel("Task", { exact: true })).toHaveValue("Fix the failing tests");
     await dialog.getByRole("button", { name: "Retry", exact: true }).click();
     await expect(dialog).not.toBeVisible();
-    expect(creates).toEqual([
-      config
-        ? { model: source.model, thinkingLevel: "medium", workspace: config }
-        : { model: source.model, thinkingLevel: "medium" },
-    ]);
+    const defaults = { thinkingLevel: "medium", speed: "standard", autoFallback: true };
+    expect(creates).toEqual([config ? { ...defaults, workspace: config } : defaults]);
     expect(messages).toHaveLength(2);
     expect(messages[0]).toEqual(messages[1]);
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("Fix the failing tests");
@@ -730,6 +793,8 @@ test("enrolls an App repository and anchors a new workspace to its default branc
   await expect(dialog).not.toBeVisible();
   expect(created).toEqual({
     thinkingLevel: "medium",
+    speed: "standard",
+    autoFallback: true,
     workspace: { repository: "octocat/project", ref: "develop" },
   });
 });

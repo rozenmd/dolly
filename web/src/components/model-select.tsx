@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import {
+  ArrowUturnLeftIcon,
   BoltIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -102,36 +103,72 @@ export function ModelPicker({
   );
 }
 
-type View = "root" | "model" | "effort";
+export const SPEEDS = ["standard", "fast"] as const;
+
+export type Speed = (typeof SPEEDS)[number];
+
+/** Fast asks OpenAI for priority processing; Claude subscriptions have no faster tier. */
+export const fastSupported = (model: string) => !model.startsWith("claude-");
+
+export const speedName = (speed: Speed) => (speed === "fast" ? "Fast" : "Standard");
+
+type List = "model" | "effort" | "speed";
+
+type View = "root" | List;
+
+type Row =
+  | { key: List; kind: "list"; label: string; value: string }
+  | { key: "fallback"; kind: "toggle"; label: string; hint: string; checked: boolean }
+  | { key: "set-default" | "reset"; kind: "action"; label: string; disabled: boolean };
 
 /**
  * One control for everything about the model a session runs on. The pill reads
- * "Opus 5.5 Medium"; its menu lists Model and Effort with their current values,
- * and each opens its choices in place (a back row returns), so it works the same
+ * "Opus 5.5 Medium"; its menu lists Model, Effort and Speed with their current
+ * values, each opening its choices in place (a back row returns), an
+ * Auto-fallback switch, and Set as default / Reset to default. It works the same
  * with a pointer, a keyboard or a thumb.
  *
  * `model` may be "" when `defaultModel` names what the empty choice resolves to,
- * as in the new-session composer.
+ * as in the new-session composer. Speed, auto-fallback and the default actions
+ * appear only when their handlers are given.
  */
 export function ModelControl({
   id,
   model,
   effort,
+  speed = "standard",
+  autoFallback = true,
   defaultModel,
   disabled,
   placement = "below",
+  isDefault = false,
+  atDefault = false,
   onModel,
   onEffort,
+  onSpeed,
+  onAutoFallback,
+  onSetDefault,
+  onReset,
 }: {
   id?: string;
   model: string;
   effort: string;
+  speed?: Speed;
+  autoFallback?: boolean;
   /** What "" resolves to; offering it adds a "Default" choice. Omit to hide that choice. */
   defaultModel?: string | null;
   disabled?: boolean;
   placement?: "above" | "below";
+  /** The current choices are already the defaults for new sessions. */
+  isDefault?: boolean;
+  /** Every setting already matches the defaults, so there is nothing to reset. */
+  atDefault?: boolean;
   onModel: (model: string) => void;
   onEffort: (level: string) => void;
+  onSpeed?: (speed: Speed) => void;
+  onAutoFallback?: (enabled: boolean) => void;
+  onSetDefault?: () => void;
+  onReset?: () => void;
 }) {
   const [view, setView] = useState<View | null>(null);
   const [active, setActive] = useState(0);
@@ -143,6 +180,8 @@ export function ModelControl({
   const offersDefault = defaultModel !== undefined;
   const resolved = model || defaultModel || "";
   const modelLabel = resolved ? shortModelName(resolved) : "Default";
+  const canFast = !resolved || fastSupported(resolved);
+  const effectiveSpeed: Speed = speed === "fast" && canFast ? "fast" : "standard";
 
   const models = offersDefault
     ? MODELS.map((option) =>
@@ -156,9 +195,21 @@ export function ModelControl({
       )
     : MODELS.filter((option) => option.value !== "");
 
-  const rows: { view: Exclude<View, "root">; label: string; value: string }[] = [
+  const speeds: (PickerOption & { disabled?: boolean })[] = SPEEDS.map((value) =>
+    value === "fast"
+      ? {
+          value,
+          label: speedName(value),
+          hint: canFast ? "Priority, uses more of your limit" : "ChatGPT models only",
+          disabled: !canFast,
+        }
+      : { value, label: speedName(value) },
+  );
+
+  const rows: Row[] = [
     {
-      view: "model",
+      key: "model",
+      kind: "list",
       label: "Model",
       value: model
         ? modelName(model)
@@ -166,14 +217,50 @@ export function ModelControl({
           ? `Default · ${modelName(defaultModel)}`
           : "Default",
     },
-    { view: "effort", label: "Effort", value: effortName(effort) },
+    { key: "effort", kind: "list", label: "Effort", value: effortName(effort) },
+    ...(onSpeed
+      ? [{ key: "speed", kind: "list", label: "Speed", value: speedName(effectiveSpeed) } as const]
+      : []),
+    ...(onAutoFallback
+      ? [
+          {
+            key: "fallback",
+            kind: "toggle",
+            label: "Auto-fallback",
+            hint: "Switch subscriptions when usage runs out",
+            checked: autoFallback,
+          } as const,
+        ]
+      : []),
+    ...(onSetDefault
+      ? [
+          {
+            key: "set-default",
+            kind: "action",
+            label: "Set as default",
+            disabled: isDefault,
+          } as const,
+        ]
+      : []),
+    ...(onReset
+      ? [{ key: "reset", kind: "action", label: "Reset to default", disabled: atDefault } as const]
+      : []),
   ];
 
-  const choices = (list: Exclude<View, "root">) => (list === "model" ? models : EFFORTS);
-  const options = view === "model" || view === "effort" ? choices(view) : [];
-  const selected = view === "model" ? model : effort;
+  const lists: Record<List, (PickerOption & { disabled?: boolean })[]> = {
+    model: models,
+    effort: EFFORTS,
+    speed: speeds,
+  };
+
+  const choices = (list: List) => lists[list];
+  const selectedIn = (list: List) => ({ model, effort, speed: effectiveSpeed })[list];
+
+  const options = view && view !== "root" ? choices(view) : [];
+  const selected = view && view !== "root" ? selectedIn(view) : "";
   // In a list, index 0 is the back row and choices follow.
   const count = view === "root" ? rows.length : options.length + 1;
+  const listLabel = { model: "Model", effort: "Effort", speed: "Speed" } as const;
 
   useEffect(() => {
     if (!open) return;
@@ -191,11 +278,10 @@ export function ModelControl({
     if (open) panel.current?.focus();
   }, [open, view]);
 
-  function show(next: View, from?: Exclude<View, "root">) {
-    if (next === "root") setActive(from ? rows.findIndex((row) => row.view === from) : 0);
+  function show(next: View, from?: List) {
+    if (next === "root") setActive(from ? rows.findIndex((row) => row.key === from) : 0);
     else {
-      const value = next === "model" ? model : effort;
-      const index = choices(next).findIndex((option) => option.value === value);
+      const index = choices(next).findIndex((option) => option.value === selectedIn(next));
 
       setActive(Math.max(0, index) + 1);
     }
@@ -208,15 +294,29 @@ export function ModelControl({
     button.current?.focus();
   }
 
-  function choose(option: PickerOption) {
+  function choose(option: PickerOption & { disabled?: boolean }) {
+    if (option.disabled) return;
+
     if (view === "model") onModel(option.value);
-    else onEffort(option.value);
+    else if (view === "effort") onEffort(option.value);
+    else if (view === "speed" && (option.value === "standard" || option.value === "fast"))
+      onSpeed?.(option.value);
     close();
   }
 
+  function activateRow(row: Row) {
+    if (row.kind === "list") show(row.key);
+    else if (row.kind === "toggle") onAutoFallback?.(!row.checked);
+    else if (!row.disabled) {
+      if (row.key === "set-default") onSetDefault?.();
+      else onReset?.();
+      close();
+    }
+  }
+
   function activate(index: number) {
-    if (view === "root") show(rows[index].view);
-    else if (index === 0) show("root", view === "model" ? "model" : "effort");
+    if (view === "root") activateRow(rows[index]);
+    else if (view && index === 0) show("root", view);
     else choose(options[index - 1]);
   }
 
@@ -238,13 +338,13 @@ export function ModelControl({
     } else if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       activate(active);
-    } else if (event.key === "ArrowRight" && view === "root") {
+    } else if (event.key === "ArrowRight" && view === "root" && rows[active]?.kind === "list") {
       event.preventDefault();
       activate(active);
-    } else if ((event.key === "ArrowLeft" || event.key === "Escape") && view !== "root") {
+    } else if ((event.key === "ArrowLeft" || event.key === "Escape") && view && view !== "root") {
       event.preventDefault();
       event.stopPropagation();
-      show("root", view === "model" ? "model" : "effort");
+      show("root", view);
     } else if (event.key === "Escape") {
       // Don't let the surrounding dialog close too.
       event.preventDefault();
@@ -264,12 +364,15 @@ export function ModelControl({
         id={id}
         type="button"
         className="picker-trigger"
-        aria-label={`Model: ${modelName(resolved || "Default")}, effort: ${effortName(effort)}`}
+        aria-label={`Model: ${modelName(resolved || "Default")}, effort: ${effortName(effort)}${
+          effectiveSpeed === "fast" ? ", fast" : ""
+        }`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
         data-model={model}
         data-effort={effort}
+        data-speed={effectiveSpeed}
         disabled={disabled}
         onClick={() => (open ? setView(null) : show("root"))}
         onKeyDown={(event) => {
@@ -279,6 +382,9 @@ export function ModelControl({
           }
         }}
       >
+        {effectiveSpeed === "fast" && (
+          <BoltIcon className="model-control-fast" aria-hidden="true" />
+        )}
         <span className="model-control-model">{modelLabel}</span>
         <span className="model-control-effort">{effortName(effort)}</span>
         <ChevronDownIcon className="picker-chevron" aria-hidden="true" />
@@ -295,28 +401,74 @@ export function ModelControl({
               aria-activedescendant={`${menuId}-${active}`}
               onKeyDown={onKeyDown}
             >
-              {rows.map((row, index) => (
-                <div
-                  key={row.view}
-                  id={`${menuId}-${index}`}
-                  role="menuitem"
-                  aria-haspopup="listbox"
-                  className={`picker-option model-control-row${index === active ? " active" : ""}`}
-                  onPointerMove={() => setActive(index)}
-                  onClick={() => show(row.view)}
-                >
-                  <span className="picker-label">{row.label}</span>
-                  <span className="model-control-value">{row.value}</span>
-                  <ChevronRightIcon className="model-control-arrow" aria-hidden="true" />
-                </div>
-              ))}
+              {rows.map((row, index) => {
+                const className = `picker-option model-control-row${index === active ? " active" : ""}`;
+
+                const startsGroup =
+                  row.kind === "action" && rows[index - 1]?.kind !== "action" && index > 0;
+
+                return (
+                  <div key={row.key} role="presentation">
+                    {startsGroup && <div className="model-control-separator" role="separator" />}
+                    {row.kind === "list" && (
+                      <div
+                        id={`${menuId}-${index}`}
+                        role="menuitem"
+                        aria-haspopup="listbox"
+                        className={className}
+                        onPointerMove={() => setActive(index)}
+                        onClick={() => activateRow(row)}
+                      >
+                        <span className="picker-label">{row.label}</span>
+                        <span className="model-control-value">{row.value}</span>
+                        <ChevronRightIcon className="model-control-arrow" aria-hidden="true" />
+                      </div>
+                    )}
+                    {row.kind === "toggle" && (
+                      <div
+                        id={`${menuId}-${index}`}
+                        role="menuitemcheckbox"
+                        aria-checked={row.checked}
+                        className={`${className} model-control-toggle`}
+                        onPointerMove={() => setActive(index)}
+                        onClick={() => activateRow(row)}
+                      >
+                        <span className="model-control-text">
+                          <span className="picker-label">{row.label}</span>
+                          <span className="model-control-hint">{row.hint}</span>
+                        </span>
+                        <CheckIcon className="model-control-check" aria-hidden="true" />
+                      </div>
+                    )}
+                    {row.kind === "action" && (
+                      <div
+                        id={`${menuId}-${index}`}
+                        role="menuitem"
+                        aria-disabled={row.disabled}
+                        className={`${className} model-control-action`}
+                        onPointerMove={() => setActive(index)}
+                        onClick={() => activateRow(row)}
+                      >
+                        <span className="picker-label">{row.label}</span>
+                        {row.key === "set-default" ? (
+                          row.disabled && (
+                            <CheckIcon className="model-control-arrow" aria-hidden="true" />
+                          )
+                        ) : (
+                          <ArrowUturnLeftIcon className="model-control-arrow" aria-hidden="true" />
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <div
               ref={panel}
               id={menuId}
               role="listbox"
-              aria-label={view === "model" ? "Model" : "Thinking effort"}
+              aria-label={view === "effort" ? "Thinking effort" : listLabel[view]}
               tabIndex={-1}
               aria-activedescendant={`${menuId}-${active}`}
               onKeyDown={onKeyDown}
@@ -330,7 +482,7 @@ export function ModelControl({
                 onClick={() => activate(0)}
               >
                 <ChevronLeftIcon className="model-control-arrow" aria-hidden="true" />
-                <span className="picker-label">{view === "model" ? "Model" : "Effort"}</span>
+                <span className="picker-label">{listLabel[view]}</span>
               </div>
               {options.map((option, offset) => {
                 const index = offset + 1;
@@ -351,6 +503,7 @@ export function ModelControl({
                       id={`${menuId}-${index}`}
                       role="option"
                       aria-selected={option.value === selected}
+                      aria-disabled={option.disabled || undefined}
                       className={`picker-option${index === active ? " active" : ""}`}
                       onPointerMove={() => setActive(index)}
                       onClick={() => choose(option)}

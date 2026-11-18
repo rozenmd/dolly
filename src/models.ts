@@ -35,9 +35,6 @@ export const SessionModel = Schema.Union([OpenAIModel, AnthropicModel]);
 export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5";
 export const DEFAULT_OPENAI_MODEL = "gpt-6-luna";
 
-/** Owner-chosen default for new conversations; `null` clears it back to the built-in defaults. */
-export const DefaultModelSetting = Schema.Struct({ model: Schema.NullOr(SessionModel) });
-
 /** Call only after validating against SessionModel. */
 export const modelProvider = (model: string) =>
   model.startsWith("claude-") ? "anthropic" : "openai";
@@ -47,21 +44,60 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export const ThinkingLevel = Schema.Literals(THINKING_LEVELS);
 export const DEFAULT_THINKING_LEVEL = "medium";
 
+/**
+ * How fast a session's model answers. `fast` asks OpenAI for priority processing, which answers
+ * sooner and draws down the ChatGPT limit faster; Claude subscriptions have no such tier, so a
+ * Claude model always runs at standard speed.
+ */
+export const SPEEDS = ["standard", "fast"] as const;
+export const Speed = Schema.Literals(SPEEDS);
+
+export type Speed = typeof Speed.Type;
+
+export const DEFAULT_SPEED: Speed = "standard";
+
+/** Whether `speed: "fast"` changes anything for a model. */
+export const fastSupported = (model: string) => modelProvider(model) === "openai";
+
+/** Sessions switch to the other subscription when theirs runs out unless the owner turns it off. */
+export const DEFAULT_AUTO_FALLBACK = true;
+
+/**
+ * Owner-chosen defaults for new conversations. Each field is optional so one setting can change
+ * alone; `null` clears that setting back to the built-in default.
+ */
+export const DefaultModelSetting = Schema.Struct({
+  model: Schema.optional(Schema.NullOr(SessionModel)),
+  thinkingLevel: Schema.optional(Schema.NullOr(ThinkingLevel)),
+  speed: Schema.optional(Schema.NullOr(Speed)),
+  autoFallback: Schema.optional(Schema.NullOr(Schema.Boolean)),
+}).check(
+  Schema.makeFilter((setting) =>
+    Object.values(setting).some((value) => value !== undefined)
+      ? undefined
+      : "Expected model, thinkingLevel, speed or autoFallback",
+  ),
+);
+
 /** Per-session changes from the composer; each applies from the next model request. */
 export const SessionSettings = Schema.Struct({
   model: Schema.optional(SessionModel),
   thinkingLevel: Schema.optional(ThinkingLevel),
+  speed: Schema.optional(Speed),
+  autoFallback: Schema.optional(Schema.Boolean),
 }).check(
   Schema.makeFilter((settings) =>
-    settings.model !== undefined || settings.thinkingLevel !== undefined
+    Object.values(settings).some((value) => value !== undefined)
       ? undefined
-      : "Expected model or thinkingLevel",
+      : "Expected model, thinkingLevel, speed or autoFallback",
   ),
 );
 
 export const NewSession = Schema.Struct({
   model: Schema.optional(SessionModel),
   thinkingLevel: Schema.optional(ThinkingLevel),
+  speed: Schema.optional(Speed),
+  autoFallback: Schema.optional(Schema.Boolean),
   workspace: Schema.optional(WorkspaceInput),
 });
 

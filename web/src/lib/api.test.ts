@@ -34,12 +34,14 @@ describe("new session context", () => {
   const source = {
     id: "session",
     model: "gpt-6-sol",
+    thinkingLevel: "high",
+    speed: "fast" as const,
     title: "Task",
     repository: "org/primary",
     updatedAt: 1,
   };
 
-  it("inherits the primary repo and policy, never the active attachment", () => {
+  it("inherits the primary repo and policy, never the active attachment or model settings", () => {
     expect(
       sessionBody(source, {
         entries: [],
@@ -56,7 +58,6 @@ describe("new session context", () => {
         },
       }),
     ).toEqual({
-      model: source.model,
       workspace: {
         repository: "org/primary",
         ref: "develop",
@@ -68,11 +69,8 @@ describe("new session context", () => {
   it("preserves repo-less context and can initialize before the first snapshot", () => {
     expect(
       sessionBody(source, { entries: [], docs: { "app.workspace": { config: null } } }),
-    ).toEqual({ model: source.model });
-    expect(sessionBody(source, null)).toEqual({
-      model: source.model,
-      workspace: { repository: source.repository },
-    });
+    ).toEqual({});
+    expect(sessionBody(source, null)).toEqual({ workspace: { repository: source.repository } });
     expect(sessionBody({ ...source, model: "Existing session", repository: "" }, null)).toEqual({});
   });
 });

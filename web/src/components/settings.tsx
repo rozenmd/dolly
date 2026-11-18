@@ -17,12 +17,14 @@ import {
   type ApiBody,
   type AuthState,
   type DefaultModel,
+  type DefaultModelChange,
 } from "../lib/api";
 import { AnthropicConnection } from "./anthropic";
 import { ChatGPTLogin } from "./chatgpt-login";
 import { ingressHook } from "./github";
 import { RepositoryPicker } from "./repositories";
-import { ModelPicker, modelName } from "./model-select";
+import { EFFORTS, ModelPicker, SPEEDS, effortName, modelName, speedName } from "./model-select";
+import { Picker } from "./picker";
 import { Input } from "./ui";
 import { UsageLimits } from "./usage";
 
@@ -270,6 +272,11 @@ function DefaultModelSetting() {
 
   const unavailable = setting?.model != null && setting.model !== setting.effective;
 
+  const save = (change: DefaultModelChange, failure: string) =>
+    void run(async () => {
+      setSetting(await defaultModel(change));
+    }, failure);
+
   return (
     <>
       <div className="connection-row">
@@ -288,13 +295,65 @@ function DefaultModelSetting() {
           value={setting?.model ?? ""}
           defaultLabel="Automatic"
           disabled={!setting || pending}
-          onChange={(model) =>
-            void run(async () => {
-              setSetting(await defaultModel(model || null));
-            }, "Could not save the default model.")
-          }
+          onChange={(model) => save({ model: model || null }, "Could not save the default model.")}
         />
       </div>
+      <div className="connection-row">
+        <span className="connection-label">
+          Default effort
+          <span className="muted">How long new sessions think before answering</span>
+        </span>
+        <Picker
+          id="default-effort"
+          label="Default effort"
+          className="model-picker"
+          align="end"
+          value={setting?.thinkingLevel ?? ""}
+          options={EFFORTS}
+          disabled={!setting || pending}
+          onChange={(thinkingLevel) =>
+            save({ thinkingLevel }, "Could not save the default effort.")
+          }
+          trigger={<span>{setting ? effortName(setting.thinkingLevel) : "…"}</span>}
+        />
+      </div>
+      <div className="connection-row">
+        <span className="connection-label">
+          Default speed
+          <span className="muted">Fast uses priority processing on ChatGPT models</span>
+        </span>
+        <Picker
+          id="default-speed"
+          label="Default speed"
+          className="model-picker"
+          align="end"
+          value={setting?.speed ?? ""}
+          options={SPEEDS.map((value) => ({ value, label: speedName(value) }))}
+          disabled={!setting || pending}
+          onChange={(speed) =>
+            save({ speed: speed === "fast" ? "fast" : "standard" }, "Could not save the speed.")
+          }
+          trigger={<span>{setting ? speedName(setting.speed) : "…"}</span>}
+        />
+      </div>
+      <label className="connection-row">
+        <span className="connection-label">
+          Auto-fallback
+          <span className="muted">
+            Switch to the other subscription when a session runs out of usage
+          </span>
+        </span>
+        <input
+          id="default-auto-fallback"
+          type="checkbox"
+          className="switch"
+          checked={setting?.autoFallback ?? true}
+          disabled={!setting || pending}
+          onChange={(event) =>
+            save({ autoFallback: event.target.checked }, "Could not save auto-fallback.")
+          }
+        />
+      </label>
       {alert}
     </>
   );

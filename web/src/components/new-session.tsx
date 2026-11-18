@@ -1,9 +1,16 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import * as Schema from "effect/Schema";
-import { defaultModel, request, Session, type ApiBody, type SavedSession } from "../lib/api";
+import {
+  defaultModel,
+  request,
+  Session,
+  type ApiBody,
+  type DefaultModel,
+  type SavedSession,
+} from "../lib/api";
 import { Modal, Textarea } from "./ui";
 import { ArrowUturnLeftIcon } from "@heroicons/react/16/solid";
-import { DEFAULT_EFFORT, ModelControl } from "./model-select";
+import { DEFAULT_EFFORT, ModelControl, type Speed } from "./model-select";
 import { RepositoryPicker } from "./repositories";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import { imagesBody, type Attachment } from "../lib/images";
@@ -26,8 +33,21 @@ export function NewSessionComposer({
   const [repository, setRepository] = useState(initial.workspace?.repository ?? "");
   const [ref, setRef] = useState(initial.workspace?.ref ?? "");
   const [model, setModel] = useState(initial.model ?? "");
-  const [fallback, setFallback] = useState<string | null>(null);
-  const [effort, setEffort] = useState(initial.thinkingLevel ?? DEFAULT_EFFORT);
+  const [defaults, setDefaults] = useState<DefaultModel | null>(null);
+  // `null` follows the owner's defaults until a choice is made here.
+  const [chosenEffort, setEffort] = useState<string | null>(initial.thinkingLevel ?? null);
+  const [chosenSpeed, setSpeed] = useState<Speed | null>(null);
+  const [chosenFallback, setAutoFallback] = useState<boolean | null>(null);
+  const effort = chosenEffort ?? defaults?.thinkingLevel ?? DEFAULT_EFFORT;
+  const speed = chosenSpeed ?? defaults?.speed ?? "standard";
+  const autoFallback = chosenFallback ?? defaults?.autoFallback ?? true;
+
+  const matchesDefaults =
+    defaults !== null &&
+    effort === defaults.thinkingLevel &&
+    speed === defaults.speed &&
+    autoFallback === defaults.autoFallback;
+
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [created, setCreated] = useState<SavedSession | null>(null);
@@ -45,7 +65,7 @@ export function NewSessionComposer({
     let active = true;
     defaultModel().then(
       (setting) => {
-        if (active) setFallback(setting.effective);
+        if (active) setDefaults(setting);
       },
       () => {},
     );
@@ -70,6 +90,8 @@ export function NewSessionComposer({
 
         if (model) body.model = model;
         body.thinkingLevel = effort;
+        body.speed = speed;
+        body.autoFallback = autoFallback;
 
         if (repository) {
           body.workspace = { repository };
@@ -180,11 +202,34 @@ export function NewSessionComposer({
             id="new-session-model"
             model={model}
             effort={effort}
-            defaultModel={fallback}
+            speed={speed}
+            autoFallback={autoFallback}
+            defaultModel={defaults?.effective ?? null}
             placement="above"
             disabled={pending || Boolean(created)}
+            isDefault={matchesDefaults && (!model || model === defaults?.effective)}
+            atDefault={matchesDefaults && !model}
             onModel={setModel}
             onEffort={setEffort}
+            onSpeed={setSpeed}
+            onAutoFallback={setAutoFallback}
+            onSetDefault={() =>
+              void defaultModel({
+                // "Default" keeps following the saved default model.
+                ...(model && { model }),
+                thinkingLevel: effort,
+                speed,
+                autoFallback,
+              }).then(setDefaults, (cause: unknown) =>
+                setError(cause instanceof Error ? cause.message : "Could not save the defaults."),
+              )
+            }
+            onReset={() => {
+              setModel("");
+              setEffort(null);
+              setSpeed(null);
+              setAutoFallback(null);
+            }}
           />
           <button
             type="submit"

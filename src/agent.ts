@@ -34,7 +34,6 @@ import { historyPage, promptIndex, promptWindow } from "./transcript-window";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
 import {
   ConversationWorkspace,
-  WorkspaceInput,
   workspaceConfig,
   activeWorkspace,
   selectRepository,
@@ -66,12 +65,13 @@ import {
   ChildMessage,
   SessionModel,
   modelProvider,
-  DEFAULT_CLAUDE_MODEL,
+  DEFAULT_AUTO_FALLBACK,
   DEFAULT_OPENAI_MODEL,
+  DEFAULT_SPEED,
   DEFAULT_THINKING_LEVEL,
+  NewSession,
   SessionSettings,
   DefaultModelSetting,
-  ThinkingLevel,
 } from "./models";
 import {
   claudeProvider,
@@ -125,22 +125,21 @@ import {
   type TranscriptMessage,
 } from "./self-query";
 import { SlackThreads } from "./slack-inbox";
-
-const DEFAULT_MODEL_KEY = "settings:default-model";
-
-/**
- * The owner's default applies while its subscription is connected; otherwise new
- * conversations use the built-in default for whichever subscription is connected.
- */
-function effectiveDefaultModel(stored: string | null, chatgpt: boolean, claude: boolean) {
-  if (stored && (modelProvider(stored) === "anthropic" ? claude : chatgpt)) return stored;
-
-  if (chatgpt) return DEFAULT_OPENAI_MODEL;
-
-  if (claude) return DEFAULT_CLAUDE_MODEL;
-
-  return stored ?? DEFAULT_OPENAI_MODEL;
-}
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import {
+  defaultsView,
+  effectiveDefaultModel,
+  fallbackModel,
+  prioritized,
+  quotaExhausted,
+  readDefaults,
+  RequestBody,
+  retriedByPi,
+  sessionMetadataKey,
+  writeDefaults,
+  type SessionMetadata,
+  FALLBACK_ENTRY,
+} from "./model-defaults";
 
 /** GitHub intake requires ChatGPT, so a Claude default does not apply to it. */
 function chatgptDefaultModel(stored: string | null) {
@@ -593,13 +592,30 @@ export class Agent extends DurableObject<Env> {
 
             return { messages: await resolveImages(this.env.SCREENSHOTS, messages) };
           },
+          beforeProviderRequest: async ({ model, payload }, api) => {
+            // A fast session asks OpenAI for priority processing (models.ts `Speed`).
+            const metadata = await this.ctx.storage.get<SessionMetadata>(
+              sessionMetadataKey(api.conversationId),
+            );
+
+            const body = Option.getOrUndefined(Schema.decodeUnknownOption(RequestBody)(payload));
+
+            const fast = body && prioritized(body, model.api, model.id, metadata?.speed);
+
+            return fast ? { payload: fast } : undefined;
+          },
           afterResponse: async (message, api) => {
-            if (message.stopReason === "error")
-              await this.capturePapercut(
-                "model",
-                message.errorMessage ?? "Model request failed",
-                api.conversationId,
-              );
+            if (message.stopReason !== "error") return;
+
+            await this.capturePapercut(
+              "model",
+              message.errorMessage ?? "Model request failed",
+              api.conversationId,
+            );
+
+            if (quotaExhausted(message))
+              // Outside the generation: it reconfigures and later continues this conversation.
+              this.ctx.waitUntil(this.fallBack(api.conversationId, message));
           },
         }),
         hook(ToolTask, {
@@ -675,19 +691,11 @@ export class Agent extends DurableObject<Env> {
           },
           conversationCreated: async (tx, conversation) => {
             await indexSession(tx, conversation.id);
+            const defaults = await readDefaults(this.ctx.storage);
             await configure(tx, conversation.id, {
               // Only GitHub intake creates conversations without a model; it requires ChatGPT.
-              model: {
-                provider: "openai",
-                modelId: chatgptDefaultModel(
-                  Option.getOrNull(
-                    Schema.decodeUnknownOption(SessionModel)(
-                      await this.ctx.storage.get(DEFAULT_MODEL_KEY),
-                    ),
-                  ),
-                ),
-              },
-              thinkingLevel: DEFAULT_THINKING_LEVEL,
+              model: { provider: "openai", modelId: chatgptDefaultModel(defaults.model) },
+              thinkingLevel: defaults.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
               tools,
             });
           },
@@ -1584,60 +1592,133 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
-  private storedDefaultModel = () =>
-    attempt("settings.model.read", () => this.ctx.storage.get(DEFAULT_MODEL_KEY)).pipe(
-      // A saved model dropped from the pinned catalog reads as unset.
-      Effect.map((value) => Option.getOrNull(Schema.decodeUnknownOption(SessionModel)(value))),
-    );
+  private storedDefaults = () =>
+    attempt("settings.model.read", () => readDefaults(this.ctx.storage));
 
   private resolveDefaultModel = (chatgpt: boolean, claude: boolean) =>
-    this.storedDefaultModel().pipe(
-      Effect.map((stored) => effectiveDefaultModel(stored, chatgpt, claude)),
+    this.storedDefaults().pipe(
+      Effect.map((stored) => effectiveDefaultModel(stored.model, chatgpt, claude)),
     );
 
+  private defaultsView = Effect.fn("Agent.defaultsView")(function* (this: Agent) {
+    const chatgpt = yield* this.credentials.get("openai");
+    const claude = yield* this.credentials.get("anthropic");
+    const stored = yield* this.storedDefaults();
+
+    return defaultsView(stored, Option.isSome(chatgpt), Option.isSome(claude));
+  });
+
+  /** The owner's defaults for new sessions: model, effort, speed and auto-fallback. */
   defaultModel() {
-    return Effect.runPromise(
-      Effect.gen({ self: this }, function* () {
-        const chatgpt = yield* this.credentials.get("openai");
-        const claude = yield* this.credentials.get("anthropic");
-        const model = yield* this.storedDefaultModel();
-
-        return {
-          model,
-          effective: effectiveDefaultModel(model, Option.isSome(chatgpt), Option.isSome(claude)),
-        };
-      }),
-    );
+    return Effect.runPromise(this.defaultsView());
   }
 
   setDefaultModel(setting: typeof DefaultModelSetting.Type) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
-        const { model } = yield* Schema.decodeUnknownEffect(DefaultModelSetting)(setting).pipe(
+        const decoded = yield* Schema.decodeUnknownEffect(DefaultModelSetting)(setting).pipe(
           Effect.mapError(
             () =>
               new OperationError({
                 operation: "settings.model",
-                message: "Unknown model",
-                details: "Select a model from the pinned OpenAI or Anthropic catalog",
+                message: "Unknown model setting",
+                details:
+                  "Select a model from the pinned OpenAI or Anthropic catalog, a thinking level, a speed or auto-fallback",
               }),
           ),
         );
 
-        yield* attempt("settings.model.write", async () => {
-          if (model === null) await this.ctx.storage.delete(DEFAULT_MODEL_KEY);
-          else await this.ctx.storage.put(DEFAULT_MODEL_KEY, model);
-        });
-        const chatgpt = yield* this.credentials.get("openai");
-        const claude = yield* this.credentials.get("anthropic");
+        yield* attempt("settings.model.write", () => writeDefaults(this.ctx.storage, decoded));
 
-        return {
-          model,
-          effective: effectiveDefaultModel(model, Option.isSome(chatgpt), Option.isSome(claude)),
-        };
+        return yield* this.defaultsView();
       }),
     );
   }
+
+  /**
+   * Auto-fallback: when a session's subscription runs out, move it to the other subscription and
+   * keep going. The switch is written to the transcript. Pi retries some limit errors itself, and
+   * a retry already runs on the new model; otherwise the failed run is continued once it ends.
+   * A session never falls back again from a model it fell back to, so two exhausted
+   * subscriptions can't bounce it back and forth; choosing a model by hand re-arms it.
+   */
+  private async fallBack(conversationId: ConversationId, message: AssistantMessage) {
+    const program = Effect.gen({ self: this }, function* () {
+      const metadata = yield* this.sessionMetadata(conversationId);
+      const defaults = yield* this.storedDefaults();
+      const enabled = metadata?.autoFallback ?? defaults.autoFallback ?? DEFAULT_AUTO_FALLBACK;
+
+      if (!enabled || metadata?.fellBackTo === message.model) return;
+
+      const to = fallbackModel(message.model, defaults.model, {
+        openai: Option.isSome(yield* this.credentials.get("openai")),
+        anthropic: Option.isSome(yield* this.credentials.get("anthropic")),
+      });
+
+      if (!to) return;
+
+      const conversation = yield* attempt("pi.conversation.read", () =>
+        this.harness.conversation(conversationId, BACKGROUND_CONTEXT),
+      );
+
+      if (!conversation) return;
+
+      yield* attempt("pi.session.configure", () =>
+        conversation.configure(
+          { model: { provider: modelProvider(to), modelId: to } },
+          BACKGROUND_CONTEXT,
+        ),
+      );
+      yield* this.patchSessionMetadata(conversationId, { fellBackTo: to });
+      yield* attempt("session.fallback.note", () =>
+        conversation.submit(
+          {
+            type: "write",
+            entry: {
+              kind: FALLBACK_ENTRY,
+              data: { from: message.model, to, reason: message.errorMessage ?? "" },
+            },
+          },
+          BACKGROUND_CONTEXT,
+        ),
+      );
+
+      if (retriedByPi(message)) return;
+
+      yield* attempt("pi.conversation.idle", () => conversation.waitForIdle(BACKGROUND_CONTEXT));
+      yield* this.arm({ active: true });
+      // Someone may have sent a message meanwhile; that run already uses the new model.
+      yield* attempt("session.fallback.continue", () =>
+        conversation.submit({ type: "continue" }, BACKGROUND_CONTEXT),
+      ).pipe(Effect.ignore);
+    });
+
+    await Effect.runPromise(
+      program.pipe(
+        Effect.catch((error) =>
+          Effect.logError({
+            event: "model_fallback_failed",
+            operation: error.operation,
+            details: error.details,
+          }),
+        ),
+      ),
+    );
+  }
+
+  private sessionMetadata = (conversationId: ConversationId) =>
+    attempt("session.metadata.read", () =>
+      this.ctx.storage.get<SessionMetadata>(sessionMetadataKey(conversationId)),
+    );
+
+  private patchSessionMetadata = (conversationId: ConversationId, patch: SessionMetadata) =>
+    attempt("session.metadata.write", () =>
+      this.ctx.storage.transaction(async (tx) => {
+        const key = sessionMetadataKey(conversationId);
+        // An `undefined` field reads back as unset, which clears that setting.
+        await tx.put(key, { ...(await tx.get<SessionMetadata>(key)), ...patch });
+      }),
+    );
 
   configureSession(id: string, settings: typeof SessionSettings.Type) {
     return Effect.runPromise(
@@ -1646,7 +1727,7 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(conversation)) return undefined;
 
-        const { model, thinkingLevel } = settings;
+        const { model, thinkingLevel, speed, autoFallback } = settings;
 
         if (model !== undefined) {
           const provider = modelProvider(model);
@@ -1662,40 +1743,56 @@ export class Agent extends DurableObject<Env> {
         }
 
         // Applies from the next model request; a running turn keeps its current request.
-        yield* attempt("pi.session.configure", () =>
-          conversation.value.configure(
-            {
-              ...(model !== undefined && {
-                model: { provider: modelProvider(model), modelId: model },
-              }),
-              ...(thinkingLevel !== undefined && { thinkingLevel }),
-            },
-            BACKGROUND_CONTEXT,
-          ),
-        );
+        if (model !== undefined || thinkingLevel !== undefined)
+          yield* attempt("pi.session.configure", () =>
+            conversation.value.configure(
+              {
+                ...(model !== undefined && {
+                  model: { provider: modelProvider(model), modelId: model },
+                }),
+                ...(thinkingLevel !== undefined && { thinkingLevel }),
+              },
+              BACKGROUND_CONTEXT,
+            ),
+          );
+
+        if (model !== undefined || speed !== undefined || autoFallback !== undefined)
+          yield* this.patchSessionMetadata(conversation.value.id, {
+            ...(speed !== undefined && { speed }),
+            ...(autoFallback !== undefined && { autoFallback }),
+            // Choosing a model by hand re-arms automatic fallback from it.
+            ...(model !== undefined && { fellBackTo: undefined }),
+          });
 
         return {
           ...(model !== undefined && { model }),
           ...(thinkingLevel !== undefined && { thinkingLevel }),
+          ...(speed !== undefined && { speed }),
+          ...(autoFallback !== undefined && { autoFallback }),
         };
       }),
     );
   }
 
-  createSession(
-    model?: string,
-    workspace?: typeof WorkspaceInput.Type,
-    thinkingLevel?: typeof ThinkingLevel.Type,
-  ) {
+  createSession(input: typeof NewSession.Type) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
+        const { model, workspace } = input;
         const chatgpt = yield* this.credentials.get("openai");
         const claude = yield* this.credentials.get("anthropic");
+        const defaults = yield* this.storedDefaults();
 
-        const defaultModel = yield* this.resolveDefaultModel(
+        const defaultModel = effectiveDefaultModel(
+          defaults.model,
           Option.isSome(chatgpt),
           Option.isSome(claude),
         );
+
+        const thinkingLevel =
+          input.thinkingLevel ?? defaults.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
+
+        const speed = input.speed ?? defaults.speed ?? DEFAULT_SPEED;
+        const autoFallback = input.autoFallback ?? defaults.autoFallback ?? DEFAULT_AUTO_FALLBACK;
 
         const modelId = yield* Schema.decodeUnknownEffect(SessionModel)(model ?? defaultModel).pipe(
           Effect.mapError(
@@ -1722,10 +1819,7 @@ export class Agent extends DurableObject<Env> {
           this.harness.createConversation(
             {
               ownership: { kind: "ownerless" },
-              agent: {
-                model: { provider, modelId },
-                thinkingLevel: thinkingLevel ?? DEFAULT_THINKING_LEVEL,
-              },
+              agent: { model: { provider, modelId }, thinkingLevel },
             },
             BACKGROUND_CONTEXT,
           ),
@@ -1744,10 +1838,12 @@ export class Agent extends DurableObject<Env> {
           this.ctx.storage.put(`session:${id}`, conversation.id),
         );
         yield* attempt("session.metadata", () =>
-          this.ctx.storage.put(`session-meta:${conversation.id}`, {
+          this.ctx.storage.put(sessionMetadataKey(conversation.id), {
             createdAt: Date.now(),
             archived: false,
-          }),
+            speed,
+            autoFallback,
+          } satisfies SessionMetadata),
         );
 
         if (workspace)
@@ -1769,7 +1865,7 @@ export class Agent extends DurableObject<Env> {
             ),
           );
 
-        return { id, model: modelId, thinkingLevel: thinkingLevel ?? DEFAULT_THINKING_LEVEL };
+        return { id, model: modelId, thinkingLevel, speed, autoFallback };
       }),
     );
   }
