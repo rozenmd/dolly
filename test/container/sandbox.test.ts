@@ -77,6 +77,7 @@ it("times real initialization steps, process launch and live-container reconnect
         "workspace.snapshot.read",
         "workspace.dependencies.cleanup",
         "workspace.start",
+        "workspace.restore.record",
         "workspace.network.http",
         "workspace.network.https",
         "sandbox.inactivity",
