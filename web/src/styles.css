@@ -470,6 +470,18 @@ select.input {
 .conversation-scroll {
   flex: 1;
   overflow-y: auto;
+  /* The conversation keeps the reader's place itself when earlier messages load above. */
+  overflow-anchor: none;
+}
+.history-loader {
+  margin-bottom: 24px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+.history-loader button {
+  color: var(--text);
+  text-decoration: underline;
 }
 .conversation-content {
   max-width: 860px;

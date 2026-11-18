@@ -4,7 +4,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
-import { Live, Snapshot } from "../src/transcript";
+import { HistoryPage, Live, Snapshot } from "../src/transcript";
+import { extendTranscript, prependHistory } from "../web/src/lib/transcript-history";
 
 /**
  * A long tool-using turn outgrows Pi's default 50-entry transcript window. A freshly
@@ -91,13 +92,13 @@ function claude(blocks: ClaudeBlock[], stop: "tool_use" | "end_turn") {
 }
 
 /** Each round thinks, narrates and calls two tools in parallel; then the final answer. */
-function longTurnModel() {
+function longTurnModel(rounds = ROUNDS) {
   let round = 0;
 
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
     round += 1;
 
-    if (round > ROUNDS)
+    if (round > rounds)
       return claude(
         [
           { type: "thinking", thinking: "done" },
@@ -254,4 +255,103 @@ it("streams the final answer of a long turn over the live WebSocket", async () =
   } finally {
     reopened.socket.close();
   }
+});
+
+const decodePage = Schema.decodeUnknownSync(Schema.fromJsonString(HistoryPage));
+
+async function history(id: string, through: number, limit?: number) {
+  const query = new URLSearchParams({ through: String(through) });
+
+  if (limit !== undefined) query.set("limit", String(limit));
+
+  return SELF.fetch(`https://worker/api/sessions/${id}/history?${query}`, { headers });
+}
+
+/** Scrolls back as the browser does: fetch pages before the oldest held entry until none remain. */
+async function scrollBack(id: string, snapshot: typeof Snapshot.Type, limit?: number) {
+  let held = snapshot;
+  let pages = 0;
+
+  while (held.before !== undefined) {
+    const through = held.before;
+    const response = await history(id, through, limit);
+    expect(response.status).toBe(200);
+    held = prependHistory(held, through, decodePage(await response.text()));
+    pages += 1;
+  }
+
+  return { held, pages };
+}
+
+it("pages a long turn's history back to its prompt, oldest first", async () => {
+  longTurnModel();
+  const id = await claudeSession();
+  await prompt(id);
+
+  const read = async () =>
+    decode(await (await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })).text());
+
+  await expect.poll(async () => settled(await read()), { timeout: 30_000 }).toBe(true);
+  const full = await read();
+  const newest = full.entries.at(-1)?.id ?? 0;
+
+  // Pretend the window held only the final answer, then scroll back in pages of 10.
+  const { held, pages } = await scrollBack(
+    id,
+    { ...full, entries: full.entries.slice(-1), before: full.entries.at(-2)?.id },
+    10,
+  );
+
+  expect(pages).toBe(Math.ceil((full.entries.length - 1) / 10));
+  expect(held.entries.map((entry) => entry.id)).toEqual(full.entries.map((entry) => entry.id));
+  expect(held.before).toBeUndefined();
+  expectPrompt(held);
+  expectFinalAnswer(held);
+
+  // A single default page covers it, starting at the conversation's first entry.
+  const page = decodePage(await (await history(id, newest)).text());
+  expect(page.before).toBeUndefined();
+  expect(page.entries.map((entry) => entry.id)).toEqual(full.entries.map((entry) => entry.id));
+
+  expect((await history(id, newest, 0)).status).toBe(400);
+  expect((await history(id, newest, 201)).status).toBe(400);
+  expect((await SELF.fetch(`https://worker/api/sessions/${id}/history`, { headers })).status).toBe(
+    400,
+  );
+  expect((await history("missing", newest)).status).toBe(404);
+});
+
+it("keeps the prompt of a live-streamed turn that outgrows the window", async () => {
+  // 40 rounds of three entries pass the 100-entry window, which then drops the prompt.
+  const rounds = 40;
+  const model = longTurnModel(rounds);
+  const id = await claudeSession();
+  const { socket, updates } = await openStream(id);
+
+  try {
+    await expect.poll(() => updates.length).toBeGreaterThan(0);
+    await prompt(id);
+    await expect.poll(() => model.rounds(), { timeout: 30_000 }).toBe(rounds + 1);
+    await expect.poll(() => settled(decode(updates.at(-1) ?? "")), { timeout: 10_000 }).toBe(true);
+  } finally {
+    socket.close();
+  }
+
+  const last = decode(updates.at(-1) ?? "");
+  expect(last.before).toBeDefined();
+  expect(last.entries.some((entry) => entry.kind === "pi.user")).toBe(false);
+
+  // Folding every update in as the browser does keeps all entries since the prompt.
+  const held = updates
+    .map((update) => decode(update))
+    .reduce<typeof Snapshot.Type | null>(extendTranscript, null);
+
+  if (!held) throw new Error("Expected streamed snapshots");
+  expect(held.before).toBeUndefined();
+  expectPrompt(held);
+  expectFinalAnswer(held);
+
+  // A browser that joined late scrolls back from the last window to the same transcript.
+  const { held: scrolled } = await scrollBack(id, last);
+  expect(scrolled.entries.map((entry) => entry.id)).toEqual(held.entries.map((entry) => entry.id));
 });

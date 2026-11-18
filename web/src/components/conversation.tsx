@@ -65,19 +65,47 @@ function Prose({ text }: { text: string }) {
   );
 }
 
+/** Transcript entries older than those shown, loaded as the reader scrolls back. */
+export type OlderHistory = {
+  /** The entry just before the oldest one shown; absent once the conversation's start is shown. */
+  before?: number;
+  loading: boolean;
+  error: string;
+  load: () => void;
+};
+
+/** How close to the top, in pixels, scrolling back starts loading earlier messages. */
+const OLDER_MARGIN = 600;
+
 export function Conversation({
   turns,
   sessionId,
   loading,
+  older,
   thread,
   onOpenThread,
 }: {
   turns: readonly Turn[];
   sessionId: string;
   loading: boolean;
+  older?: OlderHistory;
 } & ThreadLookup) {
   const scroll = useRef<HTMLDivElement>(null);
+  const top = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  // Scroll height before earlier messages are prepended, to keep the reader's place once they arrive.
+  const anchor = useRef<{ before: number; height: number }>(undefined);
+  const load = useRef(older?.load);
+  const before = older?.before;
+  const olderLoading = older?.loading ?? false;
+  const olderError = Boolean(older?.error);
+
+  function loadOlder() {
+    if (scroll.current && before !== undefined)
+      anchor.current = { before, height: scroll.current.scrollHeight };
+    load.current?.();
+  }
+
   const [now, setNow] = useState(Date.now);
   const running = turns.some((turn) => turn.running);
   const [sessions] = useState(() => new Map<string, Map<string, boolean>>());
@@ -97,8 +125,44 @@ export function Conversation({
     pinned.current = true;
   }, [sessionId]);
   useLayoutEffect(() => {
-    if (pinned.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [turns]);
+    load.current = older?.load;
+  });
+  useLayoutEffect(() => {
+    const element = scroll.current;
+
+    if (!element) return;
+
+    if (pinned.current) element.scrollTop = element.scrollHeight;
+    else if (anchor.current && anchor.current.before !== before) {
+      // Earlier messages went in above the reader: move down by what they added.
+      element.scrollTop += element.scrollHeight - anchor.current.height;
+      anchor.current = undefined;
+    } else if (anchor.current) {
+      // Live updates append below the reader without moving them; measure from here.
+      anchor.current.height = element.scrollHeight;
+    }
+  }, [turns, before]);
+
+  // Load earlier messages once the top of the conversation comes near, and again after each page while it
+  // stays near (a short page, or a tall window).
+  useEffect(() => {
+    const root = scroll.current;
+    const target = top.current;
+
+    // After a failure, only the Retry button asks again.
+    if (before === undefined || olderLoading || olderError || !root || !target) return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) loadOlder();
+      },
+      { root, rootMargin: `${OLDER_MARGIN}px 0px 0px 0px` },
+    );
+
+    observer.observe(target);
+
+    return () => observer.disconnect();
+  }, [before, olderLoading, olderError, sessionId]);
 
   return (
     <div
@@ -110,6 +174,25 @@ export function Conversation({
       }}
     >
       <div className="conversation-content">
+        <div ref={top} aria-hidden="true" />
+        {before !== undefined && turns.length > 0 && older && (
+          <div className="history-loader">
+            {older.error ? (
+              <p role="alert">
+                {older.error}{" "}
+                <button type="button" onClick={loadOlder}>
+                  Retry
+                </button>
+              </p>
+            ) : olderLoading ? (
+              <p role="status">Loading earlier messages…</p>
+            ) : (
+              <button type="button" onClick={loadOlder}>
+                Show earlier messages
+              </button>
+            )}
+          </div>
+        )}
         {loading && turns.length === 0 && (
           <p className="conversation-status" role="status">
             Loading conversation…

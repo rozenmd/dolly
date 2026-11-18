@@ -1,5 +1,11 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Conversation, ConversationWindow, Cursor, EntryId } from "@earendil-works/pi-durable";
+import type {
+  Conversation,
+  ConversationWindow,
+  Cursor,
+  EntryId,
+  EntryRecord,
+} from "@earendil-works/pi-durable";
 
 /** Pi's default window size: a fresh view holds the newest 50 entries. */
 const DEFAULT_ENTRIES = 50;
@@ -44,4 +50,35 @@ export async function promptWindow(
 
 function window(from: EntryId, entries: number): ConversationWindow {
   return { from, min: entries, max: entries * 2 };
+}
+
+/** Most entries one history page returns. */
+export const HISTORY_PAGE_LIMIT = 200;
+
+/**
+ * Entries older than a view's window, for a client scrolling back past it: up to `limit` entries at or before
+ * `through` (a window's `before`), oldest first, with the ID of the entry just before them when more remain.
+ */
+export async function historyPage(
+  conversation: Conversation,
+  through: number,
+  limit: number,
+): Promise<{ entries: EntryRecord[]; before?: EntryId }> {
+  // SAFETY: entry IDs are plain integers on the wire (a view's `before`); maxEntryId only bounds this
+  // conversation's fork-aware scan, so any integer selects at most its own entries.
+  const maxEntryId = through as EntryId;
+
+  const page = await conversation.entries(
+    { order: "descending", maxEntryId },
+    limit + 1,
+    undefined,
+    BACKGROUND_CONTEXT,
+  );
+
+  const newest = page.items.slice(0, limit);
+  const next = page.items[limit];
+
+  const entries = newest.reverse();
+
+  return next ? { entries, before: next.id } : { entries };
 }

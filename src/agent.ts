@@ -33,7 +33,7 @@ import * as Option from "effect/Option";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Predicate from "effect/Predicate";
-import { promptWindow } from "./transcript-window";
+import { historyPage, promptWindow } from "./transcript-window";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
 import {
   ConversationWorkspace,
@@ -2069,7 +2069,7 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
-  private serializeTranscript(value: ConversationView) {
+  private serializeTranscript(value: ConversationView | Awaited<ReturnType<typeof historyPage>>) {
     return this.credentials.secrets.pipe(
       Effect.map((secrets) => {
         return JSON.stringify(value, (key, item) => {
@@ -2166,6 +2166,23 @@ export class Agent extends DurableObject<Env> {
           (view) => this.serializeTranscript(view.value),
           (view) => attempt("pi.watch.stop", () => view.stop()).pipe(Effect.orDie),
         );
+      }),
+    );
+  }
+
+  /** Entries older than a view's window, redacted like the view, for scrolling back past it. */
+  history(id: string, through: number, limit: number) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        const page = yield* attempt("pi.history", () =>
+          historyPage(conversation.value, through, limit),
+        );
+
+        return yield* this.serializeTranscript(page);
       }),
     );
   }
