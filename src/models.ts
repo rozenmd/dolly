@@ -6,6 +6,8 @@ import { WorkspaceInput } from "./workspace";
  * their definitions; this list matches the models other connected agents offer.
  */
 export const openaiIds = [
+  "gpt-6.2-astra",
+  "gpt-6.2-sol",
   "gpt-6.1-sol",
   "gpt-6.1-terra",
   "gpt-6-sol",

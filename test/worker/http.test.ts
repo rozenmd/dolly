@@ -1,6 +1,7 @@
 import { SELF, reset } from "cloudflare:test";
 import { expect, it } from "vite-plus/test";
 import { headers, signIn } from "../session";
+import { chatgptProvider } from "../../src/chatgpt-login";
 
 it("serves the rendered workspace at the Worker root and its real bundled assets", async () => {
   const response = await SELF.fetch("https://worker/");
@@ -37,6 +38,33 @@ it("keeps API authentication and JSON responses separate from frontend routing",
 
   expect(unknown.status).toBe(404);
   expect(await unknown.text()).not.toContain("<html");
+});
+
+it("accepts the new ChatGPT models through the Worker and registers them for inference", async () => {
+  await signIn();
+  const provider = chatgptProvider();
+
+  for (const id of ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra", "gpt-6-luna"]) {
+    const model = provider.getModels().find((entry) => entry.id === id);
+    expect(model?.api).toBe("openai-responses");
+
+    const response = await SELF.fetch("https://worker/api/settings/model", {
+      method: "PUT",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: id }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ model: id });
+  }
+
+  const invalid = await SELF.fetch("https://worker/api/settings/model", {
+    method: "PUT",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "gpt-6.2-unknown" }),
+  });
+
+  expect(invalid.status).toBe(400);
 });
 
 it("preserves the public health endpoint and missing asset status", async () => {

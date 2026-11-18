@@ -494,7 +494,21 @@ export function chatgptProvider(
     id: PROVIDER,
     name: "ChatGPT",
     baseUrl: RESOURCE,
-    models: Object.values(OPENAI_MODELS).filter((model) => openaiIds.includes(model.id)),
+    models: [
+      ...Object.values(OPENAI_MODELS).filter((model) => openaiIds.includes(model.id)),
+      // Until Pi's catalog includes 6.2, inherit the previous generation's transport and
+      // capabilities. Prefer Pi's own definitions as soon as they become available.
+      ...(
+        [
+          ["gpt-6.2-astra", "gpt-6-astra", "GPT-6.2 Astra"],
+          ["gpt-6.2-sol", "gpt-6.1-sol", "GPT-6.2 Sol"],
+        ] as const
+      ).flatMap(([id, predecessor, name]) =>
+        Object.keys(OPENAI_MODELS).includes(id)
+          ? []
+          : [{ ...OPENAI_MODELS[predecessor], id, name }],
+      ),
+    ],
     api: onHeaders
       ? {
           stream: observeUsage(stream, onHeaders),
