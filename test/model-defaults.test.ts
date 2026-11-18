@@ -212,20 +212,33 @@ it("sends ChatGPT's service tier for the session's speed, model and plan", async
   expect(await send("gpt-6-luna", "fast")).toBe("priority");
   // gpt-5.5's backend doesn't take the priority tier.
   expect(await send("gpt-5.5", "fast")).toBeUndefined();
-  // Ultrafast needs a Pro $500 login; short of it the session runs Fast.
+  // Ultrafast needs a ChatGPT Pro login; short of it the session runs Fast.
   expect(await send("gpt-6.2-sol", "ultrafast")).toBe("priority");
 
-  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    await state.storage.put("credential:openai", {
-      type: "oauth",
-      access: tokenOn("promax"),
-      refresh: "test-refresh",
-      expires: Date.now() + 3_600_000,
+  const signIn = (plan: string) =>
+    runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+      await state.storage.put("credential:openai", {
+        type: "oauth",
+        access: tokenOn(plan),
+        refresh: "test-refresh",
+        expires: Date.now() + 3_600_000,
+      });
     });
-  });
 
-  expect(await (await call("/settings/model")).json()).toMatchObject({ ultrafastAvailable: true });
-  expect(await send("gpt-6.2-sol", "ultrafast")).toBe("ultrafast");
+  // Pro Lite ($100) has no Ultrafast.
+  await signIn("prolite");
+  expect(await (await call("/settings/model")).json()).toMatchObject({ ultrafastAvailable: false });
+  expect(await send("gpt-6.2-sol", "ultrafast")).toBe("priority");
+
+  // Both Pro plans do: $200 ("pro") and $500 ("promax").
+  for (const plan of ["pro", "promax"]) {
+    await signIn(plan);
+    expect(await (await call("/settings/model")).json()).toMatchObject({
+      ultrafastAvailable: true,
+    });
+    expect(await send("gpt-6.2-sol", "ultrafast")).toBe("ultrafast");
+  }
+
   // Only Astra and Sol serve Ultrafast; Luna runs Fast.
   expect(await send("gpt-6-luna", "ultrafast")).toBe("priority");
 }, 30_000);

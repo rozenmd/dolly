@@ -126,7 +126,7 @@ import {
 } from "./self-query";
 import { SlackThreads } from "./slack-inbox";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { normalizeEffort, ULTRAFAST_PLAN } from "./model-capabilities";
+import { normalizeEffort, ultrafastPlan } from "./model-capabilities";
 import {
   defaultsView,
   effectiveDefaultModel,
@@ -1616,11 +1616,11 @@ export class Agent extends DurableObject<Env> {
 
     return {
       ...defaultsView(stored, Option.isSome(chatgpt), Option.isSome(claude)),
-      ultrafastAvailable: (yield* Effect.promise(() => this.chatgptPlan())) === ULTRAFAST_PLAN,
+      ultrafastAvailable: ultrafastPlan(yield* Effect.promise(() => this.chatgptPlan())),
     };
   });
 
-  /** The signed-in ChatGPT plan; Ultrafast needs Pro $500 ("promax"). */
+  /** The signed-in ChatGPT plan; Ultrafast needs Pro ("pro" or "promax"). */
   private async chatgptPlan() {
     const credential = Option.getOrUndefined(
       await Effect.runPromise(this.credentials.get("openai")).catch(() => Option.none()),

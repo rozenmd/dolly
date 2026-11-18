@@ -11,7 +11,6 @@ import {
 import { Picker, type PickerOption } from "./picker";
 import {
   SPEEDS,
-  ULTRAFAST_PLAN,
   effectiveSpeed as speedOn,
   fastSupported,
   modelEfforts,
@@ -179,7 +178,7 @@ export function ModelControl({
   isDefault?: boolean;
   /** Every setting already matches the defaults, so there is nothing to reset. */
   atDefault?: boolean;
-  /** The ChatGPT login is on the plan that serves Ultrafast (Pro $500). */
+  /** The ChatGPT login is on a plan that serves Ultrafast (Pro). */
   ultrafastAvailable?: boolean;
   onModel: (model: string) => void;
   onEffort: (level: string) => void;
@@ -198,8 +197,7 @@ export function ModelControl({
   const offersDefault = defaultModel !== undefined;
   const resolved = model || defaultModel || "";
   const modelLabel = resolved ? shortModelName(resolved) : "Default";
-  const plan = ultrafastAvailable ? ULTRAFAST_PLAN : undefined;
-  const effectiveSpeed = speedOn(speed, resolved, plan);
+  const effectiveSpeed = speedOn(speed, resolved, ultrafastAvailable);
 
   const models = offersDefault
     ? MODELS.map((option) =>
@@ -217,7 +215,7 @@ export function ModelControl({
   const speedHints: Record<Speed, string | undefined> = {
     standard: fastSupported(resolved) ? undefined : "The only speed for this model",
     fast: "Priority, uses more of your limit",
-    ultrafast: "Pro $500 only",
+    ultrafast: "ChatGPT Pro only",
   };
 
   const speedOffered: Record<Speed, boolean> = {

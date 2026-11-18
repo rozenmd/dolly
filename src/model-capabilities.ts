@@ -41,7 +41,7 @@ export function normalizeEffort(model: string, effort?: string | null): Effort {
 
 /**
  * Session speeds. Fast sends ChatGPT's `priority` service tier; Ultrafast sends `ultrafast`,
- * which only Astra and Sol serve, and only to a ChatGPT Pro $500 ("promax") login. Claude
+ * which only Astra and Sol serve, and only to a ChatGPT Pro login ($200 or $500). Claude
  * subscriptions have no faster tier.
  */
 export const SPEEDS = ["standard", "fast", "ultrafast"] as const;
@@ -63,8 +63,15 @@ const FAST_MODELS = new Set([
 
 const ULTRAFAST_MODELS = new Set(["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol"]);
 
-/** The only self-serve ChatGPT plan with Ultrafast: Pro $500 ("pro" is $200, "prolite" $100). */
-export const ULTRAFAST_PLAN = "promax";
+/**
+ * ChatGPT plans that get Ultrafast: Pro $200 ("pro") and Pro $500 ("promax"). opensession allows
+ * only "promax", but Ultrafast is confirmed working on a $200 Pro login. Pro Lite ("prolite",
+ * $100) and lower plans run Ultrafast sessions at Fast.
+ */
+const ULTRAFAST_PLANS = new Set(["pro", "promax"]);
+
+/** Whether a ChatGPT plan (`chatgpt_plan_type`) gets the ultrafast service tier. */
+export const ultrafastPlan = (plan: string | undefined) => !!plan && ULTRAFAST_PLANS.has(plan);
 
 /** ChatGPT models whose backend accepts the priority service tier. */
 export const fastSupported = (model: string) => FAST_MODELS.has(model);
@@ -72,13 +79,11 @@ export const fastSupported = (model: string) => FAST_MODELS.has(model);
 /** Models the ChatGPT backend serves on the ultrafast service tier. */
 export const ultrafastSupported = (model: string) => ULTRAFAST_MODELS.has(model);
 
-/** The speed a session actually gets on `model` with the signed-in ChatGPT `plan`. */
-export function effectiveSpeed(speed: Speed | undefined, model: string, plan?: string): Speed {
+/** The speed a session actually gets on `model`; `ultrafast` says the login's plan has it. */
+export function effectiveSpeed(speed: Speed | undefined, model: string, ultrafast = false): Speed {
   if (!speed || speed === "standard" || !fastSupported(model)) return "standard";
 
-  return speed === "ultrafast" && ultrafastSupported(model) && plan === ULTRAFAST_PLAN
-    ? "ultrafast"
-    : "fast";
+  return speed === "ultrafast" && ultrafastSupported(model) && ultrafast ? "ultrafast" : "fast";
 }
 
 const SERVICE_TIERS = {
@@ -89,7 +94,7 @@ const SERVICE_TIERS = {
 
 /** The `service_tier` a request carries at that speed, if any. */
 export function serviceTier(speed: Speed | undefined, model: string, plan?: string) {
-  return SERVICE_TIERS[effectiveSpeed(speed, model, plan)];
+  return SERVICE_TIERS[effectiveSpeed(speed, model, ultrafastPlan(plan))];
 }
 
 /**

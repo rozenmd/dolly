@@ -225,7 +225,7 @@ Open the Worker's URL and follow the setup steps under [Web frontend](#web-front
 The same settings appear in the composer's model menu, with **Set as default** and **Reset to default**. They follow opensession (`src/model-capabilities.ts`):
 
 - **Effort:** each model offers only the efforts it accepts. For example, GPT-6.2 Astra and Sol have no "None", and Claude models start at "Low". An unsupported default or carried-over effort becomes High.
-- **Speed:** Fast sends ChatGPT's `priority` service tier on the models that accept it. Ultrafast sends `ultrafast` on Astra and Sol to a ChatGPT Pro $500 (`promax`) login and runs as Fast otherwise. Claude models always run at standard speed.
+- **Speed:** Fast sends ChatGPT's `priority` service tier on the models that accept it. Ultrafast sends `ultrafast` on Astra and Sol to a ChatGPT Pro login (`pro`, $200, or `promax`, $500; opensession allows only `promax`, but Ultrafast works on $200 Pro) and runs as Fast otherwise. Claude models always run at standard speed.
 - **Auto-fallback** (on by default, per session):
   - When a response fails because the subscription ran out, the session switches to the other connected subscription and continues the turn there. "Ran out" uses opensession's usage-limit and subscription-error classifiers.
   - The new model is the first equal-or-smarter destination in opensession's routing: Fable is never a destination, and a downgrade is never taken automatically.

@@ -475,7 +475,7 @@ export const DefaultModel = Schema.Struct({
   thinkingLevel: Schema.String,
   speed: Schema.Literals(SPEEDS),
   autoFallback: Schema.Boolean,
-  /** The ChatGPT login is on the plan that serves Ultrafast (Pro $500). */
+  /** The ChatGPT login is on a plan that serves Ultrafast (Pro). */
   ultrafastAvailable: Schema.Boolean,
 });
 
