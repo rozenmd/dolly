@@ -25,7 +25,7 @@ export function modelName(id: string) {
 
 export const MODELS: PickerOption[] = [
   { value: "", label: "Default" },
-  ...["gpt-6-sol", "gpt-6-luna", "gpt-6.1-terra"].map((value) => ({
+  ...["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra", "gpt-6-luna"].map((value) => ({
     value,
     label: modelName(value),
     group: CHATGPT,
