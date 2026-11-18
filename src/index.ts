@@ -15,6 +15,7 @@ import { ChildRequest, DefaultModelSetting, NewSession, SessionSettings } from "
 import { OperationError } from "./operations";
 import { exceptionDetails } from "./diagnostics";
 import { AnthropicSetup, AnthropicProbe } from "./anthropic";
+import { LoginCallback } from "./chatgpt-login";
 import type { Env } from "./env";
 import { PromptImage, MAX_IMAGES, MAX_PROMPT_BYTES } from "./images";
 import { SavedSession, SessionUpdate } from "./session-contracts";
@@ -212,7 +213,7 @@ app.delete("/api/auth/session", async (c) => {
   return c.json({ signedIn: false });
 });
 
-app.post("/api/auth/codex", (c) =>
+app.post("/api/auth/chatgpt", (c) =>
   handle(
     c,
     Effect.gen(function* () {
@@ -223,18 +224,37 @@ app.post("/api/auth/codex", (c) =>
   ),
 );
 
-app.get("/api/auth/codex", (c) =>
+app.get("/api/auth/chatgpt", (c) =>
   handle(
     c,
     Effect.gen(function* () {
       const agent = yield* AgentApi;
 
-      return c.json(yield* agent.pollLogin);
+      return c.json(yield* agent.loginStatus);
     }),
   ),
 );
 
-app.delete("/api/auth/codex", (c) =>
+app.put("/api/auth/chatgpt", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const input = yield* Effect.tryPromise(() => c.req.text()).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(LoginCallback))),
+        Effect.mapError(
+          () => new InvalidInput({ message: "Expected the redirected address as callbackUrl" }),
+        ),
+      );
+
+      const agent = yield* AgentApi;
+      const result = yield* agent.completeLogin(input);
+
+      return c.json(result, result.state === "error" ? 400 : 200);
+    }),
+  ),
+);
+
+app.delete("/api/auth/chatgpt", (c) =>
   handle(
     c,
     Effect.gen(function* () {
@@ -329,7 +349,7 @@ app.put("/api/settings/model", (c) =>
         Effect.mapError(
           () =>
             new InvalidInput({
-              message: "Expected a model from the Codex or Anthropic catalog, or null",
+              message: "Expected a model from the OpenAI or Anthropic catalog, or null",
             }),
         ),
       );
@@ -423,7 +443,7 @@ app.post("/api/sessions", (c) =>
         Effect.mapError(
           () =>
             new InvalidInput({
-              message: "Expected an optional model from the Codex or Anthropic catalog",
+              message: "Expected an optional model from the OpenAI or Anthropic catalog",
             }),
         ),
       );
@@ -485,7 +505,7 @@ app.post("/api/sessions/:id/children", (c) =>
           () =>
             new InvalidInput({
               message:
-                "Expected content, a UUID requestId and an optional Codex or Anthropic model",
+                "Expected content, a UUID requestId and an optional OpenAI or Anthropic model",
             }),
         ),
       );

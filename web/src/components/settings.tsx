@@ -11,7 +11,7 @@ import {
 } from "@heroicons/react/24/outline";
 import {
   authState,
-  codexLogin,
+  chatgptLogin,
   defaultModel,
   request,
   type ApiBody,
@@ -19,7 +19,7 @@ import {
   type DefaultModel,
 } from "../lib/api";
 import { AnthropicConnection } from "./anthropic";
-import { CodexLogin } from "./codex-login";
+import { ChatGPTLogin } from "./chatgpt-login";
 import { ingressHook } from "./github";
 import { RepositoryPicker } from "./repositories";
 import { ModelPicker, modelName } from "./model-select";
@@ -187,38 +187,38 @@ export function AccountSettings() {
 }
 
 export function ModelsSettings() {
-  const [codex, setCodex] = useState<boolean | null>(null);
+  const [chatgpt, setChatGPT] = useState<boolean | null>(null);
   const [claude, setClaude] = useState<boolean | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const { pending, run, alert } = useAction();
 
   useEffect(() => {
-    codexLogin().then(
-      (status) => setCodex(status.state === "connected"),
-      () => setCodex(null),
+    chatgptLogin().then(
+      (status) => setChatGPT(status.state === "connected"),
+      () => setChatGPT(null),
     );
   }, []);
 
   return (
     <Section title="Models" description="Subscriptions agents use to run sessions.">
       <div className="connection-row">
-        <span className={`status-dot ${codex ? "idle" : ""}`} />
+        <span className={`status-dot ${chatgpt ? "idle" : ""}`} />
         <span className="connection-label">
           ChatGPT
-          <span className="muted">{codex ? "Signed in" : "Not signed in"}</span>
+          <span className="muted">{chatgpt ? "Signed in" : "Not signed in"}</span>
         </span>
-        {codex ? (
+        {chatgpt ? (
           <button
             type="button"
             className="secondary-button"
             disabled={pending}
             onClick={() => {
-              if (!confirm("Sign out of ChatGPT? Codex sessions will need you to sign in again."))
+              if (!confirm("Sign out of ChatGPT? ChatGPT sessions will need you to sign in again."))
                 return;
 
               void run(async () => {
-                await codexLogin("DELETE");
-                setCodex(false);
+                await chatgptLogin("DELETE");
+                setChatGPT(false);
               }, "Could not sign out of ChatGPT.");
             }}
           >
@@ -232,10 +232,10 @@ export function ModelsSettings() {
           )
         )}
       </div>
-      {signingIn && !codex && (
-        <CodexLogin
+      {signingIn && !chatgpt && (
+        <ChatGPTLogin
           onConnected={() => {
-            setCodex(true);
+            setChatGPT(true);
             setSigningIn(false);
           }}
           onCancel={() => setSigningIn(false)}
@@ -243,8 +243,8 @@ export function ModelsSettings() {
       )}
       <AnthropicConnection variant="row" onConnection={setClaude} />
       {alert}
-      <DefaultModelSetting key={`${String(codex)}:${String(claude)}`} />
-      <UsageLimits key={String(codex)} />
+      <DefaultModelSetting key={`${String(chatgpt)}:${String(claude)}`} />
+      <UsageLimits key={String(chatgpt)} />
     </Section>
   );
 }

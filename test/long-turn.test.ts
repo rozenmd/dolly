@@ -201,7 +201,7 @@ beforeEach(async () => {
   await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.delete("credential:anthropic");
-    await state.storage.delete("credential:openai-codex");
+    await state.storage.delete("credential:openai");
   });
 });
 

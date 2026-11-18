@@ -51,7 +51,7 @@ beforeEach(async () => {
   await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.delete("credential:anthropic");
-    await state.storage.delete("credential:openai-codex");
+    await state.storage.delete("credential:openai");
     await state.storage.delete("settings:default-model");
   });
 });
@@ -401,7 +401,7 @@ it("saves the owner's default model in Durable Object storage and applies it to 
   const codexAccess = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
 
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    await state.storage.put("credential:openai-codex", {
+    await state.storage.put("credential:openai", {
       type: "oauth",
       access: codexAccess,
       refresh: "test-refresh",

@@ -1721,25 +1721,60 @@ code.summary-label {
   }
 }
 
-/* ChatGPT sign-in */
-.codex-login {
+/* Device and ChatGPT sign-in */
+.device-login {
   display: flex;
   flex-direction: column;
   gap: 14px;
 }
-.codex-host {
+.device-host {
   color: var(--text);
   font-weight: 500;
 }
-.codex-code-row {
+.device-code-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
 }
-.codex-code-row .primary-button {
+.device-code-row .primary-button {
   min-height: 40px;
   text-decoration: none;
+}
+.chatgpt-login {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.chatgpt-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+}
+.chatgpt-steps li > span {
+  display: block;
+  margin-bottom: 8px;
+}
+.chatgpt-steps .primary-button {
+  display: inline-flex;
+  min-height: 36px;
+  text-decoration: none;
+}
+.chatgpt-host {
+  color: var(--text);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.chatgpt-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chatgpt-footer .field-help {
+  margin: 0;
 }
 .device-code {
   display: inline-flex;
@@ -1766,7 +1801,7 @@ code.summary-label {
 .device-code:hover {
   background: var(--surface-hover);
 }
-.codex-waiting {
+.device-waiting {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1774,7 +1809,7 @@ code.summary-label {
   color: var(--muted);
   font-size: 13px;
 }
-.codex-waiting > [role="status"] {
+.device-waiting > [role="status"] {
   display: flex;
   flex: 1;
   min-width: 0;

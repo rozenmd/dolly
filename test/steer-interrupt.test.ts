@@ -1,5 +1,4 @@
 import { env } from "cloudflare:workers";
-import { zstdDecompressSync } from "node:zlib";
 import { SELF, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Schema from "effect/Schema";
@@ -13,7 +12,7 @@ beforeEach(async () => {
   await reset();
   await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    await state.storage.put("credential:openai-codex", {
+    await state.storage.put("credential:openai", {
       type: "oauth",
       access,
       refresh: "test-refresh",
@@ -111,15 +110,11 @@ const call = (n: number) => ({
   arguments: JSON.stringify({ operation: { action: "repositories" } }),
 });
 
-/** The model request body, decompressed like the Codex adapter sends it. */
+/** The model request body. */
 async function bodyOf(init?: RequestInit) {
   const encoded = new Uint8Array(await new Response(init?.body).arrayBuffer());
 
-  return new TextDecoder().decode(
-    new Headers(init?.headers).get("content-encoding") === "zstd"
-      ? zstdDecompressSync(encoded)
-      : encoded,
-  );
+  return new TextDecoder().decode(encoded);
 }
 
 /** Whether the live response has a content block of `type` yet. */
@@ -186,7 +181,7 @@ it("cuts a thinking-only response short and answers the steer next", async () =>
   let thinking!: ReturnType<typeof openStream>;
 
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-    if (!String(url).includes("/codex/responses")) return Response.json({}, { status: 404 });
+    if (!String(url).includes("/v1/responses")) return Response.json({}, { status: 404 });
     requests.push(await bodyOf(init));
 
     if (requests.length > 1) return answer("Using pnpm.");
@@ -236,7 +231,7 @@ it("lets a response with a tool call finish, then skips its unstarted calls for 
 
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     // Skipped tools make no requests; anything else is not a model request.
-    if (!String(url).includes("/codex/responses")) return Response.json({}, { status: 404 });
+    if (!String(url).includes("/v1/responses")) return Response.json({}, { status: 404 });
     requests.push(await bodyOf(init));
 
     if (requests.length > 1) return answer("Switched to pnpm.");
@@ -314,7 +309,7 @@ it("leaves a thinking response running when the steer is queued behind a follow-
   const finished = deferred();
 
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-    if (!String(url).includes("/codex/responses")) return Response.json({}, { status: 404 });
+    if (!String(url).includes("/v1/responses")) return Response.json({}, { status: 404 });
     requests.push(await bodyOf(init));
 
     if (requests.length > 1) return answer("Using pnpm.");

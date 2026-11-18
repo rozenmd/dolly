@@ -6,13 +6,17 @@ import type { ChildRequest, ChildMessage, SessionSettings, ThinkingLevel } from 
 import type { WorkspaceInput } from "./workspace";
 import type { PromptImage } from "./images";
 import type { Env } from "./env";
+import type { LoginCallback } from "./chatgpt-login";
 
 function makeAgentApi(env: Env) {
   const agent = env.AGENT.getByName("owner");
 
   return {
     startLogin: rpc("agent.login.start", async () => await agent.startLogin()),
-    pollLogin: rpc("agent.login.poll", async () => await agent.pollLogin()),
+    loginStatus: rpc("agent.login.status", async () => await agent.loginStatus()),
+    completeLogin: Effect.fn("AgentApi.completeLogin")((input: typeof LoginCallback.Type) =>
+      rpc("agent.login.complete", async () => await agent.completeLogin(input)),
+    ),
     logout: rpc("agent.logout", async () => await agent.logout()),
     createSession: Effect.fn("AgentApi.createSession")(
       (

@@ -11,13 +11,13 @@ import {
 import { Sidebar } from "./components/sidebar";
 import { Composer, Conversation } from "./components/conversation";
 import { IconButton, Input, Modal, RepoBadge } from "./components/ui";
-import { CodexLogin } from "./components/codex-login";
+import { ChatGPTLogin } from "./components/chatgpt-login";
 import { GitHubSetup, GitHubSignIn } from "./components/github";
 import { NewSessionComposer } from "./components/new-session";
 import { AnthropicConnection } from "./components/anthropic";
 import {
   authState,
-  codexLogin,
+  chatgptLogin,
   type AuthState,
   liveFromSnapshot,
   queueFromSnapshot,
@@ -49,9 +49,9 @@ export function WorkspaceApp() {
   const [snapshot, setSnapshot] = useState<typeof Snapshot.Type | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [feed, setFeed] = useState(false);
-  const [modal, setModal] = useState<"codex" | "new" | "import" | null>(null);
+  const [modal, setModal] = useState<"chatgpt" | "new" | "import" | null>(null);
   const navigate = useNavigate();
-  const [codex, setCodex] = useState<boolean | null>(null);
+  const [chatgpt, setChatGPT] = useState<boolean | null>(null);
   const [anthropic, setAnthropic] = useState(false);
   const [showClaude, setShowClaude] = useState(false);
   const [error, setError] = useState("");
@@ -127,7 +127,7 @@ export function WorkspaceApp() {
     const revision = sessionRevision.current;
 
     Promise.all([
-      codexLogin().catch(() => null),
+      chatgptLogin().catch(() => null),
       anthropicStatus().catch(() => ({ connected: false })),
       (async () => {
         try {
@@ -161,7 +161,7 @@ export function WorkspaceApp() {
         if (!active) return;
 
         const signedIn = status?.state === "connected";
-        setCodex(signedIn);
+        setChatGPT(signedIn);
         setAnthropic(claude.connected);
 
         if (sessionRevision.current !== revision) {
@@ -182,9 +182,9 @@ export function WorkspaceApp() {
             "",
         );
 
-        setModal(!signedIn && !claude.connected ? "codex" : saved.length ? null : "new");
+        setModal(!signedIn && !claude.connected ? "chatgpt" : saved.length ? null : "new");
       },
-      () => active && setCodex(null),
+      () => active && setChatGPT(null),
     );
 
     return () => {
@@ -379,7 +379,7 @@ export function WorkspaceApp() {
 
   function newSession() {
     setMobileOpen(false);
-    setModal(codex === false && !anthropic ? "codex" : "new");
+    setModal(chatgpt === false && !anthropic ? "chatgpt" : "new");
   }
 
   async function send(content: string, requestId: string, attachments: readonly Attachment[]) {
@@ -608,10 +608,10 @@ export function WorkspaceApp() {
                   D
                 </span>
                 <h2>
-                  {codex === false && !anthropic ? "Connect a model" : "No workspace selected"}
+                  {chatgpt === false && !anthropic ? "Connect a model" : "No workspace selected"}
                 </h2>
                 <button type="button" className="primary-button" onClick={newSession}>
-                  {codex === false && !anthropic ? "Connect a model" : "New session"}
+                  {chatgpt === false && !anthropic ? "Connect a model" : "New session"}
                 </button>
               </div>
             )}
@@ -631,16 +631,16 @@ export function WorkspaceApp() {
           />
         )}
       </main>
-      {modal === "codex" && (
+      {modal === "chatgpt" && (
         <Modal title="Connect a model" onClose={() => setModal(null)}>
           <h3>ChatGPT subscription</h3>
-          <CodexLogin
+          <ChatGPTLogin
             onConnected={() => {
-              setCodex(true);
+              setChatGPT(true);
               setModal(sessions.length ? null : "new");
             }}
             onCancel={() => {
-              setCodex(false);
+              setChatGPT(false);
               setModal(null);
             }}
           />

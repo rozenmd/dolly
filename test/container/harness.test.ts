@@ -55,7 +55,7 @@ mkdir -p remotes/another-owner
     await state.storage.put("github:connected", {
       app: { id: 42, slug: "fixture", pem, owner: { login: "different-app-owner" } },
     });
-    await state.storage.put("credential:openai-codex", {
+    await state.storage.put("credential:openai", {
       type: "oauth",
       access: `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture" } }))}.signature`,
       refresh: "fixture-refresh",
@@ -112,7 +112,7 @@ mkdir -p remotes/another-owner
         );
       } else return Response.json({ name: "typescript", version: "5.0.0" });
 
-    if (url.hostname === "chatgpt.com") {
+    if (url.hostname === "api.openai.com") {
       if (generation > 0) {
         if (!workingSandboxId) throw new Error("Working sandbox is not configured");
         expect(

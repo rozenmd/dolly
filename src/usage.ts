@@ -11,7 +11,7 @@ import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import type { Credentials } from "./credentials";
 
-/** One rolling subscription limit, e.g. Claude's 5-hour window or Codex's weekly window. */
+/** One rolling subscription limit, e.g. Claude's 5-hour or weekly window. */
 export type UsageWindow = {
   /** Short label: 5h, 7d, Opus, … */
   label: string;
@@ -22,7 +22,7 @@ export type UsageWindow = {
 };
 
 export type ProviderUsage = {
-  providerId: "openai-codex" | "anthropic";
+  providerId: "openai" | "anthropic";
   windows: UsageWindow[];
   /** When these numbers were observed (live fetch or last inference response). */
   observedAt: number;
@@ -36,7 +36,7 @@ export type UsageReport = {
   error?: string;
 };
 
-const PROVIDERS = ["openai-codex", "anthropic"] as const;
+const PROVIDERS = ["openai", "anthropic"] as const;
 const key = (providerId: string) => `usage:${providerId}`;
 
 const clamp = (value: number) => Math.min(100, Math.max(0, value));
@@ -89,27 +89,6 @@ export function anthropicHeaderWindows(headers: Record<string, string>): UsageWi
   return sortWindows(windows);
 }
 
-/** Codex responses carry `x-codex-{primary,secondary}-used-percent` and window/reset headers. */
-export function codexHeaderWindows(headers: Record<string, string>, now: number): UsageWindow[] {
-  const windows: UsageWindow[] = [];
-
-  for (const slot of ["primary", "secondary"] as const) {
-    const used = numeric(headers[`x-codex-${slot}-used-percent`]);
-
-    if (used === null) continue;
-    const minutes = numeric(headers[`x-codex-${slot}-window-minutes`]);
-    const resetAt = numeric(headers[`x-codex-${slot}-reset-at`]);
-    const resetAfter = numeric(headers[`x-codex-${slot}-reset-after-seconds`]);
-    windows.push({
-      label: windowLabel(minutes, slot === "primary" ? "5h" : "7d"),
-      usedPercent: clamp(used),
-      resetsAt: resetTime(resetAt, resetAfter, now),
-    });
-  }
-
-  return windows;
-}
-
 const AnthropicWindow = Schema.Struct({
   utilization: Schema.Finite,
   resets_at: Schema.optional(Schema.NullOr(Schema.String)),
@@ -137,53 +116,6 @@ export function anthropicUsageWindows(body: typeof AnthropicUsage.Type): UsageWi
   return sortWindows(windows);
 }
 
-const OptionalFinite = Schema.optional(Schema.NullOr(Schema.Finite));
-
-const CodexWindow = Schema.Struct({
-  used_percent: Schema.Finite,
-  limit_window_seconds: OptionalFinite,
-  reset_after_seconds: OptionalFinite,
-  reset_at: OptionalFinite,
-});
-
-export const CodexUsage = Schema.Struct({
-  rate_limit: Schema.Struct({
-    primary_window: Schema.optional(Schema.NullOr(CodexWindow)),
-    secondary_window: Schema.optional(Schema.NullOr(CodexWindow)),
-  }),
-});
-
-/** GET chatgpt.com/backend-api/wham/usage: `{ rate_limit: { primary_window, secondary_window } }`. */
-export function codexUsageWindows(body: typeof CodexUsage.Type, now: number): UsageWindow[] {
-  const windows: UsageWindow[] = [];
-
-  for (const slot of ["primary_window", "secondary_window"] as const) {
-    const window = body.rate_limit[slot];
-
-    if (!window) continue;
-    const seconds = window.limit_window_seconds ?? null;
-    const resetAt = window.reset_at ?? null;
-    const resetAfter = window.reset_after_seconds ?? null;
-    windows.push({
-      label: windowLabel(
-        seconds === null ? null : Math.round(seconds / 60),
-        slot === "primary_window" ? "5h" : "7d",
-      ),
-      usedPercent: clamp(window.used_percent),
-      resetsAt: resetTime(resetAt, resetAfter, now),
-    });
-  }
-
-  return windows;
-}
-
-/** An absolute reset (epoch seconds) wins over a relative one (seconds from now). */
-function resetTime(resetAt: number | null, resetAfter: number | null, now: number) {
-  if (resetAt !== null) return resetAt * 1000;
-
-  return resetAfter === null ? null : now + resetAfter * 1000;
-}
-
 /** Shortest windows first, so 5h precedes 7d and model-specific weekly limits come last. */
 function sortWindows(windows: UsageWindow[]) {
   const rank = (label: string) =>
@@ -196,44 +128,19 @@ function sortWindows(windows: UsageWindow[]) {
   return windows.sort((a, b) => rank(a.label) - rank(b.label));
 }
 
-const AccessTokenClaims = Schema.fromJsonString(
-  Schema.Struct({
-    "https://api.openai.com/auth": Schema.optional(
-      Schema.Struct({ chatgpt_account_id: Schema.optional(Schema.String) }),
-    ),
-  }),
-);
-
-/** The ChatGPT account id lives in the access token's `https://api.openai.com/auth` claim. */
-export function chatgptAccountId(accessToken: string): string | null {
-  const payload = accessToken.split(".")[1];
-
-  if (!payload) return null;
-  let json: string;
-
-  try {
-    json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
-  } catch {
-    return null;
-  }
-
-  return Option.match(Schema.decodeUnknownOption(AccessTokenClaims)(json), {
-    onNone: () => null,
-    onSome: (claims) => claims["https://api.openai.com/auth"]?.chatgpt_account_id ?? null,
-  });
-}
-
-/** Remember limits reported on a real inference response; costs no extra requests. */
+/**
+ * Remember limits reported on a real inference response; costs no extra requests. Only Claude
+ * reports them: ChatGPT enforces a connected app's limit without reporting it to the app.
+ */
 export async function recordUsageHeaders(
   storage: DurableObjectStorage,
   providerId: ProviderUsage["providerId"],
   headers: Record<string, string>,
   now = Date.now(),
 ) {
+  if (providerId !== "anthropic") return;
   const lower = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
-
-  const windows =
-    providerId === "anthropic" ? anthropicHeaderWindows(lower) : codexHeaderWindows(lower, now);
+  const windows = anthropicHeaderWindows(lower);
 
   if (windows.length === 0) return;
 
@@ -247,43 +154,17 @@ export async function recordUsageHeaders(
   await storage.put(key(providerId), usage);
 }
 
-async function fetchLive(
-  providerId: ProviderUsage["providerId"],
-  token: string,
-  now: number,
-): Promise<UsageWindow[]> {
-  const signal = AbortSignal.timeout(10_000);
-
-  if (providerId === "anthropic") {
-    const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
-      headers: { authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" },
-      redirect: "manual",
-      signal,
-    });
-
-    if (!response.ok) throw new Error(`Anthropic usage returned HTTP ${response.status}`);
-
-    return anthropicUsageWindows(
-      Schema.decodeUnknownSync(Schema.fromJsonString(AnthropicUsage))(await response.text()),
-    );
-  }
-
-  const headers = new Headers({ authorization: `Bearer ${token}` });
-  const account = chatgptAccountId(token);
-
-  if (account) headers.set("chatgpt-account-id", account);
-
-  const response = await fetch("https://chatgpt.com/backend-api/wham/usage", {
-    headers,
+async function fetchLive(token: string): Promise<UsageWindow[]> {
+  const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
+    headers: { authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" },
     redirect: "manual",
-    signal,
+    signal: AbortSignal.timeout(10_000),
   });
 
-  if (!response.ok) throw new Error(`ChatGPT usage returned HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`Anthropic usage returned HTTP ${response.status}`);
 
-  return codexUsageWindows(
-    Schema.decodeUnknownSync(Schema.fromJsonString(CodexUsage))(await response.text()),
-    now,
+  return anthropicUsageWindows(
+    Schema.decodeUnknownSync(Schema.fromJsonString(AnthropicUsage))(await response.text()),
   );
 }
 
@@ -316,13 +197,14 @@ export async function usageReport(
           : null
         : (credential.key ?? null);
 
-    if (!refresh || !token) {
+    // ChatGPT has no usage endpoint for connected apps; its limits live in ChatGPT's settings.
+    if (!refresh || !token || providerId !== "anthropic") {
       reports.push({ providerId, connected: true, usage: stored });
       continue;
     }
 
     try {
-      const windows = await fetchLive(providerId, token, now);
+      const windows = await fetchLive(token);
 
       if (windows.length === 0) throw new Error("No usage limits reported");
       const usage: ProviderUsage = { providerId, windows, observedAt: now, source: "live" };

@@ -182,7 +182,7 @@ beforeEach(async () => {
       { fullName: "example/project", defaultBranch: "main", private: false, description: null },
     ]);
     await state.storage.put("credential:anthropic", { type: "api_key", key: claudeToken });
-    await state.storage.delete("credential:openai-codex");
+    await state.storage.delete("credential:openai");
     await state.storage.delete("settings:default-model");
   });
 });
@@ -396,7 +396,7 @@ it("falls back to a code task in the default repository when Claude is not conne
   const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.delete("credential:anthropic");
-    await state.storage.put("credential:openai-codex", {
+    await state.storage.put("credential:openai", {
       type: "oauth",
       access,
       refresh: "test-refresh",
@@ -406,7 +406,7 @@ it("falls back to a code task in the default repository when Claude is not conne
   const fetch = vi.mocked(globalThis.fetch);
   const slack = fetch.getMockImplementation();
   fetch.mockImplementation(async (url, init) => {
-    if (new URL(String(url)).hostname !== "chatgpt.com") return slack!(url, init);
+    if (new URL(String(url)).hostname !== "api.openai.com") return slack!(url, init);
 
     const item = {
       type: "message",
