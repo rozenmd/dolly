@@ -31,6 +31,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Predicate from "effect/Predicate";
 import { historyPage, promptIndex, promptWindow } from "./transcript-window";
+import { compactionSettings } from "./compaction";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
 import {
   ConversationWorkspace,
@@ -691,6 +692,7 @@ export class Agent extends DurableObject<Env> {
           settings: {
             extensions: [extension],
             stream: { transport: "sse", timeoutMs: 120_000 },
+            compaction: compactionSettings(models.getModels()),
             // Every waiting steer joins at the next boundary, not one per step.
             steeringMode: "all",
           },

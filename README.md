@@ -232,6 +232,10 @@ The same settings appear in the composer's model menu, with **Set as default** a
   - The switch is written to the transcript.
   - A session never falls back again from the model it fell back to.
 
+### Automatic context compaction
+
+Dolly summarizes older conversation context as it grows, keeping recent messages verbatim and leaving the full transcript intact. It follows [Open Session's compaction policy](https://github.com/tellahq/opensession/blob/main/packages/core/opensession-server/src/server/pi-context.ts): Pi starts blocking compaction above 440,000 context tokens on large-window models, or earlier if the model's window minus Pi's default 16,384-token reserve is smaller. Pi can start a background summary before that point and can compact and retry if the provider rejects the request for exceeding its context window. No session setting or migration is required.
+
 ## Connect GitHub
 
 GitHub authentication runs in the Worker. Each coding conversation can clone GitHub.com repositories accessible to the connected App installations whose user or organization is in your account allowlist. Containers never receive App keys or installation tokens.

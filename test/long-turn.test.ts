@@ -58,7 +58,7 @@ function blockEvents(block: ClaudeBlock, index: number): ClaudeEvent[] {
   ];
 }
 
-function claude(blocks: ClaudeBlock[], stop: "tool_use" | "end_turn") {
+function claude(blocks: ClaudeBlock[], stop: "tool_use" | "end_turn", inputTokens = 10) {
   const events: ClaudeEvent[] = [
     {
       type: "message_start",
@@ -70,7 +70,7 @@ function claude(blocks: ClaudeBlock[], stop: "tool_use" | "end_turn") {
         content: [],
         stop_reason: null,
         stop_sequence: null,
-        usage: { input_tokens: 10, output_tokens: 0 },
+        usage: { input_tokens: inputTokens, output_tokens: 0 },
       },
     },
     ...blocks.flatMap((block, index) => [
@@ -426,3 +426,116 @@ it("keeps the prompt of a live-streamed turn that outgrows the window", async ()
   const { held: scrolled } = await scrollBack(id, last);
   expect(scrolled.entries.map((entry) => entry.id)).toEqual(held.entries.map((entry) => entry.id));
 });
+
+it.each(["threshold", "overflow"])(
+  "automatically compacts on %s without losing the durable transcript",
+  async (trigger) => {
+    const oldest = "Original request: keep the files in src/";
+    const recent = "Recent work to keep verbatim: " + "test fixture ".repeat(2_000).trimEnd();
+    const priorAnswer = "Second answer: " + "more test output ".repeat(2_800).trimEnd();
+    const latest = "Continue the work";
+    const summary = "Checkpoint: the user wants the files kept in src/.";
+
+    const replies = [
+      () => claude([{ type: "text", text: "First answer" }], "end_turn"),
+      // A 1M-window Haiku session should compact just above OpenSession's 440k cap.
+      () =>
+        claude(
+          [{ type: "text", text: priorAnswer }],
+          "end_turn",
+          trigger === "threshold" ? 450_000 : 10,
+        ),
+      ...(trigger === "overflow"
+        ? [
+            () =>
+              Response.json(
+                { error: { type: "invalid_request_error", message: "prompt is too long" } },
+                { status: 400 },
+              ),
+          ]
+        : []),
+      () => claude([{ type: "text", text: summary }], "end_turn"),
+      () => claude([{ type: "text", text: "Continued successfully" }], "end_turn"),
+      () => claude([{ type: "text", text: "Answered after restart" }], "end_turn"),
+    ];
+
+    const requests: string[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      requests.push(
+        await (input instanceof Request ? input.clone() : new Response(init?.body)).text(),
+      );
+
+      return (
+        replies.shift()?.() ??
+        Response.json({ error: { message: "Unexpected request" } }, { status: 400 })
+      );
+    });
+
+    const id = await claudeSession();
+    const url = `https://worker/api/sessions/${id}`;
+    const read = async () => decode(await (await SELF.fetch(url, { headers })).text());
+
+    const waitForAnswer = async (text: string) =>
+      expect
+        .poll(
+          async () => {
+            const snapshot = await read();
+
+            return (
+              !live(snapshot)?.run &&
+              snapshot.entries.some((entry) =>
+                entry.model?.some(
+                  (message) =>
+                    message.role === "assistant" &&
+                    Array.isArray(message.content) &&
+                    message.content.some((block) => block.type === "text" && block.text === text),
+                ),
+              )
+            );
+          },
+          { timeout: 10_000 },
+        )
+        .toBe(true);
+
+    await prompt(id, oldest);
+    await waitForAnswer("First answer");
+    await prompt(id, recent);
+    await waitForAnswer(priorAnswer);
+    expect(requests).toHaveLength(2);
+
+    await prompt(id, latest);
+    await waitForAnswer("Continued successfully");
+    const snapshot = await read();
+
+    expect(live(snapshot)?.runFailure).toBeUndefined();
+    expect(snapshot.entries.filter((entry) => entry.kind === "pi.compaction")).toMatchObject([
+      { data: { reason: trigger } },
+    ]);
+    expect(
+      snapshot.entries.some((entry) => entry.model?.some((message) => message.content === oldest)),
+    ).toBe(true);
+
+    const summaryIndex = trigger === "overflow" ? 3 : 2;
+    expect(requests).toHaveLength(summaryIndex + 2);
+    expect(requests[summaryIndex]).toContain(oldest);
+    expect(requests[summaryIndex]).not.toContain(recent);
+    expect(requests[summaryIndex]).not.toContain(latest);
+    expect(requests[summaryIndex + 1]).toContain(summary);
+    expect(requests[summaryIndex + 1]).toContain(recent);
+    expect(requests[summaryIndex + 1]).toContain(latest);
+    expect(requests[summaryIndex + 1]).not.toContain(oldest);
+
+    await abortAllDurableObjects();
+    await prompt(id, "Resume after restart");
+    await waitForAnswer("Answered after restart");
+    expect(requests).toHaveLength(summaryIndex + 3);
+    expect(requests.at(-1)).not.toContain(oldest);
+    const reopened = await read();
+
+    expect(reopened.entries.find((entry) => entry.kind === "pi.compaction")?.model).toEqual(
+      snapshot.entries.find((entry) => entry.kind === "pi.compaction")?.model,
+    );
+  },
+  30_000,
+);
