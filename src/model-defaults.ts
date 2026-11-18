@@ -13,9 +13,9 @@ import {
   SessionModel,
   Speed,
   ThinkingLevel,
-  fastSupported,
   modelProvider,
 } from "./models";
+import { nextFallbackModel, serviceTier, usageExhausted } from "./model-capabilities";
 
 /** Owner defaults for new sessions, one storage key per setting so each can be reset alone. */
 const KEYS = {
@@ -116,55 +116,68 @@ export const FALLBACK_ENTRY = "dolly.fallback";
 export const sessionMetadataKey = (conversationId: ConversationId) =>
   `session-meta:${conversationId}`;
 
-/**
- * Whether a failed response means the subscription has run out, not that the request hit a
- * passing throttle. ChatGPT reports `subscription_sharing_usage_limit_exceeded`; Claude
- * subscriptions report a usage limit. A plain rate limit is retried instead.
- */
-export function quotaExhausted(message: AssistantMessage) {
-  if (message.stopReason !== "error" || !message.errorMessage) return false;
-
-  return /usage.?limit|limit.?reached|insufficient_quota|quota|out of (?:extra )?usage|credit balance/i.test(
-    message.errorMessage,
-  );
-}
-
 /** Whether Pi retries this failure itself; then the retry simply runs on the new model. */
 export const retriedByPi = (message: AssistantMessage) => isRetryableAssistantError(message);
 
-/**
- * The model a session moves to when `from` runs out: the other subscription, since one
- * subscription's limit covers all of its models. The owner's default is preferred when it is on
- * that subscription. Undefined when the other subscription isn't connected.
- */
-export function fallbackModel(
-  from: string,
-  stored: string | null,
-  connected: { openai: boolean; anthropic: boolean },
-) {
-  const target = modelProvider(from) === "anthropic" ? "openai" : "anthropic";
-
-  if (!connected[target]) return undefined;
-
-  if (stored && modelProvider(stored) === target) return stored;
-
-  return target === "anthropic" ? DEFAULT_CLAUDE_MODEL : DEFAULT_OPENAI_MODEL;
-}
+/** Whether a failed response means `message.model`'s subscription ran out. */
+export const quotaExhausted = (message: AssistantMessage) =>
+  message.stopReason === "error" &&
+  usageExhausted(modelProvider(message.model), message.errorMessage ?? "");
 
 /**
- * Ask OpenAI for priority processing on a fast session. The payload is the Responses API body
- * Pi built; other APIs and standard sessions are left untouched.
+ * The model a session moves to when `from` runs out (opensession's fallback routing). Dolly
+ * has one account per subscription, so a model running out exhausts its whole subscription;
+ * candidates are on the other, connected one. Undefined when nothing qualifies.
  */
+export const fallbackModel = (from: string, connected: { openai: boolean; anthropic: boolean }) =>
+  nextFallbackModel(
+    from,
+    (model) =>
+      Schema.is(SessionModel)(model) &&
+      modelProvider(model) !== modelProvider(from) &&
+      connected[modelProvider(model)],
+  );
+
 /** Pi hands provider hooks the request body untyped; Responses API bodies are JSON objects. */
 export const RequestBody = Schema.Record(Schema.String, Schema.Unknown);
 
-export function prioritized(
+/**
+ * Ask ChatGPT for a faster service tier on a fast or ultrafast session (opensession's
+ * `enableOpenaiFastMode`). Other APIs and standard sessions are left untouched.
+ */
+export function withServiceTier(
   payload: typeof RequestBody.Type,
   api: string,
   model: string,
   speed: Speed | undefined,
+  plan: string | undefined,
 ) {
-  if (speed !== "fast" || !fastSupported(model) || !api.startsWith("openai-")) return undefined;
+  const tier = api.startsWith("openai-") ? serviceTier(speed, model, plan) : undefined;
 
-  return { ...payload, service_tier: "priority" };
+  return tier ? { ...payload, service_tier: tier } : undefined;
+}
+
+/** The ChatGPT plan claim in an access token (`chatgpt_plan_type`), lowercased. */
+export function chatgptPlan(accessToken: string) {
+  const claims = Schema.decodeUnknownOption(
+    Schema.fromJsonString(
+      Schema.Struct({
+        "https://api.openai.com/auth": Schema.optional(
+          Schema.Struct({ chatgpt_plan_type: Schema.optional(Schema.String) }),
+        ),
+      }),
+    ),
+  )(base64UrlDecode(accessToken.split(".")[1] ?? ""));
+
+  return Option.getOrUndefined(claims)?.[
+    "https://api.openai.com/auth"
+  ]?.chatgpt_plan_type?.toLowerCase();
+}
+
+function base64UrlDecode(segment: string) {
+  try {
+    return atob(segment.replace(/-/g, "+").replace(/_/g, "/"));
+  } catch {
+    return "";
+  }
 }

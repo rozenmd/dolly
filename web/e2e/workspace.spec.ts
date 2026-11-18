@@ -238,6 +238,7 @@ test("one composer pill switches the session's model, effort, speed and fallback
     thinkingLevel: "medium",
     speed: "standard",
     autoFallback: true,
+    ultrafastAvailable: false,
   };
 
   await page.route("**/api/**", (route) => {
@@ -399,6 +400,7 @@ test("connects Claude without ChatGPT, explicitly tests Worker inference, and st
           thinkingLevel: "medium",
           speed: "standard",
           autoFallback: true,
+          ultrafastAvailable: false,
         },
       });
 

@@ -6,8 +6,18 @@ import {
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  RocketLaunchIcon,
 } from "@heroicons/react/16/solid";
 import { Picker, type PickerOption } from "./picker";
+import {
+  SPEEDS,
+  ULTRAFAST_PLAN,
+  effectiveSpeed as speedOn,
+  fastSupported,
+  modelEfforts,
+  ultrafastSupported,
+  type Speed,
+} from "../../../src/model-capabilities";
 
 const CHATGPT = "ChatGPT subscription";
 const CLAUDE = "Claude subscription";
@@ -103,14 +113,19 @@ export function ModelPicker({
   );
 }
 
-export const SPEEDS = ["standard", "fast"] as const;
+export { SPEEDS, normalizeEffort, type Speed } from "../../../src/model-capabilities";
 
-export type Speed = (typeof SPEEDS)[number];
+const SPEED_NAMES: Record<Speed, string> = {
+  standard: "Standard",
+  fast: "Fast",
+  ultrafast: "Ultrafast",
+};
 
-/** Fast asks OpenAI for priority processing; Claude subscriptions have no faster tier. */
-export const fastSupported = (model: string) => !model.startsWith("claude-");
+export const speedName = (speed: Speed) => SPEED_NAMES[speed];
 
-export const speedName = (speed: Speed) => (speed === "fast" ? "Fast" : "Standard");
+/** The efforts a model accepts, as picker options; every level for an unknown model. */
+export const effortsFor = (model: string) =>
+  EFFORTS.filter((option) => modelEfforts(model).some((level) => level === option.value));
 
 type List = "model" | "effort" | "speed";
 
@@ -143,6 +158,7 @@ export function ModelControl({
   placement = "below",
   isDefault = false,
   atDefault = false,
+  ultrafastAvailable = false,
   onModel,
   onEffort,
   onSpeed,
@@ -163,6 +179,8 @@ export function ModelControl({
   isDefault?: boolean;
   /** Every setting already matches the defaults, so there is nothing to reset. */
   atDefault?: boolean;
+  /** The ChatGPT login is on the plan that serves Ultrafast (Pro $500). */
+  ultrafastAvailable?: boolean;
   onModel: (model: string) => void;
   onEffort: (level: string) => void;
   onSpeed?: (speed: Speed) => void;
@@ -180,8 +198,8 @@ export function ModelControl({
   const offersDefault = defaultModel !== undefined;
   const resolved = model || defaultModel || "";
   const modelLabel = resolved ? shortModelName(resolved) : "Default";
-  const canFast = !resolved || fastSupported(resolved);
-  const effectiveSpeed: Speed = speed === "fast" && canFast ? "fast" : "standard";
+  const plan = ultrafastAvailable ? ULTRAFAST_PLAN : undefined;
+  const effectiveSpeed = speedOn(speed, resolved, plan);
 
   const models = offersDefault
     ? MODELS.map((option) =>
@@ -195,16 +213,24 @@ export function ModelControl({
       )
     : MODELS.filter((option) => option.value !== "");
 
-  const speeds: (PickerOption & { disabled?: boolean })[] = SPEEDS.map((value) =>
-    value === "fast"
-      ? {
-          value,
-          label: speedName(value),
-          hint: canFast ? "Priority, uses more of your limit" : "ChatGPT models only",
-          disabled: !canFast,
-        }
-      : { value, label: speedName(value) },
-  );
+  // Like opensession, a speed the model or plan can't use isn't offered.
+  const speedHints: Record<Speed, string | undefined> = {
+    standard: fastSupported(resolved) ? undefined : "The only speed for this model",
+    fast: "Priority, uses more of your limit",
+    ultrafast: "Pro $500 only",
+  };
+
+  const speedOffered: Record<Speed, boolean> = {
+    standard: true,
+    fast: fastSupported(resolved),
+    ultrafast: ultrafastSupported(resolved) && ultrafastAvailable,
+  };
+
+  const speeds: PickerOption[] = SPEEDS.filter((value) => speedOffered[value]).map((value) => ({
+    value,
+    label: speedName(value),
+    hint: speedHints[value],
+  }));
 
   const rows: Row[] = [
     {
@@ -249,7 +275,7 @@ export function ModelControl({
 
   const lists: Record<List, (PickerOption & { disabled?: boolean })[]> = {
     model: models,
-    effort: EFFORTS,
+    effort: effortsFor(resolved),
     speed: speeds,
   };
 
@@ -299,8 +325,12 @@ export function ModelControl({
 
     if (view === "model") onModel(option.value);
     else if (view === "effort") onEffort(option.value);
-    else if (view === "speed" && (option.value === "standard" || option.value === "fast"))
-      onSpeed?.(option.value);
+    else if (view === "speed") {
+      const speed = SPEEDS.find((value) => value === option.value);
+
+      if (speed) onSpeed?.(speed);
+    }
+
     close();
   }
 
@@ -365,7 +395,7 @@ export function ModelControl({
         type="button"
         className="picker-trigger"
         aria-label={`Model: ${modelName(resolved || "Default")}, effort: ${effortName(effort)}${
-          effectiveSpeed === "fast" ? ", fast" : ""
+          effectiveSpeed === "standard" ? "" : `, ${speedName(effectiveSpeed).toLowerCase()}`
         }`}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -384,6 +414,9 @@ export function ModelControl({
       >
         {effectiveSpeed === "fast" && (
           <BoltIcon className="model-control-fast" aria-hidden="true" />
+        )}
+        {effectiveSpeed === "ultrafast" && (
+          <RocketLaunchIcon className="model-control-fast" aria-hidden="true" />
         )}
         <span className="model-control-model">{modelLabel}</span>
         <span className="model-control-effort">{effortName(effort)}</span>

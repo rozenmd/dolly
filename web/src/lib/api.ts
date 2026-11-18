@@ -10,6 +10,7 @@ import {
   FallbackNote,
   type RunFailure,
 } from "../../../src/transcript";
+import { SPEEDS, type Speed } from "../../../src/model-capabilities";
 
 export { Snapshot } from "../../../src/transcript";
 
@@ -51,7 +52,7 @@ export const Session = Schema.Struct({
   id: Schema.String,
   model: Schema.String,
   thinkingLevel: Schema.optional(Schema.String),
-  speed: Schema.optional(Schema.Literals(["standard", "fast"])),
+  speed: Schema.optional(Schema.Literals(SPEEDS)),
   autoFallback: Schema.optional(Schema.Boolean),
 });
 
@@ -446,7 +447,7 @@ export type ApiBody = {
   images?: readonly { mimeType: string; data: string }[];
   model?: string | null;
   thinkingLevel?: string | null;
-  speed?: "standard" | "fast" | null;
+  speed?: Speed | null;
   autoFallback?: boolean | null;
   workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] };
   repository?: string;
@@ -472,8 +473,10 @@ export const DefaultModel = Schema.Struct({
   effective: Schema.String,
   /** Effort, speed and auto-fallback new sessions start with. */
   thinkingLevel: Schema.String,
-  speed: Schema.Literals(["standard", "fast"]),
+  speed: Schema.Literals(SPEEDS),
   autoFallback: Schema.Boolean,
+  /** The ChatGPT login is on the plan that serves Ultrafast (Pro $500). */
+  ultrafastAvailable: Schema.Boolean,
 });
 
 export type DefaultModel = typeof DefaultModel.Type;
@@ -482,7 +485,7 @@ export type DefaultModel = typeof DefaultModel.Type;
 export type DefaultModelChange = {
   model?: string | null;
   thinkingLevel?: string | null;
-  speed?: "standard" | "fast" | null;
+  speed?: Speed | null;
   autoFallback?: boolean | null;
 };
 

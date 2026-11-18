@@ -409,7 +409,12 @@ it("saves the owner's default model in Durable Object storage and applies it to 
     });
   });
 
-  const builtIn = { thinkingLevel: "medium", speed: "standard", autoFallback: true };
+  const builtIn = {
+    thinkingLevel: "medium",
+    speed: "standard",
+    autoFallback: true,
+    ultrafastAvailable: false,
+  };
 
   expect(await (await call("/settings/model")).json()).toEqual({
     model: null,

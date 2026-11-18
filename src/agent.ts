@@ -126,11 +126,13 @@ import {
 } from "./self-query";
 import { SlackThreads } from "./slack-inbox";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { normalizeEffort, ULTRAFAST_PLAN } from "./model-capabilities";
 import {
   defaultsView,
   effectiveDefaultModel,
   fallbackModel,
-  prioritized,
+  withServiceTier,
+  chatgptPlan,
   quotaExhausted,
   readDefaults,
   RequestBody,
@@ -593,16 +595,19 @@ export class Agent extends DurableObject<Env> {
             return { messages: await resolveImages(this.env.SCREENSHOTS, messages) };
           },
           beforeProviderRequest: async ({ model, payload }, api) => {
-            // A fast session asks OpenAI for priority processing (models.ts `Speed`).
+            // A fast session asks ChatGPT for a faster service tier (model-capabilities.ts).
             const metadata = await this.ctx.storage.get<SessionMetadata>(
               sessionMetadataKey(api.conversationId),
             );
 
+            if (!metadata?.speed || metadata.speed === "standard") return undefined;
+
             const body = Option.getOrUndefined(Schema.decodeUnknownOption(RequestBody)(payload));
+            const plan = metadata.speed === "ultrafast" ? await this.chatgptPlan() : undefined;
 
-            const fast = body && prioritized(body, model.api, model.id, metadata?.speed);
+            const tiered = body && withServiceTier(body, model.api, model.id, metadata.speed, plan);
 
-            return fast ? { payload: fast } : undefined;
+            return tiered ? { payload: tiered } : undefined;
           },
           afterResponse: async (message, api) => {
             if (message.stopReason !== "error") return;
@@ -692,10 +697,14 @@ export class Agent extends DurableObject<Env> {
           conversationCreated: async (tx, conversation) => {
             await indexSession(tx, conversation.id);
             const defaults = await readDefaults(this.ctx.storage);
+            const modelId = chatgptDefaultModel(defaults.model);
             await configure(tx, conversation.id, {
               // Only GitHub intake creates conversations without a model; it requires ChatGPT.
-              model: { provider: "openai", modelId: chatgptDefaultModel(defaults.model) },
-              thinkingLevel: defaults.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
+              model: { provider: "openai", modelId },
+              thinkingLevel: normalizeEffort(
+                modelId,
+                defaults.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
+              ),
               tools,
             });
           },
@@ -1605,8 +1614,20 @@ export class Agent extends DurableObject<Env> {
     const claude = yield* this.credentials.get("anthropic");
     const stored = yield* this.storedDefaults();
 
-    return defaultsView(stored, Option.isSome(chatgpt), Option.isSome(claude));
+    return {
+      ...defaultsView(stored, Option.isSome(chatgpt), Option.isSome(claude)),
+      ultrafastAvailable: (yield* Effect.promise(() => this.chatgptPlan())) === ULTRAFAST_PLAN,
+    };
   });
+
+  /** The signed-in ChatGPT plan; Ultrafast needs Pro $500 ("promax"). */
+  private async chatgptPlan() {
+    const credential = Option.getOrUndefined(
+      await Effect.runPromise(this.credentials.get("openai")).catch(() => Option.none()),
+    );
+
+    return credential?.type === "oauth" ? chatgptPlan(credential.access) : undefined;
+  }
 
   /** The owner's defaults for new sessions: model, effort, speed and auto-fallback. */
   defaultModel() {
@@ -1650,7 +1671,7 @@ export class Agent extends DurableObject<Env> {
 
       if (!enabled || metadata?.fellBackTo === message.model) return;
 
-      const to = fallbackModel(message.model, defaults.model, {
+      const to = fallbackModel(message.model, {
         openai: Option.isSome(yield* this.credentials.get("openai")),
         anthropic: Option.isSome(yield* this.credentials.get("anthropic")),
       });
@@ -1663,9 +1684,15 @@ export class Agent extends DurableObject<Env> {
 
       if (!conversation) return;
 
+      const agent = yield* attempt("session.model", () => conversation.agent(BACKGROUND_CONTEXT));
+
       yield* attempt("pi.session.configure", () =>
         conversation.configure(
-          { model: { provider: modelProvider(to), modelId: to } },
+          {
+            model: { provider: modelProvider(to), modelId: to },
+            // Keep the session's effort where the new model accepts it.
+            thinkingLevel: normalizeEffort(to, agent.thinkingLevel),
+          },
           BACKGROUND_CONTEXT,
         ),
       );
@@ -1742,15 +1769,30 @@ export class Agent extends DurableObject<Env> {
             };
         }
 
+        // Effort follows what the (new) model accepts: unsupported levels become High.
+        const level =
+          model !== undefined || thinkingLevel !== undefined
+            ? yield* attempt("session.model", () =>
+                conversation.value.agent(BACKGROUND_CONTEXT),
+              ).pipe(
+                Effect.map((agent) =>
+                  normalizeEffort(
+                    model ?? agent.model?.modelId ?? "",
+                    thinkingLevel ?? agent.thinkingLevel,
+                  ),
+                ),
+              )
+            : undefined;
+
         // Applies from the next model request; a running turn keeps its current request.
-        if (model !== undefined || thinkingLevel !== undefined)
+        if (level !== undefined)
           yield* attempt("pi.session.configure", () =>
             conversation.value.configure(
               {
                 ...(model !== undefined && {
                   model: { provider: modelProvider(model), modelId: model },
                 }),
-                ...(thinkingLevel !== undefined && { thinkingLevel }),
+                thinkingLevel: level,
               },
               BACKGROUND_CONTEXT,
             ),
@@ -1766,7 +1808,7 @@ export class Agent extends DurableObject<Env> {
 
         return {
           ...(model !== undefined && { model }),
-          ...(thinkingLevel !== undefined && { thinkingLevel }),
+          ...(level !== undefined && { thinkingLevel: level }),
           ...(speed !== undefined && { speed }),
           ...(autoFallback !== undefined && { autoFallback }),
         };
@@ -1788,9 +1830,6 @@ export class Agent extends DurableObject<Env> {
           Option.isSome(claude),
         );
 
-        const thinkingLevel =
-          input.thinkingLevel ?? defaults.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
-
         const speed = input.speed ?? defaults.speed ?? DEFAULT_SPEED;
         const autoFallback = input.autoFallback ?? defaults.autoFallback ?? DEFAULT_AUTO_FALLBACK;
 
@@ -1806,6 +1845,11 @@ export class Agent extends DurableObject<Env> {
         );
 
         const provider = modelProvider(modelId);
+
+        const thinkingLevel = normalizeEffort(
+          modelId,
+          input.thinkingLevel ?? defaults.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
+        );
 
         if (Option.isNone(provider === "anthropic" ? claude : chatgpt))
           return {

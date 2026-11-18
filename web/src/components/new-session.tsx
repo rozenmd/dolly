@@ -10,7 +10,7 @@ import {
 } from "../lib/api";
 import { Modal, Textarea } from "./ui";
 import { ArrowUturnLeftIcon } from "@heroicons/react/16/solid";
-import { DEFAULT_EFFORT, ModelControl, type Speed } from "./model-select";
+import { DEFAULT_EFFORT, ModelControl, normalizeEffort, type Speed } from "./model-select";
 import { RepositoryPicker } from "./repositories";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import { imagesBody, type Attachment } from "../lib/images";
@@ -38,7 +38,13 @@ export function NewSessionComposer({
   const [chosenEffort, setEffort] = useState<string | null>(initial.thinkingLevel ?? null);
   const [chosenSpeed, setSpeed] = useState<Speed | null>(null);
   const [chosenFallback, setAutoFallback] = useState<boolean | null>(null);
-  const effort = chosenEffort ?? defaults?.thinkingLevel ?? DEFAULT_EFFORT;
+
+  // Shown and sent as the model accepts it: an unsupported level becomes High.
+  const effort = normalizeEffort(
+    model || defaults?.effective || "",
+    chosenEffort ?? defaults?.thinkingLevel ?? DEFAULT_EFFORT,
+  );
+
   const speed = chosenSpeed ?? defaults?.speed ?? "standard";
   const autoFallback = chosenFallback ?? defaults?.autoFallback ?? true;
 
@@ -212,6 +218,7 @@ export function NewSessionComposer({
             onModel={setModel}
             onEffort={setEffort}
             onSpeed={setSpeed}
+            ultrafastAvailable={defaults?.ultrafastAvailable ?? false}
             onAutoFallback={setAutoFallback}
             onSetDefault={() =>
               void defaultModel({

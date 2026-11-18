@@ -309,7 +309,7 @@ function DefaultModelSetting() {
           className="model-picker"
           align="end"
           value={setting?.thinkingLevel ?? ""}
-          options={EFFORTS}
+          options={EFFORTS.filter((option) => option.value !== "minimal")}
           disabled={!setting || pending}
           onChange={(thinkingLevel) =>
             save({ thinkingLevel }, "Could not save the default effort.")
@@ -320,7 +320,9 @@ function DefaultModelSetting() {
       <div className="connection-row">
         <span className="connection-label">
           Default speed
-          <span className="muted">Fast uses priority processing on ChatGPT models</span>
+          <span className="muted">
+            Faster ChatGPT service tiers; Claude models always run at standard speed
+          </span>
         </span>
         <Picker
           id="default-speed"
@@ -328,11 +330,15 @@ function DefaultModelSetting() {
           className="model-picker"
           align="end"
           value={setting?.speed ?? ""}
-          options={SPEEDS.map((value) => ({ value, label: speedName(value) }))}
+          options={SPEEDS.filter(
+            (value) => value !== "ultrafast" || setting?.ultrafastAvailable,
+          ).map((value) => ({ value, label: speedName(value) }))}
           disabled={!setting || pending}
-          onChange={(speed) =>
-            save({ speed: speed === "fast" ? "fast" : "standard" }, "Could not save the speed.")
-          }
+          onChange={(value) => {
+            const speed = SPEEDS.find((option) => option === value);
+
+            if (speed) save({ speed }, "Could not save the speed.");
+          }}
           trigger={<span>{setting ? speedName(setting.speed) : "…"}</span>}
         />
       </div>

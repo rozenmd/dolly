@@ -106,6 +106,7 @@ it("saves default effort, speed and auto-fallback and starts new sessions with t
     thinkingLevel: "high",
     speed: "fast",
     autoFallback: false,
+    ultrafastAvailable: false,
   });
 
   const invalid: Body[] = [
@@ -163,6 +164,7 @@ it("saves default effort, speed and auto-fallback and starts new sessions with t
     thinkingLevel: "medium",
     speed: "standard",
     autoFallback: true,
+    ultrafastAvailable: false,
   });
   expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({
     thinkingLevel: "medium",
@@ -171,7 +173,11 @@ it("saves default effort, speed and auto-fallback and starts new sessions with t
   });
 });
 
-it("asks OpenAI for priority processing only for fast sessions", async () => {
+/** A ChatGPT access token on `plan` (opensession reads `chatgpt_plan_type` from it). */
+const tokenOn = (plan?: string) =>
+  `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account", ...(plan && { chatgpt_plan_type: plan }) }, exp: 9_999_999_999 })).replace(/=+$/, "")}.signature`;
+
+it("sends ChatGPT's service tier for the session's speed, model and plan", async () => {
   const tiers: (string | undefined)[] = [];
 
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
@@ -186,8 +192,9 @@ it("asks OpenAI for priority processing only for fast sessions", async () => {
     return Response.json({ error: { message: "Model unavailable" } }, { status: 400 });
   });
 
-  for (const speed of ["fast", "standard"]) {
-    const { id } = await (await call("/sessions", "POST", { speed })).json<{ id: string }>();
+  const send = async (model: string, speed: string) => {
+    const { id } = await (await call("/sessions", "POST", { model, speed })).json<{ id: string }>();
+    const before = tiers.length;
 
     const sent = await call(`/sessions/${id}/messages`, "POST", {
       content: "hi",
@@ -195,10 +202,63 @@ it("asks OpenAI for priority processing only for fast sessions", async () => {
     });
 
     expect(sent.status).toBe(202);
-    await expect.poll(() => tiers.length, { timeout: 4000 }).toBe(speed === "fast" ? 1 : 2);
-  }
+    await expect.poll(() => tiers.length, { timeout: 4000 }).toBe(before + 1);
 
-  expect(tiers).toEqual(["priority", undefined]);
+    return tiers.at(-1);
+  };
+
+  expect(await (await call("/settings/model")).json()).toMatchObject({ ultrafastAvailable: false });
+  expect(await send("gpt-6-luna", "standard")).toBeUndefined();
+  expect(await send("gpt-6-luna", "fast")).toBe("priority");
+  // gpt-5.5's backend doesn't take the priority tier.
+  expect(await send("gpt-5.5", "fast")).toBeUndefined();
+  // Ultrafast needs a Pro $500 login; short of it the session runs Fast.
+  expect(await send("gpt-6.2-sol", "ultrafast")).toBe("priority");
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("credential:openai", {
+      type: "oauth",
+      access: tokenOn("promax"),
+      refresh: "test-refresh",
+      expires: Date.now() + 3_600_000,
+    });
+  });
+
+  expect(await (await call("/settings/model")).json()).toMatchObject({ ultrafastAvailable: true });
+  expect(await send("gpt-6.2-sol", "ultrafast")).toBe("ultrafast");
+  // Only Astra and Sol serve Ultrafast; Luna runs Fast.
+  expect(await send("gpt-6-luna", "ultrafast")).toBe("priority");
+}, 30_000);
+
+it("keeps each session's effort to what its model accepts", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("credential:anthropic", { type: "api_key", key: "test-claude-key" });
+  });
+
+  // Claude has no "none"; an unsupported level becomes High.
+  const claude = await (
+    await call("/sessions", "POST", { model: "claude-opus-5-5", thinkingLevel: "off" })
+  ).json<Listed>();
+
+  expect(claude.thinkingLevel).toBe("high");
+
+  // GPT-6 Luna accepts none; GPT-6.2 Sol rejects it, so switching model moves it to High.
+  const luna = await (
+    await call("/sessions", "POST", { model: "gpt-6-luna", thinkingLevel: "off" })
+  ).json<Listed>();
+
+  expect(luna.thinkingLevel).toBe("off");
+
+  const switched = await call(`/sessions/${luna.id}/settings`, "PUT", { model: "gpt-6.2-sol" });
+  expect(await switched.json()).toEqual({ model: "gpt-6.2-sol", thinkingLevel: "high" });
+  expect(await listed(luna.id)).toMatchObject({ model: "gpt-6.2-sol", thinkingLevel: "high" });
+
+  // A saved default effort the default model doesn't take is normalized the same way.
+  await call("/settings/model", "PUT", { model: "gpt-6.2-sol", thinkingLevel: "off" });
+  expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({
+    model: "gpt-6.2-sol",
+    thinkingLevel: "high",
+  });
 });
 
 it("switches to the other subscription when usage runs out and finishes the turn there", async () => {
@@ -242,10 +302,11 @@ it("switches to the other subscription when usage runs out and finishes the turn
 
   const snapshot = await read(id);
   const note = snapshot.entries.find((entry) => entry.kind === "dolly.fallback");
-  expect(note?.data).toMatchObject({ from: "gpt-6-sol", to: "claude-sonnet-5-5" });
+  // opensession's routing: Opus is the first equal-tier destination on the other subscription.
+  expect(note?.data).toMatchObject({ from: "gpt-6-sol", to: "claude-opus-5-5" });
   expect(Schema.decodeUnknownSync(Live)(snapshot.docs["pi.live"]).runFailure).toBeUndefined();
   expect(hosts).toEqual(["api.openai.com", "api.anthropic.com"]);
-  expect(await listed(id)).toMatchObject({ model: "claude-sonnet-5-5" });
+  expect(await listed(id)).toMatchObject({ model: "claude-opus-5-5" });
 }, 30_000);
 
 it("stays on the exhausted model when auto-fallback is off, and never bounces back", async () => {
@@ -264,7 +325,10 @@ it("stays on the exhausted model when auto-fallback is off, and never bounces ba
       : Response.json(
           {
             type: "error",
-            error: { type: "invalid_request_error", message: "usage limit reached" },
+            error: {
+              type: "invalid_request_error",
+              message: "You've hit your session limit · resets 12:50pm (UTC)",
+            },
           },
           { status: 400 },
         );
@@ -298,5 +362,5 @@ it("stays on the exhausted model when auto-fallback is off, and never bounces ba
   // Claude ran out too, but the session fell back to it, so it doesn't switch back.
   await new Promise((resolve) => setTimeout(resolve, 500));
   expect(hosts).toEqual(["api.openai.com", "api.anthropic.com"]);
-  expect(await listed(on.id)).toMatchObject({ model: "claude-sonnet-5-5" });
+  expect(await listed(on.id)).toMatchObject({ model: "claude-opus-5-5" });
 }, 30_000);

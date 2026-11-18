@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { WorkspaceInput } from "./workspace";
+import { SPEEDS } from "./model-capabilities";
 
 /**
  * Models that Sign in with ChatGPT tokens may call on api.openai.com. Pi's OpenAI catalog owns
@@ -44,20 +45,12 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export const ThinkingLevel = Schema.Literals(THINKING_LEVELS);
 export const DEFAULT_THINKING_LEVEL = "medium";
 
-/**
- * How fast a session's model answers. `fast` asks OpenAI for priority processing, which answers
- * sooner and draws down the ChatGPT limit faster; Claude subscriptions have no such tier, so a
- * Claude model always runs at standard speed.
- */
-export const SPEEDS = ["standard", "fast"] as const;
+/** Session speeds (model-capabilities.ts): Fast and Ultrafast are ChatGPT service tiers. */
 export const Speed = Schema.Literals(SPEEDS);
 
 export type Speed = typeof Speed.Type;
 
 export const DEFAULT_SPEED: Speed = "standard";
-
-/** Whether `speed: "fast"` changes anything for a model. */
-export const fastSupported = (model: string) => modelProvider(model) === "openai";
 
 /** Sessions switch to the other subscription when theirs runs out unless the owner turns it off. */
 export const DEFAULT_AUTO_FALLBACK = true;

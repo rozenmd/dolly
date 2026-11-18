@@ -14,7 +14,12 @@ import { IconButton, Input, Modal, RepoBadge } from "./components/ui";
 import { ChatGPTLogin } from "./components/chatgpt-login";
 import { GitHubSetup, GitHubSignIn } from "./components/github";
 import { NewSessionComposer } from "./components/new-session";
-import { DEFAULT_EFFORT, ModelControl, type Speed } from "./components/model-select";
+import {
+  DEFAULT_EFFORT,
+  ModelControl,
+  normalizeEffort,
+  type Speed,
+} from "./components/model-select";
 import { AnthropicConnection } from "./components/anthropic";
 import {
   authState,
@@ -522,7 +527,15 @@ export function WorkspaceApp() {
         placement="above"
         isDefault={atDefault}
         atDefault={atDefault}
-        onModel={(model) => void configure({ model })}
+        onModel={(model) => {
+          // Keep the effort where the new model accepts it, as the server does.
+          const level = normalizeEffort(model, settings.thinkingLevel);
+
+          void configure(
+            level === settings.thinkingLevel ? { model } : { model, thinkingLevel: level },
+          );
+        }}
+        ultrafastAvailable={defaults?.ultrafastAvailable ?? false}
         onEffort={(thinkingLevel) => void configure({ thinkingLevel })}
         onSpeed={(speed) => void configure({ speed })}
         onAutoFallback={(autoFallback) => void configure({ autoFallback })}
