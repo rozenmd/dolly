@@ -52,6 +52,9 @@ function makeAgentApi(env: Env) {
     history: Effect.fn("AgentApi.history")((id: string, through: number, limit: number) =>
       rpc("agent.history", async () => await agent.history(id, through, limit)),
     ),
+    prompts: Effect.fn("AgentApi.prompts")((id: string, through: number) =>
+      rpc("agent.prompts", async () => await agent.prompts(id, through)),
+    ),
     prompt: Effect.fn("AgentApi.prompt")(
       (id: string, content: string, requestId: string, images?: readonly PromptImage[]) =>
         rpc("agent.prompt", async () => await agent.prompt(id, content, requestId, images)),

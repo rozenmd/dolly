@@ -3,6 +3,7 @@ import * as Option from "effect/Option";
 import {
   Block,
   HistoryPage,
+  PromptIndex,
   Message,
   Snapshot,
   Live,
@@ -529,6 +530,17 @@ export async function historyPage(session: string, through: number, signal?: Abo
       signal,
     ),
   );
+}
+
+/** Every prompt at or before `through`, oldest first: the rail's marks for turns not yet loaded. */
+export async function promptIndex(session: string, through: number, signal?: AbortSignal) {
+  return Schema.decodeUnknownSync(Schema.fromJsonString(PromptIndex))(
+    await request(
+      `/sessions/${encodeURIComponent(session)}/prompts?through=${through}`,
+      undefined,
+      signal,
+    ),
+  ).prompts;
 }
 
 export async function authState() {

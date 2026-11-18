@@ -610,6 +610,31 @@ app.get("/api/sessions/:id/history", (c) =>
   ),
 );
 
+const PromptsQuery = Schema.Struct({
+  through: Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+});
+
+/** Every prompt at or before a view's window, so the conversation's rail can reach turns not yet loaded. */
+app.get("/api/sessions/:id/prompts", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const query = yield* Schema.decodeUnknownEffect(PromptsQuery)(c.req.query()).pipe(
+        Effect.mapError(
+          () => new InvalidInput({ message: "Expected a non-negative integer through" }),
+        ),
+      );
+
+      const agent = yield* AgentApi;
+      const result = yield* agent.prompts(c.req.param("id"), query.through);
+
+      return result
+        ? c.body(result, 200, { "Content-Type": "application/json" })
+        : c.json({ error: "Session not found" }, 404);
+    }),
+  ),
+);
+
 app.get("/api/sessions/:id", (c) =>
   handle(
     c,

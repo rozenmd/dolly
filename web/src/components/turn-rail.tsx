@@ -94,6 +94,8 @@ export function TurnRail({
   marks,
   containerRef,
   leaveLatest,
+  seeking,
+  onSeek,
   now,
 }: {
   marks: readonly RailMark[];
@@ -101,6 +103,10 @@ export function TurnRail({
   containerRef: RefObject<HTMLDivElement | null>;
   /** Moving into history is intent: stop following new output. */
   leaveLatest: () => void;
+  /** A mark whose turn is still loading: the rail jumps there once it is in the conversation. */
+  seeking?: string;
+  /** Asks for a mark's turn to be loaded (the conversation fetches earlier messages), or stops asking. */
+  onSeek: (id: string | undefined) => void;
   now: number;
 }) {
   const rail = useRef<HTMLButtonElement>(null);
@@ -229,18 +235,35 @@ export function TurnRail({
 
   /* Jumping: instant, then corrected while content above the turn finishes laying out. */
 
+  function turnNode(id: string) {
+    return containerRef.current?.querySelector<HTMLElement>(`[data-turn="${CSS.escape(id)}"]`);
+  }
+
   function jump(index: number) {
-    const element = containerRef.current;
     const mark = latest.current[index];
 
-    if (!element || !mark) return;
+    if (!mark) return;
     // First, so the scroll about to happen is not mistaken for the reader returning to the live edge.
     leaveLatest();
 
-    const selector = `[data-turn="${CSS.escape(mark.id)}"]`;
+    // Not loaded yet: the conversation fetches back to it, and the effect below lands there.
+    if (!turnNode(mark.id)) {
+      onSeek(mark.id);
+
+      return;
+    }
+
+    onSeek(undefined);
+    land(mark.id);
+  }
+
+  function land(id: string) {
+    const element = containerRef.current;
+
+    if (!element) return;
 
     const settle = () => {
-      const target = element.querySelector<HTMLElement>(selector);
+      const target = turnNode(id);
 
       if (!target) return true;
 
@@ -265,6 +288,16 @@ export function TurnRail({
 
     correct();
   }
+
+  // After each page of earlier messages lands (and the conversation has kept the reader's place), check
+  // whether the turn being reached for has arrived.
+  useEffect(() => {
+    if (seeking === undefined || !turnNode(seeking)) return;
+
+    onSeek(undefined);
+    leaveLatest();
+    land(seeking);
+  });
 
   function show(next: boolean, delay: number) {
     window.clearTimeout(timer.current);
@@ -313,6 +346,7 @@ export function TurnRail({
         type="button"
         className="turn-rail"
         aria-label="Jump to a message"
+        aria-busy={seeking !== undefined || undefined}
         style={{ left: RAIL_EDGE, width: RAIL_W, height: boxH }}
         onPointerEnter={(event) => {
           if (event.pointerType === "touch") return;
@@ -369,6 +403,7 @@ export function TurnRail({
               aria-hidden="true"
               className="turn-tick"
               data-current={here || undefined}
+              data-seeking={mark.id === seeking || undefined}
               style={{
                 top: tickY(index) - TICK_MAX_H / 2,
                 width: TICK_MAX_W,

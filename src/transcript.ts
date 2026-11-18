@@ -68,3 +68,16 @@ export const HistoryPage = Schema.Struct({
   entries: Snapshot.fields.entries,
   before: Schema.optional(Schema.Number),
 });
+
+/** Every prompt before a view's window, oldest first, with the opening of each answer. */
+export const PromptIndex = Schema.Struct({
+  prompts: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      text: Schema.String,
+      at: Schema.optional(Schema.Number),
+      images: Schema.optional(Schema.Number),
+      reply: Schema.optional(Schema.String),
+    }),
+  ),
+});

@@ -35,7 +35,7 @@ import { ago, duration } from "../lib/time";
 import { formatToolOutput, oneLine } from "../lib/tool-output";
 import { IconButton, Textarea } from "./ui";
 import { TurnRail } from "./turn-rail";
-import { railMarks } from "../lib/turn-rail";
+import { markEntry, railMarks, wholeRail, type RailMark } from "../lib/turn-rail";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import type { Attachment } from "../lib/images";
 import {
@@ -73,7 +73,10 @@ export type OlderHistory = {
   before?: number;
   loading: boolean;
   error: string;
-  load: () => void;
+  /** Loads the next page back, or every page back to `until` (an entry ID) when given. */
+  load: (until?: number) => void;
+  /** Rail marks for the prompts not loaded yet, oldest first, when the server has indexed them. */
+  index?: readonly RailMark[];
 };
 
 /** How close to the top, in pixels, scrolling back starts loading earlier messages. */
@@ -102,14 +105,23 @@ export function Conversation({
   const olderLoading = older?.loading ?? false;
   const olderError = Boolean(older?.error);
 
-  function loadOlder() {
+  function loadOlder(until?: number) {
     if (scroll.current && before !== undefined)
       anchor.current = { before, height: scroll.current.scrollHeight };
-    load.current?.();
+    load.current?.(until);
   }
 
   const [now, setNow] = useState(Date.now);
-  const marks = useMemo(() => railMarks(turns), [turns]);
+  const index = older?.index;
+
+  const marks = useMemo(
+    () => wholeRail(index ?? [], railMarks(turns), before),
+    [index, turns, before],
+  );
+
+  /** A rail mark whose turn isn't loaded yet: earlier messages load until it is, then the rail jumps there. */
+  const [seeking, setSeeking] = useState<string>();
+
   const running = turns.some((turn) => turn.running);
   const [sessions] = useState(() => new Map<string, Map<string, boolean>>());
   const choices = sessions.get(sessionId) ?? new Map<string, boolean>();
@@ -126,7 +138,24 @@ export function Conversation({
 
   useLayoutEffect(() => {
     pinned.current = true;
+    setSeeking(undefined);
   }, [sessionId]);
+
+  // Fetch back to the turn the rail is reaching for, one request at a time; a failure waits for Retry.
+  useEffect(() => {
+    if (seeking === undefined) return;
+
+    const entry = markEntry(seeking);
+
+    if (entry === undefined || before === undefined || entry > before) {
+      // Loaded (the rail has jumped), or nothing more to load.
+      setSeeking(undefined);
+
+      return;
+    }
+
+    if (!olderLoading && !olderError) loadOlder(entry);
+  }, [seeking, before, olderLoading, olderError]);
   useLayoutEffect(() => {
     load.current = older?.load;
   });
@@ -184,14 +213,14 @@ export function Conversation({
               {older.error ? (
                 <p role="alert">
                   {older.error}{" "}
-                  <button type="button" onClick={loadOlder}>
+                  <button type="button" onClick={() => loadOlder(seekingEntry(seeking))}>
                     Retry
                   </button>
                 </p>
               ) : olderLoading ? (
                 <p role="status">Loading earlier messages…</p>
               ) : (
-                <button type="button" onClick={loadOlder}>
+                <button type="button" onClick={() => loadOlder()}>
                   Show earlier messages
                 </button>
               )}
@@ -224,10 +253,16 @@ export function Conversation({
         leaveLatest={() => {
           pinned.current = false;
         }}
+        seeking={seeking}
+        onSeek={setSeeking}
         now={now}
       />
     </div>
   );
+}
+
+function seekingEntry(seeking: string | undefined) {
+  return seeking === undefined ? undefined : markEntry(seeking);
 }
 
 function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number } & ThreadLookup) {

@@ -62,10 +62,27 @@ function transcript(turns: number, paragraphs: number) {
   return entries;
 }
 
+/**
+ * Opens a session of `turns` prompts. With `window`, the live view holds only its newest `window` entries,
+ * as a long session's does: earlier ones come from the history and prompt-index routes, which record what
+ * they were asked for.
+ */
 async function open(
   page: Page,
-  { turns, paragraphs, width = 1280 }: { turns: number; paragraphs: number; width?: number },
+  {
+    turns,
+    paragraphs,
+    width = 1280,
+    window,
+  }: { turns: number; paragraphs: number; width?: number; window?: number },
 ) {
+  const entries = transcript(turns, paragraphs);
+  const shown = window === undefined ? entries : entries.slice(-window);
+  const before = window === undefined ? undefined : shown[0]!.id - 1;
+  const history: number[] = [];
+  const prompts: number[] = [];
+  const asked = { history, prompts };
+
   await page.setViewportSize({ width, height: 800 });
   await page.addInitScript(() =>
     localStorage.setItem(
@@ -75,16 +92,56 @@ async function open(
       ]),
     ),
   );
-  await page.route("**/api/**", (route) =>
-    new URL(route.request().url()).pathname === "/api/auth"
-      ? route.fulfill({ json: signedIn })
-      : route.fulfill({ json: { state: "connected" } }),
-  );
+  await page.route("**/api/**", (route) => {
+    const url = new URL(route.request().url());
+    const through = Number(url.searchParams.get("through"));
+
+    if (url.pathname === "/api/auth") return route.fulfill({ json: signedIn });
+
+    // Small pages, so reaching the first turn takes several.
+    if (url.pathname === "/api/sessions/rail/history") {
+      asked.history.push(through);
+      const older = entries.filter((entry) => entry.id <= through);
+      const next = older.at(-5);
+
+      return route.fulfill({
+        json: next ? { entries: older.slice(-4), before: next.id } : { entries: older.slice(-4) },
+      });
+    }
+
+    if (url.pathname === "/api/sessions/rail/prompts") {
+      asked.prompts.push(through);
+
+      const prompts = entries.flatMap((entry) => {
+        const message = entry.model[0]!;
+
+        if (entry.id > through || message.role !== "user") return [];
+
+        const turn = Number(String(message.content).replace("Prompt ", ""));
+
+        return [
+          {
+            id: `${entry.id}-0`,
+            text: String(message.content),
+            at: message.timestamp,
+            reply: `Answer ${turn}, line 0.`,
+          },
+        ];
+      });
+
+      return route.fulfill({ json: { prompts } });
+    }
+
+    return route.fulfill({ json: { state: "connected" } });
+  });
   await page.routeWebSocket("**/api/sessions/rail/events", (socket) =>
-    socket.send(JSON.stringify({ entries: transcript(turns, paragraphs), docs: {} })),
+    // JSON drops an undefined `before`: a window holding the whole session.
+    socket.send(JSON.stringify({ entries: shown, before, docs: {} })),
   );
   await page.goto("/", { waitUntil: "networkidle" });
   await expect(page.getByText(`Prompt ${turns - 1}`, { exact: true })).toBeVisible();
+
+  return asked;
 }
 
 const rail = (page: Page) => page.getByRole("button", { name: "Jump to a message" });
@@ -116,7 +173,10 @@ const turnOffset = (page: Page, prompt: string) =>
       (node) => node.textContent === text,
     );
 
-    return Math.round(bubble!.closest(".turn")!.getBoundingClientRect().top - scroll.top);
+    // Not rendered yet (a turn still loading): far from anywhere it could be parked.
+    if (!bubble) return 1e9;
+
+    return Math.round(bubble.closest(".turn")!.getBoundingClientRect().top - scroll.top);
   }, prompt);
 
 const preview = (page: Page) =>
@@ -193,4 +253,44 @@ test("stays out of the way when there is nowhere to jump", async ({ page }) => {
 test("is hidden at phone widths", async ({ page }) => {
   await open(page, { turns: 8, paragraphs: 12, width: 390 });
   await expect(rail(page)).not.toBeVisible();
+});
+
+test("reaches back to the first prompt of a session whose start isn't loaded yet", async ({
+  page,
+}) => {
+  // 12 turns; the live window holds only the last three, and nothing earlier has loaded.
+  const asked = await open(page, { turns: 12, paragraphs: 20, window: 6 });
+  await expect(page.locator(".prompt-bubble").filter({ hasText: "Prompt 0" })).toHaveCount(0);
+
+  // Every prompt is on the rail, indexed by the server up to the window.
+  await expect(rail(page)).toBeVisible();
+  await expect(page.locator(".turn-tick")).toHaveCount(12);
+  expect(asked.prompts).toEqual([asked.prompts[0]]);
+  expect(asked.history).toEqual([]);
+
+  // The first tick previews the first turn from the index.
+  const first = await tickPoint(page, 0);
+  await page.session.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...first });
+  await expect.poll(async () => (await preview(page)).includes("Prompt 0")).toBe(true);
+  expect(await preview(page)).toContain("Answer 0, line 0.");
+
+  // Clicking loads every page back to it, then parks it just below the top edge.
+  for (const type of ["mousePressed", "mouseReleased"])
+    await page.session.send("Input.dispatchMouseEvent", {
+      type,
+      ...first,
+      button: "left",
+      clickCount: 1,
+    });
+  await expect
+    .poll(async () => Math.abs((await turnOffset(page, "Prompt 0")) - 20) <= 2)
+    .toBe(true);
+  expect(asked.history.length).toBeGreaterThan(1);
+  expect(asked.history).toEqual([...new Set(asked.history)]);
+
+  // Still one tick per prompt, now from the loaded turns, and the first is the one being read.
+  await page.session.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 700, y: 400 });
+  await expect(page.locator(".turn-tick")).toHaveCount(12);
+  await expect.poll(async () => (await ticks(page)).findIndex((tick) => tick.ink === 1)).toBe(0);
+  await expect(rail(page)).not.toHaveAttribute("aria-busy", "true");
 });
