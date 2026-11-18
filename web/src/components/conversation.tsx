@@ -1,4 +1,4 @@
-import { DEFAULT_EFFORT, EffortPicker, modelName } from "./model-select";
+import { DEFAULT_EFFORT, ModelControl } from "./model-select";
 import {
   createContext,
   useContext,
@@ -697,6 +697,7 @@ export function Composer({
   running,
   model,
   thinkingLevel,
+  onModel,
   onThinkingLevel,
   draftKey,
   queued,
@@ -712,6 +713,7 @@ export function Composer({
   running: boolean;
   model: string;
   thinkingLevel?: string;
+  onModel: (model: string) => void;
   onThinkingLevel: (level: string) => void;
   draftKey: string;
   queued: readonly QueuedMessage[];
@@ -827,13 +829,12 @@ export function Composer({
               count={attachments.length}
               onFiles={(files) => void input.add(files)}
             />
-            <span className="composer-model" title={model}>
-              {modelName(model)}
-            </span>
-            <EffortPicker
-              value={thinkingLevel ?? DEFAULT_EFFORT}
+            <ModelControl
+              model={model}
+              effort={thinkingLevel ?? DEFAULT_EFFORT}
               placement="above"
-              onChange={onThinkingLevel}
+              onModel={onModel}
+              onEffort={onThinkingLevel}
             />
             {running && !content.trim() ? (
               <button

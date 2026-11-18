@@ -565,3 +565,53 @@ it("stores the requested thinking level and changes it for an existing session",
   const plain = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
   expect((await plain.json<{ thinkingLevel: string }>()).thinkingLevel).toBe("medium");
 });
+
+it("switches an existing session's model, refusing providers that aren't connected", async () => {
+  const created = await SELF.fetch("https://worker/api/sessions", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ model: "gpt-6-luna", thinkingLevel: "high" }),
+  });
+
+  expect(created.status).toBe(201);
+  const { id } = await created.json<{ id: string }>();
+
+  const current = async () => {
+    const sessions = await (
+      await SELF.fetch("https://worker/api/sessions", { headers })
+    ).json<{ id: string; model: string; thinkingLevel?: string }[]>();
+
+    const session = sessions.find((item) => item.id === id);
+
+    return { model: session?.model, thinkingLevel: session?.thinkingLevel };
+  };
+
+  const settings = (body: { model?: string; thinkingLevel?: string }, session = id) =>
+    SELF.fetch(`https://worker/api/sessions/${session}/settings`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+  const switched = await settings({ model: "gpt-6-sol" });
+  expect(switched.status).toBe(200);
+  expect(await switched.json()).toEqual({ model: "gpt-6-sol" });
+  expect(await current()).toEqual({ model: "gpt-6-sol", thinkingLevel: "high" });
+
+  const refused = await settings({ model: "claude-opus-5-5" });
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toEqual({ error: "Connect your Claude subscription first" });
+  expect((await settings({ model: "gpt-0-unknown" })).status).toBe(400);
+  expect((await settings({})).status).toBe(400);
+  expect((await settings({ model: "gpt-6-sol" }, "missing")).status).toBe(404);
+  expect(await current()).toEqual({ model: "gpt-6-sol", thinkingLevel: "high" });
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("credential:anthropic", { type: "api_key", key: "test-claude-key" });
+  });
+
+  const both = await settings({ model: "claude-opus-5-5", thinkingLevel: "low" });
+  expect(both.status).toBe(200);
+  await abortAllDurableObjects();
+  expect(await current()).toEqual({ model: "claude-opus-5-5", thinkingLevel: "low" });
+});

@@ -1646,15 +1646,38 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(conversation)) return undefined;
 
+        const { model, thinkingLevel } = settings;
+
+        if (model !== undefined) {
+          const provider = modelProvider(model);
+          const credential = yield* this.credentials.get(provider);
+
+          if (Option.isNone(credential))
+            return {
+              error:
+                provider === "anthropic"
+                  ? "Connect your Claude subscription first"
+                  : "Connect ChatGPT first",
+            };
+        }
+
         // Applies from the next model request; a running turn keeps its current request.
-        yield* attempt("pi.thinking.configure", () =>
+        yield* attempt("pi.session.configure", () =>
           conversation.value.configure(
-            { thinkingLevel: settings.thinkingLevel },
+            {
+              ...(model !== undefined && {
+                model: { provider: modelProvider(model), modelId: model },
+              }),
+              ...(thinkingLevel !== undefined && { thinkingLevel }),
+            },
             BACKGROUND_CONTEXT,
           ),
         );
 
-        return { thinkingLevel: settings.thinkingLevel };
+        return {
+          ...(model !== undefined && { model }),
+          ...(thinkingLevel !== undefined && { thinkingLevel }),
+        };
       }),
     );
   }

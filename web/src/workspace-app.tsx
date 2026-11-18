@@ -427,27 +427,31 @@ export function WorkspaceApp() {
     updateSessions((current) => current.map((item) => (item.id === id ? { ...item, kept } : item)));
   }
 
-  async function setThinkingLevel(level: string) {
+  /** Changes the open session's model or effort; it applies from the next model request. */
+  async function configure(settings: { model: string } | { thinkingLevel: string }) {
     const id = selected;
-    const previous = sessions.find((item) => item.id === id)?.thinkingLevel;
+    const previous = sessions.find((item) => item.id === id);
 
-    const apply = (value: string | undefined) =>
+    if (!previous) return;
+
+    const apply = (value: Partial<SavedSession>) =>
       updateSessions((current) =>
-        current.map((item) => (item.id === id ? { ...item, thinkingLevel: value } : item)),
+        current.map((item) => (item.id === id ? { ...item, ...value } : item)),
       );
 
-    apply(level);
+    apply(settings);
 
     try {
-      await request(
-        `/sessions/${encodeURIComponent(id)}/settings`,
-        { thinkingLevel: level },
-        undefined,
-        "PUT",
-      );
+      await request(`/sessions/${encodeURIComponent(id)}/settings`, settings, undefined, "PUT");
     } catch (cause) {
-      apply(previous);
-      setError(cause instanceof Error ? cause.message : "Could not change thinking effort.");
+      apply({ model: previous.model, thinkingLevel: previous.thinkingLevel });
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "model" in settings
+            ? "Could not change the model."
+            : "Could not change thinking effort.",
+      );
     }
   }
 
@@ -680,7 +684,8 @@ export function WorkspaceApp() {
                   onSteerQueued={(id) => void steerQueued(id)}
                   model={session.model}
                   thinkingLevel={session.thinkingLevel}
-                  onThinkingLevel={(level) => void setThinkingLevel(level)}
+                  onModel={(model) => void configure({ model })}
+                  onThinkingLevel={(thinkingLevel) => void configure({ thinkingLevel })}
                 />
               </>
             ) : (
