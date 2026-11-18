@@ -3,7 +3,7 @@ import * as Schema from "effect/Schema";
 import { defaultModel, request, Session, type ApiBody, type SavedSession } from "../lib/api";
 import { Modal, Textarea } from "./ui";
 import { ArrowUturnLeftIcon } from "@heroicons/react/16/solid";
-import { DEFAULT_EFFORT, EffortPicker, ModelPicker, modelName } from "./model-select";
+import { DEFAULT_EFFORT, ModelControl } from "./model-select";
 import { RepositoryPicker } from "./repositories";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import { imagesBody, type Attachment } from "../lib/images";
@@ -176,18 +176,15 @@ export function NewSessionComposer({
               Open existing
             </button>
           </div>
-          <ModelPicker
+          <ModelControl
             id="new-session-model"
-            value={model}
-            defaultLabel={fallback ? `Default (${modelName(fallback)})` : "Default"}
+            model={model}
+            effort={effort}
+            defaultModel={fallback}
+            placement="above"
             disabled={pending || Boolean(created)}
-            onChange={setModel}
-          />
-          <EffortPicker
-            id="new-session-effort"
-            value={effort}
-            disabled={pending || Boolean(created)}
-            onChange={setEffort}
+            onModel={setModel}
+            onEffort={setEffort}
           />
           <button
             type="submit"

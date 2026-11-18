@@ -45,7 +45,17 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export const ThinkingLevel = Schema.Literals(THINKING_LEVELS);
 export const DEFAULT_THINKING_LEVEL = "medium";
 
-export const SessionSettings = Schema.Struct({ thinkingLevel: ThinkingLevel });
+/** Per-session changes from the composer; each applies from the next model request. */
+export const SessionSettings = Schema.Struct({
+  model: Schema.optional(SessionModel),
+  thinkingLevel: Schema.optional(ThinkingLevel),
+}).check(
+  Schema.makeFilter((settings) =>
+    settings.model !== undefined || settings.thinkingLevel !== undefined
+      ? undefined
+      : "Expected model or thinkingLevel",
+  ),
+);
 
 export const NewSession = Schema.Struct({
   model: Schema.optional(SessionModel),

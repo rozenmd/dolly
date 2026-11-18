@@ -420,7 +420,8 @@ app.put("/api/sessions/:id/settings", (c) =>
         Effect.mapError(
           () =>
             new InvalidInput({
-              message: "Expected thinkingLevel: off, minimal, low, medium, high, xhigh or max",
+              message:
+                "Expected a catalog model and/or thinkingLevel: off, minimal, low, medium, high, xhigh or max",
             }),
         ),
       );
@@ -428,7 +429,9 @@ app.put("/api/sessions/:id/settings", (c) =>
       const agent = yield* AgentApi;
       const result = yield* agent.configureSession(c.req.param("id"), input);
 
-      return result ? c.json(result) : c.json({ error: "Session not found" }, 404);
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 409 : 200);
     }),
   ),
 );

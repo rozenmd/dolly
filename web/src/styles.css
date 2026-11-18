@@ -1092,9 +1092,6 @@ select.input {
   gap: 14px;
   margin-top: 8px;
 }
-.composer-model {
-  color: #cfcfcf;
-}
 .round-button {
   display: grid;
   place-items: center;
@@ -1587,7 +1584,7 @@ code.summary-label {
   color: var(--muted);
   white-space: nowrap;
 }
-.new-session-modal .model-picker {
+.new-session-modal .model-control {
   min-width: 0;
 }
 .create-button {
@@ -1667,6 +1664,55 @@ code.summary-label {
   padding: 0 14px;
   border-radius: 999px;
   background: rgb(255 255 255 / 4%);
+}
+/* One pill for the model and its effort: "Opus 5.5  Medium". */
+.model-control .picker-trigger {
+  gap: 6px;
+  padding: 0 12px 0 14px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 4%);
+}
+.model-control .model-control-model {
+  flex-shrink: 1;
+}
+.model-control .model-control-effort {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-weight: 400;
+}
+.picker-menu.model-control-menu {
+  min-width: 280px;
+}
+.picker-menu.model-control-menu [role="menu"],
+.picker-menu.model-control-menu [role="listbox"] {
+  max-height: min(420px, 50vh);
+  overflow-y: auto;
+  outline: none;
+}
+.model-control-row {
+  min-height: 40px;
+}
+.model-control-value {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-control-arrow {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.model-control-back {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.model-control-back .model-control-arrow {
+  margin-left: -2px;
 }
 .model-picker-bolt {
   width: 14px;
@@ -1830,14 +1876,14 @@ code.summary-label {
     flex: 1 1 100%;
     margin-right: 0;
   }
-  .new-session-modal .model-picker {
+  .new-session-modal .model-control {
     flex: 1 1 0;
     max-width: 100%;
   }
   .new-session-modal .create-button {
     min-height: 40px;
   }
-  .new-session-modal .model-picker .picker-menu {
+  .new-session-modal .model-control .picker-menu {
     left: 0;
     right: auto;
   }
@@ -2422,17 +2468,9 @@ code.summary-label {
 .usage-bar-reset {
   color: var(--faint);
 }
-.effort-picker .picker-menu {
-  min-width: 180px;
-}
 .picker.opens-up .picker-menu {
   top: auto;
   bottom: calc(100% + 6px);
-}
-.composer-model {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .checkbox-row {

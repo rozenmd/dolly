@@ -210,6 +210,82 @@ test("queues a message while running and promotes it with Send now, including af
   expect(promotions).toBe(2);
 });
 
+test("one composer pill switches the session's model and effort, and rolls back a refusal", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      "dolly.sessions.v1",
+      JSON.stringify([
+        {
+          id: "pill",
+          model: "gpt-6-luna",
+          thinkingLevel: "medium",
+          title: "Model pill",
+          repository: "",
+          updatedAt: 1,
+        },
+      ]),
+    ),
+  );
+  const changes: unknown[] = [];
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+
+    if (path === "/api/auth") return route.fulfill({ json: signedIn });
+
+    if (path === "/api/auth/anthropic") return route.fulfill({ json: { connected: false } });
+
+    if (path === "/api/sessions/pill/settings") {
+      const body = route.request().postDataJSON();
+      changes.push(body);
+
+      return body.model?.startsWith("claude-")
+        ? route.fulfill({ status: 409, json: { error: "Connect your Claude subscription first" } })
+        : route.fulfill({ json: body });
+    }
+
+    if (path === "/api/sessions/pill")
+      return route.fulfill({
+        json: {
+          entries: [{ id: 1, kind: "pi.user", model: [{ role: "user", content: "Hi" }] }],
+          docs: {},
+        },
+      });
+
+    return route.fulfill({ json: { state: "connected" } });
+  });
+  await page.goto("/", { waitUntil: "networkidle" });
+
+  const pill = page.getByRole("button", { name: /^Model:/ });
+  await expect(pill).toHaveText("GPT-6 LunaMedium");
+  await expect(page.getByRole("button", { name: "Thinking effort" })).toHaveCount(0);
+
+  await pill.click();
+  const menu = page.getByRole("menu", { name: "Model settings" });
+  await expect(menu).toContainText("GPT-6 Luna");
+  await menu.getByRole("menuitem", { name: /^Model/ }).click();
+  await page.getByRole("option", { name: "GPT-6 Sol" }).click();
+  await expect(pill).toHaveText("GPT-6 SolMedium");
+
+  await pill.click();
+  await menu.getByRole("menuitem", { name: /^Effort/ }).click();
+  await page.getByRole("option", { name: "Extra high" }).click();
+  await expect(pill).toHaveText("GPT-6 SolExtra high");
+
+  await pill.click();
+  await menu.getByRole("menuitem", { name: /^Model/ }).click();
+  await page.getByRole("option", { name: "Claude Opus 5.5" }).click();
+  await expect(page.getByRole("alert")).toContainText("Connect your Claude subscription first");
+  await expect(pill).toHaveText("GPT-6 SolExtra high");
+
+  expect(changes).toEqual([
+    { model: "gpt-6-sol" },
+    { thinkingLevel: "xhigh" },
+    { model: "claude-opus-5-5" },
+  ]);
+});
+
 test("connects Claude without ChatGPT, explicitly tests Worker inference, and starts a Claude conversation", async ({
   page,
 }) => {
@@ -561,8 +637,8 @@ for (const repository of ["octocat/project", ""]) {
       "data-value",
       repository,
     );
-    await expect(dialog.getByLabel("Model", { exact: true })).toHaveAttribute(
-      "data-value",
+    await expect(dialog.getByRole("button", { name: /^Model:/ })).toHaveAttribute(
+      "data-model",
       source.model,
     );
     await expect(dialog.getByLabel("Workspace name")).toHaveCount(0);
