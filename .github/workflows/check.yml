@@ -13,7 +13,7 @@ concurrency:
 jobs:
   plan:
     # Evaluate the PR gate from the base branch, before checking out PR code.
-    if: github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd' ||  github.actor == 'dolly-session-bot[bot]' && github.triggering_actor == 'dolly-session-bot[bot]'
+    if: github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd' ||  github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd' ||  github.actor == 'dolly-session-bot[bot]' && github.triggering_actor == 'dolly-session-bot[bot]''dolly-session-bot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
@@ -31,7 +31,7 @@ jobs:
         env:
           CI_BASE: ${{ github.event.pull_request.base.sha }}
   verify:
-    if: github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd'
+    if: github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd' ||  github.actor == 'dolly-session-bot[bot]' && github.triggering_actor == 'dolly-session-bot[bot]'
     needs: plan
     name: verify (${{ matrix.suite }}, ${{ matrix.shard }})
     runs-on: ubuntu-latest
@@ -90,7 +90,7 @@ jobs:
           retention-days: 14
   # Preserve the existing required status while waiting for every suite.
   check:
-    if: always() && github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd'
+    if: always() && github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd' ||  github.actor == 'dolly-session-bot[bot]' && github.triggering_actor == 'dolly-session-bot[bot]'
     needs: [plan, verify]
     runs-on: ubuntu-latest
     timeout-minutes: 1
