@@ -206,14 +206,14 @@ export function GitHubSignIn({
 
   if (awaiting)
     return (
-      <div className="codex-login">
+      <div className="device-login">
         <p className="muted">
           Enter this code at{" "}
-          <strong className="codex-host">
+          <strong className="device-host">
             {awaiting.verificationUri.replace(/^https:\/\//, "")}
           </strong>
         </p>
-        <div className="codex-code-row">
+        <div className="device-code-row">
           <DeviceCode code={awaiting.userCode} />
           <a
             className="primary-button"
@@ -230,7 +230,7 @@ export function GitHubSignIn({
             {error}
           </p>
         )}
-        <div className="codex-waiting">
+        <div className="device-waiting">
           {paused ? (
             <button type="button" className="secondary-button" onClick={() => setPaused(false)}>
               Check again
@@ -252,7 +252,7 @@ export function GitHubSignIn({
     );
 
   return (
-    <div className="codex-login">
+    <div className="device-login">
       {status?.state === "expired" ? (
         <p className="muted">That code expired before it was authorized.</p>
       ) : firstRun ? (

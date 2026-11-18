@@ -141,7 +141,7 @@ beforeEach(async () => {
   await signIn();
   const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    await state.storage.put("credential:openai-codex", {
+    await state.storage.put("credential:openai", {
       type: "oauth",
       access,
       refresh: "test-refresh",
@@ -169,7 +169,7 @@ it("writes and edits sandbox files through Pi tools, reporting line diff stats a
 
   let requests = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
-    expect(String(url)).toContain("chatgpt.com");
+    expect(String(url)).toContain("api.openai.com");
 
     return codexEvents(requests++);
   });

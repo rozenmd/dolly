@@ -1,9 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, createProvider } from "@earendil-works/pi-ai/models";
-import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
-import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
-import { stream, streamSimple } from "@earendil-works/pi-ai/api/openai-codex-responses";
+import { createModels } from "@earendil-works/pi-ai/models";
 import {
   configure,
   AgentDoc,
@@ -70,7 +67,7 @@ import {
   SessionModel,
   modelProvider,
   DEFAULT_CLAUDE_MODEL,
-  DEFAULT_CODEX_MODEL,
+  DEFAULT_OPENAI_MODEL,
   DEFAULT_THINKING_LEVEL,
   SessionSettings,
   DefaultModelSetting,
@@ -85,14 +82,16 @@ import {
   AnthropicProbe,
 } from "./anthropic";
 import { Account, Credentials } from "./credentials";
+import { recordUsageHeaders, usageReport, forgetUsage, type ProviderUsage } from "./usage";
 import {
-  observeUsage,
-  recordUsageHeaders,
-  usageReport,
-  forgetUsage,
-  type ProviderUsage,
-} from "./usage";
-import { CodexProtocol, startLogin, pollLogin, logout } from "./codex-login";
+  ChatGPTProtocol,
+  LoginCallback,
+  chatgptProvider,
+  completeLogin,
+  loginStatus,
+  logout,
+  startLogin,
+} from "./chatgpt-login";
 import { GitHubAuth } from "./github-auth";
 import {
   agentGitIdentityEnv,
@@ -133,19 +132,19 @@ const DEFAULT_MODEL_KEY = "settings:default-model";
  * The owner's default applies while its subscription is connected; otherwise new
  * conversations use the built-in default for whichever subscription is connected.
  */
-function effectiveDefaultModel(stored: string | null, codex: boolean, claude: boolean) {
-  if (stored && (modelProvider(stored) === "anthropic" ? claude : codex)) return stored;
+function effectiveDefaultModel(stored: string | null, chatgpt: boolean, claude: boolean) {
+  if (stored && (modelProvider(stored) === "anthropic" ? claude : chatgpt)) return stored;
 
-  if (codex) return DEFAULT_CODEX_MODEL;
+  if (chatgpt) return DEFAULT_OPENAI_MODEL;
 
   if (claude) return DEFAULT_CLAUDE_MODEL;
 
-  return stored ?? DEFAULT_CODEX_MODEL;
+  return stored ?? DEFAULT_OPENAI_MODEL;
 }
 
-/** GitHub intake requires Codex, so a Claude default does not apply to it. */
-function codexDefaultModel(stored: string | null) {
-  return stored && modelProvider(stored) === "openai-codex" ? stored : DEFAULT_CODEX_MODEL;
+/** GitHub intake requires ChatGPT, so a Claude default does not apply to it. */
+function chatgptDefaultModel(stored: string | null) {
+  return stored && modelProvider(stored) === "openai" ? stored : DEFAULT_OPENAI_MODEL;
 }
 
 /** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
@@ -153,7 +152,7 @@ export class Agent extends DurableObject<Env> {
   private harness!: Harness;
   private readonly credentials: Credentials;
   private readonly papercuts: Papercuts;
-  private readonly services: Layer.Layer<Account | CodexProtocol | GitHub | GitHubAuth>;
+  private readonly services: Layer.Layer<Account | ChatGPTProtocol | GitHub | GitHubAuth>;
   private readonly slackServices: Layer.Layer<SlackHostService>;
   private readonly githubTask = githubDelivery((event, text) =>
     Effect.flatMap(GitHub, (github) => github.reply(event, text)).pipe(
@@ -184,7 +183,7 @@ export class Agent extends DurableObject<Env> {
     this.papercuts = new Papercuts(ctx.storage.sql);
     this.services = Layer.mergeAll(
       Layer.succeed(Account, this.credentials),
-      CodexProtocol.layer,
+      ChatGPTProtocol.layer,
       GitHub.layer(ctx.storage, env),
       GitHubAuth.layer(ctx.storage),
     );
@@ -199,49 +198,8 @@ export class Agent extends DurableObject<Env> {
   private initialize = Effect.fn("Agent.initialize")(function* (this: Agent) {
     yield* this.arm({ active: true });
     const models = createModels({ credentials: this.credentials });
-    const provider = openaiCodexProvider();
-    const oauth = provider.auth.oauth;
-
-    if (!oauth) return yield* Effect.die("Codex provider must support OAuth");
     models.setProvider(
-      createProvider({
-        id: provider.id,
-        name: provider.name,
-        baseUrl: provider.baseUrl,
-        models: Object.values(OPENAI_CODEX_MODELS),
-        // Load the SSE adapter with the Worker, not in an evictable generation request.
-        api: {
-          stream: observeUsage(stream, this.usageObserver("openai-codex")),
-          streamSimple: this.steerInterrupts.wrap(
-            observeUsage(streamSimple, this.usageObserver("openai-codex")),
-          ),
-        },
-        auth: {
-          oauth: {
-            ...oauth,
-            // Request auth needs only the stored token, not Pi's Node-only OAuth flow loader.
-            toAuth: async (credential) => ({ apiKey: credential.access }),
-            refresh: (credential, signal) =>
-              Effect.runPromise(
-                Effect.tryPromise({
-                  try: () => oauth.refresh(credential, signal),
-                  catch: (cause) => {
-                    const details = exceptionDetails(cause, [
-                      credential.access,
-                      credential.refresh,
-                    ]);
-
-                    return new OperationError({
-                      operation: "codex.refresh",
-                      message: details.message,
-                      details,
-                    });
-                  },
-                }),
-              ),
-          },
-        },
-      }),
+      chatgptProvider(this.usageObserver("openai"), (fn) => this.steerInterrupts.wrap(fn)),
     );
     models.setProvider(
       claudeProvider(this.usageObserver("anthropic"), (fn) => this.steerInterrupts.wrap(fn)),
@@ -718,10 +676,10 @@ export class Agent extends DurableObject<Env> {
           conversationCreated: async (tx, conversation) => {
             await indexSession(tx, conversation.id);
             await configure(tx, conversation.id, {
-              // Only GitHub intake creates conversations without a model; it requires Codex.
+              // Only GitHub intake creates conversations without a model; it requires ChatGPT.
               model: {
-                provider: "openai-codex",
-                modelId: codexDefaultModel(
+                provider: "openai",
+                modelId: chatgptDefaultModel(
                   Option.getOrNull(
                     Schema.decodeUnknownOption(SessionModel)(
                       await this.ctx.storage.get(DEFAULT_MODEL_KEY),
@@ -1167,8 +1125,7 @@ export class Agent extends DurableObject<Env> {
 
         if (verified.status !== 202) return verified;
 
-        if (Option.isNone(yield* this.credentials.get("openai-codex")))
-          return { status: 503 as const };
+        if (Option.isNone(yield* this.credentials.get("openai"))) return { status: 503 as const };
         yield* this.arm({ active: true });
 
         return yield* admitGitHub(this.harness, this.githubTask, verified.event);
@@ -1252,13 +1209,13 @@ export class Agent extends DurableObject<Env> {
         )
           return { status: 200 as const };
 
-        const codex = yield* this.credentials.get("openai-codex");
+        const chatgpt = yield* this.credentials.get("openai");
         const claude = yield* this.credentials.get("anthropic");
 
-        if (Option.isNone(codex) && Option.isNone(claude)) return { status: 503 as const };
+        if (Option.isNone(chatgpt) && Option.isNone(claude)) return { status: 503 as const };
 
         const modelId = yield* this.resolveDefaultModel(
-          Option.isSome(codex),
+          Option.isSome(chatgpt),
           Option.isSome(claude),
         );
 
@@ -1583,13 +1540,16 @@ export class Agent extends DurableObject<Env> {
   startLogin() {
     return Effect.runPromise(Effect.provide(startLogin, this.services));
   }
-  pollLogin() {
-    return Effect.runPromise(Effect.provide(pollLogin, this.services));
+  loginStatus() {
+    return Effect.runPromise(Effect.provide(loginStatus, this.services));
+  }
+  completeLogin(input: typeof LoginCallback.Type) {
+    return Effect.runPromise(Effect.provide(completeLogin(input), this.services));
   }
   logout() {
     return Effect.runPromise(
       Effect.provide(logout, this.services).pipe(
-        Effect.tap(() => Effect.promise(() => forgetUsage(this.ctx.storage, "openai-codex"))),
+        Effect.tap(() => Effect.promise(() => forgetUsage(this.ctx.storage, "openai"))),
       ),
     );
   }
@@ -1630,21 +1590,21 @@ export class Agent extends DurableObject<Env> {
       Effect.map((value) => Option.getOrNull(Schema.decodeUnknownOption(SessionModel)(value))),
     );
 
-  private resolveDefaultModel = (codex: boolean, claude: boolean) =>
+  private resolveDefaultModel = (chatgpt: boolean, claude: boolean) =>
     this.storedDefaultModel().pipe(
-      Effect.map((stored) => effectiveDefaultModel(stored, codex, claude)),
+      Effect.map((stored) => effectiveDefaultModel(stored, chatgpt, claude)),
     );
 
   defaultModel() {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
-        const codex = yield* this.credentials.get("openai-codex");
+        const chatgpt = yield* this.credentials.get("openai");
         const claude = yield* this.credentials.get("anthropic");
         const model = yield* this.storedDefaultModel();
 
         return {
           model,
-          effective: effectiveDefaultModel(model, Option.isSome(codex), Option.isSome(claude)),
+          effective: effectiveDefaultModel(model, Option.isSome(chatgpt), Option.isSome(claude)),
         };
       }),
     );
@@ -1659,7 +1619,7 @@ export class Agent extends DurableObject<Env> {
               new OperationError({
                 operation: "settings.model",
                 message: "Unknown model",
-                details: "Select a model from the pinned Pi Codex or Anthropic catalog",
+                details: "Select a model from the pinned OpenAI or Anthropic catalog",
               }),
           ),
         );
@@ -1668,12 +1628,12 @@ export class Agent extends DurableObject<Env> {
           if (model === null) await this.ctx.storage.delete(DEFAULT_MODEL_KEY);
           else await this.ctx.storage.put(DEFAULT_MODEL_KEY, model);
         });
-        const codex = yield* this.credentials.get("openai-codex");
+        const chatgpt = yield* this.credentials.get("openai");
         const claude = yield* this.credentials.get("anthropic");
 
         return {
           model,
-          effective: effectiveDefaultModel(model, Option.isSome(codex), Option.isSome(claude)),
+          effective: effectiveDefaultModel(model, Option.isSome(chatgpt), Option.isSome(claude)),
         };
       }),
     );
@@ -1706,11 +1666,11 @@ export class Agent extends DurableObject<Env> {
   ) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
-        const codex = yield* this.credentials.get("openai-codex");
+        const chatgpt = yield* this.credentials.get("openai");
         const claude = yield* this.credentials.get("anthropic");
 
         const defaultModel = yield* this.resolveDefaultModel(
-          Option.isSome(codex),
+          Option.isSome(chatgpt),
           Option.isSome(claude),
         );
 
@@ -1720,19 +1680,19 @@ export class Agent extends DurableObject<Env> {
               new OperationError({
                 operation: "session.model",
                 message: "Unknown model",
-                details: "Select a model from the pinned Pi Codex or Anthropic catalog",
+                details: "Select a model from the pinned OpenAI or Anthropic catalog",
               }),
           ),
         );
 
         const provider = modelProvider(modelId);
 
-        if (Option.isNone(provider === "anthropic" ? claude : codex))
+        if (Option.isNone(provider === "anthropic" ? claude : chatgpt))
           return {
             error:
               provider === "anthropic"
                 ? "Connect your Claude subscription first"
-                : "Connect your Codex subscription first",
+                : "Connect ChatGPT first",
           };
 
         const conversation = yield* attempt("pi.conversation.create", () =>
@@ -1995,14 +1955,14 @@ export class Agent extends DurableObject<Env> {
           conversation.value.agent(BACKGROUND_CONTEXT),
         );
 
-        const provider = agent.model?.provider ?? "openai-codex";
+        const provider = agent.model?.provider ?? "openai";
 
         if (Option.isNone(yield* this.credentials.get(provider)))
           return {
             error:
               provider === "anthropic"
                 ? "Connect your Claude subscription first"
-                : "Connect your Codex subscription first",
+                : "Connect ChatGPT first",
           };
         yield* this.arm({ active: true });
 
@@ -2212,14 +2172,16 @@ export class Agent extends DurableObject<Env> {
 
         const agent = yield* attempt("parent.model", () => parent.value.agent(BACKGROUND_CONTEXT));
 
-        const provider = modelProvider(parsed.model ?? agent.model?.modelId ?? DEFAULT_CODEX_MODEL);
+        const provider = modelProvider(
+          parsed.model ?? agent.model?.modelId ?? DEFAULT_OPENAI_MODEL,
+        );
 
         if (Option.isNone(yield* this.credentials.get(provider)))
           return {
             error:
               provider === "anthropic"
                 ? "Connect your Claude subscription first"
-                : "Connect your Codex subscription first",
+                : "Connect ChatGPT first",
           };
         yield* this.arm({ active: true });
 
@@ -2252,7 +2214,7 @@ export class Agent extends DurableObject<Env> {
             error:
               provider === "anthropic"
                 ? "Connect your Claude subscription first"
-                : "Connect your Codex subscription first",
+                : "Connect ChatGPT first",
           };
         yield* this.arm({ active: true });
 

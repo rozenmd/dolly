@@ -19,7 +19,7 @@ it("serves the rendered workspace at the Worker root and its real bundled assets
 });
 
 it("keeps API authentication and JSON responses separate from frontend routing", async () => {
-  const denied = await SELF.fetch("https://worker/api/auth/codex");
+  const denied = await SELF.fetch("https://worker/api/auth/chatgpt");
   expect(denied.status).toBe(401);
   expect(await denied.json()).toEqual({ error: "Sign in with GitHub" });
 
@@ -31,7 +31,7 @@ it("keeps API authentication and JSON responses separate from frontend routing",
   });
 
   expect(authorized.status).toBe(409);
-  expect(await authorized.json()).toEqual({ error: "Connect your Codex subscription first" });
+  expect(await authorized.json()).toEqual({ error: "Connect ChatGPT first" });
 
   const unknown = await SELF.fetch("https://worker/api/missing", { headers });
 

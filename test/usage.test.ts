@@ -71,7 +71,7 @@ beforeEach(async () => {
   await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.delete("credential:anthropic");
-    await state.storage.delete("credential:openai-codex");
+    await state.storage.delete("credential:openai");
   });
 });
 
@@ -85,7 +85,7 @@ it("requires sign-in and reports nothing for providers that are not connected", 
   const fetch = vi.spyOn(globalThis, "fetch");
   const reports = await usage(true);
   expect(reports["anthropic"]).toEqual({ providerId: "anthropic", connected: false, usage: null });
-  expect(reports["openai-codex"]).toMatchObject({ connected: false, usage: null });
+  expect(reports["openai"]).toMatchObject({ connected: false, usage: null });
   expect(fetch).not.toHaveBeenCalled();
 });
 
@@ -165,52 +165,25 @@ it("reads live Claude usage including model-scoped weekly limits", async () => {
   expect(fetch).toHaveBeenCalledTimes(1);
 });
 
-it("reads ChatGPT usage with the account id from the access token, and clears it on sign-out", async () => {
+it("reports ChatGPT as connected without contacting OpenAI, since connected apps get no usage data", async () => {
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    await state.storage.put("credential:openai-codex", {
+    await state.storage.put("credential:openai", {
       type: "oauth",
       access,
       refresh: "test-refresh",
       expires: Date.now() + 3_600_000,
+      clientId: "app_dolly_registered",
     });
   });
 
-  const now = Date.now();
-
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-    expect(String(url)).toBe("https://chatgpt.com/backend-api/wham/usage");
-    expect(new Headers(init?.headers).get("chatgpt-account-id")).toBe("acct-usage");
-
-    return Response.json({
-      plan_type: "pro",
-      rate_limit: {
-        primary_window: { used_percent: 34, limit_window_seconds: 18000, reset_after_seconds: 600 },
-        secondary_window: {
-          used_percent: 71.6,
-          limit_window_seconds: 604800,
-          reset_at: 2_000_000_000,
-        },
-      },
-    });
+  const fetch = vi.spyOn(globalThis, "fetch");
+  expect((await usage(true))["openai"]).toEqual({
+    providerId: "openai",
+    connected: true,
+    usage: null,
   });
+  expect(fetch).not.toHaveBeenCalled();
 
-  const report = (await usage(true))["openai-codex"];
-  expect(report?.usage?.windows).toMatchObject([
-    { label: "5h", usedPercent: 34 },
-    { label: "7d", usedPercent: 71.6, resetsAt: 2_000_000_000_000 },
-  ]);
-  expect(report?.usage?.windows[0]?.resetsAt).toBeGreaterThanOrEqual(now + 600_000);
-
-  fetch.mockResolvedValueOnce(
-    Response.json({
-      rate_limit: { primary_window: { used_percent: "not-a-number" } },
-    }),
-  );
-  expect((await usage(true))["openai-codex"]).toMatchObject({
-    usage: report?.usage,
-    error: expect.any(String),
-  });
-
-  await call("/auth/codex", "DELETE");
-  expect((await usage())["openai-codex"]).toMatchObject({ connected: false, usage: null });
+  await call("/auth/chatgpt", "DELETE");
+  expect((await usage())["openai"]).toMatchObject({ connected: false, usage: null });
 });

@@ -1,5 +1,4 @@
 import { env } from "cloudflare:workers";
-import { zstdDecompressSync } from "node:zlib";
 import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Schema from "effect/Schema";
@@ -107,7 +106,7 @@ beforeEach(async () => {
   await signIn();
   roots = [];
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    await state.storage.put("credential:openai-codex", {
+    await state.storage.put("credential:openai", {
       type: "oauth",
       access,
       refresh: "test-refresh",
@@ -243,10 +242,7 @@ it.each([false, true])(
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
       const encoded = new Uint8Array(await new Response(init?.body).arrayBuffer());
 
-      const bytes =
-        new Headers(init?.headers).get("content-encoding") === "zstd"
-          ? zstdDecompressSync(encoded)
-          : encoded;
+      const bytes = encoded;
 
       const request = Schema.decodeUnknownSync(
         Schema.fromJsonString(

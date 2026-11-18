@@ -444,6 +444,7 @@ export type ApiBody = {
   signingSecret?: string;
   allowedUserId?: string;
   defaultRepository?: string;
+  callbackUrl?: string;
 };
 
 export const DefaultModel = Schema.Struct({
@@ -471,24 +472,30 @@ export async function anthropicStatus() {
   )(await request("/auth/anthropic"));
 }
 
-export const CodexStatus = Schema.Union([
+export const ChatGPTStatus = Schema.Union([
   Schema.Struct({ state: Schema.Literals(["connected", "not_connected", "expired"]) }),
   Schema.Struct({
-    state: Schema.Literal("awaiting_code"),
-    verificationUri: Schema.String,
-    userCode: Schema.String,
+    state: Schema.Literal("awaiting_redirect"),
+    authorizeUrl: Schema.String,
+    redirectUri: Schema.String,
     expiresAt: Schema.Number,
-    pollAfterSeconds: Schema.Number,
   }),
 ]);
 
-export type CodexStatus = typeof CodexStatus.Type;
+export type ChatGPTStatus = typeof ChatGPTStatus.Type;
 
-/** Reads, starts (POST) or cancels and signs out of (DELETE) the ChatGPT device login. */
-export async function codexLogin(method: "GET" | "POST" | "DELETE" = "GET") {
-  const text = await request("/auth/codex", undefined, undefined, method);
+/** Reads, starts (POST) or cancels and signs out of (DELETE) Sign in with ChatGPT. */
+export async function chatgptLogin(method: "GET" | "POST" | "DELETE" = "GET") {
+  const text = await request("/auth/chatgpt", undefined, undefined, method);
 
-  return Schema.decodeUnknownSync(Schema.fromJsonString(CodexStatus))(text);
+  return Schema.decodeUnknownSync(Schema.fromJsonString(ChatGPTStatus))(text);
+}
+
+/** Finishes sign-in with the address ChatGPT redirected the browser to. */
+export async function completeChatGPTLogin(callbackUrl: string) {
+  const text = await request("/auth/chatgpt", { callbackUrl }, undefined, "PUT");
+
+  return Schema.decodeUnknownSync(Schema.fromJsonString(ChatGPTStatus))(text);
 }
 
 const GitHubApp = Schema.Union([
@@ -621,7 +628,7 @@ const UsageWindow = Schema.Struct({
 });
 
 const UsageReport = Schema.Struct({
-  providerId: Schema.Literals(["openai-codex", "anthropic"]),
+  providerId: Schema.Literals(["openai", "anthropic"]),
   connected: Schema.Boolean,
   usage: Schema.NullOr(
     Schema.Struct({

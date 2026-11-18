@@ -5,7 +5,7 @@ it("requires Cloudflare Access for the page, assets, and API even with a session
   for (const path of [
     "/",
     "/assets/missing.js",
-    "/api/auth/codex",
+    "/api/auth/chatgpt",
     "/unknown",
     "/api/setup/github/callback",
     `/api/setup/github/${"a".repeat(43)}`,

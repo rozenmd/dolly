@@ -161,7 +161,7 @@ test("queues a message while running and promotes it with Send now, including af
 
     if (path === "/api/auth") return route.fulfill({ json: signedIn });
 
-    if (path === "/api/auth/codex") return route.fulfill({ json: { state: "connected" } });
+    if (path === "/api/auth/chatgpt") return route.fulfill({ json: { state: "connected" } });
 
     if (path === "/api/auth/anthropic") return route.fulfill({ json: { connected: false } });
 
@@ -210,7 +210,7 @@ test("queues a message while running and promotes it with Send now, including af
   expect(promotions).toBe(2);
 });
 
-test("connects Claude without Codex, explicitly tests Worker inference, and starts a Claude conversation", async ({
+test("connects Claude without ChatGPT, explicitly tests Worker inference, and starts a Claude conversation", async ({
   page,
 }) => {
   const token = `sk-ant-oat01-${"a".repeat(64)}`;
@@ -222,7 +222,7 @@ test("connects Claude without Codex, explicitly tests Worker inference, and star
 
     if (path === "/api/auth") return route.fulfill({ json: signedIn });
 
-    if (path === "/api/auth/codex") return route.fulfill({ json: { state: "not_connected" } });
+    if (path === "/api/auth/chatgpt") return route.fulfill({ json: { state: "not_connected" } });
 
     if (path === "/api/auth/anthropic") {
       if (route.request().method() === "PUT") {
@@ -938,7 +938,7 @@ test("authenticated create, send, stop, reload, and error recovery", async ({ pa
 
     if (path === "/api/auth") return route.fulfill({ json: signedIn });
 
-    if (path === "/api/auth/codex") return route.fulfill({ json: { state: "connected" } });
+    if (path === "/api/auth/chatgpt") return route.fulfill({ json: { state: "connected" } });
 
     if (path === "/api/sessions")
       return route.fulfill({ status: 201, json: { id: "test-session", model: "gpt-6-sol" } });
@@ -994,19 +994,19 @@ test("authenticated create, send, stop, reload, and error recovery", async ({ pa
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Fix flaky tests");
 });
 
-test("ChatGPT device sign-in shows the code, polls until approved, then opens a new workspace", async ({
+const awaitingRedirect = {
+  state: "awaiting_redirect",
+  authorizeUrl:
+    "https://auth.openai.com/api/accounts/authorize?client_id=dynamic_agent_client&agent_name_hint=Dolly",
+  redirectUri: "http://127.0.0.1:1455/auth/callback",
+  expiresAt: Date.now() + 600_000,
+};
+
+test("Sign in with ChatGPT links to approval, finishes with the pasted redirect, then opens a new workspace", async ({
   page,
 }) => {
   const calls: string[] = [];
-  let polls = 0;
-
-  const awaiting = {
-    state: "awaiting_code",
-    verificationUri: "https://auth.openai.com/codex/device",
-    userCode: "ABCD-1234",
-    expiresAt: Date.now() + 900_000,
-    pollAfterSeconds: 1,
-  };
+  const pasted: unknown[] = [];
 
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -1014,40 +1014,55 @@ test("ChatGPT device sign-in shows the code, polls until approved, then opens a 
 
     if (path === "/api/auth") return route.fulfill({ json: signedIn });
 
-    if (path !== "/api/auth/codex") return route.fulfill({ status: 404, json: { error: "x" } });
+    if (path !== "/api/auth/chatgpt") return route.fulfill({ status: 404, json: { error: "x" } });
 
     calls.push(method);
 
-    if (method === "POST") return route.fulfill({ json: awaiting });
+    if (method === "POST") return route.fulfill({ json: awaitingRedirect });
 
-    if (calls.filter((call) => call === "POST").length === 0)
-      return route.fulfill({ json: { state: "not_connected" } });
+    if (method === "PUT") {
+      pasted.push(JSON.parse(route.request().postData() ?? "null"));
 
-    polls += 1;
+      return pasted.length === 1
+        ? route.fulfill({
+            status: 400,
+            json: { state: "error", error: "That address is from a different sign-in attempt." },
+          })
+        : route.fulfill({ json: { state: "connected" } });
+    }
 
-    if (polls === 2) return route.fulfill({ status: 502, json: { error: "Temporary failure" } });
-
-    return route.fulfill({ json: polls < 3 ? awaiting : { state: "connected" } });
+    return route.fulfill({
+      json: calls.includes("POST") ? awaitingRedirect : { state: "not_connected" },
+    });
   });
   await page.goto("/", { waitUntil: "networkidle" });
   const dialog = page.getByRole("dialog", { name: "Connect a model" });
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Sign in with ChatGPT" }).click();
-  await expect(page.getByRole("button", { name: "Copy code ABCD-1234" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Open ChatGPT" })).toHaveAttribute(
+  await expect(dialog.getByRole("link", { name: "Open ChatGPT" })).toHaveAttribute(
     "href",
-    "https://auth.openai.com/codex/device",
+    awaitingRedirect.authorizeUrl,
   );
+  const address = dialog.getByLabel("Address of the page that didn't load");
+  await address.fill("http://127.0.0.1:1455/auth/callback?code=old&state=stale");
+  await dialog.getByRole("button", { name: "Connect" }).click();
+  await expect(dialog.getByRole("alert")).toHaveText(
+    "That address is from a different sign-in attempt.",
+  );
+  await address.fill("http://127.0.0.1:1455/auth/callback?code=abc&state=s&client_id=app_x");
+  await dialog.getByRole("button", { name: "Connect" }).click();
   await expect(page.getByRole("dialog", { name: "New session" })).toBeVisible({
     timeout: 10_000,
   });
-  expect(polls).toBe(3);
+  expect(pasted).toEqual([
+    { callbackUrl: "http://127.0.0.1:1455/auth/callback?code=old&state=stale" },
+    { callbackUrl: "http://127.0.0.1:1455/auth/callback?code=abc&state=s&client_id=app_x" },
+  ]);
 });
 
-test("cancelling ChatGPT sign-in ignores an approval that was already in flight", async ({
+test("cancelling ChatGPT sign-in ignores a connection that was already in flight", async ({
   page,
 }) => {
-  let started = false;
   let deleted = false;
   let release: () => void = () => {};
   const held = new Promise<void>((resolve) => (release = resolve));
@@ -1060,38 +1075,27 @@ test("cancelling ChatGPT sign-in ignores an approval that was already in flight"
 
     if (method === "DELETE") {
       deleted = true;
-      // The Worker serialises DELETE behind the approval already holding the account lock.
+      // The Worker serialises DELETE behind the exchange already holding the account lock.
       await held;
       await new Promise((resolve) => setTimeout(resolve, 300));
 
       return route.fulfill({ json: { state: "not_connected" } });
     }
 
-    if (method === "POST") {
-      started = true;
+    if (method === "PUT") {
+      await held;
 
-      return route.fulfill({
-        json: {
-          state: "awaiting_code",
-          verificationUri: "https://auth.openai.com/codex/device",
-          userCode: "ABCD-1234",
-          expiresAt: Date.now() + 900_000,
-          pollAfterSeconds: 1,
-        },
-      });
+      return route.fulfill({ json: { state: "connected" } });
     }
 
-    if (!started) return route.fulfill({ json: { state: "not_connected" } });
-
-    await held;
-
-    return route.fulfill({ json: { state: "connected" } });
+    return route.fulfill({ json: awaitingRedirect });
   });
   await page.goto("/", { waitUntil: "networkidle" });
   const dialog = page.getByRole("dialog", { name: "Connect a model" });
-  await dialog.getByRole("button", { name: "Sign in with ChatGPT" }).click();
-  await expect(dialog.getByRole("button", { name: "Copy code ABCD-1234" })).toBeVisible();
-  await page.waitForTimeout(1_500);
+  await dialog
+    .getByLabel("Address of the page that didn't load")
+    .fill("http://127.0.0.1:1455/auth/callback?code=abc&state=s&client_id=app_x");
+  await dialog.getByRole("button", { name: "Connect" }).click();
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await expect.poll(() => deleted).toBe(true);
   release();

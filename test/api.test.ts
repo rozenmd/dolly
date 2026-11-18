@@ -15,9 +15,10 @@ describe("Hono Worker in workerd", () => {
   });
   it("rejects unauthenticated access to every protected operation", async () => {
     for (const [path, method] of [
-      ["auth/codex", "GET"],
-      ["auth/codex", "POST"],
-      ["auth/codex", "DELETE"],
+      ["auth/chatgpt", "GET"],
+      ["auth/chatgpt", "POST"],
+      ["auth/chatgpt", "PUT"],
+      ["auth/chatgpt", "DELETE"],
       ["settings/model", "GET"],
       ["settings/model", "PUT"],
       ["sessions", "POST"],
@@ -63,7 +64,7 @@ describe("Hono Worker in workerd", () => {
   it("requires a subscription before creating a session", async () => {
     const response = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: "Connect your Codex subscription first" });
+    expect(await response.json()).toEqual({ error: "Connect ChatGPT first" });
   });
   it("validates queue IDs and rejects unknown sessions", async () => {
     for (const id of ["0", "-1", "1.5", "NaN", "9007199254740992"]) {
@@ -104,7 +105,7 @@ describe("Hono Worker in workerd", () => {
       ).status,
     ).toBe(404);
   });
-  it("rejects malformed session requests and unknown Codex models before creating a session", async () => {
+  it("rejects malformed session requests and unknown models before creating a session", async () => {
     for (const body of [
       "not json",
       "null",
@@ -112,7 +113,7 @@ describe("Hono Worker in workerd", () => {
       JSON.stringify({ model: 42 }),
       JSON.stringify({ model: null }),
       JSON.stringify({ model: "" }),
-      JSON.stringify({ model: "not-a-codex-model" }),
+      JSON.stringify({ model: "not-a-model" }),
     ]) {
       const response = await SELF.fetch("https://worker/api/sessions", {
         method: "POST",
@@ -122,7 +123,7 @@ describe("Hono Worker in workerd", () => {
 
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({
-        error: "Expected an optional model from the Codex or Anthropic catalog",
+        error: "Expected an optional model from the OpenAI or Anthropic catalog",
       });
     }
   });

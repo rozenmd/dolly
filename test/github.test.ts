@@ -956,7 +956,7 @@ it("runs the registered github tool through Pi and persists its result without A
   await connect();
   const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    await state.storage.put("credential:openai-codex", {
+    await state.storage.put("credential:openai", {
       type: "oauth",
       access,
       refresh: "test-refresh",
@@ -976,7 +976,7 @@ it("runs the registered github tool through Pi and persists its result without A
 
     if (new URL(String(url)).pathname === "/installation/repositories")
       return Response.json({ repositories: [{ full_name: repository }] });
-    expect(String(url)).toContain("chatgpt.com");
+    expect(String(url)).toContain("api.openai.com");
 
     const item =
       requests++ === 0
@@ -1075,7 +1075,7 @@ it("runs the registered github tool through Pi and persists its result without A
   } finally {
     await post(`/api/sessions/${created.id}/abort`, {});
     await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-      await state.storage.delete("credential:openai-codex");
+      await state.storage.delete("credential:openai");
     });
   }
 });

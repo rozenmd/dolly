@@ -7,7 +7,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import { Account, Credentials } from "../src/credentials";
-import { CodexProtocol, startLogin, pollLogin } from "../src/codex-login";
+import { ChatGPTProtocol, startLogin, loginStatus } from "../src/chatgpt-login";
 import { OperationError } from "../src/operations";
 import { readBounded, readWindow } from "../src/sandbox";
 
@@ -31,7 +31,7 @@ it("releases the credential permit when its holder is interrupted", async () => 
   });
 });
 
-it("expires a device grant using Effect's TestClock without wall-clock waits", async () => {
+it("expires a pending ChatGPT sign-in using Effect's TestClock without wall-clock waits", async () => {
   await runInDurableObject(env.AGENT.getByName(crypto.randomUUID()), async (_, state) => {
     const unexpected = new OperationError({
       operation: "test",
@@ -41,19 +41,21 @@ it("expires a device grant using Effect's TestClock without wall-clock waits", a
 
     const services = Layer.mergeAll(
       Layer.succeed(Account, new Credentials(state.storage)),
-      Layer.succeed(CodexProtocol, {
-        start: Effect.succeed({ device_auth_id: "device", user_code: "TEST-CODE", interval: 5 }),
-        poll: () => Effect.fail(unexpected),
+      Layer.succeed(ChatGPTProtocol, {
         exchange: () => Effect.fail(unexpected),
+        refresh: () => Effect.fail(unexpected),
       }),
       TestClock.layer(),
     );
 
     await Effect.runPromise(
       Effect.gen(function* () {
-        expect(yield* startLogin).toMatchObject({ state: "awaiting_code", expiresAt: 900_000 });
-        yield* TestClock.adjust("15 minutes");
-        expect(yield* pollLogin).toEqual({ state: "expired" });
+        expect(yield* startLogin).toMatchObject({
+          state: "awaiting_redirect",
+          expiresAt: 600_000,
+        });
+        yield* TestClock.adjust("10 minutes");
+        expect(yield* loginStatus).toEqual({ state: "expired" });
       }).pipe(Effect.provide(services)),
     );
   });
@@ -154,7 +156,7 @@ it("cancels a pending reader when its Effect fiber is interrupted", async () => 
   expect(stream.locked).toBe(false);
 });
 
-it("keeps a bounded Codex request deadline inside the token-rotation critical section", async () => {
+it("keeps a bounded ChatGPT request deadline inside the token-rotation critical section", async () => {
   await Effect.runPromise(
     Effect.gen(function* () {
       const fiber = yield* Effect.forkChild(
@@ -167,7 +169,7 @@ it("keeps a bounded Codex request deadline inside the token-rotation critical se
   );
 });
 
-it("times out an incomplete Codex response body and aborts its HTTP scope", async () => {
+it("times out an incomplete ChatGPT token response body and aborts its HTTP scope", async () => {
   let signal: AbortSignal | undefined;
 
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
@@ -177,13 +179,17 @@ it("times out an incomplete Codex response body and aborts its HTTP scope", asyn
   });
 
   try {
-    const services = Layer.mergeAll(CodexProtocol.layer, TestClock.layer());
+    const services = Layer.mergeAll(ChatGPTProtocol.layer, TestClock.layer());
     await Effect.runPromise(
       Effect.gen(function* () {
-        const protocol = yield* CodexProtocol;
-        const fiber = yield* Effect.forkChild(Effect.flip(protocol.start));
+        const protocol = yield* ChatGPTProtocol;
+
+        const fiber = yield* Effect.forkChild(
+          Effect.flip(protocol.refresh({ refresh: "refresh", clientId: "client" })),
+        );
+
         yield* TestClock.adjust("15 seconds");
-        expect((yield* Fiber.join(fiber)).message).toBe("Codex request timed out");
+        expect((yield* Fiber.join(fiber)).message).toBe("ChatGPT request timed out");
         expect(signal?.aborted).toBe(true);
       }).pipe(Effect.provide(services)),
     );

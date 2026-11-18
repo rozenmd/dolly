@@ -36,7 +36,7 @@ test("attaches screenshots in both composers with picker, paste and drop, and pr
         },
       });
 
-    if (path === "/api/auth/codex") return route.fulfill({ json: { state: "connected" } });
+    if (path === "/api/auth/chatgpt") return route.fulfill({ json: { state: "connected" } });
 
     if (path === "/api/auth/anthropic") return route.fulfill({ json: { connected: false } });
 

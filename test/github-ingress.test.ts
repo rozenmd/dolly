@@ -109,7 +109,7 @@ beforeEach(async () => {
     await state.storage.put("github:connected", {
       app: { id: 42, slug: "dolly-test", pem, owner: { login: "example" } },
     });
-    await state.storage.delete("credential:openai-codex");
+    await state.storage.delete("credential:openai");
   });
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url) =>
     String(url).includes("/repos/other/")
@@ -206,7 +206,7 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
       app: { id: 42, slug: "dolly-test", pem, owner: { login: "example" } },
       repositories: ["example/project"],
     });
-    await state.storage.put("credential:openai-codex", {
+    await state.storage.put("credential:openai", {
       type: "oauth",
       access,
       refresh: "test-refresh",
@@ -219,7 +219,7 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     const parsed = new URL(String(url));
 
-    if (parsed.hostname === "chatgpt.com") {
+    if (parsed.hostname === "api.openai.com") {
       codexRequests++;
 
       if (stall)

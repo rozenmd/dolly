@@ -1,5 +1,4 @@
 import { env } from "cloudflare:workers";
-import { zstdDecompressSync } from "node:zlib";
 import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -14,7 +13,7 @@ beforeEach(async () => {
   await reset();
   await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    await state.storage.put("credential:openai-codex", {
+    await state.storage.put("credential:openai", {
       type: "oauth",
       access,
       refresh: "test-refresh",
@@ -209,10 +208,7 @@ it.each(["gpt-6-luna", "claude-haiku-5-5"])(
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
       const encoded = await new Response(init?.body).arrayBuffer();
 
-      const bytes =
-        new Headers(init?.headers).get("content-encoding") === "zstd"
-          ? zstdDecompressSync(new Uint8Array(encoded))
-          : new Uint8Array(encoded);
+      const bytes = new Uint8Array(encoded);
 
       requests.push(new TextDecoder().decode(bytes));
 
@@ -410,16 +406,12 @@ it.each([
   "runs $expectedModel through the Codex SSE adapter with durable model selection and deduplication",
   async ({ model, expectedModel }) => {
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-      expect(String(url)).toContain("chatgpt.com/backend-api/codex/responses");
+      expect(String(url)).toContain("api.openai.com/v1/responses");
       expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${access}`);
-      expect(new Headers(init?.headers).get("chatgpt-account-id")).toBe("test-account");
 
       const encoded = await new Response(init?.body).arrayBuffer();
 
-      const bytes =
-        new Headers(init?.headers).get("content-encoding") === "zstd"
-          ? zstdDecompressSync(new Uint8Array(encoded))
-          : new Uint8Array(encoded);
+      const bytes = new Uint8Array(encoded);
 
       const request = Schema.decodeUnknownSync(
         Schema.fromJsonString(Schema.Struct({ model: Schema.String })),

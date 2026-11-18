@@ -3,7 +3,13 @@ import { ArrowPathIcon } from "@heroicons/react/16/solid";
 import { usage, type UsageReport } from "../lib/api";
 import { ago, duration } from "../lib/time";
 
-const names = { "openai-codex": "ChatGPT", anthropic: "Claude" } as const;
+const names = { openai: "ChatGPT", anthropic: "Claude" } as const;
+
+/** ChatGPT enforces a connected app's limit without reporting it to the app. */
+const unreported = {
+  openai: "Limits are set under Connected App Limits in ChatGPT settings",
+  anthropic: "No usage reported yet",
+} as const;
 
 /** Per-account limit bars: 5h / 7d (and model-specific) windows with reset times. */
 export function UsageLimits() {
@@ -59,7 +65,7 @@ export function UsageLimits() {
             <span className="muted">
               {report.usage
                 ? `${report.usage.source === "live" ? "Updated" : "Seen on last run"} ${ago(report.usage.observedAt)} ago`
-                : (report.error ?? "No usage reported yet")}
+                : (report.error ?? unreported[report.providerId])}
             </span>
           </div>
           {report.usage && (

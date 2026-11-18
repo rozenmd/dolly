@@ -9,6 +9,7 @@ import { headers, signIn } from "./session";
 import { Live, Snapshot } from "../src/transcript";
 import { SlackThreads } from "../src/slack-inbox";
 
+const claudeToken = `sk-ant-oat01-${"a".repeat(40)}`;
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
 
 type CodexOutput =
@@ -60,25 +61,17 @@ const call = (args: Record<string, string | number | boolean>) =>
     arguments: JSON.stringify(args),
   });
 
-/** Model responses in order, plus ChatGPT's usage endpoint for live refreshes. */
+/** Model responses in order, plus Claude's usage endpoint for live refreshes. */
 function model(responses: Array<() => Response>) {
   const usageFetches: string[] = [];
 
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = input instanceof Request ? input.url : String(input);
 
-    if (url.includes("/wham/usage")) {
+    if (url.includes("/api/oauth/usage")) {
       usageFetches.push(url);
 
-      return Response.json({
-        rate_limit: {
-          primary_window: {
-            used_percent: 42,
-            limit_window_seconds: 18_000,
-            reset_after_seconds: 600,
-          },
-        },
-      });
+      return Response.json({ five_hour: { utilization: 42, resets_at: null } });
     }
 
     const next = responses.shift();
@@ -154,14 +147,16 @@ beforeEach(async () => {
   await reset();
   await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    await state.storage.put("credential:openai-codex", {
+    await state.storage.put("credential:openai", {
       type: "oauth",
       access,
       refresh: "test-refresh",
       expires: Date.now() + 3_600_000,
     });
-    await state.storage.put("usage:openai-codex", {
-      providerId: "openai-codex",
+    // ChatGPT reports no limits to connected apps; Claude's stand in for a provider that does.
+    await state.storage.put("credential:anthropic", { type: "api_key", key: claudeToken });
+    await state.storage.put("usage:anthropic", {
+      providerId: "anthropic",
       windows: [{ label: "5h", usedPercent: 30, resetsAt: Date.now() + 3_600_000 }],
       observedAt: Date.now(),
       source: "headers",
@@ -183,32 +178,33 @@ it("reports subscription usage and rate-limits live refreshes", async () => {
   ]);
 
   const id = await session();
-  await run(id, "How much Codex do I have left?");
+  await run(id, "How much Claude do I have left?");
   const [stored, refreshed, cooled] = await dollyResults(id);
 
   expect(stored).toMatchObject({
     ok: true,
     providers: [
+      { provider: "openai", connected: true, limits: [] },
       {
-        provider: "openai-codex",
+        provider: "anthropic",
         connected: true,
         source: "headers",
         limits: [{ name: "5h", usedPercent: 30, remainingPercent: 70 }],
       },
-      { provider: "anthropic", connected: false, limits: [] },
     ],
   });
   expect(refreshed).toMatchObject({
     ok: true,
     providers: [
-      { provider: "openai-codex", source: "live", limits: [{ name: "5h", usedPercent: 42 }] },
-      { provider: "anthropic", connected: false },
+      { provider: "openai", connected: true, limits: [] },
+      { provider: "anthropic", source: "live", limits: [{ name: "5h", usedPercent: 42 }] },
     ],
   });
   expect(refreshed).not.toHaveProperty("refreshSkipped");
   expect(cooled).toMatchObject({ ok: true, refreshSkipped: expect.stringContaining("5 minutes") });
   expect(usageFetches).toHaveLength(1);
   expect(JSON.stringify([stored, refreshed, cooled])).not.toContain(access);
+  expect(JSON.stringify([stored, refreshed, cooled])).not.toContain(claudeToken);
 });
 
 it("lists and reads other web sessions, redacting credentials", async () => {
