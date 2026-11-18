@@ -595,7 +595,8 @@ it("switches an existing session's model, refusing providers that aren't connect
 
   const switched = await settings({ model: "gpt-6-sol" });
   expect(switched.status).toBe(200);
-  expect(await switched.json()).toEqual({ model: "gpt-6-sol" });
+  // The response carries the effort the new model runs at (here unchanged).
+  expect(await switched.json()).toEqual({ model: "gpt-6-sol", thinkingLevel: "high" });
   expect(await current()).toEqual({ model: "gpt-6-sol", thinkingLevel: "high" });
 
   const refused = await settings({ model: "claude-opus-5-5" });

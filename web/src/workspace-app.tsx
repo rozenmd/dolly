@@ -14,6 +14,12 @@ import { IconButton, Input, Modal, RepoBadge } from "./components/ui";
 import { ChatGPTLogin } from "./components/chatgpt-login";
 import { GitHubSetup, GitHubSignIn } from "./components/github";
 import { NewSessionComposer } from "./components/new-session";
+import {
+  DEFAULT_EFFORT,
+  ModelControl,
+  normalizeEffort,
+  type Speed,
+} from "./components/model-select";
 import { AnthropicConnection } from "./components/anthropic";
 import {
   authState,
@@ -30,6 +36,8 @@ import {
   turnsFromSnapshot,
   sessionBody,
   anthropicStatus,
+  defaultModel,
+  type DefaultModel,
 } from "./lib/api";
 import { ago } from "./lib/time";
 import { watchSession } from "./lib/session-stream";
@@ -42,6 +50,14 @@ import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-s
 import { useSessionSummary } from "./lib/session-summary";
 
 const storageKey = "dolly.sessions.v1";
+
+/** Model settings the composer can change on a session; each applies from the next request. */
+type SessionChange = {
+  model?: string;
+  thinkingLevel?: string;
+  speed?: Speed;
+  autoFallback?: boolean;
+};
 
 export function WorkspaceApp() {
   const [auth, setAuth] = useState<AuthState | null>(null);
@@ -57,6 +73,7 @@ export function WorkspaceApp() {
   const navigate = useNavigate();
   const [chatgpt, setChatGPT] = useState<boolean | null>(null);
   const [anthropic, setAnthropic] = useState(false);
+  const [defaults, setDefaults] = useState<DefaultModel | null>(null);
   const [showClaude, setShowClaude] = useState(false);
   const [error, setError] = useState("");
   const [streamError, setStreamError] = useState("");
@@ -427,8 +444,24 @@ export function WorkspaceApp() {
     updateSessions((current) => current.map((item) => (item.id === id ? { ...item, kept } : item)));
   }
 
-  /** Changes the open session's model or effort; it applies from the next model request. */
-  async function configure(settings: { model: string } | { thinkingLevel: string }) {
+  // What new sessions start with; also what "Reset to default" returns a session to.
+  useEffect(() => {
+    if (chatgpt === null) return;
+    let active = true;
+    defaultModel().then(
+      (value) => {
+        if (active) setDefaults(value);
+      },
+      () => {},
+    );
+
+    return () => {
+      active = false;
+    };
+  }, [chatgpt, anthropic]);
+
+  /** Changes the open session's model settings; they apply from the next model request. */
+  async function configure(settings: SessionChange) {
     const id = selected;
     const previous = sessions.find((item) => item.id === id);
 
@@ -444,15 +477,82 @@ export function WorkspaceApp() {
     try {
       await request(`/sessions/${encodeURIComponent(id)}/settings`, settings, undefined, "PUT");
     } catch (cause) {
-      apply({ model: previous.model, thinkingLevel: previous.thinkingLevel });
+      apply({
+        model: previous.model,
+        thinkingLevel: previous.thinkingLevel,
+        speed: previous.speed,
+        autoFallback: previous.autoFallback,
+      });
       setError(
         cause instanceof Error
           ? cause.message
           : "model" in settings
             ? "Could not change the model."
-            : "Could not change thinking effort.",
+            : "Could not change the model settings.",
       );
     }
+  }
+
+  /** Makes the open session's model settings the defaults for new sessions. */
+  async function saveDefaults(settings: Required<SessionChange>) {
+    try {
+      setDefaults(await defaultModel(settings));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not save the defaults.");
+    }
+  }
+
+  /** The composer's model pill for the open session, with its defaults actions. */
+  function sessionModelControl(current: SavedSession) {
+    const settings = {
+      model: current.model,
+      thinkingLevel: current.thinkingLevel ?? DEFAULT_EFFORT,
+      speed: current.speed ?? "standard",
+      autoFallback: current.autoFallback ?? defaults?.autoFallback ?? true,
+    } as const;
+
+    const atDefault =
+      defaults !== null &&
+      settings.model === defaults.effective &&
+      settings.thinkingLevel === defaults.thinkingLevel &&
+      settings.speed === defaults.speed &&
+      settings.autoFallback === defaults.autoFallback;
+
+    return (
+      <ModelControl
+        model={settings.model}
+        effort={settings.thinkingLevel}
+        speed={settings.speed}
+        autoFallback={settings.autoFallback}
+        placement="above"
+        isDefault={atDefault}
+        atDefault={atDefault}
+        onModel={(model) => {
+          // Keep the effort where the new model accepts it, as the server does.
+          const level = normalizeEffort(model, settings.thinkingLevel);
+
+          void configure(
+            level === settings.thinkingLevel ? { model } : { model, thinkingLevel: level },
+          );
+        }}
+        ultrafastAvailable={defaults?.ultrafastAvailable ?? false}
+        onEffort={(thinkingLevel) => void configure({ thinkingLevel })}
+        onSpeed={(speed) => void configure({ speed })}
+        onAutoFallback={(autoFallback) => void configure({ autoFallback })}
+        onSetDefault={() => void saveDefaults(settings)}
+        onReset={
+          defaults
+            ? () =>
+                void configure({
+                  model: defaults.effective,
+                  thinkingLevel: defaults.thinkingLevel,
+                  speed: defaults.speed,
+                  autoFallback: defaults.autoFallback,
+                })
+            : undefined
+        }
+      />
+    );
   }
 
   function newSession() {
@@ -682,10 +782,7 @@ export function WorkspaceApp() {
                   running={running}
                   queued={queued}
                   onSteerQueued={(id) => void steerQueued(id)}
-                  model={session.model}
-                  thinkingLevel={session.thinkingLevel}
-                  onModel={(model) => void configure({ model })}
-                  onThinkingLevel={(thinkingLevel) => void configure({ thinkingLevel })}
+                  modelControl={sessionModelControl(session)}
                 />
               </>
             ) : (

@@ -5,6 +5,7 @@ import { ConversationWorkspace } from "./workspace";
 import { redact } from "./diagnostics";
 import type { SavedSession } from "./session-contracts";
 import { indexSession } from "./coordination";
+import { sessionMetadataKey, type SessionMetadata } from "./model-defaults";
 
 type PullRequestRef = { repository: string; number: number; url: string };
 
@@ -45,8 +46,6 @@ function lastPromptAt(entries: readonly EntryRecord[]): number {
 }
 
 const LIVE_STATUSES = ["running", "waiting", "sleeping"] as const;
-
-type Metadata = { archived: boolean; kept?: boolean; createdAt?: number };
 
 /** Discover history, not just sessions created after this feature was deployed. */
 export async function listSessions(
@@ -105,7 +104,7 @@ export async function listSessions(
       const [agent, workspace, metadata, latest, savedPull, createdPull] = await Promise.all([
         conversation.agent(BACKGROUND_CONTEXT),
         harness.snapshot(ConversationWorkspace, record.id, BACKGROUND_CONTEXT),
-        storage.get<Metadata>(`session-meta:${record.id}`),
+        storage.get<SessionMetadata>(sessionMetadataKey(record.id)),
         conversation.entries({ order: "descending" }, 50, undefined, BACKGROUND_CONTEXT),
         storage.get<PullRequestRef & { seen: string }>(`session-pr:${record.id}`),
         storage.get<PullRequestRef>(`session-created-pr:${record.id}`),
@@ -201,6 +200,8 @@ export async function listSessions(
         id: aliases.get(record.id) ?? String(record.id),
         model: agent.model?.modelId ?? "Existing session",
         thinkingLevel: agent.thinkingLevel,
+        ...(metadata?.speed && { speed: metadata.speed }),
+        ...(metadata?.autoFallback !== undefined && { autoFallback: metadata.autoFallback }),
         title: title || "Untitled session",
         repository: workspace?.config?.repository ?? "",
         ref: workspace?.config?.ref,

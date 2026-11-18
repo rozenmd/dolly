@@ -350,7 +350,8 @@ app.put("/api/settings/model", (c) =>
         Effect.mapError(
           () =>
             new InvalidInput({
-              message: "Expected a model from the OpenAI or Anthropic catalog, or null",
+              message:
+                "Expected model (a catalog model), thinkingLevel, speed (standard or fast) or autoFallback; null restores a built-in default",
             }),
         ),
       );
@@ -421,7 +422,7 @@ app.put("/api/sessions/:id/settings", (c) =>
           () =>
             new InvalidInput({
               message:
-                "Expected a catalog model and/or thinkingLevel: off, minimal, low, medium, high, xhigh or max",
+                "Expected a catalog model, thinkingLevel (off, minimal, low, medium, high, xhigh or max), speed (standard or fast) and/or autoFallback",
             }),
         ),
       );
@@ -454,11 +455,7 @@ app.post("/api/sessions", (c) =>
 
       const agent = yield* AgentApi;
 
-      const result = yield* agent.createSession(
-        parsed.model,
-        parsed.workspace,
-        parsed.thinkingLevel,
-      );
+      const result = yield* agent.createSession(parsed);
 
       return c.json(result, "error" in result ? 409 : 201);
     }),

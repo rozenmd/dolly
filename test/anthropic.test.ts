@@ -409,9 +409,17 @@ it("saves the owner's default model in Durable Object storage and applies it to 
     });
   });
 
+  const builtIn = {
+    thinkingLevel: "medium",
+    speed: "standard",
+    autoFallback: true,
+    ultrafastAvailable: false,
+  };
+
   expect(await (await call("/settings/model")).json()).toEqual({
     model: null,
     effective: "gpt-6-luna",
+    ...builtIn,
   });
 
   for (const body of [{}, { model: "not-a-model" }, { model: 42 }])
@@ -419,7 +427,7 @@ it("saves the owner's default model in Durable Object storage and applies it to 
 
   // A Claude default without a Claude subscription is saved but not yet used.
   expect(await (await call("/settings/model", "PUT", { model: "claude-opus-5-5" })).json()).toEqual(
-    { model: "claude-opus-5-5", effective: "gpt-6-luna" },
+    { model: "claude-opus-5-5", effective: "gpt-6-luna", ...builtIn },
   );
   expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({ model: "gpt-6-luna" });
 
@@ -429,6 +437,7 @@ it("saves the owner's default model in Durable Object storage and applies it to 
   expect(await (await call("/settings/model")).json()).toEqual({
     model: "claude-opus-5-5",
     effective: "claude-opus-5-5",
+    ...builtIn,
   });
   expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({
     model: "claude-opus-5-5",
@@ -444,6 +453,7 @@ it("saves the owner's default model in Durable Object storage and applies it to 
   expect(await (await call("/settings/model", "PUT", { model: null })).json()).toEqual({
     model: null,
     effective: "gpt-6-luna",
+    ...builtIn,
   });
   expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({ model: "gpt-6-luna" });
 });

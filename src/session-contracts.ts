@@ -1,10 +1,15 @@
 import * as Schema from "effect/Schema";
+import { SPEEDS } from "./model-capabilities";
 
 export const SavedSession = Schema.Struct({
   id: Schema.String,
   model: Schema.String,
   /** Pi thinking level; absent for sessions saved before it was reported. */
   thinkingLevel: Schema.optional(Schema.String),
+  /** Fast and Ultrafast are ChatGPT service tiers (model-capabilities.ts); absent means standard. */
+  speed: Schema.optional(Schema.Literals(SPEEDS)),
+  /** Switch subscriptions when this one runs out; absent follows the owner's default. */
+  autoFallback: Schema.optional(Schema.Boolean),
   title: Schema.String,
   repository: Schema.String,
   updatedAt: Schema.Number,

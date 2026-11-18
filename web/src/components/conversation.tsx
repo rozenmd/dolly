@@ -1,6 +1,7 @@
-import { DEFAULT_EFFORT, ModelControl } from "./model-select";
+import { modelName } from "./model-select";
 import {
   createContext,
+  Fragment,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -8,10 +9,12 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ReactNode,
   type SyntheticEvent,
 } from "react";
 import {
   ArrowUpIcon,
+  ArrowsRightLeftIcon,
   CheckIcon,
   ChevronRightIcon,
   ExclamationCircleIcon,
@@ -455,13 +458,21 @@ function WorkLog({ turn, now }: { turn: Turn; now: number }) {
         {changed && <DiffStat diff={changed} />}
       </summary>
       <div className="work-timeline">
-        {turn.items.map((item) =>
-          item.kind === "text" ? (
-            <Prose key={item.id} text={item.text} />
-          ) : (
-            <StepGroup key={item.id} id={item.id} steps={item.steps} now={now} />
-          ),
-        )}
+        {turn.items.map((item) => (
+          <Fragment key={item.id}>
+            {item.kind === "text" && <Prose text={item.text} />}
+            {item.kind === "fallback" && (
+              <p className="fallback-note" role="note">
+                <ArrowsRightLeftIcon aria-hidden="true" />
+                <span>
+                  Switched to <strong>{modelName(item.to)}</strong>: {modelName(item.from)} ran out
+                  of usage
+                </span>
+              </p>
+            )}
+            {item.kind === "steps" && <StepGroup id={item.id} steps={item.steps} now={now} />}
+          </Fragment>
+        ))}
       </div>
     </details>
   );
@@ -695,10 +706,7 @@ export function Composer({
   onStop,
   pending,
   running,
-  model,
-  thinkingLevel,
-  onModel,
-  onThinkingLevel,
+  modelControl,
   draftKey,
   queued,
   onSteerQueued,
@@ -711,10 +719,8 @@ export function Composer({
   onStop: () => void;
   pending: boolean;
   running: boolean;
-  model: string;
-  thinkingLevel?: string;
-  onModel: (model: string) => void;
-  onThinkingLevel: (level: string) => void;
+  /** The session's model pill (`ModelControl`), owned by the workspace. */
+  modelControl: ReactNode;
   draftKey: string;
   queued: readonly QueuedMessage[];
   onSteerQueued: (id: number) => void;
@@ -829,13 +835,7 @@ export function Composer({
               count={attachments.length}
               onFiles={(files) => void input.add(files)}
             />
-            <ModelControl
-              model={model}
-              effort={thinkingLevel ?? DEFAULT_EFFORT}
-              placement="above"
-              onModel={onModel}
-              onEffort={onThinkingLevel}
-            />
+            {modelControl}
             {running && !content.trim() ? (
               <button
                 type="button"

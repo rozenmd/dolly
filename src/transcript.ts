@@ -57,6 +57,8 @@ export const Snapshot = Schema.Struct({
       id: Schema.Number,
       kind: Schema.String,
       model: Schema.optional(Schema.Array(Message)),
+      /** Display data of application entries, such as an automatic model switch. */
+      data: Schema.optional(Schema.Unknown),
     }),
   ),
   before: Schema.optional(Schema.Number),
@@ -81,3 +83,6 @@ export const PromptIndex = Schema.Struct({
     }),
   ),
 });
+
+/** `dolly.fallback` entry data: the session ran out of usage on `from` and moved to `to`. */
+export const FallbackNote = Schema.Struct({ from: Schema.String, to: Schema.String });

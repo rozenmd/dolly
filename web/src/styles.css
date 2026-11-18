@@ -1714,6 +1714,73 @@ code.summary-label {
 .model-control-back .model-control-arrow {
   margin-left: -2px;
 }
+.model-control .model-control-fast {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  margin-right: -2px;
+  color: var(--muted);
+}
+.model-control-separator {
+  height: 1px;
+  margin: 6px -6px;
+  background: rgb(255 255 255 / 8%);
+}
+.model-control-toggle {
+  min-height: 52px;
+}
+.model-control-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+.model-control-hint {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-control-check {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--muted);
+  visibility: hidden;
+}
+.model-control-toggle[aria-checked="true"] .model-control-check {
+  visibility: visible;
+}
+.model-control-action .model-control-arrow {
+  margin-left: auto;
+}
+.model-control-action[aria-disabled="true"] {
+  color: var(--faint);
+  cursor: default;
+}
+.picker-option[aria-disabled="true"] {
+  color: var(--faint);
+  cursor: default;
+}
+.fallback-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.fallback-note svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.fallback-note strong {
+  color: var(--text);
+  font-weight: 500;
+}
 .model-picker-bolt {
   width: 14px;
   height: 14px;
@@ -2491,4 +2558,46 @@ code.summary-label {
 
 .settings-card .primary-button {
   text-decoration: none;
+}
+
+/* An on/off setting drawn as a switch; still a native checkbox for keyboards and forms. */
+input.switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 14%);
+  cursor: pointer;
+  appearance: none;
+  transition: background 120ms ease;
+}
+input.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 120ms ease;
+}
+input.switch:checked {
+  background: var(--blue);
+}
+input.switch:checked::after {
+  transform: translateX(16px);
+}
+input.switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+input.switch:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+label.connection-row {
+  cursor: pointer;
 }

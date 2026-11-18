@@ -7,8 +7,10 @@ import {
   Message,
   Snapshot,
   Live,
+  FallbackNote,
   type RunFailure,
 } from "../../../src/transcript";
+import { SPEEDS, type Speed } from "../../../src/model-capabilities";
 
 export { Snapshot } from "../../../src/transcript";
 
@@ -50,6 +52,8 @@ export const Session = Schema.Struct({
   id: Schema.String,
   model: Schema.String,
   thinkingLevel: Schema.optional(Schema.String),
+  speed: Schema.optional(Schema.Literals(SPEEDS)),
+  autoFallback: Schema.optional(Schema.Boolean),
 });
 
 export { SavedSession } from "../../../src/session-contracts";
@@ -63,11 +67,8 @@ const WorkspaceSelection = Schema.Struct({
 });
 
 export function sessionBody(source: SavedSession, snapshot: typeof Snapshot.Type | null): ApiBody {
+  // Model, effort, speed and auto-fallback start from the owner's defaults, not the open session.
   const body: ApiBody = {};
-
-  if (source.model !== "Existing session") body.model = source.model;
-
-  if (source.thinkingLevel) body.thinkingLevel = source.thinkingLevel;
   const state = snapshot?.docs["app.workspace"];
 
   if (state !== undefined) {
@@ -134,7 +135,9 @@ export function diffTotal(steps: readonly Step[]): DiffStats | undefined {
 
 export type TurnItem =
   | { kind: "text"; id: string; text: string }
-  | { kind: "steps"; id: string; steps: Step[] };
+  | { kind: "steps"; id: string; steps: Step[] }
+  /** The session ran out of usage on `from` and switched to `to` (auto-fallback). */
+  | { kind: "fallback"; id: string; from: string; to: string };
 
 export type Turn = {
   id: string;
@@ -344,6 +347,19 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
   }
 
   for (const entry of snapshot.entries) {
+    const fallback =
+      entry.kind === "dolly.fallback"
+        ? Option.getOrUndefined(Schema.decodeUnknownOption(FallbackNote)(entry.data))
+        : undefined;
+
+    if (fallback)
+      current(String(entry.id)).items.push({
+        kind: "fallback",
+        id: String(entry.id),
+        from: fallback.from,
+        to: fallback.to,
+      });
+
     for (const [index, message] of (entry.model ?? []).entries())
       add(message, `${entry.id}-${index}`);
     const turn = turns.at(-1);
@@ -430,7 +446,9 @@ export type ApiBody = {
   requestId?: string;
   images?: readonly { mimeType: string; data: string }[];
   model?: string | null;
-  thinkingLevel?: string;
+  thinkingLevel?: string | null;
+  speed?: Speed | null;
+  autoFallback?: boolean | null;
   workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] };
   repository?: string;
   owner?: string;
@@ -453,16 +471,30 @@ export const DefaultModel = Schema.Struct({
   model: Schema.NullOr(Schema.String),
   /** What a new session without a model would use right now. */
   effective: Schema.String,
+  /** Effort, speed and auto-fallback new sessions start with. */
+  thinkingLevel: Schema.String,
+  speed: Schema.Literals(SPEEDS),
+  autoFallback: Schema.Boolean,
+  /** The ChatGPT login is on a plan that serves Ultrafast (Pro). */
+  ultrafastAvailable: Schema.Boolean,
 });
 
 export type DefaultModel = typeof DefaultModel.Type;
 
-/** Reads the default model for new sessions, or saves it (`null` restores the built-in default). */
-export async function defaultModel(model?: string | null) {
+/** A change to the defaults for new sessions; `null` restores one built-in default. */
+export type DefaultModelChange = {
+  model?: string | null;
+  thinkingLevel?: string | null;
+  speed?: Speed | null;
+  autoFallback?: boolean | null;
+};
+
+/** Reads the defaults for new sessions, or saves a change to them. */
+export async function defaultModel(change?: DefaultModelChange) {
   const text =
-    model === undefined
+    change === undefined
       ? await request("/settings/model")
-      : await request("/settings/model", { model }, undefined, "PUT");
+      : await request("/settings/model", change, undefined, "PUT");
 
   return Schema.decodeUnknownSync(Schema.fromJsonString(DefaultModel))(text);
 }
