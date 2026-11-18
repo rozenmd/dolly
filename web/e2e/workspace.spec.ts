@@ -398,15 +398,16 @@ test("connects Claude without ChatGPT, explicitly tests Worker inference, and st
   await connect.getByRole("button", { name: "Continue with Claude" }).click();
   const composer = page.getByRole("dialog", { name: "New session" });
   // The server resolves the default, so a Claude-only owner gets Claude without a client override.
-  await expect(composer.getByRole("button", { name: "Model", exact: true })).toHaveAttribute(
-    "data-value",
-    "",
+  const pill = composer.getByRole("button", { name: /^Model:/ });
+  await expect(pill).toHaveAttribute("data-model", "");
+  await expect(pill).toHaveText("Sonnet 5.5Medium");
+  await pill.click();
+  await composer.getByRole("menuitem", { name: /^Model/ }).click();
+  await expect(composer.getByRole("option", { name: /^Default/ })).toContainText(
+    "Claude Sonnet 5.5",
   );
-  await expect(composer.getByRole("button", { name: "Model", exact: true })).toContainText(
-    "Default (Claude Sonnet 5.5)",
-  );
-  await composer.getByRole("button", { name: "Model", exact: true }).click();
   await composer.getByRole("option", { name: "Claude Haiku 5.5" }).click();
+  await expect(pill).toHaveAttribute("data-model", "claude-haiku-5-5");
   await composer.getByLabel("Task", { exact: true }).fill("Say hello");
   expect(await composer.evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth)).toBe(true);
   await expect(composer.getByRole("button", { name: "Create", exact: true })).toBeInViewport();
