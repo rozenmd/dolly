@@ -30,7 +30,7 @@ import * as Option from "effect/Option";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Predicate from "effect/Predicate";
-import { historyPage, promptWindow } from "./transcript-window";
+import { historyPage, promptIndex, promptWindow } from "./transcript-window";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
 import {
   ConversationWorkspace,
@@ -2029,7 +2029,12 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
-  private serializeTranscript(value: ConversationView | Awaited<ReturnType<typeof historyPage>>) {
+  private serializeTranscript(
+    value:
+      | ConversationView
+      | Awaited<ReturnType<typeof historyPage>>
+      | Awaited<ReturnType<typeof promptIndex>>,
+  ) {
     return this.credentials.secrets.pipe(
       Effect.map((secrets) => {
         return JSON.stringify(value, (key, item) => {
@@ -2143,6 +2148,21 @@ export class Agent extends DurableObject<Env> {
         );
 
         return yield* this.serializeTranscript(page);
+      }),
+    );
+  }
+
+  /** Every prompt at or before `through`, redacted like the view, for the rail to reach unloaded turns. */
+  prompts(id: string, through: number) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        const index = yield* attempt("pi.prompts", () => promptIndex(conversation.value, through));
+
+        return yield* this.serializeTranscript(index);
       }),
     );
   }

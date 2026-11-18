@@ -22,6 +22,7 @@ import {
   liveFromSnapshot,
   queueFromSnapshot,
   historyPage,
+  promptIndex,
   readSessions,
   request,
   SavedSession,
@@ -33,6 +34,7 @@ import {
 import { ago } from "./lib/time";
 import { watchSession } from "./lib/session-stream";
 import { extendTranscript, prependHistory } from "./lib/transcript-history";
+import { indexedMarks, type RailMark } from "./lib/turn-rail";
 import { imagesBody, type Attachment } from "./lib/images";
 import { sessionList } from "./lib/session-list";
 import { belongsInSidebar, sessionThreads, sidebarSelection } from "./lib/session-threads";
@@ -65,6 +67,16 @@ export function WorkspaceApp() {
   // The `before` an older-history request is in flight for, so one scroll asks once.
   const [olderThrough, setOlderThrough] = useState<number>();
   const [olderError, setOlderError] = useState("");
+
+  // Rail marks for the prompts at or before `through`, so the rail reaches turns not loaded yet.
+  const [railIndex, setRailIndex] = useState<{
+    session: string;
+    through: number;
+    marks: readonly RailMark[];
+  }>();
+
+  const indexing = useRef<string>(undefined);
+  const before = snapshot?.before;
   const connected = Boolean(auth?.user);
   const session = connected ? sessions.find((item) => item.id === selected) : undefined;
   const summary = useSessionSummary();
@@ -301,8 +313,33 @@ export function WorkspaceApp() {
     });
   }
 
-  /** Fetches the page before the oldest held entry, as the reader scrolls back toward the first prompt. */
-  async function loadOlder() {
+  // Index the prompts before the window once per session, and again only if a reconnect leaves a gap
+  // between what was indexed and what is held. Older pages loading never need it again.
+  useEffect(() => {
+    if (!connected || before === undefined) return;
+
+    if (railIndex?.session === selected && railIndex.through >= before) return;
+
+    if (indexing.current === selected) return;
+
+    const id = selected;
+    const through = before;
+    indexing.current = id;
+
+    promptIndex(id, through)
+      .then((prompts) => setRailIndex({ session: id, through, marks: indexedMarks(prompts) }))
+      // The rail still covers the loaded turns; reopening the session tries again.
+      .catch(() => undefined)
+      .finally(() => {
+        if (indexing.current === id) indexing.current = undefined;
+      });
+  }, [connected, selected, before, railIndex]);
+
+  /**
+   * Fetches the page before the oldest held entry, as the reader scrolls back toward the first prompt, or
+   * every page back to `until` (an entry ID), for the rail jumping to a turn not loaded yet.
+   */
+  async function loadOlder(until?: number) {
     const through = snapshot?.before;
 
     if (through === undefined || olderThrough === through) return;
@@ -312,7 +349,15 @@ export function WorkspaceApp() {
     setOlderError("");
 
     try {
-      const page = await historyPage(id, through);
+      let page = await historyPage(id, through);
+      const entries = [...page.entries];
+
+      while (until !== undefined && page.before !== undefined && page.before >= until) {
+        page = await historyPage(id, page.before);
+        entries.unshift(...page.entries);
+      }
+
+      page = page.before === undefined ? { entries } : { entries, before: page.before };
 
       // Entry IDs are unique per Dolly instance, so a page for another session never matches `before`.
       setSnapshot((held) => (held ? prependHistory(held, through, page) : held));
@@ -619,7 +664,8 @@ export function WorkspaceApp() {
                     before: snapshot?.before,
                     loading: olderThrough !== undefined,
                     error: olderError,
-                    load: () => void loadOlder(),
+                    load: (until) => void loadOlder(until),
+                    index: railIndex?.session === session.id ? railIndex.marks : undefined,
                   }}
                   thread={(id) => rows.find((row) => row.id === id)}
                   onOpenThread={select}

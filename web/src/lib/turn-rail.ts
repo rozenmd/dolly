@@ -1,3 +1,4 @@
+import type { PromptIndex } from "../../../src/transcript";
 import type { Step, Turn } from "./api";
 
 /**
@@ -125,8 +126,7 @@ function outcome(turn: Turn): RailOutcome | undefined {
 }
 
 function reply(turn: Turn) {
-  if (turn.answer)
-    return clamp(flatten(dropOpenFence(turn.answer.text.slice(0, REPLY_SCAN))), MAX_REPLY);
+  if (turn.answer) return replyPreview(turn.answer.text);
 
   if (turn.running) return turn.activity ?? "Working";
 
@@ -136,14 +136,23 @@ function reply(turn: Turn) {
   return "";
 }
 
+/** A prompt as the rail's one line: what it was about, or its screenshots when it has no words. */
+function promptPreview(text: string, images = 0) {
+  const line = clamp(flatten(dropLeadingQuote(text)), MAX_PREVIEW);
+
+  return line || (images === 1 ? "Screenshot" : images ? `${images} screenshots` : "");
+}
+
+function replyPreview(text: string) {
+  return clamp(flatten(dropOpenFence(text.slice(0, REPLY_SCAN))), MAX_REPLY);
+}
+
 /** Rail marks for the turns that start with a prompt, oldest first. */
 export function railMarks(turns: readonly Turn[]): RailMark[] {
   return turns.flatMap((turn) => {
     if (!turn.prompt) return [];
 
-    const images = turn.prompt.images ?? 0;
-    const text = clamp(flatten(dropLeadingQuote(turn.prompt.text)), MAX_PREVIEW);
-    const preview = text || (images === 1 ? "Screenshot" : images ? `${images} screenshots` : "");
+    const preview = promptPreview(turn.prompt.text, turn.prompt.images);
 
     if (!preview) return [];
 
@@ -159,4 +168,48 @@ export function railMarks(turns: readonly Turn[]): RailMark[] {
 
     return [mark];
   });
+}
+
+/** Rail marks for prompts the server indexed, for turns the browser hasn't loaded yet. */
+export function indexedMarks(prompts: (typeof PromptIndex.Type)["prompts"]): RailMark[] {
+  return prompts.flatMap((prompt) => {
+    const preview = promptPreview(prompt.text, prompt.images);
+
+    if (!preview) return [];
+
+    const mark: RailMark = { id: prompt.id, preview };
+
+    if (prompt.reply) mark.reply = replyPreview(prompt.reply);
+
+    if (prompt.at !== undefined) mark.at = prompt.at;
+
+    return [mark];
+  });
+}
+
+/** The transcript entry a mark's turn starts at: turn ids are `${entryId}-${messageIndex}`. */
+export function markEntry(id: string) {
+  const entry = Number.parseInt(id, 10);
+
+  return Number.isNaN(entry) ? undefined : entry;
+}
+
+/**
+ * The whole conversation's marks: indexed ones for the entries at or before `before` (those not loaded yet),
+ * then the loaded turns'. Loaded marks win, since they know what each turn produced.
+ */
+export function wholeRail(
+  index: readonly RailMark[],
+  loaded: readonly RailMark[],
+  before: number | undefined,
+): RailMark[] {
+  if (before === undefined || !index.length) return [...loaded];
+
+  const earlier = index.filter((mark) => {
+    const entry = markEntry(mark.id);
+
+    return entry !== undefined && entry <= before;
+  });
+
+  return [...earlier, ...loaded];
 }

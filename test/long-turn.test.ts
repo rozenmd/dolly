@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
-import { HistoryPage, Live, Snapshot } from "../src/transcript";
+import { HistoryPage, Live, PromptIndex, Snapshot } from "../src/transcript";
 import { extendTranscript, prependHistory } from "../web/src/lib/transcript-history";
 
 /**
@@ -187,11 +187,11 @@ async function claudeSession() {
   return (await created.json<{ id: string }>()).id;
 }
 
-async function prompt(id: string) {
+async function prompt(id: string, content = "Explore") {
   const sent = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ content: "Explore", requestId: crypto.randomUUID() }),
+    body: JSON.stringify({ content, requestId: crypto.randomUUID() }),
   });
 
   expect(sent.status).toBe(202);
@@ -319,6 +319,77 @@ it("pages a long turn's history back to its prompt, oldest first", async () => {
     400,
   );
   expect((await history("missing", newest)).status).toBe(404);
+});
+
+/** The browser's ids for the turns its prompts start: `${entryId}-${messageIndex}` (web/src/lib/api.ts). */
+const userMessages = (snapshot: typeof Snapshot.Type) =>
+  snapshot.entries.flatMap((entry) =>
+    (entry.model ?? []).flatMap((message, index) =>
+      message.role === "user" ? [`${entry.id}-${index}`] : [],
+    ),
+  );
+
+const decodeIndex = Schema.decodeUnknownSync(Schema.fromJsonString(PromptIndex));
+
+const prompts = (id: string, through: number | string) =>
+  SELF.fetch(`https://worker/api/sessions/${id}/prompts?through=${through}`, { headers });
+
+it("indexes every prompt before a window, with each turn's answer, for the rail", async () => {
+  longTurnModel();
+  const id = await claudeSession();
+
+  const read = async () =>
+    decode(await (await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })).text());
+
+  await prompt(id);
+  await expect.poll(async () => settled(await read()), { timeout: 30_000 }).toBe(true);
+  await prompt(id, "Again");
+
+  // The second turn answers at once, so the newest entry is its answer.
+  await expect
+    .poll(
+      async () => {
+        const snapshot = await read();
+
+        const messages = snapshot.entries.flatMap((entry) => entry.model ?? []);
+        const again = messages.findIndex((message) => message.content === "Again");
+
+        return (
+          settled(snapshot) &&
+          again >= 0 &&
+          messages.at(-1)?.role === "assistant" &&
+          messages.length - 1 > again
+        );
+      },
+      { timeout: 30_000 },
+    )
+    .toBe(true);
+
+  // Scrolled all the way back, the browser holds the same prompts the index names.
+  const { held } = await scrollBack(id, {
+    ...(await read()),
+    entries: [],
+    before: (await read()).entries.at(-1)?.id,
+  });
+
+  const newest = held.entries.at(-1)?.id ?? 0;
+  const all = decodeIndex(await (await prompts(id, newest)).text()).prompts;
+
+  expect(all.map((mark) => mark.id)).toEqual(userMessages(held));
+  expect(all).toMatchObject([
+    { text: "Explore", reply: "FINAL ANSWER" },
+    { text: "Again", reply: "FINAL ANSWER" },
+  ]);
+  expect(all[0]?.at).toBeTypeOf("number");
+
+  // Indexing only up to the second prompt still reads the first turn through to its answer.
+  const second = Number.parseInt(all[1]?.id ?? "", 10);
+  const earlier = decodeIndex(await (await prompts(id, second - 1)).text()).prompts;
+  expect(earlier).toEqual([all[0]]);
+
+  expect((await prompts(id, -1)).status).toBe(400);
+  expect((await prompts(id, "x")).status).toBe(400);
+  expect((await prompts("missing", newest)).status).toBe(404);
 });
 
 it("keeps the prompt of a live-streamed turn that outgrows the window", async () => {
