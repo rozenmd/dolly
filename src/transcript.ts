@@ -62,3 +62,9 @@ export const Snapshot = Schema.Struct({
   before: Schema.optional(Schema.Number),
   docs: Schema.Record(Schema.String, Schema.Unknown),
 });
+
+/** Entries before a view's window, oldest first; `before` names the next older entry when more remain. */
+export const HistoryPage = Schema.Struct({
+  entries: Snapshot.fields.entries,
+  before: Schema.optional(Schema.Number),
+});

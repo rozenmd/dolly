@@ -18,6 +18,7 @@ import { AnthropicSetup, AnthropicProbe } from "./anthropic";
 import type { Env } from "./env";
 import { PromptImage, MAX_IMAGES, MAX_PROMPT_BYTES } from "./images";
 import { SavedSession, SessionUpdate } from "./session-contracts";
+import { HISTORY_PAGE_LIMIT } from "./transcript-window";
 
 export { Agent } from "./agent";
 
@@ -549,6 +550,45 @@ app.get("/api/sessions/:id/events", async (c) => {
 
   return owner(c).fetch(new Request(url, { headers: { Upgrade: "websocket" } }));
 });
+
+const HistoryQuery = Schema.Struct({
+  through: Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  limit: Schema.optional(
+    Schema.NumberFromString.check(
+      Schema.isInt(),
+      Schema.isBetween({ minimum: 1, maximum: HISTORY_PAGE_LIMIT }),
+    ),
+  ),
+});
+
+/** Transcript entries before a view's window, oldest first, so the browser can scroll back to the start. */
+app.get("/api/sessions/:id/history", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const query = yield* Schema.decodeUnknownEffect(HistoryQuery)(c.req.query()).pipe(
+        Effect.mapError(
+          () =>
+            new InvalidInput({
+              message: `Expected a non-negative integer through and an optional limit from 1 to ${HISTORY_PAGE_LIMIT}`,
+            }),
+        ),
+      );
+
+      const agent = yield* AgentApi;
+
+      const result = yield* agent.history(
+        c.req.param("id"),
+        query.through,
+        query.limit ?? HISTORY_PAGE_LIMIT,
+      );
+
+      return result
+        ? c.body(result, 200, { "Content-Type": "application/json" })
+        : c.json({ error: "Session not found" }, 404);
+    }),
+  ),
+);
 
 app.get("/api/sessions/:id", (c) =>
   handle(

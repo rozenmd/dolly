@@ -1,6 +1,13 @@
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
-import { Block, Message, Snapshot, Live, type RunFailure } from "../../../src/transcript";
+import {
+  Block,
+  HistoryPage,
+  Message,
+  Snapshot,
+  Live,
+  type RunFailure,
+} from "../../../src/transcript";
 
 export { Snapshot } from "../../../src/transcript";
 
@@ -506,6 +513,17 @@ export const AuthState = Schema.Struct({
 export type AuthState = typeof AuthState.Type;
 
 /** Whether a GitHub App exists, whether dolly has an owner, and who this browser is signed in as. */
+/** Up to one page of transcript entries at or before `through`, oldest first. */
+export async function historyPage(session: string, through: number, signal?: AbortSignal) {
+  return Schema.decodeUnknownSync(Schema.fromJsonString(HistoryPage))(
+    await request(
+      `/sessions/${encodeURIComponent(session)}/history?through=${through}`,
+      undefined,
+      signal,
+    ),
+  );
+}
+
 export async function authState() {
   return Schema.decodeUnknownSync(Schema.fromJsonString(AuthState))(await request("/auth"));
 }

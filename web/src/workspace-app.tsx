@@ -21,6 +21,7 @@ import {
   type AuthState,
   liveFromSnapshot,
   queueFromSnapshot,
+  historyPage,
   readSessions,
   request,
   SavedSession,
@@ -31,6 +32,7 @@ import {
 } from "./lib/api";
 import { ago } from "./lib/time";
 import { watchSession } from "./lib/session-stream";
+import { extendTranscript, prependHistory } from "./lib/transcript-history";
 import { imagesBody, type Attachment } from "./lib/images";
 import { sessionList } from "./lib/session-list";
 import { belongsInSidebar, sessionThreads, sidebarSelection } from "./lib/session-threads";
@@ -60,6 +62,9 @@ export function WorkspaceApp() {
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(false);
+  // The `before` an older-history request is in flight for, so one scroll asks once.
+  const [olderThrough, setOlderThrough] = useState<number>();
+  const [olderError, setOlderError] = useState("");
   const connected = Boolean(auth?.user);
   const session = connected ? sessions.find((item) => item.id === selected) : undefined;
   const summary = useSessionSummary();
@@ -239,11 +244,13 @@ export function WorkspaceApp() {
     setSnapshot(null);
     setLoading(true);
     setStreamError("");
+    setOlderThrough(undefined);
+    setOlderError("");
 
     return watchSession(
       selected,
       (value) => {
-        setSnapshot(value);
+        setSnapshot((held) => extendTranscript(held, value));
         setStreamError("");
         setLoading(false);
 
@@ -292,6 +299,28 @@ export function WorkspaceApp() {
 
       return next;
     });
+  }
+
+  /** Fetches the page before the oldest held entry, as the reader scrolls back toward the first prompt. */
+  async function loadOlder() {
+    const through = snapshot?.before;
+
+    if (through === undefined || olderThrough === through) return;
+
+    const id = selected;
+    setOlderThrough(through);
+    setOlderError("");
+
+    try {
+      const page = await historyPage(id, through);
+
+      // Entry IDs are unique per Dolly instance, so a page for another session never matches `before`.
+      setSnapshot((held) => (held ? prependHistory(held, through, page) : held));
+    } catch (cause) {
+      setOlderError(cause instanceof Error ? cause.message : "Could not load earlier messages.");
+    } finally {
+      setOlderThrough((current) => (current === through ? undefined : current));
+    }
   }
 
   function select(id: string) {
@@ -586,6 +615,12 @@ export function WorkspaceApp() {
                   turns={turns}
                   sessionId={session.id}
                   loading={loading}
+                  older={{
+                    before: snapshot?.before,
+                    loading: olderThrough !== undefined,
+                    error: olderError,
+                    load: () => void loadOlder(),
+                  }}
                   thread={(id) => rows.find((row) => row.id === id)}
                   onOpenThread={select}
                 />
