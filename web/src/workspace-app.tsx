@@ -216,7 +216,12 @@ export function WorkspaceApp() {
             "",
         );
 
-        setModal(!signedIn && !claude.connected ? "chatgpt" : saved.length ? null : "new");
+        // Only prompt when nothing is open: a dialog the user opened while sessions were
+        // loading (e.g. a half-typed new session) must never be closed or swapped out.
+        setModal(
+          (current) =>
+            current ?? (!signedIn && !claude.connected ? "chatgpt" : saved.length ? null : "new"),
+        );
       },
       () => active && setChatGPT(null),
     );

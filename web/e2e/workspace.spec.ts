@@ -1204,6 +1204,55 @@ test("Sign in with ChatGPT links to approval, finishes with the pasted redirect,
   ]);
 });
 
+test("a new session dialog opened while sessions load stays open when they arrive", async ({
+  page,
+}) => {
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let listed = false;
+
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+
+    if (path === "/api/auth") return route.fulfill({ json: signedIn });
+
+    if (path === "/api/sessions" && route.request().method() === "GET") {
+      if (!listed) {
+        listed = true;
+        await held;
+      }
+
+      return route.fulfill({
+        json: [
+          {
+            id: "background",
+            model: "gpt-6-sol",
+            title: "Background session",
+            repository: "",
+            updatedAt: Date.now(),
+          },
+        ],
+      });
+    }
+
+    if (path === "/api/sessions/background")
+      return route.fulfill({ json: { entries: [], docs: {} } });
+
+    return route.fulfill({ json: { state: "connected" } });
+  });
+  await page.goto("/");
+  await page.locator(".header-actions").getByRole("button", { name: "New session" }).click();
+  const dialog = page.getByRole("dialog", { name: "New session" });
+  const task = dialog.getByLabel("Task", { exact: true });
+  await task.fill("Half-typed task");
+  release();
+  // The loaded session is selected behind the dialog, which keeps the draft.
+  await expect(page.locator(".workspace-header h1")).toHaveText("Background session");
+  await expect(dialog).toBeVisible();
+  await expect(task).toHaveValue("Half-typed task");
+  await expect(task).toBeFocused();
+});
+
 test("cancelling ChatGPT sign-in ignores a connection that was already in flight", async ({
   page,
 }) => {
