@@ -34,6 +34,8 @@ import { diffTotal, type DiffStats, type QueuedMessage, type Step, type Turn } f
 import { ago, duration } from "../lib/time";
 import { formatToolOutput, oneLine } from "../lib/tool-output";
 import { IconButton, Textarea } from "./ui";
+import { TurnRail } from "./turn-rail";
+import { railMarks } from "../lib/turn-rail";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import type { Attachment } from "../lib/images";
 import {
@@ -107,6 +109,7 @@ export function Conversation({
   }
 
   const [now, setNow] = useState(Date.now);
+  const marks = useMemo(() => railMarks(turns), [turns]);
   const running = turns.some((turn) => turn.running);
   const [sessions] = useState(() => new Map<string, Map<string, boolean>>());
   const choices = sessions.get(sessionId) ?? new Map<string, boolean>();
@@ -165,54 +168,64 @@ export function Conversation({
   }, [before, olderLoading, olderError, sessionId]);
 
   return (
-    <div
-      className="conversation-scroll"
-      ref={scroll}
-      onScroll={(event) => {
-        const element = event.currentTarget;
-        pinned.current = element.scrollHeight - element.clientHeight - element.scrollTop < 80;
-      }}
-    >
-      <div className="conversation-content">
-        <div ref={top} aria-hidden="true" />
-        {before !== undefined && turns.length > 0 && older && (
-          <div className="history-loader">
-            {older.error ? (
-              <p role="alert">
-                {older.error}{" "}
+    <div className="conversation-frame">
+      <div
+        className="conversation-scroll"
+        ref={scroll}
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          pinned.current = element.scrollHeight - element.clientHeight - element.scrollTop < 80;
+        }}
+      >
+        <div className="conversation-content">
+          <div ref={top} aria-hidden="true" />
+          {before !== undefined && turns.length > 0 && older && (
+            <div className="history-loader">
+              {older.error ? (
+                <p role="alert">
+                  {older.error}{" "}
+                  <button type="button" onClick={loadOlder}>
+                    Retry
+                  </button>
+                </p>
+              ) : olderLoading ? (
+                <p role="status">Loading earlier messages…</p>
+              ) : (
                 <button type="button" onClick={loadOlder}>
-                  Retry
+                  Show earlier messages
                 </button>
-              </p>
-            ) : olderLoading ? (
-              <p role="status">Loading earlier messages…</p>
-            ) : (
-              <button type="button" onClick={loadOlder}>
-                Show earlier messages
-              </button>
-            )}
-          </div>
-        )}
-        {loading && turns.length === 0 && (
-          <p className="conversation-status" role="status">
-            Loading conversation…
-          </p>
-        )}
-        {!loading && turns.length === 0 && (
-          <p className="conversation-status">Send a message to start.</p>
-        )}
-        <DisclosureChoices.Provider value={choices}>
-          {turns.map((turn) => (
-            <TurnView
-              key={turn.id}
-              turn={turn}
-              now={now}
-              thread={thread}
-              onOpenThread={onOpenThread}
-            />
-          ))}
-        </DisclosureChoices.Provider>
+              )}
+            </div>
+          )}
+          {loading && turns.length === 0 && (
+            <p className="conversation-status" role="status">
+              Loading conversation…
+            </p>
+          )}
+          {!loading && turns.length === 0 && (
+            <p className="conversation-status">Send a message to start.</p>
+          )}
+          <DisclosureChoices.Provider value={choices}>
+            {turns.map((turn) => (
+              <TurnView
+                key={turn.id}
+                turn={turn}
+                now={now}
+                thread={thread}
+                onOpenThread={onOpenThread}
+              />
+            ))}
+          </DisclosureChoices.Provider>
+        </div>
       </div>
+      <TurnRail
+        marks={marks}
+        containerRef={scroll}
+        leaveLatest={() => {
+          pinned.current = false;
+        }}
+        now={now}
+      />
     </div>
   );
 }
@@ -233,7 +246,7 @@ function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number
   );
 
   return (
-    <section className="turn">
+    <section className="turn" data-turn={turn.prompt ? turn.id : undefined}>
       {turn.prompt && (
         <article className="prompt" aria-label="user message">
           {turn.prompt.at !== undefined && (
