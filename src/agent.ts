@@ -33,6 +33,7 @@ import * as Predicate from "effect/Predicate";
 import { historyPage, promptIndex, promptWindow } from "./transcript-window";
 import { compactionSettings } from "./compaction";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
+import { Scheduler, SCHEDULE_TOOL_NAMES, scheduleTasks } from "./schedule";
 import {
   ConversationWorkspace,
   workspaceConfig,
@@ -381,6 +382,7 @@ export class Agent extends DurableObject<Env> {
     } satisfies ToolRegistration;
 
     const coordination = new Coordination(() => this.harness);
+    const scheduler = new Scheduler(() => this.harness);
     const githubSchema = toolParameters(GitHubRequest);
 
     const githubTool = {
@@ -556,12 +558,19 @@ export class Agent extends DurableObject<Env> {
         },
       } satisfies ToolRegistration,
       ...coordination.tools(),
+      ...scheduler.tools(),
     ];
 
     const extension = defineExtension({
       name: "sandbox",
       tools,
-      tasks: [...coordinationTasks, this.githubTask, this.slackTask, this.checkpointTask],
+      tasks: [
+        ...coordinationTasks,
+        ...scheduleTasks,
+        this.githubTask,
+        this.slackTask,
+        this.checkpointTask,
+      ],
       hooks: [
         hook(GenerationTask, {
           afterRun: async (run, api, context) => {
@@ -862,6 +871,34 @@ export class Agent extends DurableObject<Env> {
             } while (cursor);
           }, BACKGROUND_CONTEXT)
           .then(() => this.ctx.storage.put("migration:dolly-tool", true)),
+      );
+
+    if (
+      !(yield* attempt("schedule.migration.read", () =>
+        this.ctx.storage.get("migration:schedule-tools"),
+      ))
+    )
+      yield* attempt("schedule.tools.update", () =>
+        this.harness
+          .commit(async (tx) => {
+            let cursor: Cursor | undefined;
+
+            do {
+              const page = await tx.scanConversations({}, 100, cursor);
+
+              for (const conversation of page.items) {
+                const agent = await tx.doc(AgentDoc, conversation.id);
+
+                for (const names of [agent.tools, agent.modelTools])
+                  if (Array.isArray(names))
+                    for (const name of SCHEDULE_TOOL_NAMES)
+                      if (!names.includes(name)) names.push(name);
+              }
+
+              cursor = page.next;
+            } while (cursor);
+          }, BACKGROUND_CONTEXT)
+          .then(() => this.ctx.storage.put("migration:schedule-tools", true)),
       );
 
     yield* this.arm(this.harness.wake());
