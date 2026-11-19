@@ -188,6 +188,152 @@ const CombinedStatus = Schema.Struct({
   ),
 });
 
+const PullHead = Schema.Struct({
+  state: Schema.String,
+  merged: Schema.optional(Schema.Boolean),
+  merged_at: Schema.optional(Schema.NullOr(Schema.String)),
+  head: Schema.Struct({ sha: Sha }),
+});
+
+const WorkflowRun = Schema.Struct({
+  id: Schema.Number,
+  name: Schema.optional(Schema.NullOr(Schema.String)),
+  status: Schema.NullOr(Schema.String),
+  conclusion: Schema.NullOr(Schema.String),
+  html_url: Schema.String,
+  head_sha: Schema.String,
+  run_attempt: Schema.optional(Schema.Number),
+});
+
+const WorkflowRuns = Schema.Struct({ workflow_runs: Schema.Array(WorkflowRun) });
+
+const WorkflowJobs = Schema.Struct({
+  jobs: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      status: Schema.String,
+      conclusion: Schema.NullOr(Schema.String),
+      html_url: Schema.optional(Schema.NullOr(Schema.String)),
+      steps: Schema.optional(
+        Schema.Array(
+          Schema.Struct({ name: Schema.String, conclusion: Schema.NullOr(Schema.String) }),
+        ),
+      ),
+    }),
+  ),
+});
+
+const StateCounts = Schema.NullOr(
+  Schema.Array(Schema.Struct({ state: Schema.String, count: Schema.Number })),
+);
+
+const CheckCountsResponse = Schema.Struct({
+  data: Schema.NullOr(
+    Schema.Struct({
+      repository: Schema.NullOr(
+        Schema.Struct({
+          pullRequest: Schema.NullOr(
+            Schema.Struct({
+              state: Schema.String,
+              headRefOid: Schema.String,
+              commits: Schema.Struct({
+                nodes: Schema.Array(
+                  Schema.Struct({
+                    commit: Schema.Struct({
+                      statusCheckRollup: Schema.NullOr(
+                        Schema.Struct({
+                          contexts: Schema.Struct({
+                            checkRunCountsByState: StateCounts,
+                            statusContextCountsByState: StateCounts,
+                          }),
+                        }),
+                      ),
+                    }),
+                  }),
+                ),
+              }),
+            }),
+          ),
+        }),
+      ),
+    }),
+  ),
+});
+
+/** State, head and check counts by state from one 1-point GraphQL query. */
+const CHECK_COUNTS_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      state
+      headRefOid
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 1) {
+                checkRunCountsByState { state count }
+                statusContextCountsByState { state count }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/** A GraphQL PullRequestState as the REST-shaped state waits compare. */
+function pullState(state: string): PullRequestState {
+  if (state === "MERGED") return "merged";
+
+  return state === "CLOSED" ? "closed" : "open";
+}
+
+/** A PR's cheap read: enough to see that checks are plainly still running, nothing more. */
+export type PullCheckCounts = {
+  state: PullRequestState;
+  headSha: string;
+  /** Count per uppercase GraphQL state (QUEUED, IN_PROGRESS, SUCCESS, FAILURE, PENDING...). */
+  counts: { state: string; count: number }[];
+};
+
+/** One CI check as a wait sees it: a check run or a commit status, by name. */
+export type CiCheck = {
+  name: string;
+  /** GitHub's raw status (check runs) or state (commit statuses), lowercase. */
+  status: string;
+  conclusion: string | null;
+  url?: string;
+};
+
+export type PullChecks = {
+  state: PullRequestState;
+  headSha: string;
+  checks: CiCheck[];
+};
+
+export type CiWorkflowRun = {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  url: string;
+  headSha: string;
+  attempt: number;
+  jobs: {
+    name: string;
+    status: string;
+    conclusion: string | null;
+    url?: string;
+    failedSteps: string[];
+  }[];
+};
+
+/** Which run a workflow_run wait watches: an id, or a workflow plus the ref it ran for. */
+export type WorkflowRunTarget =
+  | { runId: number }
+  | { workflow: string; ref: string; createdAfter: number };
+
 type ThreadComment = {
   id: number;
   author: string | null;
@@ -262,6 +408,7 @@ type GitHubBody =
       permissions: Readonly<Record<string, string>>;
     }
   | { body: string }
+  | { query: string; variables: Readonly<Record<string, string | number>> }
   | { ref: string; sha: string }
   | { head: string; base: string; title: string; body: string }
   | PullRequestEdit
@@ -834,7 +981,16 @@ function makeGitHub(
         public: true,
         redirect_url: `${value.origin}/api/setup/github/callback`,
         default_permissions: GITHUB_APP_GRANT_PERMISSIONS,
-        default_events: ["issue_comment"],
+        // CI events let durable waits wake as soon as checks change, instead of at the next poll.
+        default_events: [
+          "issue_comment",
+          "check_run",
+          "check_suite",
+          "status",
+          "workflow_run",
+          "workflow_job",
+          "pull_request",
+        ],
         hook_attributes: { url: hook, active: true },
       },
     };
@@ -1462,13 +1618,14 @@ function makeGitHub(
     const verified = yield* verifyWebhook(profile, body, signature, event);
 
     if (verified.status !== 202) return verified;
+    // CI events nudge waits; they pass the same account and installation checks as commands.
+    const subject = verified.kind === "ci" ? verified.ci : verified.event;
 
-    if (!(yield* accountAllowed(verified.event.repository.split("/")[0])))
-      return { status: 403 as const };
+    if (!(yield* accountAllowed(subject.repository.split("/")[0]))) return { status: 403 as const };
     const connected = yield* read();
 
     const installation = yield* api(
-      `/repos/${verified.event.repository}/installation`,
+      `/repos/${subject.repository}/installation`,
       yield* jwt(connected.app),
     ).pipe(
       Effect.flatMap(decode(Schema.Struct({ id: Schema.Number }))),
@@ -1483,7 +1640,7 @@ function makeGitHub(
       }),
     );
 
-    if (!installation || installation.id !== verified.event.installationId)
+    if (!installation || installation.id !== subject.installationId)
       return { status: 403 as const };
 
     return verified;
@@ -1566,7 +1723,148 @@ function makeGitHub(
     return summary;
   });
 
+  /**
+   * Reads for durable CI waits. They poll for up to hours, so they always use an installation
+   * token (5,000 requests an hour) rather than the anonymous public path (60 an hour per IP).
+   */
+  const ciRead = Effect.fn("GitHub.ciRead")(function* (repository: string, path: string) {
+    const token = yield* tokenFor(yield* read(), repository, "read");
+
+    return yield* api(path, token);
+  });
+
+  const pullChecks = Effect.fn("GitHub.pullChecks")(function* (repository: string, number: number) {
+    const root = `/repos/${repository}`;
+
+    const pull = yield* ciRead(repository, `${root}/pulls/${number}`).pipe(
+      Effect.flatMap(decode(PullHead)),
+    );
+
+    const [runs, status] = yield* Effect.all([
+      ciRead(repository, `${root}/commits/${pull.head.sha}/check-runs?per_page=100`).pipe(
+        Effect.flatMap(decode(CheckRuns)),
+      ),
+      ciRead(repository, `${root}/commits/${pull.head.sha}/status`).pipe(
+        Effect.flatMap(decode(CombinedStatus)),
+      ),
+    ]);
+
+    const state: PullRequestState =
+      pull.merged || pull.merged_at ? "merged" : pull.state === "closed" ? "closed" : "open";
+
+    const checks: CiCheck[] = [
+      ...runs.check_runs.map((run) => ({
+        name: run.name,
+        status: run.status.toLowerCase(),
+        conclusion: run.conclusion?.toLowerCase() ?? null,
+        url: run.details_url ?? undefined,
+      })),
+      ...status.statuses.map((entry) => ({
+        name: entry.context,
+        status: entry.state.toLowerCase(),
+        conclusion: null,
+        url: entry.target_url ?? undefined,
+      })),
+    ];
+
+    const result: PullChecks = { state, headSha: pull.head.sha, checks };
+
+    return result;
+  });
+
+  const pullCheckCounts = Effect.fn("GitHub.pullCheckCounts")(function* (
+    repository: string,
+    number: number,
+  ) {
+    const token = yield* tokenFor(yield* read(), repository, "read");
+    const [owner = "", name = ""] = repository.split("/");
+
+    const response = yield* api("/graphql", token, {
+      query: CHECK_COUNTS_QUERY,
+      variables: { owner, name, number },
+    }).pipe(Effect.flatMap(decode(CheckCountsResponse)));
+
+    const pull = response.data?.repository?.pullRequest;
+
+    if (!pull)
+      return yield* new OperationError({
+        operation: "github.graphql",
+        message: `GitHub returned no pull request ${repository}#${number}`,
+        details: null,
+      });
+
+    const contexts = pull.commits.nodes[0]?.commit.statusCheckRollup?.contexts;
+
+    const result: PullCheckCounts = {
+      state: pullState(pull.state),
+      headSha: pull.headRefOid,
+      counts: [
+        ...(contexts?.checkRunCountsByState ?? []),
+        ...(contexts?.statusContextCountsByState ?? []),
+      ],
+    };
+
+    return result;
+  });
+
+  /** The run a wait watches with its latest attempt's jobs, or undefined before it exists. */
+  const workflowRun = Effect.fn("GitHub.workflowRun")(function* (
+    repository: string,
+    target: WorkflowRunTarget,
+  ) {
+    const root = `/repos/${repository}/actions`;
+    let run: typeof WorkflowRun.Type | undefined;
+
+    if ("runId" in target)
+      run = yield* ciRead(repository, `${root}/runs/${target.runId}`).pipe(
+        Effect.flatMap(decode(WorkflowRun)),
+      );
+    else {
+      const filter = /^[a-f0-9]{40}$/i.test(target.ref) ? "head_sha" : "branch";
+
+      const created = new Date(target.createdAfter).toISOString();
+
+      const runs = yield* ciRead(
+        repository,
+        `${root}/workflows/${encodeURIComponent(target.workflow)}/runs?per_page=10&${filter}=${encodeURIComponent(target.ref)}&created=${encodeURIComponent(`>=${created}`)}`,
+      ).pipe(Effect.flatMap(decode(WorkflowRuns)));
+
+      run = runs.workflow_runs[0];
+    }
+
+    if (!run) return undefined;
+
+    const jobs = yield* ciRead(
+      repository,
+      `${root}/runs/${run.id}/jobs?filter=latest&per_page=100`,
+    ).pipe(Effect.flatMap(decode(WorkflowJobs)));
+
+    const result: CiWorkflowRun = {
+      id: run.id,
+      name: run.name ?? `run ${run.id}`,
+      status: (run.status ?? "queued").toLowerCase(),
+      conclusion: run.conclusion?.toLowerCase() ?? null,
+      url: run.html_url,
+      headSha: run.head_sha,
+      attempt: run.run_attempt ?? 1,
+      jobs: jobs.jobs.map((job) => ({
+        name: job.name,
+        status: job.status.toLowerCase(),
+        conclusion: job.conclusion?.toLowerCase() ?? null,
+        url: job.html_url ?? undefined,
+        failedSteps: (job.steps ?? [])
+          .filter((step) => step.conclusion === "failure")
+          .map((step) => step.name),
+      })),
+    };
+
+    return result;
+  });
+
   return {
+    pullChecks,
+    pullCheckCounts,
+    workflowRun,
     status,
     botIdentity,
     clientId,

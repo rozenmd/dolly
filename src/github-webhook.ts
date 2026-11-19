@@ -32,6 +32,166 @@ const CommentEvent = Schema.Struct({
   comment: Schema.Struct({ id: Id, body: Schema.String, user: Schema.Struct({ login: Login }) }),
 });
 
+const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
+const Pulls = Schema.optional(Schema.Array(Schema.Struct({ number: Id })));
+
+const CiBase = {
+  installation: Schema.Struct({ id: Id }),
+  repository: Schema.Struct({ full_name: Repository }),
+};
+
+const FAILED = ["failure", "timed_out", "startup_failure"];
+
+/** The CI events that can move a wait forward; anything else about CI is noise. */
+const CiEvents = {
+  check_run: Schema.Struct({
+    ...CiBase,
+    action: Schema.Literal("completed"),
+    check_run: Schema.Struct({
+      head_sha: Sha,
+      conclusion: Schema.NullOr(Schema.String),
+      pull_requests: Pulls,
+    }),
+  }),
+  check_suite: Schema.Struct({
+    ...CiBase,
+    action: Schema.Literal("completed"),
+    check_suite: Schema.Struct({ head_sha: Sha, pull_requests: Pulls }),
+  }),
+  status: Schema.Struct({ ...CiBase, sha: Sha, state: Schema.String }),
+  workflow_run: Schema.Struct({
+    ...CiBase,
+    action: Schema.Literal("completed"),
+    workflow_run: Schema.Struct({
+      id: Id,
+      head_sha: Sha,
+      head_branch: Schema.optional(Schema.NullOr(Schema.String)),
+      path: Schema.optional(Schema.String),
+      pull_requests: Pulls,
+    }),
+  }),
+  workflow_job: Schema.Struct({
+    ...CiBase,
+    action: Schema.Literal("completed"),
+    workflow_job: Schema.Struct({
+      run_id: Id,
+      head_sha: Sha,
+      conclusion: Schema.NullOr(Schema.String),
+    }),
+  }),
+  pull_request: Schema.Struct({
+    ...CiBase,
+    action: Schema.Literal("closed"),
+    number: Id,
+    pull_request: Schema.Struct({ head: Schema.Struct({ sha: Sha }) }),
+  }),
+};
+
+/**
+ * A CI change a wait may care about. It only pulls a matching wait's next poll forward; the wait
+ * still reads GitHub itself, so a forged or stale event can cost a poll but never a wrong result.
+ */
+export type CiEvent = {
+  installationId: number;
+  repository: string;
+  shas: string[];
+  pulls: number[];
+  runId?: number;
+  /** Workflow file path and branch or tag, for a run named by workflow and ref. */
+  workflowPath?: string;
+  ref?: string;
+};
+
+function ciEvent(event: string, text: string): CiEvent | undefined {
+  const json = Option.getOrUndefined(
+    Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))(text),
+  );
+
+  const base = (value: { installation: { id: number }; repository: { full_name: string } }) => ({
+    installationId: value.installation.id,
+    repository: value.repository.full_name.toLowerCase(),
+  });
+
+  const numbers = (pulls?: readonly { number: number }[]) =>
+    (pulls ?? []).map((pull) => pull.number);
+
+  if (event === "check_run") {
+    const value = Option.getOrUndefined(Schema.decodeUnknownOption(CiEvents.check_run)(json));
+
+    // A passing check alone rarely settles anything; check_suite covers that.
+    if (!value || !FAILED.includes(value.check_run.conclusion ?? "")) return undefined;
+
+    return {
+      ...base(value),
+      shas: [value.check_run.head_sha],
+      pulls: numbers(value.check_run.pull_requests),
+    };
+  }
+
+  if (event === "check_suite") {
+    const value = Option.getOrUndefined(Schema.decodeUnknownOption(CiEvents.check_suite)(json));
+
+    if (!value) return undefined;
+
+    return {
+      ...base(value),
+      shas: [value.check_suite.head_sha],
+      pulls: numbers(value.check_suite.pull_requests),
+    };
+  }
+
+  if (event === "status") {
+    const value = Option.getOrUndefined(Schema.decodeUnknownOption(CiEvents.status)(json));
+
+    if (!value || value.state === "pending") return undefined;
+
+    return { ...base(value), shas: [value.sha], pulls: [] };
+  }
+
+  if (event === "workflow_run") {
+    const value = Option.getOrUndefined(Schema.decodeUnknownOption(CiEvents.workflow_run)(json));
+
+    if (!value) return undefined;
+    const run = value.workflow_run;
+
+    const result: CiEvent = {
+      ...base(value),
+      shas: [run.head_sha],
+      pulls: numbers(run.pull_requests),
+      runId: run.id,
+    };
+
+    if (run.path) result.workflowPath = run.path;
+
+    if (run.head_branch) result.ref = run.head_branch;
+
+    return result;
+  }
+
+  if (event === "workflow_job") {
+    const value = Option.getOrUndefined(Schema.decodeUnknownOption(CiEvents.workflow_job)(json));
+
+    if (!value || !FAILED.includes(value.workflow_job.conclusion ?? "")) return undefined;
+
+    return {
+      ...base(value),
+      shas: [value.workflow_job.head_sha],
+      pulls: [],
+      runId: value.workflow_job.run_id,
+    };
+  }
+
+  if (event === "pull_request") {
+    const value = Option.getOrUndefined(Schema.decodeUnknownOption(CiEvents.pull_request)(json));
+
+    if (!value) return undefined;
+
+    return { ...base(value), shas: [value.pull_request.head.sha], pulls: [value.number] };
+  }
+
+  return undefined;
+}
+
 export const GitHubEvent = Schema.Struct({
   installationId: Id,
   repository: Repository,
@@ -71,7 +231,11 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
 
   if (!valid) return { status: 401 as const };
 
-  if (event !== "issue_comment") return { status: 204 as const };
+  if (event !== "issue_comment") {
+    const ci = ciEvent(event, new TextDecoder().decode(body));
+
+    return ci ? { status: 202 as const, kind: "ci" as const, ci } : { status: 204 as const };
+  }
 
   const parsed = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(CommentEvent))(
     new TextDecoder().decode(body),
@@ -94,6 +258,7 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
 
   return {
     status: 202 as const,
+    kind: "comment" as const,
     event: {
       installationId: value.installation.id,
       repository: value.repository.full_name.toLowerCase(),

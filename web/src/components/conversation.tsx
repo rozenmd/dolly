@@ -21,6 +21,8 @@ import {
   StopIcon,
 } from "@heroicons/react/16/solid";
 import {
+  CheckBadgeIcon,
+  CheckCircleIcon,
   ClockIcon,
   CodeBracketIcon,
   CommandLineIcon,
@@ -31,6 +33,7 @@ import {
   PencilIcon,
   UsersIcon,
   WrenchIcon,
+  XCircleIcon,
 } from "@heroicons/react/24/outline";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -42,6 +45,7 @@ import { TurnRail } from "./turn-rail";
 import { markEntry, railMarks, wholeRail, type RailMark } from "../lib/turn-rail";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import { ScheduleButton } from "./schedule";
+import { CiWaitStrip } from "./ci-wait";
 import type { Attachment } from "../lib/images";
 import {
   spawnedThreadId,
@@ -295,7 +299,16 @@ function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number
           now={now}
         />
       )}
-      {turn.prompt && !turn.prompt.scheduled && (
+      {turn.prompt?.ciWait && (
+        <CiWaitNotice
+          id={turn.id}
+          wake={turn.prompt.ciWait}
+          prompt={turn.prompt.text}
+          deliveredAt={turn.prompt.at}
+          now={now}
+        />
+      )}
+      {turn.prompt && !turn.prompt.scheduled && !turn.prompt.ciWait && (
         <article className="prompt" aria-label="user message">
           {turn.prompt.at !== undefined && (
             <div className="prompt-meta">
@@ -387,6 +400,57 @@ function ScheduledNotice({
       </summary>
       <div className="scheduled-body">
         <Prose text={text} />
+      </div>
+    </details>
+  );
+}
+
+const CI_WAIT_ICONS = {
+  passed: CheckCircleIcon,
+  failed: XCircleIcon,
+  closed: CheckBadgeIcon,
+  timed_out: ClockIcon,
+  finished: CheckBadgeIcon,
+};
+
+/**
+ * A CI wait woke the agent: what happened to the checks, as a notice rather than a bubble, since
+ * the owner didn't type it. What GitHub reported and the agent's own follow-up are one click away.
+ */
+function CiWaitNotice({
+  id,
+  wake,
+  prompt,
+  deliveredAt,
+  now,
+}: {
+  id: string;
+  wake: NonNullable<NonNullable<Turn["prompt"]>["ciWait"]>;
+  prompt: string;
+  deliveredAt?: number;
+  now: number;
+}) {
+  const disclosure = useDisclosure(`ci-wait-${id}`, false);
+  const Icon = CI_WAIT_ICONS[wake.outcome];
+
+  return (
+    <details
+      className="scheduled-notice ci-wait-notice"
+      data-outcome={wake.outcome}
+      aria-label="CI wait result"
+      {...disclosure}
+    >
+      <summary>
+        <Icon aria-hidden="true" />
+        <span className="scheduled-title">{wake.headline}</span>
+        {deliveredAt !== undefined && (
+          <time dateTime={new Date(deliveredAt).toISOString()}>{ago(deliveredAt, now)}</time>
+        )}
+        <ChevronRightIcon className="disclosure" />
+      </summary>
+      <div className="scheduled-body">
+        <Prose text={wake.trigger} />
+        {prompt && <p className="ci-wait-next">Then: {prompt}</p>}
       </div>
     </details>
   );
@@ -648,6 +712,8 @@ const toolIcons = new Map(
     schedule_prompt: ClockIcon,
     list_scheduled_prompts: ClockIcon,
     cancel_scheduled_prompt: ClockIcon,
+    wait_for: CheckBadgeIcon,
+    cancel_wait: CheckBadgeIcon,
   }),
 );
 
@@ -820,6 +886,7 @@ export function Composer({
   return (
     <div className="composer-area">
       <div className={queued.length > 0 ? "composer-shell has-queue" : "composer-shell"}>
+        <CiWaitStrip session={draftKey} activity={activity} />
         {queued.length > 0 && (
           <section className="message-queue" aria-label="Queued messages">
             <h2>
