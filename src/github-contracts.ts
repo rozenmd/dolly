@@ -21,6 +21,9 @@ const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
 
 const PullNumber = Schema.Int.check(Schema.isGreaterThan(0));
 
+/** GitHub Actions run and job ids, which outgrow PR numbers but stay safe integers. */
+const ActionsId = Schema.Int.check(Schema.isGreaterThan(0));
+
 const Page = Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(100));
 
 const LineNumber = Schema.Int.check(Schema.isGreaterThan(0));
@@ -146,6 +149,20 @@ export const GitHubRequest = Schema.Struct({
       number: PullNumber,
     }),
     Schema.Struct({
+      /** A workflow run's jobs (latest attempt) with ids for read_job_log and their steps. */
+      action: Schema.Literal("list_workflow_jobs"),
+      repository: Repository,
+      run_id: ActionsId,
+    }),
+    Schema.Struct({
+      /** A window of one Actions job's log; the tail when offset is omitted. */
+      action: Schema.Literal("read_job_log"),
+      repository: Repository,
+      job_id: ActionsId,
+      offset: Schema.optional(LineNumber),
+      limit: Schema.optional(LineNumber.check(Schema.isLessThanOrEqualTo(2000))),
+    }),
+    Schema.Struct({
       action: Schema.Literal("create_review"),
       repository: Repository,
       number: PullNumber,
@@ -192,6 +209,8 @@ export const GitHubResult = Schema.Union([
       "pull_request_files",
       "pull_request_comments",
       "pull_request_checks",
+      "workflow_jobs",
+      "job_log",
       "review",
       "review_comment",
       "screenshot",

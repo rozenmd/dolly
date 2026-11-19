@@ -25,6 +25,7 @@ import {
 import { exceptionDetails } from "./diagnostics";
 import { integrationJson } from "./integration-http";
 import { describeWindow, windowText } from "./file-window";
+import { JobLogWindow, type JobLogRange } from "./job-log";
 import { budgetPatches, invalidAnchors, REVIEW_FOOTER } from "./github-review";
 import { attempt, OperationError } from "./operations";
 import { MAX_IMAGE_BYTES } from "./images";
@@ -185,6 +186,8 @@ const Review = Schema.Struct({
 const CheckRuns = Schema.Struct({
   check_runs: Schema.Array(
     Schema.Struct({
+      /** For GitHub Actions, the check run id is the job id read_job_log takes. */
+      id: Schema.optional(Schema.Number),
       name: Schema.String,
       status: Schema.String,
       conclusion: Schema.NullOr(Schema.String),
@@ -238,6 +241,33 @@ const WorkflowJobs = Schema.Struct({
       ),
     }),
   ),
+});
+
+/** One Actions job as list_workflow_jobs and read_job_log describe it. */
+const ActionsJob = Schema.Struct({
+  id: Schema.Number,
+  run_id: Schema.Number,
+  name: Schema.String,
+  status: Schema.String,
+  conclusion: Schema.NullOr(Schema.String),
+  html_url: Schema.optional(Schema.NullOr(Schema.String)),
+  started_at: Schema.optional(Schema.NullOr(Schema.String)),
+  completed_at: Schema.optional(Schema.NullOr(Schema.String)),
+  steps: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        number: Schema.Number,
+        name: Schema.String,
+        status: Schema.String,
+        conclusion: Schema.NullOr(Schema.String),
+      }),
+    ),
+  ),
+});
+
+const ActionsJobs = Schema.Struct({
+  total_count: Schema.Number,
+  jobs: Schema.Array(ActionsJob),
 });
 
 const StateCounts = Schema.NullOr(
@@ -402,6 +432,69 @@ const jwt = Effect.fn("GitHub.jwt")(function* (app: typeof App.Type) {
 
   return `${input}.${base64url(new Uint8Array(signature))}`;
 });
+
+/** Logs are streamed and windowed, but a runaway job's log still stops being read past this. */
+const MAX_JOB_LOG_BYTES = 64 * 1_048_576;
+
+/**
+ * Download one Actions job log and window it. GitHub answers the API request with a redirect to a
+ * short-lived signed URL, which is fetched without the installation token so it never leaves GitHub.
+ */
+const downloadJobLog = (repository: string, jobId: number, token: string, range: JobLogRange) =>
+  attempt("github.job_log", async (signal) => {
+    const headers = new Headers({
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "dolly",
+    });
+
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+
+    let response = await fetch(
+      `https://api.github.com/repos/${repository}/actions/jobs/${jobId}/logs`,
+      { headers, redirect: "manual", signal },
+    );
+
+    const location = response.headers.get("Location");
+
+    if (response.status >= 300 && response.status < 400 && location) {
+      await response.body?.cancel();
+      response = await fetch(location, { headers: { "User-Agent": "dolly" }, signal });
+    }
+
+    if (!response.ok) {
+      await response.body?.cancel();
+
+      return { ok: false as const, status: response.status };
+    }
+
+    const reader = response.body?.getReader();
+    const window = new JobLogWindow(range);
+    const decoder = new TextDecoder();
+    let size = 0;
+    let cut = false;
+
+    try {
+      while (reader) {
+        const next = await reader.read();
+
+        if (next.done) break;
+        size += next.value.byteLength;
+        window.push(decoder.decode(next.value, { stream: true }));
+
+        if (size >= MAX_JOB_LOG_BYTES) {
+          cut = true;
+          break;
+        }
+      }
+    } finally {
+      await reader?.cancel().catch(() => {});
+    }
+
+    window.push(decoder.decode());
+
+    return { ok: true as const, log: window.finish(), cut };
+  });
 
 const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) =>
   flow(
@@ -1403,6 +1496,107 @@ function makeGitHub(
             statuses: status.statuses,
           },
         },
+      };
+    }
+
+    if (op.action === "list_workflow_jobs") {
+      const listing = yield* readApi(
+        op.repository,
+        `/repos/${op.repository}/actions/runs/${op.run_id}/jobs?filter=latest&per_page=100`,
+      ).pipe(Effect.flatMap(decode(ActionsJobs)));
+
+      return {
+        ok: true,
+        result: {
+          kind: "workflow_jobs",
+          data: {
+            run_id: op.run_id,
+            total_count: listing.total_count,
+            jobs: listing.jobs.map((job) => ({
+              id: job.id,
+              name: job.name,
+              status: job.status,
+              conclusion: job.conclusion,
+              url: job.html_url ?? null,
+              steps: (job.steps ?? []).map((step) => ({
+                number: step.number,
+                name: step.name,
+                status: step.status,
+                conclusion: step.conclusion,
+              })),
+            })),
+          },
+        },
+      };
+    }
+
+    if (op.action === "read_job_log") {
+      // Reading the job first confirms the repository is readable (public, or an allowed owner)
+      // and says whether a log can exist yet.
+      const job = yield* readApi(
+        op.repository,
+        `/repos/${op.repository}/actions/jobs/${op.job_id}`,
+      ).pipe(Effect.flatMap(decode(ActionsJob)));
+
+      const summary = {
+        id: job.id,
+        run_id: job.run_id,
+        name: job.name,
+        status: job.status,
+        conclusion: job.conclusion,
+        url: job.html_url ?? null,
+        failed_steps: (job.steps ?? [])
+          .filter((step) => ["failure", "timed_out"].includes(step.conclusion ?? ""))
+          .map((step) => ({ number: step.number, name: step.name })),
+      };
+
+      if (job.status !== "completed")
+        return {
+          ok: false,
+          code: "job_log_unavailable",
+          message: `Job ${job.id} (${job.name}) is ${job.status}; GitHub serves its log once the job completes. Use wait_for, then read it again.`,
+        };
+
+      // Log downloads need actions: read, so prefer the installation's read token.
+      const token = (yield* accountAllowed(op.repository.split("/")[0]))
+        ? yield* tokenFor(yield* read(), op.repository, "read").pipe(
+            Effect.catch(() => publicReadToken),
+          )
+        : yield* publicReadToken;
+
+      const download = yield* downloadJobLog(op.repository, op.job_id, token, {
+        offset: op.offset,
+        limit: op.limit,
+      }).pipe(
+        Effect.timeout("45 seconds"),
+        Effect.mapError((cause) =>
+          cause instanceof OperationError
+            ? cause
+            : new OperationError({
+                operation: "github.job_log",
+                message: `Reading the log of job ${op.job_id} timed out`,
+                details: null,
+              }),
+        ),
+      );
+
+      if (!download.ok)
+        return {
+          ok: false,
+          code: "job_log_unavailable",
+          message:
+            download.status === 410 || download.status === 404
+              ? `GitHub has no log for job ${job.id} (HTTP ${download.status}): it may have expired or been deleted.`
+              : download.status === 403 || download.status === 401
+                ? `GitHub refused the log for job ${job.id} (HTTP ${download.status}). Logs need the Dolly GitHub App installed on ${op.repository} with Actions read access, and its owner in Settings → Accounts dolly can work in.`
+                : `GitHub returned HTTP ${download.status} for the log of job ${job.id}.`,
+        };
+
+      const note = download.cut ? "The log exceeds 64 MiB; only its first 64 MiB were read." : null;
+
+      return {
+        ok: true,
+        result: { kind: "job_log", data: { job: summary, ...download.log, note } },
       };
     }
 

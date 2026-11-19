@@ -2065,3 +2065,164 @@ it("reports first-run setup: installations, allowed accounts, enrollment and App
   });
   expect(fetch).toHaveBeenCalledTimes(2);
 });
+
+it("reads Actions job logs through a redirect without forwarding the token", async () => {
+  await connect();
+  const stamp = "2026-01-02T03:04:05.1234567Z ";
+
+  const log = [
+    ...Array.from({ length: 997 }, (_, index) => `${stamp}line ${index + 1}`),
+    `${stamp}\u001b[31mFAIL\u001b[0m test/a.test.ts`,
+    `${stamp}##[error]Process completed with exit code 1.`,
+    `${stamp}Cleaning up`,
+  ].join("\r\n");
+
+  const job = (id: number, status: string) => ({
+    id,
+    run_id: 9,
+    name: "test (1)",
+    status,
+    conclusion: status === "completed" ? "failure" : null,
+    html_url: `https://github.com/example/project/actions/runs/9/job/${id}`,
+    steps: [
+      { number: 1, name: "Checkout", status: "completed", conclusion: "success" },
+      { number: 2, name: "Test", status: "completed", conclusion: "failure" },
+    ],
+  });
+
+  const blobs: string[] = [];
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const target = new URL(String(url));
+    const authorization = new Headers(init?.headers).get("Authorization");
+
+    if (target.hostname === "results.blob.example") {
+      blobs.push(authorization ?? "");
+
+      return new Response(log);
+    }
+
+    const path = target.pathname;
+
+    if (path === "/app/installations") return Response.json([{ id: 7 }]);
+
+    if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (path.endsWith("/access_tokens"))
+      return Response.json({
+        token: "installation-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+    if (path === "/repos/example/project") return Response.json({ private: false });
+
+    if (path === "/repos/example/project/actions/runs/9/jobs")
+      return Response.json({
+        total_count: 2,
+        jobs: [job(123, "completed"), job(124, "in_progress")],
+      });
+
+    if (path === "/repos/example/project/actions/jobs/123")
+      return Response.json(job(123, "completed"));
+
+    if (path === "/repos/example/project/actions/jobs/124")
+      return Response.json(job(124, "in_progress"));
+
+    if (path === "/repos/example/project/actions/jobs/125")
+      return Response.json(job(125, "completed"));
+
+    if (path === "/repos/example/project/actions/jobs/123/logs") {
+      expect(authorization).toBe("Bearer installation-token");
+      expect(init?.redirect).toBe("manual");
+
+      return new Response(null, {
+        status: 302,
+        headers: { Location: "https://results.blob.example/logs/123?sig=signed" },
+      });
+    }
+
+    if (path === "/repos/example/project/actions/jobs/125/logs")
+      return new Response(null, { status: 410 });
+    throw new Error(`Unexpected GitHub path ${path}`);
+  });
+
+  expect(
+    await (await execute({ action: "list_workflow_jobs", repository, run_id: 9 })).json(),
+  ).toMatchObject({
+    ok: true,
+    result: {
+      kind: "workflow_jobs",
+      data: {
+        jobs: [
+          { id: 123, conclusion: "failure", steps: [{ number: 1 }, { number: 2, name: "Test" }] },
+          { id: 124, status: "in_progress" },
+        ],
+      },
+    },
+  });
+
+  const tail = await (
+    await execute({ action: "read_job_log", repository, job_id: 123 })
+  ).json<{
+    ok: true;
+    result: {
+      kind: string;
+      data: {
+        job: { failed_steps: unknown[] };
+        total_lines: number;
+        start_line: number;
+        end_line: number;
+        next_offset: number | null;
+        errors: { line: number; text: string }[];
+        content: string;
+      };
+    };
+  }>();
+
+  expect(tail.result.kind).toBe("job_log");
+  expect(tail.result.data).toMatchObject({
+    job: { failed_steps: [{ number: 2, name: "Test" }] },
+    total_lines: 1000,
+    start_line: 701,
+    end_line: 1000,
+    next_offset: null,
+    errors: [{ line: 999, text: "##[error]Process completed with exit code 1." }],
+  });
+
+  const lines = tail.result.data.content.split("\n");
+
+  expect(lines).toHaveLength(300);
+  expect(lines[0]).toBe("line 701");
+  expect(lines.at(-3)).toBe("FAIL test/a.test.ts");
+  expect(tail.result.data.content).not.toContain("\r");
+
+  expect(
+    await (
+      await execute({ action: "read_job_log", repository, job_id: 123, offset: 2, limit: 3 })
+    ).json(),
+  ).toMatchObject({
+    ok: true,
+    result: {
+      data: { start_line: 2, end_line: 4, next_offset: 5, content: "line 2\nline 3\nline 4" },
+    },
+  });
+
+  // The signed log URL never receives the installation token.
+  expect(blobs).toEqual(["", ""]);
+
+  expect(
+    await (await execute({ action: "read_job_log", repository, job_id: 124 })).json(),
+  ).toMatchObject({
+    ok: false,
+    code: "job_log_unavailable",
+    message: expect.stringContaining("in_progress"),
+  });
+
+  expect(
+    await (await execute({ action: "read_job_log", repository, job_id: 125 })).json(),
+  ).toMatchObject({
+    ok: false,
+    code: "job_log_unavailable",
+    message: expect.stringContaining("expired"),
+  });
+});
