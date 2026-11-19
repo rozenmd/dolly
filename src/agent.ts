@@ -158,11 +158,16 @@ export class Agent extends DurableObject<Env> {
   private readonly papercuts: Papercuts;
   private readonly services: Layer.Layer<Account | ChatGPTProtocol | GitHub | GitHubAuth>;
   private readonly slackServices: Layer.Layer<SlackHostService>;
-  private readonly githubTask = githubDelivery((event, text) =>
-    Effect.flatMap(GitHub, (github) => github.reply(event, text)).pipe(
-      Effect.provide(this.services),
-    ),
-  );
+  private readonly githubTask = githubDelivery({
+    reply: (event, text) =>
+      Effect.flatMap(GitHub, (github) => github.reply(event, text)).pipe(
+        Effect.provide(this.services),
+      ),
+    finished: (event) =>
+      Effect.flatMap(GitHub, (github) => github.react(event, "rocket")).pipe(
+        Effect.provide(this.services),
+      ),
+  });
   private readonly slackTask = slackDelivery({
     prepare: (input, isNew) =>
       Effect.flatMap(SlackHostService, (host) => host.prepare(input, isNew)).pipe(
@@ -1267,7 +1272,22 @@ export class Agent extends DurableObject<Env> {
         if (Option.isNone(yield* this.credentials.get("openai"))) return { status: 503 as const };
         yield* this.arm({ active: true });
 
-        return yield* admitGitHub(this.harness, this.githubTask, verified.event);
+        const admitted = yield* admitGitHub(this.harness, this.githubTask, verified.event);
+
+        // Acknowledge the command on GitHub straight away. Best effort: the task is already queued.
+        if (!admitted.duplicate)
+          yield* Effect.flatMap(GitHub, (github) => github.react(verified.event, "eyes")).pipe(
+            Effect.catchTag("OperationError", (error) =>
+              Effect.logError({
+                event: "github_reaction_failed",
+                reaction: "eyes",
+                error: exceptionDetails(error),
+                details: error.details,
+              }),
+            ),
+          );
+
+        return admitted;
       }).pipe(
         Effect.provide(this.services),
         Effect.catchTag("OperationError", (error) =>

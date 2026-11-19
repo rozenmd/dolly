@@ -220,6 +220,7 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
     });
   });
   const posted: string[] = [];
+  const reactions: string[] = [];
   let stall = true;
   let codexRequests = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
@@ -275,6 +276,21 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
         token: "private-installation-token",
         expires_at: new Date(Date.now() + 3_600_000).toISOString(),
       });
+
+    const reaction = parsed.pathname.match(
+      /^\/repos\/example\/project\/issues\/comments\/(\d+)\/reactions$/,
+    );
+
+    if (reaction) {
+      expect(init?.method).toBe("POST");
+      reactions.push(`${reaction[1]}:${JSON.parse(String(init?.body)).content}`);
+
+      // GitHub fails one rocket; the posted answer must still count as delivered.
+      if (reactions.at(-1) === "124:rocket") return Response.json({}, { status: 500 });
+
+      return Response.json({ id: reactions.length }, { status: 201 });
+    }
+
     expect([
       "/repos/example/project/issues/3/comments",
       "/repos/example/project/issues/4/comments",
@@ -298,7 +314,10 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
   }
 
   expect((await hook(payload)).status).toBe(202);
+  // Eyes as soon as the command is admitted, before any work.
+  expect(reactions).toEqual(["123:eyes"]);
   expect((await hook(payload)).status).toBe(202);
+  expect(reactions).toEqual(["123:eyes"]);
   const admitted = await threads();
   expect(admitted).toHaveLength(1);
   expect(admitted[0].deliveries).toHaveLength(1);
@@ -329,6 +348,7 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
   expect(posted).toEqual([expect.stringContaining("<!-- dolly:comment:123 -->")]);
   expect(posted[0]).toContain("Completed GitHub request");
   expect(posted[0]).toContain("<!-- dolly:comment:123 -->");
+  expect(reactions).toEqual(["123:eyes", "123:rocket"]);
   await runInDurableObject(env.AGENT.getByName("owner"), async () => {
     await harnesses.at(-1)?.close(BACKGROUND_CONTEXT);
   });
@@ -339,6 +359,7 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
   await expect.poll(async () => (await threads())[0].deliveries[1].outcome).toBe("completed");
   expect((await threads())[0].id).toBe(admitted[0].id);
   expect(posted).toHaveLength(2);
+  expect(reactions).toEqual(["123:eyes", "123:rocket", "124:eyes", "124:rocket"]);
   await runInDurableObject(env.AGENT.getByName("owner"), async () => {
     const harness = harnesses.at(-1);
 
