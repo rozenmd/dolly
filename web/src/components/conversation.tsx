@@ -863,7 +863,7 @@ export function Composer({
   async function submit(event: FormEvent) {
     event.preventDefault();
 
-    if (!content.trim() || pending || input.reading) return;
+    if ((!content.trim() && !attachments.length) || pending || input.reading) return;
 
     const requestId =
       retry?.content === content &&
@@ -965,7 +965,7 @@ export function Composer({
               onScheduled={() => setDrafts((values) => ({ ...values, [draftKey]: "" }))}
             />
             {modelControl}
-            {running && !content.trim() ? (
+            {running && !content.trim() && !attachments.length ? (
               <button
                 type="button"
                 className="round-button stop"
@@ -979,7 +979,7 @@ export function Composer({
               <button
                 type="submit"
                 className="round-button send"
-                disabled={!content.trim() || pending || input.reading}
+                disabled={(!content.trim() && !attachments.length) || pending || input.reading}
                 aria-label={running ? "Queue message" : "Send message"}
               >
                 <ArrowUpIcon />

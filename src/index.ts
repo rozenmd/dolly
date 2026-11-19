@@ -36,10 +36,18 @@ const Message = Schema.Struct({
   requestId: Schema.String.check(Schema.isUUID()),
 });
 
+/** Text may be empty when screenshots are attached: the images are the message. */
 const PromptMessage = Schema.Struct({
-  ...Message.fields,
+  content: Schema.Trim.check(Schema.isMaxLength(32_768)),
+  requestId: Message.fields.requestId,
   images: Schema.optional(Schema.Array(PromptImage).check(Schema.isMaxLength(MAX_IMAGES))),
-});
+}).check(
+  Schema.makeFilter((message) =>
+    message.content.length > 0 || (message.images?.length ?? 0) > 0
+      ? undefined
+      : "Expected content or at least one image",
+  ),
+);
 
 /** Hono owns HTTP; Effect programs run once at the request boundary. */
 function handle(
@@ -659,7 +667,7 @@ app.post("/api/sessions/:id/messages", (c) =>
           () =>
             new InvalidInput({
               message:
-                "Expected content, a UUID requestId and at most 4 PNG, JPEG, GIF or WebP images under 5 MB each",
+                "Expected content or images, a UUID requestId and at most 4 PNG, JPEG, GIF or WebP images under 5 MB each",
             }),
         ),
       );
