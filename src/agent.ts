@@ -382,7 +382,12 @@ export class Agent extends DurableObject<Env> {
     } satisfies ToolRegistration;
 
     const coordination = new Coordination(() => this.harness);
-    const scheduler = new Scheduler(() => this.harness);
+
+    const scheduler = new Scheduler(
+      () => this.harness,
+      (conversationId) => this.startedFromWeb(conversationId),
+    );
+
     const githubSchema = toolParameters(GitHubRequest);
 
     const githubTool = {

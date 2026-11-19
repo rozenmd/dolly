@@ -7,9 +7,12 @@ import {
   abortAllDurableObjects,
 } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { ConversationId } from "@earendil-works/pi-durable";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import { SlackThreads } from "../src/slack-inbox";
 
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
 
@@ -279,4 +282,32 @@ it("stopping the session cancels its pending scheduled prompts", async () => {
   await new Promise((resolve) => setTimeout(resolve, 200));
   expect(delivered).toBe(false);
   expect(await userEntries(id)).toBe(1);
+});
+
+it("refuses to schedule from a Slack intake thread, whose text is not only the owner's", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    const { toolOutput } = await modelRequest(init);
+
+    if (toolOutput) return answer(`Result: ${toolOutput}`);
+
+    return call("schedule_prompt", { in_minutes: 5, prompt: "Later" });
+  });
+
+  const id = await root();
+
+  // Mark this conversation as a Slack intake thread, as slack-inbox.ts does on creation.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    const conversationId = await state.storage.get<ConversationId>(`session:${id}`);
+
+    if (conversationId === undefined) throw new Error("Session alias missing");
+
+    await agent["harness"].commit(async (tx) => {
+      const threads = await tx.doc(SlackThreads);
+      threads.threads["C1:1.0"] = { id: conversationId, events: {} };
+    }, BACKGROUND_CONTEXT);
+  });
+
+  await prompt(id, "Do it in five minutes");
+  await expect.poll(() => transcript(id)).toContain("Result: ");
+  expect(await transcript(id)).toContain("only available in sessions started from the web app");
 });

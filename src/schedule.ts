@@ -12,7 +12,9 @@ import {
 import { int, obj, opt, str } from "@earendil-works/pi-schema";
 
 export const MAX_SCHEDULED = 20;
-export const MAX_DELAY_MINUTES = 30 * 24 * 60;
+
+/** A week: longer than any sensible check-back, short enough to catch a seconds-for-minutes mistake. */
+export const MAX_DELAY_MINUTES = 7 * 24 * 60;
 
 type Scheduled = { taskId: TaskId<ScheduleResult>; at: number; createdAt: number; prompt: string };
 
@@ -104,6 +106,11 @@ function parseAt(at: string) {
 export class Scheduler {
   constructor(
     private readonly getHarness: () => Harness,
+    /**
+     * Whether this conversation may author its own future turns. GitHub and Slack threads take
+     * text from people other than the owner, and their replies are tied to inbound events.
+     */
+    private readonly allowed: (conversationId: ConversationId) => Promise<boolean>,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -116,6 +123,9 @@ export class Scheduler {
     input: { prompt: string; in_minutes?: number; at?: string },
     context: Context = BACKGROUND_CONTEXT,
   ) {
+    if (!(await this.allowed(conversationId)))
+      return { error: "Scheduled prompts are only available in sessions started from the web app" };
+
     if ((input.in_minutes === undefined) === (input.at === undefined))
       return { error: "Give exactly one of in_minutes or at" };
 
@@ -136,7 +146,7 @@ export class Scheduler {
     if (at < now + 60_000) return { error: "Schedule at least 1 minute ahead", now: iso(now) };
 
     if (at > now + MAX_DELAY_MINUTES * 60_000)
-      return { error: "Schedule at most 30 days ahead", now: iso(now) };
+      return { error: "Schedule at most 7 days ahead", now: iso(now) };
 
     const conversation = await this.harness.conversation(conversationId, context);
 
@@ -156,7 +166,12 @@ export class Scheduler {
 
       state.pending[String(taskId)] = { taskId, at, createdAt: now, prompt: input.prompt };
 
-      return { id: String(taskId), at: iso(at), now: iso(now) };
+      return {
+        id: String(taskId),
+        at: iso(at),
+        now: iso(now),
+        note: "It will arrive in this session as a new message; end your turn now. Cancel with cancel_scheduled_prompt.",
+      };
     }, context);
   }
 
@@ -191,7 +206,7 @@ export class Scheduler {
       defineTool({
         name: "schedule_prompt",
         description:
-          "Schedule a prompt to arrive in this same session later, as a new user message, e.g. when asked to do something in two hours or tomorrow at 9. Give exactly one of in_minutes (1–43200) or at (ISO 8601 with an offset or Z); the result reports the current time. Write a self-contained prompt: restate the request, repository, branch and constraints, because it runs as a fresh turn. After scheduling, end your turn and tell the user when it will run. Durable across restarts; up to 20 pending per session. Stopping the session cancels pending prompts. A delivered prompt can schedule its own continuation.",
+          "Schedule a prompt to arrive in THIS session later as a new user message, then end your turn. Use it when asked to do something later (in two hours, tomorrow at 9) and instead of sleep for any wait longer than a few minutes: a long job, a deploy, a release workflow. Give exactly one of in_minutes (1–10080) or at (ISO 8601 with an offset or Z); the result reports the current time. Write the prompt to your future self with everything needed to pick the work up: the request, repository, branch, constraints, what to run, what done looks like and what to do on failure. Fires once and survives restarts; a delivered prompt can schedule its own continuation. Up to 20 pending per session; stopping the session cancels them. Only in sessions started from the web app.",
         parameters: obj({
           prompt: str({ minLength: 1, maxLength: 32_768 }),
           in_minutes: opt(int({ minimum: 1, maximum: MAX_DELAY_MINUTES })),
