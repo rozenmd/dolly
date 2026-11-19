@@ -1205,6 +1205,15 @@ export class Agent extends DurableObject<Env> {
         number: reply.result.number,
         url: reply.result.url,
       });
+
+      // Subscribe the session to its own PR's checks, so failing CI comes back here unasked.
+      const ciWait = await this.ciWaiter.watchOpenedPull(
+        id,
+        input.operation.repository,
+        reply.result.number,
+      );
+
+      if (ciWait) return { ...reply, ciWait };
     }
 
     return reply;

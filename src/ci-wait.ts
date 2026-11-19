@@ -761,6 +761,41 @@ export class CiWaiter {
   }
 
   /**
+   * The session just opened a pull request: watch its checks, so a failing job wakes the session
+   * without the owner having to chase it. An explicit wait the agent already registered wins, and
+   * sessions that can't wait (not started from the web app) are left alone. Never throws: opening
+   * the PR has already succeeded.
+   */
+  async watchOpenedPull(
+    conversationId: ConversationId,
+    repository: string,
+    number: number,
+    context: Context = BACKGROUND_CONTEXT,
+  ) {
+    try {
+      if (!(await this.allowed(conversationId))) return undefined;
+
+      if (await this.current(conversationId, context)) return undefined;
+
+      const result = await this.waitFor(
+        conversationId,
+        {
+          kind: "pr_checks",
+          repository,
+          number,
+          prompt:
+            "This is the pull request you opened in this session. If a check failed, read its log with github read_job_log, fix the cause, push, and wait for the checks again. If everything passed, briefly tell the owner and finish.",
+        },
+        context,
+      );
+
+      return "error" in result ? undefined : result;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * A webhook says CI changed: pull each matching wait's next poll forward. Pi can't move a sleep,
    * so the sleeping task is swapped for one that resumes from the same poll state at once, in one
    * commit; the old one is then aborted and, if it was mid-poll, finds itself no longer current.
@@ -854,7 +889,7 @@ export class CiWaiter {
       defineTool({
         name: "wait_for",
         description:
-          "Wait for CI without holding the turn, then end your turn. Use it instead of sleep or polling after pushing: kind pr_checks watches a pull request's checks (repository owner/name, number); kind workflow_run watches one GitHub Actions run, by run_id or by workflow (file name such as release.yml) plus ref (branch, tag or commit sha), so it can be registered right after a push or tag before the run exists. The Worker polls GitHub and wakes this session with the result as a new message: on the first failed check (so fixing can start while slower checks run), when everything settles, when the PR closes or merges, or at the timeout (default 120 minutes, max 1440). Checks waiting on a person (an approval) never wake it. A re-armed wait for the same PR or run doesn't wake again until something changes. prompt is what to do when woken. One wait per session: calling it again replaces the current one. Only in sessions started from the web app.",
+          "Wait for CI without holding the turn, then end your turn. Use it instead of sleep or polling after pushing: kind pr_checks watches a pull request's checks (repository owner/name, number); kind workflow_run watches one GitHub Actions run, by run_id or by workflow (file name such as release.yml) plus ref (branch, tag or commit sha), so it can be registered right after a push or tag before the run exists. The Worker polls GitHub and wakes this session with the result as a new message: on the first failed check (so fixing can start while slower checks run), when everything settles, when the PR closes or merges, or at the timeout (default 120 minutes, max 1440). Checks waiting on a person (an approval) never wake it. A re-armed wait for the same PR or run doesn't wake again until something changes. prompt is what to do when woken. One wait per session: calling it again replaces the current one. Opening a pull request (github or workspace open_pull_request) already registers a pr_checks wait for it when none is active; its result says so as ciWait, so just end your turn. Only in sessions started from the web app.",
         parameters: obj({
           kind: oneOf(["pr_checks", "workflow_run"]),
           repository: str({ description: "owner/name" }),

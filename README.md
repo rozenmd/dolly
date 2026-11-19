@@ -11,11 +11,11 @@ It runs on the ChatGPT or Claude subscription you already pay for. You don't nee
 - Every session gets its own computer: each conversation has its own container, checkout and branch. No worktrees, no port conflicts, no "which terminal was that in?"
 
 - Close your laptop: sessions run on Cloudflare, not in your terminal. Work survives restarts, and your files are saved at the end of every turn.
-  
+
 - Start from anywhere: use the web app, a Slack DM or @-mention, or comment `/dolly fix the failing test` on a pull request. Your sessions show up on every device you sign in from.
 
 - Direct a team: agents can start child agents, each in its own sandbox, and wait for their results.
-  
+
 - Let it check back on its own: agents schedule their own follow-ups and wait on CI. "Push it and tell me when checks pass" is one prompt.
 
 ## Ask for proof
