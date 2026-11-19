@@ -9,24 +9,31 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as IndexRouteImport } from './routes/index'
+import { Route as AppRouteImport } from './routes/_app'
 import { Route as SettingsRouteImport } from './routes/settings'
+import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as SettingsIndexRouteImport } from './routes/settings/index'
 import { Route as SettingsAccountRouteImport } from './routes/settings/account'
 import { Route as SettingsGithubRouteImport } from './routes/settings/github'
 import { Route as SettingsModelsRouteImport } from './routes/settings/models'
 import { Route as SettingsRepositoriesRouteImport } from './routes/settings/repositories'
 import { Route as SettingsSlackRouteImport } from './routes/settings/slack'
+import { Route as AppSessionSessionIdRouteImport } from './routes/_app/session.$sessionId'
+import { Route as AppWorkspaceWorkspaceIdSessionSessionIdRouteImport } from './routes/_app/workspace.$workspaceId.session.$sessionId'
 
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const AppRoute = AppRouteImport.update({
+  id: '/_app',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
   getParentRoute: () => rootRouteImport,
+} as any)
+const AppIndexRoute = AppIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppRoute,
 } as any)
 const SettingsIndexRoute = SettingsIndexRouteImport.update({
   id: '/',
@@ -58,9 +65,20 @@ const SettingsSlackRoute = SettingsSlackRouteImport.update({
   path: '/slack',
   getParentRoute: () => SettingsRoute,
 } as any)
+const AppSessionSessionIdRoute = AppSessionSessionIdRouteImport.update({
+  id: '/session/$sessionId',
+  path: '/session/$sessionId',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppWorkspaceWorkspaceIdSessionSessionIdRoute =
+  AppWorkspaceWorkspaceIdSessionSessionIdRouteImport.update({
+    id: '/workspace/$workspaceId/session/$sessionId',
+    path: '/workspace/$workspaceId/session/$sessionId',
+    getParentRoute: () => AppRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
-  '/': typeof IndexRoute
+  '/': typeof AppIndexRoute
   '/settings': typeof SettingsRouteWithChildren
   '/settings/account': typeof SettingsAccountRoute
   '/settings/github': typeof SettingsGithubRoute
@@ -68,26 +86,33 @@ export interface FileRoutesByFullPath {
   '/settings/repositories': typeof SettingsRepositoriesRoute
   '/settings/slack': typeof SettingsSlackRoute
   '/settings/': typeof SettingsIndexRoute
+  '/session/$sessionId': typeof AppSessionSessionIdRoute
+  '/workspace/$workspaceId/session/$sessionId': typeof AppWorkspaceWorkspaceIdSessionSessionIdRoute
 }
 export interface FileRoutesByTo {
-  '/': typeof IndexRoute
   '/settings/account': typeof SettingsAccountRoute
   '/settings/github': typeof SettingsGithubRoute
   '/settings/models': typeof SettingsModelsRoute
   '/settings/repositories': typeof SettingsRepositoriesRoute
   '/settings/slack': typeof SettingsSlackRoute
+  '/': typeof AppIndexRoute
   '/settings': typeof SettingsIndexRoute
+  '/session/$sessionId': typeof AppSessionSessionIdRoute
+  '/workspace/$workspaceId/session/$sessionId': typeof AppWorkspaceWorkspaceIdSessionSessionIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
-  '/': typeof IndexRoute
+  '/_app': typeof AppRouteWithChildren
   '/settings': typeof SettingsRouteWithChildren
   '/settings/account': typeof SettingsAccountRoute
   '/settings/github': typeof SettingsGithubRoute
   '/settings/models': typeof SettingsModelsRoute
   '/settings/repositories': typeof SettingsRepositoriesRoute
   '/settings/slack': typeof SettingsSlackRoute
+  '/_app/': typeof AppIndexRoute
   '/settings/': typeof SettingsIndexRoute
+  '/_app/session/$sessionId': typeof AppSessionSessionIdRoute
+  '/_app/workspace/$workspaceId/session/$sessionId': typeof AppWorkspaceWorkspaceIdSessionSessionIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -100,39 +125,46 @@ export interface FileRouteTypes {
     | '/settings/repositories'
     | '/settings/slack'
     | '/settings/'
+    | '/session/$sessionId'
+    | '/workspace/$workspaceId/session/$sessionId'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/'
     | '/settings/account'
     | '/settings/github'
     | '/settings/models'
     | '/settings/repositories'
     | '/settings/slack'
+    | '/'
     | '/settings'
+    | '/session/$sessionId'
+    | '/workspace/$workspaceId/session/$sessionId'
   id:
     | '__root__'
-    | '/'
+    | '/_app'
     | '/settings'
     | '/settings/account'
     | '/settings/github'
     | '/settings/models'
     | '/settings/repositories'
     | '/settings/slack'
+    | '/_app/'
     | '/settings/'
+    | '/_app/session/$sessionId'
+    | '/_app/workspace/$workspaceId/session/$sessionId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute
+  AppRoute: typeof AppRouteWithChildren
   SettingsRoute: typeof SettingsRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/': {
-      id: '/'
-      path: '/'
+    '/_app': {
+      id: '/_app'
+      path: ''
       fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+      preLoaderRoute: typeof AppRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/settings': {
@@ -141,6 +173,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/settings'
       preLoaderRoute: typeof SettingsRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/_app/': {
+      id: '/_app/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof AppIndexRouteImport
+      parentRoute: typeof AppRoute
     }
     '/settings/': {
       id: '/settings/'
@@ -184,8 +223,37 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsSlackRouteImport
       parentRoute: typeof SettingsRoute
     }
+    '/_app/session/$sessionId': {
+      id: '/_app/session/$sessionId'
+      path: '/session/$sessionId'
+      fullPath: '/session/$sessionId'
+      preLoaderRoute: typeof AppSessionSessionIdRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/workspace/$workspaceId/session/$sessionId': {
+      id: '/_app/workspace/$workspaceId/session/$sessionId'
+      path: '/workspace/$workspaceId/session/$sessionId'
+      fullPath: '/workspace/$workspaceId/session/$sessionId'
+      preLoaderRoute: typeof AppWorkspaceWorkspaceIdSessionSessionIdRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
+
+interface AppRouteChildren {
+  AppIndexRoute: typeof AppIndexRoute
+  AppSessionSessionIdRoute: typeof AppSessionSessionIdRoute
+  AppWorkspaceWorkspaceIdSessionSessionIdRoute: typeof AppWorkspaceWorkspaceIdSessionSessionIdRoute
+}
+
+const AppRouteChildren: AppRouteChildren = {
+  AppIndexRoute: AppIndexRoute,
+  AppSessionSessionIdRoute: AppSessionSessionIdRoute,
+  AppWorkspaceWorkspaceIdSessionSessionIdRoute:
+    AppWorkspaceWorkspaceIdSessionSessionIdRoute,
+}
+
+const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 
 interface SettingsRouteChildren {
   SettingsAccountRoute: typeof SettingsAccountRoute
@@ -210,7 +278,7 @@ const SettingsRouteWithChildren = SettingsRoute._addFileChildren(
 )
 
 const rootRouteChildren: RootRouteChildren = {
-  IndexRoute: IndexRoute,
+  AppRoute: AppRouteWithChildren,
   SettingsRoute: SettingsRouteWithChildren,
 }
 export const routeTree = rootRouteImport

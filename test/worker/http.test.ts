@@ -19,6 +19,15 @@ it("serves the rendered workspace at the Worker root and its real bundled assets
   expect(asset.headers.get("content-type")).toContain("text/css");
 });
 
+it("renders the workspace at session URLs", async () => {
+  for (const path of ["/workspace/root/session/child", "/session/child"]) {
+    const response = await SELF.fetch(`https://worker${path}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    expect(await response.text()).toContain("dolly");
+  }
+});
+
 it("keeps API authentication and JSON responses separate from frontend routing", async () => {
   const denied = await SELF.fetch("https://worker/api/auth/chatgpt");
   expect(denied.status).toBe(401);

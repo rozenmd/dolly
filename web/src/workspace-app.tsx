@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useParams } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import { Bars3Icon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
 import {
@@ -48,6 +48,7 @@ import { sessionList } from "./lib/session-list";
 import { belongsInSidebar, sessionThreads, sidebarSelection } from "./lib/session-threads";
 import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-summary";
 import { useSessionSummary } from "./lib/session-summary";
+import { workspaceId } from "./lib/session-url";
 
 const storageKey = "dolly.sessions.v1";
 
@@ -65,7 +66,10 @@ export function WorkspaceApp() {
   const [setupError, setSetupError] = useState("");
   const [sessions, setSessions] = useState<readonly SavedSession[]>([]);
   const sessionRevision = useRef(0);
-  const [selected, setSelected] = useState("");
+  // The session the URL names: /workspace/<workspaceId>/session/<sessionId>, or /session/<sessionId>.
+  const params = useParams({ strict: false });
+  const routed = params.sessionId ?? "";
+  const [selected, setSelected] = useState(routed);
   const [snapshot, setSnapshot] = useState<typeof Snapshot.Type | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [feed, setFeed] = useState(false);
@@ -390,8 +394,45 @@ export function WorkspaceApp() {
     }
   }
 
+  /** Moves the address to `id`'s canonical URL, or the app root when nothing is open. */
+  function route(id: string, list: readonly SavedSession[], replace: boolean) {
+    if (!id) {
+      if (routed) void navigate({ to: "/", replace });
+
+      return;
+    }
+
+    const workspace = workspaceId(list, id);
+
+    if (routed === id && params.workspaceId === workspace) return;
+
+    void navigate({
+      to: "/workspace/$workspaceId/session/$sessionId",
+      params: { workspaceId: workspace, sessionId: id },
+      replace,
+    });
+  }
+
+  // Links, reloads and back/forward open the session the URL names.
+  useEffect(() => {
+    if (!routed) return;
+    setSelected(routed);
+    setFeed(false);
+  }, [routed]);
+
+  // Keeps the address on the open session's canonical URL: a bare /session/<id> link, the root
+  // after a session is chosen for you, or a workspace that is not the session's root.
+  useEffect(() => {
+    // The URL moved first (a link or back/forward); the effect above catches the selection up.
+    if (routed && routed !== selected) return;
+
+    if (!selected || !sessions.some((item) => item.id === selected)) return;
+    route(selected, sessions, true);
+  }, [routed, params.workspaceId, selected, sessions]);
+
   function select(id: string) {
     setSelected(id);
+    route(id, sessions, false);
     setFeed(false);
     setMobileOpen(false);
     setError("");
