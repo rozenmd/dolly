@@ -142,12 +142,13 @@ import {
   retriedByPi,
   sessionMetadataKey,
   writeDefaults,
+  type IntakeAgent,
   type SessionMetadata,
   FALLBACK_ENTRY,
 } from "./model-defaults";
 
-/** GitHub intake requires ChatGPT, so a Claude default does not apply to it. */
-function chatgptDefaultModel(stored: string | null) {
+/** The model a new conversation starts with before its creator configures its own. */
+function placeholderModel(stored: string | null) {
   return stored && modelProvider(stored) === "openai" ? stored : DEFAULT_OPENAI_MODEL;
 }
 
@@ -745,9 +746,9 @@ export class Agent extends DurableObject<Env> {
           conversationCreated: async (tx, conversation) => {
             await indexSession(tx, conversation.id);
             const defaults = await readDefaults(this.ctx.storage);
-            const modelId = chatgptDefaultModel(defaults.model);
+            const modelId = placeholderModel(defaults.model);
             await configure(tx, conversation.id, {
-              // Only GitHub intake creates conversations without a model; it requires ChatGPT.
+              // A placeholder: GitHub and Slack intake set the owner's effective default after this.
               model: { provider: "openai", modelId },
               thinkingLevel: normalizeEffort(
                 modelId,
@@ -1269,10 +1270,15 @@ export class Agent extends DurableObject<Env> {
           return { status: 202 as const };
         }
 
-        if (Option.isNone(yield* this.credentials.get("openai"))) return { status: 503 as const };
+        const chatgpt = yield* this.credentials.get("openai");
+        const claude = yield* this.credentials.get("anthropic");
+
+        if (Option.isNone(chatgpt) && Option.isNone(claude)) return { status: 503 as const };
+
+        const agent = yield* this.intakeAgent(Option.isSome(chatgpt), Option.isSome(claude));
         yield* this.arm({ active: true });
 
-        const admitted = yield* admitGitHub(this.harness, this.githubTask, verified.event);
+        const admitted = yield* admitGitHub(this.harness, this.githubTask, verified.event, agent);
 
         // Acknowledge the command on GitHub straight away. Best effort: the task is already queued.
         if (!admitted.duplicate)
@@ -1373,12 +1379,7 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(chatgpt) && Option.isNone(claude)) return { status: 503 as const };
 
-        const modelId = yield* this.resolveDefaultModel(
-          Option.isSome(chatgpt),
-          Option.isSome(claude),
-        );
-
-        const model = { provider: modelProvider(modelId), modelId };
+        const agent = yield* this.intakeAgent(Option.isSome(chatgpt), Option.isSome(claude));
 
         const text = slackPromptText(event.text ?? "", profile.botUserId);
 
@@ -1412,7 +1413,7 @@ export class Agent extends DurableObject<Env> {
             reply: event.thread_ts !== undefined,
             files,
           },
-          { allowedUserId: profile.allowedUserId, model },
+          { allowedUserId: profile.allowedUserId, agent },
         );
 
         return { status: 200 as const };
@@ -1746,9 +1747,17 @@ export class Agent extends DurableObject<Env> {
   private storedDefaults = () =>
     attempt("settings.model.read", () => readDefaults(this.ctx.storage));
 
-  private resolveDefaultModel = (chatgpt: boolean, claude: boolean) =>
+  /** Model and effort for a session GitHub or Slack starts: the owner's effective defaults. */
+  private intakeAgent = (chatgpt: boolean, claude: boolean) =>
     this.storedDefaults().pipe(
-      Effect.map((stored) => effectiveDefaultModel(stored.model, chatgpt, claude)),
+      Effect.map((stored): IntakeAgent => {
+        const modelId = effectiveDefaultModel(stored.model, chatgpt, claude);
+
+        return {
+          model: { provider: modelProvider(modelId), modelId },
+          thinkingLevel: normalizeEffort(modelId, stored.thinkingLevel ?? DEFAULT_THINKING_LEVEL),
+        };
+      }),
     );
 
   private defaultsView = Effect.fn("Agent.defaultsView")(function* (this: Agent) {

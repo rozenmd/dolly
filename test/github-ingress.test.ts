@@ -402,3 +402,132 @@ it("rejects an otherwise valid webhook from an account that is not allowed befor
   expect((await hook(payload)).status).toBe(403);
   expect(fetch).not.toHaveBeenCalled();
 });
+
+it("runs a /dolly command on the owner's default model, including a Claude one", async () => {
+  const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("github:connected", {
+      app: { id: 42, slug: "dolly-test", pem, owner: { login: "example" } },
+      repositories: ["example/project"],
+    });
+    // Both subscriptions connected: the saved Claude default must win over the ChatGPT one.
+    await state.storage.put("credential:openai", {
+      type: "oauth",
+      access,
+      refresh: "test-refresh",
+      expires: Date.now() + 3_600_000,
+    });
+    await state.storage.put("credential:anthropic", {
+      type: "api_key",
+      key: `sk-ant-oat01-${"a".repeat(64)}`,
+    });
+  });
+  const models: string[] = [];
+  const posted: string[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const parsed = new URL(String(url));
+
+    if (parsed.hostname === "api.openai.com") {
+      models.push(JSON.parse(String(init?.body)).model);
+
+      return Response.json({ error: "ChatGPT should not run" }, { status: 500 });
+    }
+
+    if (parsed.hostname === "api.anthropic.com") {
+      const model = JSON.parse(String(init?.body)).model;
+      models.push(model);
+
+      const events = [
+        {
+          type: "message_start",
+          message: {
+            id: "msg_claude",
+            type: "message",
+            role: "assistant",
+            model,
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 0 },
+          },
+        },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "Answered by Opus" },
+        },
+        { type: "content_block_stop", index: 0 },
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: 1 },
+        },
+        { type: "message_stop" },
+      ];
+
+      return new Response(
+        events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    }
+
+    if (parsed.pathname.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (parsed.pathname.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+    if (parsed.pathname.endsWith("/reactions")) return Response.json({ id: 1 }, { status: 201 });
+
+    if (parsed.pathname === "/repos/example/project/issues/5/comments") {
+      if (init?.method === "GET") return Response.json([]);
+      posted.push(JSON.parse(String(init?.body)).body);
+
+      return Response.json({ id: 999 });
+    }
+
+    throw new Error(`Unexpected request to ${String(url)}`);
+  });
+
+  const saved = await SELF.fetch("https://worker/api/settings/model", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ model: "claude-opus-5-5" }),
+  });
+
+  expect(saved.status).toBe(200);
+
+  // A PR and comment of its own: storage outlives earlier tests' threads.
+  const command = {
+    ...payload,
+    issue: { ...payload.issue, number: 5 },
+    comment: { ...payload.comment, id: 500 },
+  };
+
+  expect((await hook(command)).status).toBe(202);
+  await expect.poll(() => posted, { timeout: 15_000 }).toHaveLength(1);
+  expect(posted[0]).toContain("Answered by Opus");
+  expect(models).toEqual(["claude-opus-5-5"]);
+}, 25_000);
+
+it("runs a /dolly command with only Claude connected", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("credential:anthropic", {
+      type: "api_key",
+      key: `sk-ant-oat01-${"a".repeat(64)}`,
+    });
+  });
+  // Admission no longer needs ChatGPT; the reply itself is covered above.
+  expect(
+    (
+      await hook({
+        ...payload,
+        issue: { ...payload.issue, number: 6 },
+        comment: { ...payload.comment, id: 600 },
+      })
+    ).status,
+  ).toBe(202);
+});

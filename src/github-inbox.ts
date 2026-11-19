@@ -1,6 +1,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   AssistantEntry,
+  configure,
   defineDoc,
   defineTask,
   type ConversationId,
@@ -13,6 +14,7 @@ import { exceptionDetails } from "./diagnostics";
 import { ConversationWorkspace, workspaceConfig } from "./workspace";
 import { GitHubEvent } from "./github-webhook";
 import { attempt, OperationError } from "./operations";
+import type { IntakeAgent } from "./model-defaults";
 
 export const GitHubThreads = defineDoc<{
   threads: Record<string, { id: ConversationId; events: Record<string, TaskId<null>> }>;
@@ -161,6 +163,7 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
   harness: Harness,
   delivery: ReturnType<typeof githubDelivery>,
   event: typeof GitHubEvent.Type,
+  agent: IntakeAgent,
 ) {
   return yield* attempt("github.intake", () =>
     harness.commit(async (tx) => {
@@ -179,6 +182,7 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
 
       if (!thread) {
         const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
+        await configure(tx, conversation.id, agent);
         const workspace = await tx.doc(ConversationWorkspace, conversation.id);
         workspace.config = workspaceConfig(
           { repository: event.repository, ref: `refs/pull/${event.number}/head` },
