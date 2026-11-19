@@ -1,10 +1,12 @@
 import { defineConfig } from "vite-plus";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 
+const workerOutput = "./.cloudflare/output/v1/workers/default";
+
 export default defineConfig({
   plugins: [
     cloudflareTest({
-      main: "./.cloudflare/output/v0/workers/default/bundle/index.js",
+      main: `${workerOutput}/bundle/index.js`,
       config: false,
       miniflare: {
         compatibilityDate: "2026-11-10",
@@ -15,7 +17,7 @@ export default defineConfig({
           ACCESS_AUD: "test-audience",
         },
         assets: {
-          directory: "./.cloudflare/output/v0/workers/default/assets",
+          directory: `${workerOutput}/assets`,
           binding: "ASSETS",
           run_worker_first: true,
         },

@@ -7,7 +7,7 @@
     "deploy": "pnpm run build && cf deploy --prebuilt"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "2.0.0-beta.v.13",
+    "@cloudflare/vite-plugin": "2.0.0-rc.2",
     "vite": "catalog:",
     "vite-plus": "catalog:",
     "wrangler": "4.160.0"

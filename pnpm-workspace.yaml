@@ -14,7 +14,7 @@ minimumReleaseAgeExclude:
   - "@earendil-works/pi-durable@1.5.2"
   - "@earendil-works/pi-schema@1.5.2"
   - "@earendil-works/pi-telemetry@1.5.2"
-  - cf@1.0.0-beta.29
+  - cf@1.0.0-beta.29 || 1.0.0-rc.2
   - hono@4.13.18
 
 packages:
