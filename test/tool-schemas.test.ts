@@ -109,7 +109,7 @@ it("sends Claude every tool's arguments as root properties", async () => {
 
   // Only genuinely argument-less tools may arrive empty; a new root-union tool would show up here.
   const empty = tools.filter((tool) => Object.keys(tool.input_schema.properties).length === 0);
-  expect(empty.map((tool) => tool.name)).toEqual(["list_children"]);
+  expect(empty.map((tool) => tool.name)).toEqual(["list_children", "list_scheduled_prompts"]);
 
   expect(byName.papercuts?.input_schema).toMatchObject({
     required: ["action"],

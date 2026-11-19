@@ -2601,3 +2601,185 @@ input.switch:focus-visible {
 label.connection-row {
   cursor: pointer;
 }
+
+/* Scheduled prompts: a delivered one reads as a notice, not the owner's bubble. */
+.scheduled-notice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.scheduled-notice > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+}
+.scheduled-notice > summary::-webkit-details-marker {
+  display: none;
+}
+.scheduled-notice > summary:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+.scheduled-notice > summary > svg:first-child {
+  width: 15px;
+  height: 15px;
+  color: var(--amber);
+}
+.scheduled-title {
+  color: var(--text);
+  font-weight: 500;
+}
+.scheduled-notice time {
+  color: var(--faint);
+}
+.scheduled-notice .disclosure {
+  width: 14px;
+  height: 14px;
+  transition: transform 120ms ease;
+}
+.scheduled-notice[open] .disclosure {
+  transform: rotate(90deg);
+}
+.scheduled-body {
+  align-self: stretch;
+  margin: 10px 0 0 15%;
+  padding: 10px 16px;
+  border-left: 2px solid var(--amber);
+  border-radius: 0 12px 12px 0;
+  background: var(--surface);
+}
+
+/* "Send later" in the composer, anchored to the composer so it fits a phone too. */
+.composer {
+  position: relative;
+}
+.schedule-trigger {
+  position: relative;
+}
+.schedule-trigger svg {
+  width: 18px;
+  height: 18px;
+}
+.schedule-badge {
+  position: absolute;
+  top: -4px;
+  right: -5px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--amber);
+  box-shadow: 0 0 0 2px var(--surface);
+  color: #1c1c1c;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+.schedule-menu {
+  position: absolute;
+  right: 12px;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  width: min(360px, calc(100% - 24px));
+  padding: 6px;
+  background: #282828;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgb(0 0 0 / 50%);
+}
+.schedule-menu hr {
+  margin: 4px 6px;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+.schedule-menu .picker-action:disabled {
+  color: var(--faint);
+  cursor: default;
+  background: none;
+}
+.schedule-pending {
+  margin: 0 0 4px;
+  padding: 0 0 4px;
+  border-bottom: 1px solid var(--line);
+  list-style: none;
+}
+.schedule-pending li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 4px 0 10px;
+  font-size: 13px;
+}
+.schedule-when {
+  flex-shrink: 0;
+  color: var(--amber);
+  font-weight: 600;
+}
+.schedule-text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.schedule-source {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--faint);
+  font-size: 11px;
+}
+.schedule-cancel {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  border-radius: 6px;
+  color: var(--faint);
+}
+.schedule-cancel:hover {
+  color: var(--red);
+  background: rgb(255 255 255 / 6%);
+}
+.schedule-cancel svg {
+  width: 14px;
+  height: 14px;
+}
+.schedule-heading {
+  margin: 0;
+  padding: 8px 10px 4px;
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 500;
+}
+.schedule-error {
+  margin: 4px 10px;
+  font-size: 12px;
+}
+.schedule-fields {
+  display: grid;
+  grid-template-columns: 1fr 130px;
+  gap: 8px;
+  padding-top: 8px;
+}
+@media (max-width: 760px) {
+  .scheduled-body {
+    margin-left: 0;
+  }
+  .schedule-menu {
+    right: 8px;
+    width: calc(100% - 16px);
+  }
+}

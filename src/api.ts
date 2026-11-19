@@ -50,6 +50,17 @@ function makeAgentApi(env: Env) {
       (id: string, content: string, requestId: string, images?: readonly PromptImage[]) =>
         rpc("agent.prompt", async () => await agent.prompt(id, content, requestId, images)),
     ),
+    scheduledPrompts: Effect.fn("AgentApi.scheduledPrompts")((id: string) =>
+      rpc("agent.schedule.list", async () => await agent.scheduledPrompts(id)),
+    ),
+    schedulePrompt: Effect.fn("AgentApi.schedulePrompt")(
+      (id: string, input: { content: string; at: string; requestId: string }) =>
+        rpc("agent.schedule.create", async () => await agent.schedulePrompt(id, input)),
+    ),
+    cancelScheduledPrompt: Effect.fn("AgentApi.cancelScheduledPrompt")(
+      (id: string, scheduleId: string) =>
+        rpc("agent.schedule.cancel", async () => await agent.cancelScheduledPrompt(id, scheduleId)),
+    ),
     abort: Effect.fn("AgentApi.abort")((id: string) =>
       rpc("agent.abort", async () => await agent.abort(id)),
     ),

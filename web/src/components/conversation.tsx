@@ -21,6 +21,7 @@ import {
   StopIcon,
 } from "@heroicons/react/16/solid";
 import {
+  ClockIcon,
   CodeBracketIcon,
   CommandLineIcon,
   DocumentDuplicateIcon,
@@ -40,6 +41,7 @@ import { IconButton, Textarea } from "./ui";
 import { TurnRail } from "./turn-rail";
 import { markEntry, railMarks, wholeRail, type RailMark } from "../lib/turn-rail";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
+import { ScheduleButton } from "./schedule";
 import type { Attachment } from "../lib/images";
 import {
   spawnedThreadId,
@@ -285,7 +287,15 @@ function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number
 
   return (
     <section className="turn" data-turn={turn.prompt ? turn.id : undefined}>
-      {turn.prompt && (
+      {turn.prompt?.scheduled && (
+        <ScheduledNotice
+          id={turn.id}
+          text={turn.prompt.text}
+          deliveredAt={turn.prompt.at}
+          now={now}
+        />
+      )}
+      {turn.prompt && !turn.prompt.scheduled && (
         <article className="prompt" aria-label="user message">
           {turn.prompt.at !== undefined && (
             <div className="prompt-meta">
@@ -345,6 +355,40 @@ function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number
         </p>
       )}
     </section>
+  );
+}
+
+/**
+ * A prompt a schedule delivered, the agent's own check-back or the owner's "send later": a
+ * notice rather than a bubble, since nobody typed it at this moment. Its text stays one click away.
+ */
+function ScheduledNotice({
+  id,
+  text,
+  deliveredAt,
+  now,
+}: {
+  id: string;
+  text: string;
+  deliveredAt?: number;
+  now: number;
+}) {
+  const disclosure = useDisclosure(`scheduled-${id}`, false);
+
+  return (
+    <details className="scheduled-notice" aria-label="scheduled message" {...disclosure}>
+      <summary>
+        <ClockIcon aria-hidden="true" />
+        <span className="scheduled-title">Scheduled message</span>
+        {deliveredAt !== undefined && (
+          <time dateTime={new Date(deliveredAt).toISOString()}>{ago(deliveredAt, now)}</time>
+        )}
+        <ChevronRightIcon className="disclosure" />
+      </summary>
+      <div className="scheduled-body">
+        <Prose text={text} />
+      </div>
+    </details>
   );
 }
 
@@ -601,6 +645,9 @@ const toolIcons = new Map(
     list_children: UsersIcon,
     task_status: UsersIcon,
     cancel_task: UsersIcon,
+    schedule_prompt: ClockIcon,
+    list_scheduled_prompts: ClockIcon,
+    cancel_scheduled_prompt: ClockIcon,
   }),
 );
 
@@ -710,6 +757,7 @@ export function Composer({
   draftKey,
   queued,
   onSteerQueued,
+  activity,
 }: {
   onSend: (
     content: string,
@@ -724,6 +772,8 @@ export function Composer({
   draftKey: string;
   queued: readonly QueuedMessage[];
   onSteerQueued: (id: number) => void;
+  /** Changes as the conversation moves, so "send later" picks up schedules the agent makes. */
+  activity: number;
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
@@ -834,6 +884,18 @@ export function Composer({
               disabled={pending || input.reading}
               count={attachments.length}
               onFiles={(files) => void input.add(files)}
+            />
+            <ScheduleButton
+              session={draftKey}
+              draft={content}
+              disabled={pending}
+              activity={activity}
+              unavailable={
+                attachments.length
+                  ? "Screenshots can't be sent later; remove them first"
+                  : undefined
+              }
+              onScheduled={() => setDrafts((values) => ({ ...values, [draftKey]: "" }))}
             />
             {modelControl}
             {running && !content.trim() ? (
