@@ -13,7 +13,7 @@ export const WebhookUrl = Schema.String.check(
 );
 
 export const WebhookSetup = Schema.Struct({
-  /** Who may run /pi commands. An empty list stops every command. */
+  /** Who may run /dolly commands. An empty list stops every command. */
   senders: Schema.Array(Login),
   secret: Schema.optional(Schema.String.check(Schema.isMinLength(32), Schema.isMaxLength(256))),
 });
@@ -251,8 +251,8 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
     return { status: 403 as const };
   const command = value.comment.body.trimStart();
 
-  if (!/^\/pi(?:\s|$)/.test(command)) return { status: 204 as const };
-  const content = command.slice(3).trim();
+  if (!/^\/dolly(?:\s|$)/.test(command)) return { status: 204 as const };
+  const content = command.slice("/dolly".length).trim();
 
   if (!content || content.length > 16_384) return { status: 204 as const };
 

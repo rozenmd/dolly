@@ -583,7 +583,7 @@ function makeGitHub(
     return raw === undefined ? "" : yield* decode(WebhookUrl)(raw);
   });
 
-  // Who may run /pi commands. The signing secret stays server-side.
+  // Who may run /dolly commands. The signing secret stays server-side.
   const senders = Effect.gen(function* () {
     const raw = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
 
