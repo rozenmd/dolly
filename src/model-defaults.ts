@@ -15,7 +15,7 @@ import {
   ThinkingLevel,
   modelProvider,
 } from "./models";
-import { nextFallbackModel, serviceTier, usageExhausted } from "./model-capabilities";
+import { nextFallbackModel, serviceTier, usageExhausted, type Effort } from "./model-capabilities";
 
 /** Owner defaults for new sessions, one storage key per setting so each can be reset alone. */
 const KEYS = {
@@ -87,6 +87,12 @@ export function effectiveDefaultModel(stored: string | null, chatgpt: boolean, c
 
   return stored ?? DEFAULT_OPENAI_MODEL;
 }
+
+/** The model and effort GitHub and Slack intake give a session they start. */
+export type IntakeAgent = {
+  model: { provider: "openai" | "anthropic"; modelId: string };
+  thinkingLevel: Effort;
+};
 
 /** What `GET /api/settings/model` reports: saved choices and what a new session uses now. */
 export function defaultsView(stored: StoredDefaults, chatgpt: boolean, claude: boolean) {

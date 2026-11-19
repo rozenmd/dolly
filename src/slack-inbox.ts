@@ -14,6 +14,7 @@ import * as Result from "effect/Result";
 import { exceptionDetails } from "./diagnostics";
 import { attempt, OperationError } from "./operations";
 import type { SlackDelivery } from "./slack-events";
+import type { IntakeAgent } from "./model-defaults";
 import { ConversationWorkspace, workspaceConfig, type WorkspaceInput } from "./workspace";
 
 /** Slack thread (`channel:threadTs`) → its Dolly conversation and the messages delivered to it. */
@@ -215,7 +216,7 @@ export const admitSlack = Effect.fn("Slack.admit")(function* (
   harness: Harness,
   delivery: ReturnType<typeof slackDelivery>,
   event: SlackDelivery,
-  options: { allowedUserId: string | null; model: { provider: string; modelId: string } },
+  options: { allowedUserId: string | null; agent: IntakeAgent },
 ) {
   return yield* attempt("slack.intake", () =>
     harness.commit(async (tx) => {
@@ -233,7 +234,7 @@ export const admitSlack = Effect.fn("Slack.admit")(function* (
 
       if (!thread) {
         const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
-        await configure(tx, conversation.id, { model: options.model });
+        await configure(tx, conversation.id, options.agent);
         thread = { id: conversation.id, events: {} };
       }
 
