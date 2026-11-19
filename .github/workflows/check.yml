@@ -13,7 +13,7 @@ concurrency:
 jobs:
   plan:
     # Evaluate the PR gate from the base branch, before checking out PR code.
-    if: github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd' ||  github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd' ||  github.actor == 'dolly-session-bot[bot]' && github.triggering_actor == 'dolly-session-bot[bot]''dolly-session-bot[bot]'
+    if: github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd' ||  github.actor == 'rozenmd' && github.triggering_actor == 'rozenmd' ||  github.actor == 'dolly-session-bot[bot]' && github.triggering_actor == 'dolly-session-bot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
