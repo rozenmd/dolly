@@ -279,6 +279,50 @@ it.each(["gpt-6-luna", "claude-haiku-5-5"])(
   },
 );
 
+it.each(["gpt-6-luna", "claude-haiku-5-5"])(
+  "sends a screenshot-only prompt to %s without an empty text block",
+  async (model) => {
+    await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+      await state.storage.put("credential:anthropic", { type: "api_key", key: "test-claude-key" });
+    });
+    const requests: string[] = [];
+    const data = btoa("screenshot only ".repeat(100));
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+      requests.push(await new Response(init?.body).text());
+
+      return Response.json({ error: { message: "Model unavailable" } }, { status: 400 });
+    });
+
+    const created = await SELF.fetch("https://worker/api/sessions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model }),
+    });
+
+    const { id } = await created.json<{ id: string }>();
+
+    const send = (body: { content: string; images?: { mimeType: string; data: string }[] }) =>
+      SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ requestId: crypto.randomUUID(), ...body }),
+      });
+
+    expect((await send({ content: "  " })).status).toBe(400);
+    expect((await send({ content: "", images: [] })).status).toBe(400);
+    expect(requests).toHaveLength(0);
+
+    expect((await send({ content: "  ", images: [{ mimeType: "image/png", data }] })).status).toBe(
+      202,
+    );
+
+    await expect.poll(() => requests.length).toBe(1);
+    expect(requests[0]).toContain(data);
+    expect(requests[0]).not.toMatch(/"text":\s*""/);
+  },
+);
+
 it("pushes an initial snapshot and redacted live updates over an authenticated WebSocket", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
     Response.json({ error: { message: "Model unavailable" } }, { status: 400 }),

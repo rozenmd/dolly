@@ -2312,8 +2312,9 @@ export class Agent extends DurableObject<Env> {
             {
               type: "input",
               // Persist only R2 references; beforeRequest hydrates image bytes transiently.
+              // Screenshot-only prompts carry no text block: providers reject empty text.
               content: imageBlocks.length
-                ? [{ type: "text" as const, text: content }, ...imageBlocks]
+                ? [...(content ? [{ type: "text" as const, text: content }] : []), ...imageBlocks]
                 : content,
               requestId,
               whenBusy: "followUp",

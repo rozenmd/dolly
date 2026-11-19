@@ -87,7 +87,7 @@ export function NewSessionComposer({
   async function submit(event: FormEvent) {
     event.preventDefault();
 
-    if (pending || input.reading || !content.trim()) return;
+    if (pending || input.reading || (!content.trim() && !attachments.length)) return;
     setPending(true);
     setError("");
 
@@ -119,7 +119,7 @@ export function NewSessionComposer({
 
         session = {
           ...result,
-          title: content.trim().split("\n")[0].slice(0, 80),
+          title: content.trim().split("\n")[0].slice(0, 80) || "Screenshot",
           repository,
           ref,
           updatedAt: Date.now(),
@@ -177,7 +177,6 @@ export function NewSessionComposer({
             name="content"
             placeholder="What do you want to work on?"
             autoFocus
-            required
             maxLength={16384}
             value={content}
             onChange={(event) => setContent(event.target.value)}
@@ -252,7 +251,7 @@ export function NewSessionComposer({
           <button
             type="submit"
             className="create-button"
-            disabled={pending || input.reading || !content.trim()}
+            disabled={pending || input.reading || (!content.trim() && !attachments.length)}
             aria-keyshortcuts="Meta+Enter Control+Enter"
           >
             {pending ? "Starting…" : created ? "Retry" : "Create"}

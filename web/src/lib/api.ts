@@ -43,7 +43,7 @@ export function queueFromSnapshot(snapshot: typeof Snapshot.Type): QueuedMessage
     return [
       {
         id: input.value.id,
-        text: messageText({ role: "user", content: input.value.content }),
+        text: queuedText(input.value.content),
         steering: input.value.mode === "steer",
       },
     ];
@@ -163,6 +163,17 @@ export type Turn = {
   failure?: typeof RunFailure.Type;
   retry?: { readonly at: number; readonly error: string };
 };
+
+/** A screenshot-only message has no text; label it so the queue row is not blank. */
+function queuedText(content: typeof QueuedInput.Type.content) {
+  const text = messageText({ role: "user", content });
+
+  if (text || Schema.is(Schema.String)(content)) return text;
+
+  const images = content.filter((block) => block.type === "image").length;
+
+  return images ? `📎 ${images} screenshot${images === 1 ? "" : "s"}` : text;
+}
 
 function messageText(message: typeof Message.Type) {
   return Schema.is(Schema.String)(message.content)

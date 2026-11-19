@@ -131,5 +131,25 @@ test("attaches screenshots in both composers with picker, paste and drop, and pr
 
   expect(sent[1].images).toEqual([{ mimeType: "image/png", data: png }]);
   expect(sent[3].images).toBeUndefined();
+
+  // A screenshot alone is a complete message: no text needed.
+  const send = composer.getByRole("button", { name: "Send message" });
+  await expect(send).toBeDisabled();
+  await composer.locator('input[type="file"]').setInputFiles({
+    name: "only.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(png, "base64"),
+  });
+  await expect(composer.getByRole("img", { name: "only.png" })).toBeVisible();
+  await expect(send).not.toBeDisabled();
+  await prompt.press("Enter");
+  await expect(page.getByText("Please retry", { exact: true })).toBeVisible();
+  await send.click();
+  await expect(composer.getByRole("img")).toHaveCount(0);
+  const screenshotOnly = sent.filter((item) => item.content === "");
+
+  expect(screenshotOnly).toHaveLength(2);
+  expect(screenshotOnly[1]).toEqual(screenshotOnly[0]);
+  expect(screenshotOnly[0].images).toEqual([{ mimeType: "image/png", data: png }]);
   expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.v1"))).not.toContain(png);
 });
