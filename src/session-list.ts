@@ -198,6 +198,8 @@ export async function listSessions(
 
       sessions.push({
         id: aliases.get(record.id) ?? String(record.id),
+        ...(metadata?.workspaceId && { workspaceId: metadata.workspaceId }),
+        ...(metadata?.createdAt && { createdAt: metadata.createdAt }),
         model: agent.model?.modelId ?? "Existing session",
         thinkingLevel: agent.thinkingLevel,
         ...(metadata?.speed && { speed: metadata.speed }),
@@ -217,5 +219,30 @@ export async function listSessions(
     cursor = page.next;
   } while (cursor);
 
-  return sessions.sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+  return withWorkspaces(sessions).sort(
+    (a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id),
+  );
+}
+
+/**
+ * Every session's workspace: spawned sessions join their root's, and a root recorded before
+ * workspaces existed is a workspace of its own, keyed by its session ID.
+ */
+export function withWorkspaces(sessions: readonly SavedSession[]): SavedSession[] {
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+
+  return sessions.map((session) => {
+    let root = session;
+    const seen = new Set([session.id]);
+
+    while (root.parentId && !seen.has(root.parentId)) {
+      const parent = byId.get(root.parentId);
+
+      if (!parent) break;
+      seen.add(parent.id);
+      root = parent;
+    }
+
+    return { ...session, workspaceId: root.workspaceId ?? root.id };
+  });
 }

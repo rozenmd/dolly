@@ -51,6 +51,7 @@ export function queueFromSnapshot(snapshot: typeof Snapshot.Type): QueuedMessage
 
 export const Session = Schema.Struct({
   id: Schema.String,
+  workspaceId: Schema.optional(Schema.String),
   model: Schema.String,
   thinkingLevel: Schema.optional(Schema.String),
   speed: Schema.optional(Schema.Literals(SPEEDS)),
@@ -483,6 +484,7 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 }
 
 export type ApiBody = {
+  workspaceId?: string;
   sessions?: readonly SavedSession[];
   archived?: boolean;
   kept?: boolean;

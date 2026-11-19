@@ -1,7 +1,6 @@
 /**
- * A session's threads: the sessions it spawned, and theirs in turn. Ported from
- * opensession (frontend/lib/session-threads.ts and sidebar-workspaces.ts) with
- * one row per root session standing in for its workspace row.
+ * A session's threads: the sessions it spawned, and theirs in turn. They belong to
+ * their root's workspace (lib/workspaces.ts).
  */
 
 import * as Option from "effect/Option";
@@ -32,7 +31,7 @@ export const THREAD_STATE_LABEL: Record<ThreadState, string> = {
 };
 
 /**
- * Spawned sessions stay out of the sidebar unless the owner kept one there.
+ * Spawned sessions are not workspace tabs unless the owner kept one.
  * They are reached from their parent instead.
  */
 export function belongsInSidebar(session: Related) {
@@ -54,16 +53,6 @@ export function rootSession(sessions: readonly Related[], id: string) {
   }
 
   return root?.id ?? id;
-}
-
-/**
- * The sidebar row that owns an open session: its own row when it has one,
- * otherwise the row of its root, so opening a child keeps its parent lit.
- */
-export function sidebarSelection(sessions: readonly Related[], id: string) {
-  const session = sessions.find((item) => item.id === id);
-
-  return !session || belongsInSidebar(session) ? id : rootSession(sessions, id);
 }
 
 /** The sessions `rootId` started, and theirs in turn, newest first. */

@@ -102,6 +102,8 @@ export function defaultsView(stored: StoredDefaults, chatgpt: boolean, claude: b
 /** Per-session record beside Pi's conversation: sidebar state and model options Pi doesn't keep. */
 export type SessionMetadata = {
   createdAt?: number;
+  /** The workspace this session belongs to; absent before workspaces were recorded. */
+  workspaceId?: string;
   archived?: boolean;
   kept?: boolean;
   speed?: Speed;

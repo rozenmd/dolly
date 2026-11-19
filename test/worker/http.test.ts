@@ -20,7 +20,7 @@ it("serves the rendered workspace at the Worker root and its real bundled assets
 });
 
 it("renders the workspace at session URLs", async () => {
-  for (const path of ["/workspace/root/session/child", "/session/child"]) {
+  for (const path of ["/workspace/root/session/child", "/workspace/root", "/session/child"]) {
     const response = await SELF.fetch(`https://worker${path}`);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/html");

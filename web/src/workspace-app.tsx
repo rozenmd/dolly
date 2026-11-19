@@ -45,10 +45,10 @@ import { extendTranscript, prependHistory } from "./lib/transcript-history";
 import { indexedMarks, type RailMark } from "./lib/turn-rail";
 import { imagesBody, type Attachment } from "./lib/images";
 import { sessionList } from "./lib/session-list";
-import { belongsInSidebar, sessionThreads, sidebarSelection } from "./lib/session-threads";
+import { belongsInSidebar, rootSession, sessionThreads } from "./lib/session-threads";
 import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-summary";
 import { useSessionSummary } from "./lib/session-summary";
-import { workspaceId } from "./lib/session-url";
+import { workspaceMain, workspaceOf, workspaceRows, workspaceTabs } from "./lib/workspaces";
 
 const storageKey = "dolly.sessions.v1";
 
@@ -74,6 +74,8 @@ export function WorkspaceApp() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [feed, setFeed] = useState(false);
   const [modal, setModal] = useState<"chatgpt" | "new" | "import" | null>(null);
+  // The workspace a new session joins; undefined starts a new workspace.
+  const [joining, setJoining] = useState<string>();
   const navigate = useNavigate();
   const [chatgpt, setChatGPT] = useState<boolean | null>(null);
   const [anthropic, setAnthropic] = useState(false);
@@ -118,11 +120,15 @@ export function WorkspaceApp() {
         pullRequest: item.pullRequest,
         parentId: item.parentId,
         kept: item.kept,
+        workspaceId: item.workspaceId,
+        createdAt: item.createdAt,
       }))
     : [];
 
-  // Spawned sessions live with their parent, not in the sidebar (see lib/session-threads).
-  const sidebarRows = rows.filter(belongsInSidebar);
+  // One row per workspace; spawned sessions live with their parent (see lib/session-threads).
+  const sidebarRows = workspaceRows(rows);
+  const workspace = session ? workspaceOf(sessions, session.id) : "";
+  const tabs = workspace ? workspaceTabs(rows, workspace) : [];
 
   const parent = session?.parentId
     ? sessions.find((item) => item.id === session.parentId)
@@ -402,7 +408,7 @@ export function WorkspaceApp() {
       return;
     }
 
-    const workspace = workspaceId(list, id);
+    const workspace = workspaceOf(list, id);
 
     if (routed === id && params.workspaceId === workspace) return;
 
@@ -427,12 +433,33 @@ export function WorkspaceApp() {
     if (routed && routed !== selected) return;
 
     if (!selected || !sessions.some((item) => item.id === selected)) return;
+
+    // A workspace link waits for the effect below to open that workspace.
+    if (!routed && params.workspaceId && workspaceOf(sessions, selected) !== params.workspaceId)
+      return;
     route(selected, sessions, true);
   }, [routed, params.workspaceId, selected, sessions]);
 
-  function select(id: string) {
+  // A workspace link (/workspace/<id>) opens the session that started it.
+  useEffect(() => {
+    if (routed || !params.workspaceId) return;
+    const main = workspaceMain(sessions, params.workspaceId);
+
+    if (main) {
+      setSelected(main.id);
+      setFeed(false);
+    }
+  }, [routed, params.workspaceId, sessions]);
+
+  function openWorkspace(id: string) {
+    const main = workspaceMain(sessions, id);
+
+    if (main) select(main.id);
+  }
+
+  function select(id: string, list = sessions) {
     setSelected(id);
-    route(id, sessions, false);
+    route(id, list, false);
     setFeed(false);
     setMobileOpen(false);
     setError("");
@@ -461,18 +488,52 @@ export function WorkspaceApp() {
       current.map((item) => (item.id === id ? { ...item, archived: !target.archived } : item)),
     );
 
-    if (!target.archived && selected === id) {
-      select(
-        sessionList(
-          sessions.filter((item) => item.id !== id && belongsInSidebar(item)),
-          "",
-          Date.now(),
-        ).active[0]?.id || "",
-      );
-    }
+    if (!target.archived && selected === id) selectAfterArchive([id]);
   }
 
-  /** opensession's "Keep in sidebar": a spawned session gets a row of its own. */
+  /** After archiving the open session, stay in its workspace if any of it is left. */
+  function selectAfterArchive(archived: readonly string[]) {
+    const left = sessions.filter((item) => !archived.includes(item.id));
+
+    const sibling = workspaceTabs(left, workspaceOf(sessions, selected)).find(
+      (item) => !item.archived,
+    );
+
+    select(
+      sibling?.id || sessionList(left.filter(belongsInSidebar), "", Date.now()).active[0]?.id || "",
+    );
+  }
+
+  /** Archives every session in a workspace, or restores them all. */
+  async function toggleArchiveWorkspace(id: string) {
+    const row = sidebarRows.find((item) => item.id === id);
+
+    if (!row) return;
+    const archived = !row.archived;
+    const changed = row.sessions.filter((item) => Boolean(item.archived) !== archived);
+
+    try {
+      await Promise.all(
+        changed.map((item) =>
+          request(`/sessions/${encodeURIComponent(item.id)}`, { archived }, undefined, "PUT"),
+        ),
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not sync archive state.");
+
+      return;
+    }
+
+    const ids = changed.map((item) => item.id);
+    updateSessions((current) =>
+      current.map((item) => (ids.includes(item.id) ? { ...item, archived } : item)),
+    );
+
+    if (archived && workspaceOf(sessions, selected) === id)
+      selectAfterArchive(row.sessions.map((item) => item.id));
+  }
+
+  /** Keeping a spawned session makes it a tab of its workspace. */
   async function toggleKept(id: string) {
     const target = sessions.find((item) => item.id === id);
 
@@ -601,8 +662,10 @@ export function WorkspaceApp() {
     );
   }
 
-  function newSession() {
+  /** Starts a session in a new workspace, or in `workspace` when given. */
+  function newSession(workspace?: string) {
     setMobileOpen(false);
+    setJoining(workspace);
     setModal(chatgpt === false && !anthropic ? "chatgpt" : "new");
   }
 
@@ -712,13 +775,13 @@ export function WorkspaceApp() {
       </a>
       <Sidebar
         rows={sidebarRows}
-        selected={sidebarSelection(sessions, selected)}
+        selected={workspace}
         connected={connected}
         open={mobileOpen}
         feed={feed}
-        onSelect={select}
-        onArchive={toggleArchive}
-        onNew={newSession}
+        onSelect={openWorkspace}
+        onArchive={(id) => void toggleArchiveWorkspace(id)}
+        onNew={() => newSession()}
         onSettings={() => {
           setMobileOpen(false);
           void navigate({ to: "/settings" });
@@ -770,7 +833,7 @@ export function WorkspaceApp() {
           <div className="header-actions">
             {session && !feed && session.parentId && (
               <IconButton
-                label={session.kept ? "Remove from sidebar" : "Keep in sidebar"}
+                label={session.kept ? "Remove workspace tab" : "Keep as workspace tab"}
                 aria-pressed={Boolean(session.kept)}
                 className={session.kept ? "pressed" : ""}
                 onClick={() => void toggleKept(session.id)}
@@ -786,7 +849,7 @@ export function WorkspaceApp() {
                 {session.archived ? <ArrowUturnLeftIcon /> : <ArchiveBoxIcon />}
               </IconButton>
             )}
-            <IconButton label="New session" onClick={newSession}>
+            <IconButton label="New session" onClick={() => newSession()}>
               <PlusIcon />
             </IconButton>
             {session && !feed && <SessionSummaryToggle summary={summary} />}
@@ -794,6 +857,40 @@ export function WorkspaceApp() {
         </header>
         <div className="content-layout">
           <div className="conversation-panel">
+            {session && !feed && workspace && (
+              <nav className="workspace-tabs" aria-label="Workspace sessions">
+                {tabs.map((tab) => {
+                  // A spawned session open in the workspace lights the tab it was spawned from.
+                  const active =
+                    tab.id === session.id ||
+                    (!tabs.some((item) => item.id === session.id) &&
+                      tab.id === rootSession(rows, session.id));
+
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      className={`workspace-tab ${active ? "active" : ""} ${tab.archived ? "archived" : ""}`}
+                      aria-current={active ? "page" : undefined}
+                      title={tab.archived ? `${tab.title} (archived)` : tab.title}
+                      onClick={() => select(tab.id)}
+                    >
+                      {tab.running && (
+                        <span className="status-dot working pulse" aria-hidden="true" />
+                      )}
+                      <span>{tab.title}</span>
+                    </button>
+                  );
+                })}
+                <IconButton
+                  label="New session in this workspace"
+                  className="workspace-tab-new"
+                  onClick={() => newSession(workspace)}
+                >
+                  <PlusIcon />
+                </IconButton>
+              </nav>
+            )}
             {feedback && (
               <p
                 className={`feedback ${error || streamError || sessionError ? "error-text" : ""}`}
@@ -840,7 +937,7 @@ export function WorkspaceApp() {
                 <h2>
                   {chatgpt === false && !anthropic ? "Connect a model" : "No workspace selected"}
                 </h2>
-                <button type="button" className="primary-button" onClick={newSession}>
+                <button type="button" className="primary-button" onClick={() => newSession()}>
                   {chatgpt === false && !anthropic ? "Connect a model" : "New session"}
                 </button>
               </div>
@@ -895,12 +992,21 @@ export function WorkspaceApp() {
       {modal === "new" && (
         <NewSessionComposer
           initial={session ? sessionBody(session, snapshot) : {}}
+          workspace={
+            joining
+              ? {
+                  id: joining,
+                  title: sidebarRows.find((row) => row.id === joining)?.title ?? "",
+                }
+              : undefined
+          }
           onClose={() => setModal(null)}
           onImport={() => setModal("import")}
           onSaved={(value) => save([value, ...sessions.filter((item) => item.id !== value.id)])}
           onCreated={(value) => {
-            save([value, ...sessions.filter((item) => item.id !== value.id)]);
-            select(value.id);
+            const next = [value, ...sessions.filter((item) => item.id !== value.id)];
+            save(next);
+            select(value.id, next);
             setModal(null);
           }}
         />
@@ -910,8 +1016,9 @@ export function WorkspaceApp() {
           onClose={() => setModal(null)}
           onNew={() => setModal("new")}
           onCreated={(value) => {
-            save([value, ...sessions.filter((item) => item.id !== value.id)]);
-            select(value.id);
+            const next = [value, ...sessions.filter((item) => item.id !== value.id)];
+            save(next);
+            select(value.id, next);
             setModal(null);
           }}
         />

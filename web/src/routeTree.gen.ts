@@ -19,6 +19,7 @@ import { Route as SettingsModelsRouteImport } from './routes/settings/models'
 import { Route as SettingsRepositoriesRouteImport } from './routes/settings/repositories'
 import { Route as SettingsSlackRouteImport } from './routes/settings/slack'
 import { Route as AppSessionSessionIdRouteImport } from './routes/_app/session.$sessionId'
+import { Route as AppWorkspaceWorkspaceIdIndexRouteImport } from './routes/_app/workspace.$workspaceId.index'
 import { Route as AppWorkspaceWorkspaceIdSessionSessionIdRouteImport } from './routes/_app/workspace.$workspaceId.session.$sessionId'
 
 const AppRoute = AppRouteImport.update({
@@ -70,6 +71,12 @@ const AppSessionSessionIdRoute = AppSessionSessionIdRouteImport.update({
   path: '/session/$sessionId',
   getParentRoute: () => AppRoute,
 } as any)
+const AppWorkspaceWorkspaceIdIndexRoute =
+  AppWorkspaceWorkspaceIdIndexRouteImport.update({
+    id: '/workspace/$workspaceId/',
+    path: '/workspace/$workspaceId/',
+    getParentRoute: () => AppRoute,
+  } as any)
 const AppWorkspaceWorkspaceIdSessionSessionIdRoute =
   AppWorkspaceWorkspaceIdSessionSessionIdRouteImport.update({
     id: '/workspace/$workspaceId/session/$sessionId',
@@ -87,6 +94,7 @@ export interface FileRoutesByFullPath {
   '/settings/slack': typeof SettingsSlackRoute
   '/settings/': typeof SettingsIndexRoute
   '/session/$sessionId': typeof AppSessionSessionIdRoute
+  '/workspace/$workspaceId/': typeof AppWorkspaceWorkspaceIdIndexRoute
   '/workspace/$workspaceId/session/$sessionId': typeof AppWorkspaceWorkspaceIdSessionSessionIdRoute
 }
 export interface FileRoutesByTo {
@@ -98,6 +106,7 @@ export interface FileRoutesByTo {
   '/': typeof AppIndexRoute
   '/settings': typeof SettingsIndexRoute
   '/session/$sessionId': typeof AppSessionSessionIdRoute
+  '/workspace/$workspaceId': typeof AppWorkspaceWorkspaceIdIndexRoute
   '/workspace/$workspaceId/session/$sessionId': typeof AppWorkspaceWorkspaceIdSessionSessionIdRoute
 }
 export interface FileRoutesById {
@@ -112,6 +121,7 @@ export interface FileRoutesById {
   '/_app/': typeof AppIndexRoute
   '/settings/': typeof SettingsIndexRoute
   '/_app/session/$sessionId': typeof AppSessionSessionIdRoute
+  '/_app/workspace/$workspaceId/': typeof AppWorkspaceWorkspaceIdIndexRoute
   '/_app/workspace/$workspaceId/session/$sessionId': typeof AppWorkspaceWorkspaceIdSessionSessionIdRoute
 }
 export interface FileRouteTypes {
@@ -126,6 +136,7 @@ export interface FileRouteTypes {
     | '/settings/slack'
     | '/settings/'
     | '/session/$sessionId'
+    | '/workspace/$workspaceId/'
     | '/workspace/$workspaceId/session/$sessionId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -137,6 +148,7 @@ export interface FileRouteTypes {
     | '/'
     | '/settings'
     | '/session/$sessionId'
+    | '/workspace/$workspaceId'
     | '/workspace/$workspaceId/session/$sessionId'
   id:
     | '__root__'
@@ -150,6 +162,7 @@ export interface FileRouteTypes {
     | '/_app/'
     | '/settings/'
     | '/_app/session/$sessionId'
+    | '/_app/workspace/$workspaceId/'
     | '/_app/workspace/$workspaceId/session/$sessionId'
   fileRoutesById: FileRoutesById
 }
@@ -230,6 +243,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSessionSessionIdRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/workspace/$workspaceId/': {
+      id: '/_app/workspace/$workspaceId/'
+      path: '/workspace/$workspaceId'
+      fullPath: '/workspace/$workspaceId/'
+      preLoaderRoute: typeof AppWorkspaceWorkspaceIdIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/workspace/$workspaceId/session/$sessionId': {
       id: '/_app/workspace/$workspaceId/session/$sessionId'
       path: '/workspace/$workspaceId/session/$sessionId'
@@ -243,12 +263,14 @@ declare module '@tanstack/react-router' {
 interface AppRouteChildren {
   AppIndexRoute: typeof AppIndexRoute
   AppSessionSessionIdRoute: typeof AppSessionSessionIdRoute
+  AppWorkspaceWorkspaceIdIndexRoute: typeof AppWorkspaceWorkspaceIdIndexRoute
   AppWorkspaceWorkspaceIdSessionSessionIdRoute: typeof AppWorkspaceWorkspaceIdSessionSessionIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppIndexRoute: AppIndexRoute,
   AppSessionSessionIdRoute: AppSessionSessionIdRoute,
+  AppWorkspaceWorkspaceIdIndexRoute: AppWorkspaceWorkspaceIdIndexRoute,
   AppWorkspaceWorkspaceIdSessionSessionIdRoute:
     AppWorkspaceWorkspaceIdSessionSessionIdRoute,
 }

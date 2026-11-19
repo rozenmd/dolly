@@ -1,6 +1,6 @@
 import { expect, test } from "./browser";
 
-// Spawned sessions follow opensession: kept out of the sidebar, reached from their parent.
+// Spawned sessions join their root's workspace and are reached from their parent.
 const now = Date.now();
 
 const pull = (number: number, state: "open" | "merged") => ({
@@ -176,14 +176,20 @@ test("keeps spawned sessions out of the sidebar and shows them with their parent
   ).toBeVisible();
   await expect(page.getByText("I started two threads and will report back.")).toBeVisible();
 
-  // Only top-level sessions and the one the owner kept get rows.
-  await expect(workspaces.locator(".workspace-row")).toHaveCount(3);
+  // One row per workspace; spawned sessions join their root's.
+  await expect(workspaces.locator(".workspace-row")).toHaveCount(2);
   await expect(workspaces).toContainText("Coordinate the release");
-  await expect(workspaces).toContainText("Fix the docs");
+  await expect(workspaces).not.toContainText("Fix the docs");
   await expect(workspaces).toContainText("Polish the settings page");
   await expect(workspaces).not.toContainText("Investigate the flaky test");
   await expect(workspaces).not.toContainText("Bump the SDK");
   await expect(workspaces).not.toContainText("Read the CI logs");
+
+  // The workspace's tabs are its sessions plus the spawned one the owner kept.
+  const tabs = page.getByRole("navigation", { name: "Workspace sessions", exact: true });
+  await expect(tabs.locator(".workspace-tab")).toHaveCount(2);
+  await expect(tabs.locator(".workspace-tab").first()).toHaveText("Coordinate the release");
+  await expect(tabs.locator(".workspace-tab").last()).toHaveText("Fix the docs");
 
   // The summary card, open by default on a wide window, lists every descendant
   // grouped by where it stands.
@@ -212,38 +218,38 @@ test("keeps spawned sessions out of the sidebar and shows them with their parent
     page.getByRole("heading", { name: "Investigate the flaky test", exact: true }),
   ).toBeVisible();
   await expect(workspaces.locator(".workspace-row.active")).toHaveText(/Coordinate the release/);
-  await expect(workspaces.locator(".workspace-row")).toHaveCount(3);
+  await expect(workspaces.locator(".workspace-row")).toHaveCount(2);
+  await expect(tabs.locator(".workspace-tab.active")).toHaveText("Coordinate the release");
   await expect(
-    page.getByRole("button", { name: "Coordinate the release", exact: true }),
+    page
+      .locator(".breadcrumb")
+      .getByRole("button", { name: "Coordinate the release", exact: true }),
   ).toBeVisible();
 
   if (shots) await page.screenshot({ path: `${shots}/desktop-child.png` });
 
-  // Keep in sidebar gives the child a row of its own, persisted on the server.
-  await page.getByRole("button", { name: "Keep in sidebar", exact: true }).click();
-  await expect(workspaces.locator(".workspace-row")).toHaveCount(4);
-  await expect(workspaces.locator(".workspace-row.active")).toHaveText(
-    /Investigate the flaky test/,
-  );
+  // Keeping the child makes it a tab of its own, persisted on the server.
+  await page.getByRole("button", { name: "Keep as workspace tab", exact: true }).click();
+  await expect(tabs.locator(".workspace-tab")).toHaveCount(3);
+  await expect(tabs.locator(".workspace-tab.active")).toHaveText(/Investigate the flaky test/);
+  await expect(workspaces.locator(".workspace-row")).toHaveCount(2);
   expect(updates).toEqual([{ id: "flaky", kept: true }]);
   await page.reload();
-  // The kept row survives a reload and opens the child directly.
-  await workspaces
-    .locator(".workspace-row")
-    .filter({ hasText: "Investigate the flaky test" })
-    .click();
-  await expect(workspaces.locator(".workspace-row.active")).toHaveText(
-    /Investigate the flaky test/,
-  );
-  await page.getByRole("button", { name: "Remove from sidebar", exact: true }).click();
-  await expect(workspaces.locator(".workspace-row")).toHaveCount(3);
+  // The kept tab survives a reload and opens the child directly.
+  await tabs.locator(".workspace-tab").filter({ hasText: "Investigate the flaky test" }).click();
+  await expect(tabs.locator(".workspace-tab.active")).toHaveText(/Investigate the flaky test/);
+  await page.getByRole("button", { name: "Remove workspace tab", exact: true }).click();
+  await expect(tabs.locator(".workspace-tab")).toHaveCount(2);
   expect(updates).toEqual([
     { id: "flaky", kept: true },
     { id: "flaky", kept: false },
   ]);
 
   // The breadcrumb returns to the parent.
-  await page.getByRole("button", { name: "Coordinate the release", exact: true }).click();
+  await page
+    .locator(".breadcrumb")
+    .getByRole("button", { name: "Coordinate the release", exact: true })
+    .click();
   await expect(
     page.getByRole("heading", { name: "Coordinate the release", exact: true }),
   ).toBeVisible();
@@ -261,6 +267,6 @@ test("hides spawned sessions from the mobile sidebar too", async ({ page }) => {
 
   if (shots) await page.screenshot({ path: `${shots}/mobile-sidebar.png` });
 
-  await expect(workspaces.locator(".workspace-row")).toHaveCount(3);
+  await expect(workspaces.locator(".workspace-row")).toHaveCount(2);
   await expect(workspaces).not.toContainText("Investigate the flaky test");
 });

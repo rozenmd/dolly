@@ -1862,7 +1862,18 @@ export class Agent extends DurableObject<Env> {
   createSession(input: typeof NewSession.Type) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
-        const { model, workspace } = input;
+        const { model } = input;
+
+        const joined =
+          input.workspaceId === undefined
+            ? undefined
+            : yield* this.workspaceSource(input.workspaceId);
+
+        if (input.workspaceId !== undefined && !joined) return { error: "Workspace not found" };
+
+        // A session started in a workspace works on its repository unless told otherwise.
+        const workspace = input.workspace ?? joined?.workspace;
+        const workspaceId = input.workspaceId ?? crypto.randomUUID();
         const chatgpt = yield* this.credentials.get("openai");
         const claude = yield* this.credentials.get("anthropic");
         const defaults = yield* this.storedDefaults();
@@ -1924,9 +1935,16 @@ export class Agent extends DurableObject<Env> {
         yield* attempt("session.write", () =>
           this.ctx.storage.put(`session:${id}`, conversation.id),
         );
+
+        // A new workspace remembers its first session, whose repository later sessions inherit.
+        if (!joined)
+          yield* attempt("workspace.write", () =>
+            this.ctx.storage.put(`workspace:${workspaceId}`, conversation.id),
+          );
         yield* attempt("session.metadata", () =>
           this.ctx.storage.put(sessionMetadataKey(conversation.id), {
             createdAt: Date.now(),
+            workspaceId,
             archived: false,
             speed,
             autoFallback,
@@ -1952,10 +1970,53 @@ export class Agent extends DurableObject<Env> {
             ),
           );
 
-        return { id, model: modelId, thinkingLevel, speed, autoFallback };
+        return { id, workspaceId, model: modelId, thinkingLevel, speed, autoFallback };
       }),
     );
   }
+
+  /**
+   * The repository a new session in workspace `id` inherits, read from one of its top-level
+   * sessions; undefined when no such workspace exists. Sessions from before workspaces were
+   * recorded are workspaces keyed by their own session ID.
+   */
+  private workspaceSource = Effect.fn("Agent.workspaceSource")(function* (this: Agent, id: string) {
+    let member = yield* attempt("workspace.read", () =>
+      this.ctx.storage.get<ConversationId>(`workspace:${id}`),
+    );
+
+    if (!member) {
+      const legacy = yield* this.conversation(id);
+
+      if (Option.isNone(legacy)) return undefined;
+      const conversationId = legacy.value.id;
+
+      const [record, metadata] = yield* attempt("workspace.legacy", () =>
+        Promise.all([
+          this.harness.commit((tx) => tx.conversation(conversationId), BACKGROUND_CONTEXT),
+          this.ctx.storage.get<SessionMetadata>(sessionMetadataKey(conversationId)),
+        ]),
+      );
+
+      // Spawned sessions and sessions recorded in another workspace do not name a workspace.
+      if (record?.owner || (metadata?.workspaceId && metadata.workspaceId !== id)) return undefined;
+      member = conversationId;
+    }
+
+    const conversationId = member;
+
+    const state = yield* attempt("workspace.config", () =>
+      this.harness.snapshot(ConversationWorkspace, conversationId, BACKGROUND_CONTEXT),
+    );
+
+    const config = state?.config;
+
+    return {
+      workspace: config
+        ? { repository: config.repository, ref: config.ref, networkHosts: config.networkHosts }
+        : undefined,
+    };
+  });
 
   private pullSummaries = new Map<string, { summary: PullRequestSummary; checked: number }>();
 
