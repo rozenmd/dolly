@@ -26,9 +26,14 @@ export const GitHubThreads = defineDoc<{
 
 type Checkpoint = { phase: "deliver" } | { phase: "reply"; text: string; attempts: number };
 
-export function githubDelivery(
-  reply: (event: typeof GitHubEvent.Type, text: string) => Effect.Effect<void, OperationError>,
-) {
+export function githubDelivery({
+  reply,
+  finished,
+}: {
+  reply: (event: typeof GitHubEvent.Type, text: string) => Effect.Effect<void, OperationError>;
+  /** Marks the command's comment as done. Best effort: the answer is already posted. */
+  finished: (event: typeof GitHubEvent.Type) => Effect.Effect<void, OperationError>;
+}) {
   return defineTask<typeof GitHubEvent.Type, Checkpoint, null>({
     name: "app.github-delivery",
     version: 1,
@@ -96,6 +101,16 @@ export function githubDelivery(
             const result = yield* reply(task.input, task.state.checkpoint.text).pipe(Effect.result);
 
             if (Result.isSuccess(result)) {
+              yield* finished(task.input).pipe(
+                Effect.catchTag("OperationError", (error) =>
+                  Effect.logError({
+                    event: "github_reaction_failed",
+                    reaction: "rocket",
+                    error: exceptionDetails(error),
+                    details: error.details,
+                  }),
+                ),
+              );
               yield* attempt("github.replied", () =>
                 runtime.commit(
                   () => ({ status: "terminal", outcome: { status: "completed", result: null } }),

@@ -509,6 +509,9 @@ const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) =>
     ),
   );
 
+/** Reactions Dolly leaves on a /pi comment: eyes once admitted, rocket once answered. */
+export type CommentReaction = "eyes" | "rocket";
+
 /** The only pull request fields update_pull_request may send. */
 type PullRequestEdit = { title?: string; body?: string };
 
@@ -518,6 +521,7 @@ type GitHubBody =
       permissions: Readonly<Record<string, string>>;
     }
   | { body: string }
+  | { content: CommentReaction }
   | { query: string; variables: Readonly<Record<string, string | number>> }
   | { ref: string; sha: string }
   | { head: string; base: string; title: string; body: string }
@@ -1928,6 +1932,19 @@ function makeGitHub(
     }
   });
 
+  /** GitHub keeps one reaction of each kind per user, so repeating this is harmless. */
+  const react = Effect.fn("GitHub.react")(function* (
+    event: typeof GitHubEvent.Type,
+    content: CommentReaction,
+  ) {
+    const connected = yield* read();
+    const token = yield* tokenFor(connected, event.repository, "write");
+
+    yield* api(`/repos/${event.repository}/issues/comments/${event.commentId}/reactions`, token, {
+      content,
+    });
+  });
+
   const authorize = Effect.fn("GitHub.authorize")(function* (repository: string, write: boolean) {
     const connected = yield* read();
     const token = yield* tokenFor(connected, repository, write ? "code" : "read");
@@ -2133,6 +2150,7 @@ function makeGitHub(
     configureWebhook,
     receiveWebhook,
     reply,
+    react,
     authorize,
   };
 }
