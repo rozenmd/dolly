@@ -1086,6 +1086,11 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
+  /** First-run checklist state: App installations, allowed accounts, enrollment and App gaps. */
+  githubOnboarding() {
+    return this.githubRun(Effect.flatMap(GitHub, (github) => github.onboarding));
+  }
+
   githubEnrollRepository(repository: string, remove: boolean) {
     if (remove)
       return this.githubRun(

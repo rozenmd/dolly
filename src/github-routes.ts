@@ -53,6 +53,14 @@ githubRoutes.get("/api/integrations/github/accounts", async (c) =>
   ),
 );
 
+githubRoutes.get("/api/integrations/github/onboarding", async (c) => {
+  const result = await Effect.runPromise(
+    rpc("github.onboarding", async () => await c.env.AGENT.getByName("owner").githubOnboarding()),
+  );
+
+  return c.json(result, "error" in result ? 409 : 200);
+});
+
 githubRoutes.get("/api/integrations/github/repositories", async (c) => {
   const result = await Effect.runPromise(
     rpc(

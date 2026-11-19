@@ -18,11 +18,22 @@ export function ingressHook(value: string) {
   return base ? `${base}/hooks/github` : "";
 }
 
+/**
+ * The ingress Worker's likely address when this dolly runs on workers.dev: both Workers deploy to
+ * the same account subdomain, as `dolly` and `dolly-ingress`. Empty when there is nothing to guess.
+ */
+export function guessIngress(hostname: string) {
+  const match = /^dolly\.([a-z0-9-]+\.workers\.dev)$/i.exec(hostname);
+
+  return match ? `https://dolly-ingress.${match[1]}` : "";
+}
+
 /** Creates the GitHub App from a manifest. GitHub fills in every setting, including the webhook. */
 export function GitHubSetup({ initialError }: { initialError: string }) {
   const [ownerType, setOwnerType] = useState<"personal" | "organization">("personal");
   const [owner, setOwner] = useState("");
-  const [ingress, setIngress] = useState("");
+  const [guessed] = useState(() => guessIngress(window.location.hostname));
+  const [ingress, setIngress] = useState(guessed);
   const [error, setError] = useState(initialError);
   const [pending, setPending] = useState(false);
 
@@ -101,8 +112,10 @@ export function GitHubSetup({ initialError }: { initialError: string }) {
         aria-describedby="github-ingress-help"
       />
       <p id="github-ingress-help" className="field-help">
-        The URL of your deployed dolly-ingress Worker. GitHub sends issue and pull request comments
-        there.
+        {guessed && ingress === guessed
+          ? "Filled in from this address; check it matches your deployed dolly-ingress Worker. "
+          : "The URL of your deployed dolly-ingress Worker. "}
+        GitHub sends comments and CI updates there.
       </p>
       {error && (
         <p role="alert" className="error-text">
