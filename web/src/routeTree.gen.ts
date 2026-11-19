@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
+import { Route as AppFeedRouteImport } from './routes/_app/feed'
 import { Route as SettingsIndexRouteImport } from './routes/settings/index'
 import { Route as SettingsAccountRouteImport } from './routes/settings/account'
 import { Route as SettingsGithubRouteImport } from './routes/settings/github'
@@ -34,6 +35,11 @@ const SettingsRoute = SettingsRouteImport.update({
 const AppIndexRoute = AppIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppFeedRoute = AppFeedRouteImport.update({
+  id: '/feed',
+  path: '/feed',
   getParentRoute: () => AppRoute,
 } as any)
 const SettingsIndexRoute = SettingsIndexRouteImport.update({
@@ -87,6 +93,7 @@ const AppWorkspaceWorkspaceIdSessionSessionIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/settings': typeof SettingsRouteWithChildren
+  '/feed': typeof AppFeedRoute
   '/settings/account': typeof SettingsAccountRoute
   '/settings/github': typeof SettingsGithubRoute
   '/settings/models': typeof SettingsModelsRoute
@@ -98,6 +105,7 @@ export interface FileRoutesByFullPath {
   '/workspace/$workspaceId/session/$sessionId': typeof AppWorkspaceWorkspaceIdSessionSessionIdRoute
 }
 export interface FileRoutesByTo {
+  '/feed': typeof AppFeedRoute
   '/settings/account': typeof SettingsAccountRoute
   '/settings/github': typeof SettingsGithubRoute
   '/settings/models': typeof SettingsModelsRoute
@@ -113,6 +121,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
   '/settings': typeof SettingsRouteWithChildren
+  '/_app/feed': typeof AppFeedRoute
   '/settings/account': typeof SettingsAccountRoute
   '/settings/github': typeof SettingsGithubRoute
   '/settings/models': typeof SettingsModelsRoute
@@ -129,6 +138,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/settings'
+    | '/feed'
     | '/settings/account'
     | '/settings/github'
     | '/settings/models'
@@ -140,6 +150,7 @@ export interface FileRouteTypes {
     | '/workspace/$workspaceId/session/$sessionId'
   fileRoutesByTo: FileRoutesByTo
   to:
+    | '/feed'
     | '/settings/account'
     | '/settings/github'
     | '/settings/models'
@@ -154,6 +165,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_app'
     | '/settings'
+    | '/_app/feed'
     | '/settings/account'
     | '/settings/github'
     | '/settings/models'
@@ -192,6 +204,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof AppIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/feed': {
+      id: '/_app/feed'
+      path: '/feed'
+      fullPath: '/feed'
+      preLoaderRoute: typeof AppFeedRouteImport
       parentRoute: typeof AppRoute
     }
     '/settings/': {
@@ -261,6 +280,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
+  AppFeedRoute: typeof AppFeedRoute
   AppIndexRoute: typeof AppIndexRoute
   AppSessionSessionIdRoute: typeof AppSessionSessionIdRoute
   AppWorkspaceWorkspaceIdIndexRoute: typeof AppWorkspaceWorkspaceIdIndexRoute
@@ -268,6 +288,7 @@ interface AppRouteChildren {
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppFeedRoute: AppFeedRoute,
   AppIndexRoute: AppIndexRoute,
   AppSessionSessionIdRoute: AppSessionSessionIdRoute,
   AppWorkspaceWorkspaceIdIndexRoute: AppWorkspaceWorkspaceIdIndexRoute,

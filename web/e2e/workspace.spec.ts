@@ -1062,7 +1062,7 @@ test("mobile navigation and 320px layout", async ({ page }) => {
   await expect(page.getByRole("complementary", { name: "Workspace navigation" })).not.toBeVisible();
   await page.getByRole("button", { name: "Open navigation" }).click();
   await expect(page.getByRole("complementary", { name: "Workspace navigation" })).toBeVisible();
-  await page.getByRole("button", { name: "Feed" }).click();
+  await page.getByRole("link", { name: "Feed" }).click();
   await expect(page.getByRole("complementary", { name: "Workspace navigation" })).not.toBeVisible();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Feed");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
