@@ -34,17 +34,27 @@ Ask in Slack, check the screenshot on your phone and merge from GitHub. Dolly op
 
 ## Get started
 
-You need Node.js 24, pnpm 12, Docker and a paid Cloudflare Workers account.
+You need Node.js 24, pnpm 12, Docker, a paid Cloudflare Workers account and Cloudflare Zero Trust. See [What you need](docs/setup.md#1-what-you-need).
 
-    pnpm install --frozen-lockfile
-    pnpm exec cf auth login
-    pnpm access:plan && pnpm access:deploy
-    pnpm run deploy
-    pnpm --dir ingress run deploy
+1. Install and log in to Cloudflare ([guide](docs/setup.md#2-install-and-log-in-to-cloudflare)):
 
-Then open your Worker's URL. Setup walks you through creating the GitHub App, signing in, connecting ChatGPT or Claude and choosing repositories.
+       pnpm install --frozen-lockfile
+       pnpm exec cf auth login
 
-To configure Cloudflare Access, Slack and the API, see the [full setup guide](docs/setup.md).
+2. Set up Cloudflare Access. Copy `infra/.env.example` to `infra/.env` and fill in its values, then plan and deploy ([guide](docs/setup.md#3-set-up-cloudflare-access)):
+
+       cp infra/.env.example infra/.env
+       pnpm access:plan
+       pnpm access:deploy
+
+3. Deploy the main Worker and the ingress Worker ([guide](docs/setup.md#4-deploy-the-workers)):
+
+       pnpm run deploy
+       pnpm --dir ingress run deploy
+
+4. Open your Worker's URL. Setup walks you through creating the GitHub App, signing in, connecting ChatGPT or Claude and choosing repositories ([guide](docs/setup.md#5-first-run-setup-in-the-browser)).
+
+To connect Slack or use Claude, see [Connect Slack](docs/setup.md#6-optional-connect-slack) and [Use Claude instead of ChatGPT](docs/setup.md#7-optional-use-claude-instead-of-chatgpt).
 
 ## Status
 
