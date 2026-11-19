@@ -2656,6 +2656,41 @@ label.connection-row {
   background: var(--surface);
 }
 
+/* A CI wait's wake-up: the same notice, tinted by what the checks did. */
+.ci-wait-notice > summary {
+  max-width: 100%;
+}
+.ci-wait-notice .scheduled-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ci-wait-notice > summary > svg {
+  flex: none;
+}
+.ci-wait-notice[data-outcome="passed"] > summary > svg:first-child {
+  color: var(--green);
+}
+.ci-wait-notice[data-outcome="failed"] > summary > svg:first-child {
+  color: var(--red);
+}
+.ci-wait-notice[data-outcome="closed"] > summary > svg:first-child,
+.ci-wait-notice[data-outcome="finished"] > summary > svg:first-child {
+  color: var(--muted);
+}
+.ci-wait-notice[data-outcome="passed"] .scheduled-body {
+  border-left-color: var(--green);
+}
+.ci-wait-notice[data-outcome="failed"] .scheduled-body {
+  border-left-color: var(--red);
+}
+.ci-wait-next {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 /* "Send later" in the composer, anchored to the composer so it fits a phone too. */
 .composer {
   position: relative;

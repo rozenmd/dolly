@@ -12,6 +12,7 @@ import {
 } from "../../../src/transcript";
 import { SPEEDS, type Speed } from "../../../src/model-capabilities";
 import { parseScheduledMessage } from "../../../src/schedule-message";
+import { parseCiWaitMessage, type CiWaitOutcome } from "../../../src/ci-wait-message";
 
 export { Snapshot } from "../../../src/transcript";
 
@@ -148,6 +149,8 @@ export type Turn = {
     images?: number;
     /** Delivered by a schedule rather than typed: shown as a notice, not the owner's bubble. */
     scheduled?: { id: string; at: number };
+    /** A CI wait's wake-up, written for the model: shown as a notice of its outcome. */
+    ciWait?: { outcome: CiWaitOutcome; headline: string; trigger: string };
   };
   items: TurnItem[];
   answer?: { id: string; text: string };
@@ -206,6 +209,27 @@ function scheduleDetail(block: typeof Block.Type) {
   return [when, args.prompt].filter(Boolean).join(" · ");
 }
 
+const WaitArguments = Schema.Struct({
+  repository: Schema.optional(Schema.String),
+  number: Schema.optional(Schema.Number),
+  run_id: Schema.optional(Schema.Number),
+  workflow: Schema.optional(Schema.String),
+  ref: Schema.optional(Schema.String),
+});
+
+/** What a wait_for call watches: `owner/repo#12` or `owner/repo release.yml @ v1.2.0`. */
+function waitDetail(block: typeof Block.Type) {
+  const args = Option.getOrUndefined(Schema.decodeUnknownOption(WaitArguments)(block.arguments));
+
+  if (!args?.repository) return "";
+
+  if (args.number !== undefined) return `${args.repository}#${args.number}`;
+
+  if (args.run_id !== undefined) return `${args.repository} run ${args.run_id}`;
+
+  return [args.repository, args.workflow, args.ref && `@ ${args.ref}`].filter(Boolean).join(" ");
+}
+
 const OperationArguments = Schema.Struct({ operation: Schema.Unknown });
 
 /**
@@ -227,6 +251,8 @@ function stepArguments(block: typeof Block.Type) {
 function stepDetail(block: typeof Block.Type): Pick<Step, "detail" | "file"> {
   if (block.name === "schedule_prompt" || block.name === "cancel_scheduled_prompt")
     return { detail: scheduleDetail(block) };
+
+  if (block.name === "wait_for") return { detail: waitDetail(block) };
 
   const args = stepArguments(block);
 
@@ -286,13 +312,17 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     if (message.role === "user") {
       const text = messageText(message);
       const scheduled = parseScheduledMessage(text);
+      const wake = parseCiWaitMessage(text);
 
       const prompt: NonNullable<Turn["prompt"]> = {
-        text: scheduled?.prompt ?? text,
+        text: scheduled?.prompt ?? wake?.prompt ?? text,
         at: message.timestamp,
       };
 
       if (scheduled) prompt.scheduled = { id: scheduled.id, at: scheduled.at };
+
+      if (wake)
+        prompt.ciWait = { outcome: wake.outcome, headline: wake.headline, trigger: wake.trigger };
 
       const images = Schema.is(Schema.String)(message.content)
         ? 0

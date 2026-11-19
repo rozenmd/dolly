@@ -34,6 +34,7 @@ import { historyPage, promptIndex, promptWindow } from "./transcript-window";
 import { compactionSettings } from "./compaction";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
 import { Scheduler, SCHEDULE_TOOL_NAMES, scheduleTasks } from "./schedule";
+import { CI_WAIT_TOOL_NAMES, CiWaiter } from "./ci-wait";
 import {
   ConversationWorkspace,
   workspaceConfig,
@@ -176,6 +177,25 @@ export class Agent extends DurableObject<Env> {
   private readonly alarmPermit = Semaphore.makeUnsafe(1);
   private readonly scheduler = new Scheduler(
     () => this.harness,
+    (conversationId) => this.startedFromWeb(conversationId),
+  );
+  /** CI waits read GitHub here in the Worker, never through the sandbox. */
+  private readonly ciWaiter = new CiWaiter(
+    () => this.harness,
+    () => ({
+      pullChecks: (repository, number) =>
+        Effect.runPromise(
+          Effect.flatMap(GitHub, (github) => github.pullChecks(repository, number)).pipe(
+            Effect.provide(this.services),
+          ),
+        ),
+      workflowRun: (repository, target) =>
+        Effect.runPromise(
+          Effect.flatMap(GitHub, (github) => github.workflowRun(repository, target)).pipe(
+            Effect.provide(this.services),
+          ),
+        ),
+    }),
     (conversationId) => this.startedFromWeb(conversationId),
   );
   private readonly checkpointTask = workspaceCheckpoint(
@@ -563,6 +583,7 @@ export class Agent extends DurableObject<Env> {
       } satisfies ToolRegistration,
       ...coordination.tools(),
       ...this.scheduler.tools(),
+      ...this.ciWaiter.tools(),
     ];
 
     const extension = defineExtension({
@@ -571,6 +592,7 @@ export class Agent extends DurableObject<Env> {
       tasks: [
         ...coordinationTasks,
         ...scheduleTasks,
+        this.ciWaiter.task,
         this.githubTask,
         this.slackTask,
         this.checkpointTask,
@@ -903,6 +925,34 @@ export class Agent extends DurableObject<Env> {
             } while (cursor);
           }, BACKGROUND_CONTEXT)
           .then(() => this.ctx.storage.put("migration:schedule-tools", true)),
+      );
+
+    if (
+      !(yield* attempt("ci-wait.migration.read", () =>
+        this.ctx.storage.get("migration:ci-wait-tools"),
+      ))
+    )
+      yield* attempt("ci-wait.tools.update", () =>
+        this.harness
+          .commit(async (tx) => {
+            let cursor: Cursor | undefined;
+
+            do {
+              const page = await tx.scanConversations({}, 100, cursor);
+
+              for (const conversation of page.items) {
+                const agent = await tx.doc(AgentDoc, conversation.id);
+
+                for (const names of [agent.tools, agent.modelTools])
+                  if (Array.isArray(names))
+                    for (const name of CI_WAIT_TOOL_NAMES)
+                      if (!names.includes(name)) names.push(name);
+              }
+
+              cursor = page.next;
+            } while (cursor);
+          }, BACKGROUND_CONTEXT)
+          .then(() => this.ctx.storage.put("migration:ci-wait-tools", true)),
       );
 
     yield* this.arm(this.harness.wake());
