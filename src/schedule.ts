@@ -10,13 +10,24 @@ import {
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { int, obj, opt, str } from "@earendil-works/pi-schema";
+import { scheduledMessage } from "./schedule-message";
 
 export const MAX_SCHEDULED = 20;
 
 /** A week: longer than any sensible check-back, short enough to catch a seconds-for-minutes mistake. */
 export const MAX_DELAY_MINUTES = 7 * 24 * 60;
 
-type Scheduled = { taskId: TaskId<ScheduleResult>; at: number; createdAt: number; prompt: string };
+/** Who scheduled it: the agent with schedule_prompt, or the owner from the web composer. */
+export type ScheduleSource = "agent" | "owner";
+
+type Scheduled = {
+  taskId: TaskId<ScheduleResult>;
+  at: number;
+  createdAt: number;
+  prompt: string;
+  source?: ScheduleSource;
+  requestId?: string;
+};
 
 type ScheduleInput = { prompt: string; at: number; createdAt: number };
 
@@ -34,11 +45,6 @@ const ScheduledPrompts = defineDoc<{ pending: Record<string, Scheduled> }>({
 });
 
 const iso = (at: number) => new Date(at).toISOString();
-
-/** The message a schedule submits, labelled so the model and the owner can tell it was scheduled. */
-export function scheduledMessage(id: string, input: ScheduleInput) {
-  return `[Scheduled prompt ${id}, set at ${iso(input.createdAt)} for ${iso(input.at)}]\n\n${input.prompt}`;
-}
 
 /**
  * Sleeps in Pi's durable task store until `at`, so it survives restarts and Durable Object eviction:
@@ -122,8 +128,10 @@ export class Scheduler {
     conversationId: ConversationId,
     input: { prompt: string; in_minutes?: number; at?: string },
     context: Context = BACKGROUND_CONTEXT,
+    options: { source: ScheduleSource; requestId?: string } = { source: "agent" },
   ) {
-    if (!(await this.allowed(conversationId)))
+    // The owner's own words may be scheduled anywhere, as they may be typed anywhere.
+    if (options.source === "agent" && !(await this.allowed(conversationId)))
       return { error: "Scheduled prompts are only available in sessions started from the web app" };
 
     if ((input.in_minutes === undefined) === (input.at === undefined))
@@ -155,6 +163,19 @@ export class Scheduler {
     return conversation.commit(async (tx) => {
       const state = await tx.doc(ScheduledPrompts, conversationId);
 
+      // A retried request returns its pending schedule instead of scheduling twice.
+      const retried =
+        options.requestId === undefined
+          ? undefined
+          : Object.entries(state.pending).find(
+              ([, entry]) => entry.requestId === options.requestId,
+            );
+
+      if (retried)
+        return retried[1].prompt === input.prompt && retried[1].at === at
+          ? { id: retried[0], at: iso(at), now: iso(now) }
+          : { error: "requestId already used with a different prompt or time" };
+
       if (Object.keys(state.pending).length >= MAX_SCHEDULED)
         return { error: `Scheduled prompt limit reached (${MAX_SCHEDULED} pending per session)` };
 
@@ -164,7 +185,16 @@ export class Scheduler {
         { ownership: { kind: "conversation" }, background: true },
       );
 
-      state.pending[String(taskId)] = { taskId, at, createdAt: now, prompt: input.prompt };
+      const entry: Scheduled = {
+        taskId,
+        at,
+        createdAt: now,
+        prompt: input.prompt,
+        source: options.source,
+      };
+
+      if (options.requestId !== undefined) entry.requestId = options.requestId;
+      state.pending[String(taskId)] = entry;
 
       return {
         id: String(taskId),
@@ -181,7 +211,12 @@ export class Scheduler {
     return {
       now: iso(this.now()),
       scheduled: Object.entries(state?.pending ?? {})
-        .map(([id, entry]) => ({ id, at: iso(entry.at), prompt: entry.prompt }))
+        .map(([id, entry]) => ({
+          id,
+          at: iso(entry.at),
+          prompt: entry.prompt,
+          source: entry.source ?? "agent",
+        }))
         .sort((a, b) => a.at.localeCompare(b.at)),
     };
   }

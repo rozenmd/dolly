@@ -11,6 +11,7 @@ import {
   type RunFailure,
 } from "../../../src/transcript";
 import { SPEEDS, type Speed } from "../../../src/model-capabilities";
+import { parseScheduledMessage } from "../../../src/schedule-message";
 
 export { Snapshot } from "../../../src/transcript";
 
@@ -141,7 +142,13 @@ export type TurnItem =
 
 export type Turn = {
   id: string;
-  prompt?: { text: string; at?: number; images?: number };
+  prompt?: {
+    text: string;
+    at?: number;
+    images?: number;
+    /** Delivered by a schedule rather than typed: shown as a notice, not the owner's bubble. */
+    scheduled?: { id: string; at: number };
+  };
   items: TurnItem[];
   answer?: { id: string; text: string };
   steps: number;
@@ -170,6 +177,35 @@ const ToolArguments = Schema.Struct({
   url: Schema.optional(Schema.String),
 });
 
+const ScheduleArguments = Schema.Struct({
+  prompt: Schema.optional(Schema.String),
+  in_minutes: Schema.optional(Schema.Number),
+  at: Schema.optional(Schema.String),
+  id: Schema.optional(Schema.String),
+});
+
+/** When a schedule_prompt call fires, then what it says: `in 2h · Start the migration…`. */
+function scheduleDetail(block: typeof Block.Type) {
+  const args = Option.getOrUndefined(
+    Schema.decodeUnknownOption(ScheduleArguments)(block.arguments),
+  );
+
+  if (!args) return "";
+
+  if (block.name === "cancel_scheduled_prompt") return args.id ?? "";
+
+  const minutes = args.in_minutes;
+
+  const when =
+    minutes === undefined
+      ? args.at
+      : minutes < 60 || minutes % 60
+        ? `in ${minutes}m`
+        : `in ${minutes / 60}h`;
+
+  return [when, args.prompt].filter(Boolean).join(" · ");
+}
+
 const OperationArguments = Schema.Struct({ operation: Schema.Unknown });
 
 /**
@@ -189,6 +225,9 @@ function stepArguments(block: typeof Block.Type) {
 }
 
 function stepDetail(block: typeof Block.Type): Pick<Step, "detail" | "file"> {
+  if (block.name === "schedule_prompt" || block.name === "cancel_scheduled_prompt")
+    return { detail: scheduleDetail(block) };
+
   const args = stepArguments(block);
 
   if (!args) return { detail: "" };
@@ -245,10 +284,15 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 
   function add(message: typeof Message.Type, id: string) {
     if (message.role === "user") {
+      const text = messageText(message);
+      const scheduled = parseScheduledMessage(text);
+
       const prompt: NonNullable<Turn["prompt"]> = {
-        text: messageText(message),
+        text: scheduled?.prompt ?? text,
         at: message.timestamp,
       };
+
+      if (scheduled) prompt.scheduled = { id: scheduled.id, at: scheduled.at };
 
       const images = Schema.is(Schema.String)(message.content)
         ? 0
@@ -444,6 +488,8 @@ export type ApiBody = {
   kept?: boolean;
   content?: string;
   requestId?: string;
+  /** When a scheduled message is sent, as ISO 8601. */
+  at?: string;
   images?: readonly { mimeType: string; data: string }[];
   model?: string | null;
   thinkingLevel?: string | null;

@@ -699,6 +699,64 @@ app.post("/api/sessions/:id/queue/:submissionId/steer", (c) =>
   ),
 );
 
+app.get("/api/sessions/:id/scheduled", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const agent = yield* AgentApi;
+      const result = yield* agent.scheduledPrompts(c.req.param("id"));
+
+      return result ? c.json(result) : c.json({ error: "Session not found" }, 404);
+    }),
+  ),
+);
+
+app.post("/api/sessions/:id/scheduled", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const parsed = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+        Effect.flatMap(
+          Schema.decodeUnknownEffect(
+            Schema.Struct({ ...Message.fields, at: Schema.String.check(Schema.isMaxLength(64)) }),
+          ),
+        ),
+        Effect.mapError(
+          () =>
+            new InvalidInput({
+              message: "Expected content, an ISO 8601 at with an offset and a UUID requestId",
+            }),
+        ),
+      );
+
+      const agent = yield* AgentApi;
+      const result = yield* agent.schedulePrompt(c.req.param("id"), parsed);
+
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 409 : 201);
+    }),
+  ),
+);
+
+app.delete("/api/sessions/:id/scheduled/:scheduleId", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const agent = yield* AgentApi;
+
+      const result = yield* agent.cancelScheduledPrompt(
+        c.req.param("id"),
+        c.req.param("scheduleId"),
+      );
+
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 404 : 200);
+    }),
+  ),
+);
+
 app.post("/api/sessions/:id/abort", (c) =>
   handle(
     c,

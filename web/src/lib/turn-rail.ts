@@ -1,4 +1,5 @@
 import type { PromptIndex } from "../../../src/transcript";
+import { parseScheduledMessage } from "../../../src/schedule-message";
 import type { Step, Turn } from "./api";
 
 /**
@@ -138,7 +139,9 @@ function reply(turn: Turn) {
 
 /** A prompt as the rail's one line: what it was about, or its screenshots when it has no words. */
 function promptPreview(text: string, images = 0) {
-  const line = clamp(flatten(dropLeadingQuote(text)), MAX_PREVIEW);
+  // A scheduled prompt previews as what it asks, not its delivery label.
+  const body = parseScheduledMessage(text)?.prompt ?? text;
+  const line = clamp(flatten(dropLeadingQuote(body)), MAX_PREVIEW);
 
   return line || (images === 1 ? "Screenshot" : images ? `${images} screenshots` : "");
 }

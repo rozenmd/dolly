@@ -311,3 +311,127 @@ it("refuses to schedule from a Slack intake thread, whose text is not only the o
   await expect.poll(() => transcript(id)).toContain("Result: ");
   expect(await transcript(id)).toContain("only available in sessions started from the web app");
 });
+
+const ScheduledList = Schema.Struct({
+  scheduled: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      at: Schema.String,
+      prompt: Schema.String,
+      source: Schema.String,
+    }),
+  ),
+});
+
+async function listScheduled(id: string) {
+  const response = await SELF.fetch(`https://worker/api/sessions/${id}/scheduled`, { headers });
+
+  expect(response.status).toBe(200);
+
+  return Schema.decodeUnknownSync(ScheduledList)(await response.json()).scheduled;
+}
+
+const sendLater = (id: string, body: Record<string, string>) =>
+  SELF.fetch(`https://worker/api/sessions/${id}/scheduled`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+
+it("lets the owner send a message later from the web app, retry safely and cancel it", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    const { serialized } = await modelRequest(init);
+
+    return answer(serialized.includes("Review the PR") ? "Reviewed" : "Unexpected");
+  });
+
+  const id = await root();
+  const at = new Date(realNow() + 3 * 60 * 60_000).toISOString();
+  const body = { content: "Review the PR", at, requestId: crypto.randomUUID() };
+
+  const created = await sendLater(id, body);
+  expect(created.status).toBe(201);
+
+  const first = Schema.decodeUnknownSync(Schema.Struct({ id: Schema.String }))(
+    await created.json(),
+  );
+
+  // A retried request returns the same schedule; reusing its ID for other text is refused.
+  expect(await (await sendLater(id, body)).json()).toMatchObject({ id: first.id });
+  expect((await sendLater(id, { ...body, content: "Something else" })).status).toBe(409);
+
+  const other = await sendLater(id, {
+    content: "Never mind",
+    at,
+    requestId: crypto.randomUUID(),
+  });
+
+  const cancelled = Schema.decodeUnknownSync(Schema.Struct({ id: Schema.String }))(
+    await other.json(),
+  );
+
+  expect(await listScheduled(id)).toEqual([
+    { id: first.id, at, prompt: "Review the PR", source: "owner" },
+    { id: cancelled.id, at, prompt: "Never mind", source: "owner" },
+  ]);
+
+  const removed = await SELF.fetch(`https://worker/api/sessions/${id}/scheduled/${cancelled.id}`, {
+    method: "DELETE",
+    headers,
+  });
+
+  expect(removed.status).toBe(200);
+  await expect
+    .poll(async () => (await listScheduled(id)).map((item) => item.id))
+    .toEqual([first.id]);
+  expect(
+    (
+      await SELF.fetch(`https://worker/api/sessions/${id}/scheduled/${cancelled.id}`, {
+        method: "DELETE",
+        headers,
+      })
+    ).status,
+  ).toBe(404);
+
+  // Bad input never schedules.
+  expect(
+    (await sendLater(id, { content: "x", at: "tomorrow", requestId: crypto.randomUUID() })).status,
+  ).toBe(409);
+  expect((await sendLater(id, { content: "x", at })).status).toBe(400);
+  expect((await sendLater("missing", { ...body, requestId: crypto.randomUUID() })).status).toBe(
+    404,
+  );
+
+  await abortAllDurableObjects();
+  await advance(3 * 60 * 60_000 + 60_000);
+  await expect.poll(() => transcript(id), { timeout: 4000 }).toContain("Reviewed");
+
+  const delivered = await transcript(id);
+  expect(delivered).toContain(`[Scheduled prompt ${first.id}, set at `);
+  expect(delivered).not.toContain("Never mind");
+  expect(await listScheduled(id)).toEqual([]);
+});
+
+it("lets the owner send later into a Slack-started session, where the agent may not schedule", async () => {
+  const id = await root();
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    const conversationId = await state.storage.get<ConversationId>(`session:${id}`);
+
+    if (conversationId === undefined) throw new Error("Session alias missing");
+
+    await agent["harness"].commit(async (tx) => {
+      const threads = await tx.doc(SlackThreads);
+      threads.threads["C1:1.0"] = { id: conversationId, events: {} };
+    }, BACKGROUND_CONTEXT);
+  });
+
+  const response = await sendLater(id, {
+    content: "Follow up",
+    at: new Date(realNow() + 60 * 60_000).toISOString(),
+    requestId: crypto.randomUUID(),
+  });
+
+  expect(response.status).toBe(201);
+  expect(await listScheduled(id)).toHaveLength(1);
+});

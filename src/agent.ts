@@ -174,6 +174,10 @@ export class Agent extends DurableObject<Env> {
   });
   private readonly steerInterrupts = new SteerInterrupts();
   private readonly alarmPermit = Semaphore.makeUnsafe(1);
+  private readonly scheduler = new Scheduler(
+    () => this.harness,
+    (conversationId) => this.startedFromWeb(conversationId),
+  );
   private readonly checkpointTask = workspaceCheckpoint(
     (sandboxId, turnId) => this.env.SANDBOX.getByName(sandboxId).checkpoint(turnId),
     (conversationId, message) =>
@@ -383,11 +387,6 @@ export class Agent extends DurableObject<Env> {
 
     const coordination = new Coordination(() => this.harness);
 
-    const scheduler = new Scheduler(
-      () => this.harness,
-      (conversationId) => this.startedFromWeb(conversationId),
-    );
-
     const githubSchema = toolParameters(GitHubRequest);
 
     const githubTool = {
@@ -563,7 +562,7 @@ export class Agent extends DurableObject<Env> {
         },
       } satisfies ToolRegistration,
       ...coordination.tools(),
-      ...scheduler.tools(),
+      ...this.scheduler.tools(),
     ];
 
     const extension = defineExtension({
@@ -2471,6 +2470,57 @@ export class Agent extends DurableObject<Env> {
               result: { ...receipt.result, text: redact(receipt.result.text, secrets) },
             }
           : receipt;
+      }),
+    );
+  }
+
+  scheduledPrompts(id: string) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        return yield* attempt("schedule.list", () => this.scheduler.list(conversation.value.id));
+      }),
+    );
+  }
+
+  /** The owner's "send later" from the composer: their own words, at an absolute time. */
+  schedulePrompt(id: string, input: { content: string; at: string; requestId: string }) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        // Armed before the commit, like any call that can start work (see arm()).
+        yield* this.arm({ active: true });
+
+        return yield* attempt("schedule.create", () =>
+          this.scheduler.schedule(
+            conversation.value.id,
+            { prompt: input.content, at: input.at },
+            BACKGROUND_CONTEXT,
+            { source: "owner", requestId: input.requestId },
+          ),
+        );
+      }),
+    );
+  }
+
+  cancelScheduledPrompt(id: string, scheduleId: string) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        yield* this.arm({ active: true });
+
+        return yield* attempt("schedule.cancel", () =>
+          this.scheduler.cancel(conversation.value.id, scheduleId),
+        );
       }),
     );
   }

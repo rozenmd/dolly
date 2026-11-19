@@ -787,6 +787,7 @@ export function WorkspaceApp() {
                   running={running}
                   queued={queued}
                   onSteerQueued={(id) => void steerQueued(id)}
+                  activity={snapshot?.entries.at(-1)?.id ?? 0}
                   modelControl={sessionModelControl(session)}
                 />
               </>
