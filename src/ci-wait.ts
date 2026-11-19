@@ -11,7 +11,14 @@ import {
 } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { ciWaitMessage, type CiWaitOutcome } from "./ci-wait-message";
-import type { CiCheck, CiWorkflowRun, PullChecks, WorkflowRunTarget } from "./github";
+import type {
+  CiCheck,
+  CiWorkflowRun,
+  PullCheckCounts,
+  PullChecks,
+  WorkflowRunTarget,
+} from "./github";
+import type { CiEvent } from "./github-webhook";
 
 /**
  * Durable, turn-ending CI waits, after OpenSession's agent-waits. The agent registers one wait and
@@ -46,6 +53,12 @@ const UNCHANGED_POLL_MS = 2 * MINUTE;
 /** A workflow run the agent names by workflow and ref may have started just before it registered. */
 const RUN_LOOKBACK_MS = 15 * MINUTE;
 
+/** While checks plainly run, the full read (3 REST calls) still happens this often. */
+const FULL_READ_EVERY_MS = 5 * MINUTE;
+
+/** A webhook doesn't replace a wait whose next poll is already this close. */
+const NUDGE_MIN_MS = 5_000;
+
 /** A report older than this no longer suppresses a wake. */
 const REPORT_TTL_MS = 24 * 60 * MINUTE;
 
@@ -57,13 +70,27 @@ export type CiTarget =
 /** GitHub reads, run in the Worker with an installation token. They throw on failure. */
 export type CiReads = {
   pullChecks(repository: string, number: number): Promise<PullChecks>;
+  /** The 1-point GraphQL read: state, head and check counts by state. */
+  pullCheckCounts(repository: string, number: number): Promise<PullCheckCounts>;
   workflowRun(repository: string, target: WorkflowRunTarget): Promise<CiWorkflowRun | undefined>;
 };
 
-type WaitInput = { target: CiTarget; prompt: string; createdAt: number; deadlineAt: number };
+type WaitInput = {
+  target: CiTarget;
+  prompt: string;
+  createdAt: number;
+  deadlineAt: number;
+  /** Set when a webhook replaced a sleeping task: carry on polling from here, now. */
+  resume?: PollState;
+};
 
 type PollState = {
   phase: "poll";
+  /** The PR head the last full read saw, and when: the cheap read may stand in until it's stale. */
+  headSha?: string;
+  fullReadAt?: number;
+  /** The run a workflow+ref wait found, so webhooks for it can be matched. */
+  runId?: number;
   /** A wake-worthy result and when it was first seen, for the settle window. */
   candidate?: { signature: string; since: number };
   lastError?: string;
@@ -75,12 +102,24 @@ type PollState = {
 
 type WaitResult = { outcome: CiWaitOutcome };
 
+/** A session's wait as the agent's tools and the owner's composer see it. */
+export type CiWaitView = {
+  id: string;
+  waiting_on: string;
+  timeout: string;
+  next_poll: string;
+  last_seen?: string;
+};
+
 type CurrentWait = {
   taskId: TaskId<WaitResult>;
   target: CiTarget;
   prompt: string;
   createdAt: number;
   deadlineAt: number;
+  /** When the task wakes next, and the state it wakes with, so a webhook can pull it forward. */
+  nextPollAt: number;
+  poll?: PollState;
 };
 
 /** One wait per conversation, plus what the last wake reported so a re-armed wait won't repeat it. */
@@ -94,6 +133,17 @@ const CiWaits = defineDoc<{
   history: "latest",
   fork: "initial",
   initial: () => ({}),
+  checkpointWhen: () => false,
+});
+
+/** Every live wait by repository, so a webhook finds the waits it concerns without a scan. */
+const CiWaitIndex = defineDoc<{
+  waits: Record<string, { conversationId: ConversationId; repository: string }>;
+}>({
+  kind: "app.ci-wait-index",
+  version: 1,
+  scope: "session",
+  initial: () => ({ waits: {} }),
   checkpointWhen: () => false,
 });
 
@@ -192,18 +242,25 @@ export function decidePr(
 
   const known = reported === signature;
 
+  const read: PollState = {
+    phase: "poll",
+    headSha: pull.headSha,
+    fullReadAt: now,
+    lastSummary: summary,
+  };
+
   if (!settled && (failed.length === 0 || known))
     return {
       kind: "poll",
       at: nextPoll(input, now, PR_POLL_MS),
-      state: { phase: "poll", lastSummary: summary },
+      state: read,
     };
 
   if (known)
     return {
       kind: "poll",
       at: nextPoll(input, now, UNCHANGED_POLL_MS),
-      state: { phase: "poll", lastSummary: summary, unchangedSince: state.unchangedSince ?? now },
+      state: { ...read, unchangedSince: state.unchangedSince ?? now },
     };
 
   const since = state.candidate?.signature === signature ? state.candidate.since : now;
@@ -212,7 +269,7 @@ export function decidePr(
     return {
       kind: "poll",
       at: nextPoll(input, now, PR_POLL_MS),
-      state: { phase: "poll", lastSummary: summary, candidate: { signature, since } },
+      state: { ...read, candidate: { signature, since } },
     };
 
   const waiting = needsPerson.length
@@ -297,8 +354,13 @@ export function decideRun(
       kind: "poll",
       at: nextPoll(input, now, wakes ? UNCHANGED_POLL_MS : RUN_POLL_MS),
       state: wakes
-        ? { phase: "poll", lastSummary: summary, unchangedSince: state.unchangedSince ?? now }
-        : { phase: "poll", lastSummary: summary },
+        ? {
+            phase: "poll",
+            runId: run.id,
+            lastSummary: summary,
+            unchangedSince: state.unchangedSince ?? now,
+          }
+        : { phase: "poll", runId: run.id, lastSummary: summary },
     };
 
   if (run.status !== "completed")
@@ -338,6 +400,26 @@ function timedOut(input: WaitInput, state: PollState, now: number): Decision {
   return { kind: "deliver", outcome: "timed_out", headline: `timed out on ${what}`, detail };
 }
 
+/** Whether a CI event concerns a wait: its PR, the head it last saw, or its run. */
+function matches(wait: CurrentWait, event: CiEvent) {
+  const target = wait.target;
+  const poll = wait.poll;
+
+  if (target.kind === "pr_checks")
+    return (
+      event.pulls.includes(target.number) ||
+      (poll?.headSha !== undefined && event.shas.includes(poll.headSha))
+    );
+
+  const runId = "runId" in target ? target.runId : poll?.runId;
+
+  if (runId !== undefined && event.runId === runId) return true;
+
+  if (!("workflow" in target) || !event.workflowPath?.endsWith(`/${target.workflow}`)) return false;
+
+  return event.ref === target.ref || event.shas.includes(target.ref.toLowerCase());
+}
+
 function runTarget(target: CiTarget & { kind: "workflow_run" }, createdAt: number) {
   const value: WorkflowRunTarget =
     "runId" in target
@@ -345,6 +427,58 @@ function runTarget(target: CiTarget & { kind: "workflow_run" }, createdAt: numbe
       : { workflow: target.workflow, ref: target.ref, createdAfter: createdAt - RUN_LOOKBACK_MS };
 
   return value;
+}
+
+/** A poll state for checks still running: what was read stays, any pending wake is dropped. */
+function running(state: PollState) {
+  const next: PollState = { phase: "poll" };
+
+  if (state.headSha !== undefined) next.headSha = state.headSha;
+
+  if (state.fullReadAt !== undefined) next.fullReadAt = state.fullReadAt;
+
+  if (state.lastSummary !== undefined) next.lastSummary = state.lastSummary;
+
+  return next;
+}
+
+const ROLLUP_PENDING = new Set([
+  "QUEUED",
+  "IN_PROGRESS",
+  "PENDING",
+  "WAITING",
+  "REQUESTED",
+  "EXPECTED",
+]);
+
+const ROLLUP_FAILED = new Set(["FAILURE", "TIMED_OUT", "ERROR", "STARTUP_FAILURE"]);
+
+/**
+ * Whether the cheap count read shows checks plainly still running with nothing failed on the head
+ * the last full read saw: the one case where the full read would only reschedule. Any doubt (no
+ * recent full read, a new head, a failure, nothing pending, a read error) falls through to it.
+ */
+async function stillRunning(
+  reads: CiReads,
+  target: CiTarget & { kind: "pr_checks" },
+  state: PollState,
+  now: number,
+) {
+  if (state.fullReadAt === undefined || now - state.fullReadAt >= FULL_READ_EVERY_MS) return false;
+
+  try {
+    const counts = await reads.pullCheckCounts(target.repository, target.number);
+    const live = counts.counts.filter((row) => row.count > 0);
+
+    return (
+      counts.state === "open" &&
+      counts.headSha === state.headSha &&
+      !live.some((row) => ROLLUP_FAILED.has(row.state.toUpperCase())) &&
+      live.some((row) => ROLLUP_PENDING.has(row.state.toUpperCase()))
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Read and decide one poll; read failures keep polling until the deadline. */
@@ -359,6 +493,13 @@ async function poll(
   const target = input.target;
 
   try {
+    if (target.kind === "pr_checks" && (await stillRunning(reads, target, state, now)))
+      return {
+        kind: "poll",
+        at: nextPoll(input, now, PR_POLL_MS),
+        state: running(state),
+      } satisfies Decision;
+
     if (target.kind === "pr_checks")
       return decidePr(
         { ...input, target },
@@ -392,7 +533,7 @@ function ciWaitTask(reads: () => CiReads) {
   return defineTask<WaitInput, { phase: "start" } | PollState, WaitResult>({
     name: "app.ci-wait",
     version: 1,
-    initial: () => ({ phase: "start" }),
+    initial: (input) => input.resume ?? { phase: "start" },
     phases: {
       start: (task, runtime, context) =>
         runtime.sleepUntil(
@@ -425,14 +566,25 @@ function ciWaitTask(reads: () => CiReads) {
         await runtime.commit(async (tx) => {
           const waits = await tx.doc(CiWaits, runtime.conversationId);
 
-          // Replaced or cancelled while GitHub answered: never resurrect or deliver a stale wait.
-          if (String(waits.current?.taskId) !== String(task.id))
-            return { status: "terminal", outcome: { status: "aborted" } };
+          const index = await tx.doc(CiWaitIndex);
+          const current = waits.current;
 
-          if (decision.kind === "poll")
+          // Replaced, nudged or cancelled while GitHub answered: never resurrect or deliver it.
+          if (!current || String(current.taskId) !== String(task.id)) {
+            delete index.waits[String(task.id)];
+
+            return { status: "terminal", outcome: { status: "aborted" } };
+          }
+
+          if (decision.kind === "poll") {
+            current.nextPollAt = decision.at;
+            current.poll = decision.state;
+
             return { status: "sleeping", until: decision.at, checkpoint: decision.state };
+          }
 
           delete waits.current;
+          delete index.waits[String(task.id)];
 
           if (decision.signature !== undefined)
             waits.reported = { key, signature: decision.signature, at: runtime.now() };
@@ -461,6 +613,7 @@ function ciWaitTask(reads: () => CiReads) {
         const waits = await tx.doc(CiWaits, runtime.conversationId);
 
         if (String(waits.current?.taskId) === String(task.id)) delete waits.current;
+        delete (await tx.doc(CiWaitIndex)).waits[String(task.id)];
 
         return { status: "terminal", outcome: { status: "aborted" } };
       }, context),
@@ -580,7 +733,15 @@ export class CiWaiter {
         background: true,
       });
 
-      waits.current = { taskId, ...input_ };
+      waits.current = {
+        taskId,
+        ...input_,
+        nextPollAt: Math.min(input_.deadlineAt, now + FIRST_POLL_MS),
+      };
+      const index = await tx.doc(CiWaitIndex);
+
+      if (previous) delete index.waits[String(previous)];
+      index.waits[String(taskId)] = { conversationId, repository: target.repository.toLowerCase() };
 
       return { previous, taskId };
     }, context);
@@ -599,17 +760,78 @@ export class CiWaiter {
     };
   }
 
+  /**
+   * A webhook says CI changed: pull each matching wait's next poll forward. Pi can't move a sleep,
+   * so the sleeping task is swapped for one that resumes from the same poll state at once, in one
+   * commit; the old one is then aborted and, if it was mid-poll, finds itself no longer current.
+   * Event contents only choose which waits poll early; what a wake says always comes from a read.
+   */
+  async nudge(event: CiEvent, context: Context = BACKGROUND_CONTEXT) {
+    const index = await this.harness.snapshot(CiWaitIndex, context);
+    const now = this.now();
+    let nudged = 0;
+
+    for (const [id, entry] of Object.entries(index?.waits ?? {})) {
+      if (entry.repository !== event.repository) continue;
+      const conversation = await this.harness.conversation(entry.conversationId, context);
+
+      if (!conversation) continue;
+
+      const replaced = await conversation.commit(async (tx) => {
+        const waits = await tx.doc(CiWaits, entry.conversationId);
+        const current = waits.current;
+
+        if (!current || String(current.taskId) !== id) return undefined;
+
+        if (current.nextPollAt - now < NUDGE_MIN_MS || !matches(current, event)) return undefined;
+
+        const input: WaitInput = {
+          target: current.target,
+          prompt: current.prompt,
+          createdAt: current.createdAt,
+          deadlineAt: current.deadlineAt,
+          resume: current.poll ?? { phase: "poll" },
+        };
+
+        const previous = current.taskId;
+
+        current.taskId = await tx.createTask(this.task, input, {
+          ownership: { kind: "conversation" },
+          background: true,
+        });
+
+        current.nextPollAt = now;
+        const waitIndex = await tx.doc(CiWaitIndex);
+        delete waitIndex.waits[id];
+        waitIndex.waits[String(current.taskId)] = entry;
+
+        return previous;
+      }, context);
+
+      if (!replaced) continue;
+      await this.harness.abortTask(replaced, context).catch(() => {});
+      nudged += 1;
+    }
+
+    return nudged;
+  }
+
   async current(conversationId: ConversationId, context: Context = BACKGROUND_CONTEXT) {
     const waits = await this.harness.snapshot(CiWaits, conversationId, context);
     const wait = waits?.current;
 
-    return wait
-      ? {
-          id: String(wait.taskId),
-          waiting_on: describeTarget(wait.target),
-          timeout: iso(wait.deadlineAt),
-        }
-      : undefined;
+    if (!wait) return undefined;
+
+    const result: CiWaitView = {
+      id: String(wait.taskId),
+      waiting_on: describeTarget(wait.target),
+      timeout: iso(wait.deadlineAt),
+      next_poll: iso(wait.nextPollAt),
+    };
+
+    if (wait.poll?.lastSummary) result.last_seen = wait.poll.lastSummary;
+
+    return result;
   }
 
   async cancel(conversationId: ConversationId, context: Context = BACKGROUND_CONTEXT) {

@@ -2,6 +2,7 @@ import { createPrivateKey } from "node:crypto";
 import { env } from "cloudflare:workers";
 import {
   SELF,
+  createExecutionContext,
   reset,
   runInDurableObject,
   runDurableObjectAlarm,
@@ -11,6 +12,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import { GitHubIngress } from "../src/github-ingress";
+import { ingress } from "../src/ingress";
 
 /**
  * Durable CI waits through the real Worker HTTP API, Agent Durable Object, Pi storage and alarms.
@@ -151,14 +154,26 @@ type FakeGitHub = {
   pull: { state: string; merged: boolean; sha: string };
   checks: Check[];
   run?: Run;
+  /** Every API read, then the full PR reads and the cheap GraphQL count reads on their own. */
   reads: number;
+  pulls: number;
+  graphql: number;
 };
 
 const github: FakeGitHub = {
   pull: { state: "open", merged: false, sha: "a".repeat(40) },
   checks: [],
   reads: 0,
+  pulls: 0,
+  graphql: 0,
 };
+
+/** The GraphQL rollup state GitHub would count a fake check under. */
+function rollupState(check: Check) {
+  if (check.status !== "completed") return "IN_PROGRESS";
+
+  return (check.conclusion ?? "").toUpperCase();
+}
 
 /** The fake model's reply to a request; `undefined` falls through to the default. */
 let model: (request: Awaited<ReturnType<typeof modelRequest>>) => Response;
@@ -176,6 +191,44 @@ function fakeGitHub(url: URL) {
     });
 
   github.reads += 1;
+
+  if (path === "/graphql") {
+    github.graphql += 1;
+    const counts = new Map<string, number>();
+
+    for (const check of github.checks)
+      counts.set(rollupState(check), (counts.get(rollupState(check)) ?? 0) + 1);
+
+    return Response.json({
+      data: {
+        repository: {
+          pullRequest: {
+            state: github.pull.merged ? "MERGED" : github.pull.state.toUpperCase(),
+            headRefOid: github.pull.sha,
+            commits: {
+              nodes: [
+                {
+                  commit: {
+                    statusCheckRollup: {
+                      contexts: {
+                        checkRunCountsByState: [...counts].map(([state, count]) => ({
+                          state,
+                          count,
+                        })),
+                        statusContextCountsByState: [],
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+  }
+
+  if (path === `/repos/${repository}/pulls/8`) github.pulls += 1;
 
   if (path === `/repos/${repository}/pulls/8`)
     return Response.json({
@@ -251,6 +304,71 @@ const userEntries = async (id: string) =>
     }>()
   ).entries.filter((entry) => entry.kind === "pi.user").length;
 
+const WEBHOOK_SECRET = "test-webhook-secret-at-least-32-characters";
+const entry = new GitHubIngress(createExecutionContext(), env);
+
+/** The event-specific part of a fake CI webhook payload; installation and repository are added. */
+type WebhookPayload = {
+  action?: string;
+  sha?: string;
+  state?: string;
+  check_run?: { head_sha: string; conclusion: string | null; pull_requests: { number: number }[] };
+  check_suite?: { head_sha: string; pull_requests: { number: number }[] };
+  workflow_run?: {
+    id: number;
+    head_sha: string;
+    head_branch: string;
+    path: string;
+    pull_requests: { number: number }[];
+  };
+};
+
+/** Deliver a signed GitHub webhook through the ingress Worker, as GitHub would. */
+async function webhook(event: string, payload: WebhookPayload) {
+  const body = JSON.stringify({
+    installation: { id: 7 },
+    repository: { full_name: repository },
+    ...payload,
+  });
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(WEBHOOK_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+
+  const signed = new Uint8Array(
+    await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)),
+  );
+
+  const response = await ingress.request(
+    "https://ingress/hooks/github",
+    {
+      method: "POST",
+      headers: {
+        "X-GitHub-Event": event,
+        "X-Hub-Signature-256": `sha256=${Array.from(signed, (byte) => byte.toString(16).padStart(2, "0")).join("")}`,
+        "X-GitHub-Delivery": crypto.randomUUID(),
+      },
+      body,
+    },
+    { INGRESS: entry },
+  );
+
+  return response.status;
+}
+
+const wait = async (id: string) =>
+  (
+    await (
+      await SELF.fetch(`https://worker/api/sessions/${id}/wait`, { headers })
+    ).json<{
+      wait: { id: string; waiting_on: string; next_poll: string; last_seen?: string } | null;
+    }>()
+  ).wait;
+
 const realNow = Date.now.bind(Date);
 const started = { at: 0 };
 
@@ -275,6 +393,8 @@ beforeEach(async () => {
   github.checks = [];
   github.run = undefined;
   github.reads = 0;
+  github.pulls = 0;
+  github.graphql = 0;
   modelCalls = 0;
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("credential:openai", {
@@ -288,6 +408,7 @@ beforeEach(async () => {
       app: { id: 42, slug: "dolly-test", pem, owner: { login: "example" } },
     });
     await state.storage.put("github:accounts", ["example"]);
+    await state.storage.put("github:webhook", { secret: WEBHOOK_SECRET, senders: [] });
   });
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -361,15 +482,23 @@ it("wakes the session on the first failed check, without the model running betwe
   // Checks still running: several polls read GitHub, nothing is delivered, no model runs.
   const reads = github.reads;
   await at(20_000);
+  expect(github.pulls).toBe(2);
+
+  // While checks plainly run, the next poll is one 1-point GraphQL count read, not the full read.
   await at(55_000);
+  expect(github.graphql).toBe(1);
+  expect(github.pulls).toBe(2);
   expect(github.reads).toBeGreaterThan(reads);
   expect(await userEntries(id)).toBe(1);
   expect(modelCalls).toBe(afterTurn);
 
   // A failed check is final for its commit: it wakes the agent while "test" still runs, once the
   // result has held for the settle window.
+  // The count read sees the failure and falls through to the full read, which names it.
   github.checks = [done("lint", "failure"), pending("test")];
   await at(90_000);
+  expect(github.graphql).toBe(2);
+  expect(github.pulls).toBe(3);
   expect(wakes).toHaveLength(0);
   await at(125_000);
   await at(160_000);
@@ -529,4 +658,129 @@ it("cancel_wait stops delivery, and bad targets fail in the turn", async () => {
   for (const ms of [20_000, 60_000, 120_000]) await at(ms);
   expect(woken).toBe(false);
   expect(await userEntries(id)).toBe(1);
+});
+
+it("a matching webhook pulls the next poll forward; others don't", async () => {
+  github.checks = [pending("lint")];
+  const { wakes } = waiter({ kind: "pr_checks", repository, number: 8 });
+
+  const id = await root();
+  await prompt(id, "Wait for CI");
+  await expect.poll(() => transcript(id)).toContain("Registered: ");
+  await at(20_000);
+  const before = await wait(id);
+  expect(before?.last_seen).toContain("1 pending of 1");
+  expect(Date.parse(before?.next_poll ?? "")).toBe(started.at + 50_000);
+  const pulls = github.pulls;
+
+  // Events for another PR and commit, a passing check run, or a pending status: no nudge.
+  expect(
+    await webhook("check_suite", {
+      action: "completed",
+      check_suite: { head_sha: "d".repeat(40), pull_requests: [{ number: 9 }] },
+    }),
+  ).toBe(202);
+  expect(
+    await webhook("check_run", {
+      action: "completed",
+      check_run: { head_sha: "a".repeat(40), conclusion: "success", pull_requests: [] },
+    }),
+  ).toBe(204);
+  expect(await webhook("status", { sha: "a".repeat(40), state: "pending" })).toBe(204);
+  expect(github.pulls).toBe(pulls);
+  expect((await wait(id))?.id).toBe(before?.id);
+
+  // A failing check on the head the wait last saw: it reads GitHub now, at the same clock time,
+  // without waiting for the alarm. The settle window still applies before it wakes the agent.
+  github.checks = [done("lint", "failure")];
+  expect(
+    await webhook("check_run", {
+      action: "completed",
+      check_run: { head_sha: "a".repeat(40), conclusion: "failure", pull_requests: [] },
+    }),
+  ).toBe(202);
+  await expect.poll(() => github.pulls, { timeout: 4000 }).toBe(pulls + 1);
+  const nudged = await wait(id);
+  expect(nudged?.id).not.toBe(before?.id);
+  expect(Date.parse(nudged?.next_poll ?? "")).toBe(started.at + 20_000 + 30_000);
+
+  await at(50_000);
+  await at(80_000);
+  await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(1);
+  expect(wakes[0]).toContain("failed · PR #8: 1 of 1 checks failed");
+  expect(await wait(id)).toBeNull();
+  expect(
+    await webhook("check_suite", {
+      action: "completed",
+      check_suite: { head_sha: "a".repeat(40), pull_requests: [{ number: 8 }] },
+    }),
+  ).toBe(202);
+  expect(wakes).toHaveLength(1);
+});
+
+it("a workflow_run webhook wakes a release wait at once, without an alarm", async () => {
+  const { wakes } = waiter({
+    kind: "workflow_run",
+    repository,
+    workflow: "release.yml",
+    ref: "v1.2.0",
+  });
+
+  const id = await root();
+  await prompt(id, "Tag and wait");
+  await expect.poll(() => transcript(id)).toContain("Registered: ");
+
+  github.run = {
+    id: 77,
+    status: "completed",
+    conclusion: "success",
+    jobs: [{ name: "publish", status: "completed", conclusion: "success" }],
+  };
+
+  expect(
+    await webhook("workflow_run", {
+      action: "completed",
+      workflow_run: {
+        id: 77,
+        head_sha: "b".repeat(40),
+        head_branch: "v1.2.0",
+        path: ".github/workflows/release.yml",
+        pull_requests: [],
+      },
+    }),
+  ).toBe(202);
+  await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(1);
+  expect(wakes[0]).toContain("passed · Release success");
+});
+
+it("shows the session's wait to the owner and lets them cancel it", async () => {
+  github.checks = [pending("lint")];
+  const { wakes } = waiter({ kind: "pr_checks", repository, number: 8 });
+
+  const id = await root();
+  expect(await wait(id)).toBeNull();
+  await prompt(id, "Wait for CI");
+  await expect.poll(() => transcript(id)).toContain("Registered: ");
+  expect(await wait(id)).toMatchObject({ waiting_on: "example/project#8 checks" });
+
+  const cancelled = await SELF.fetch(`https://worker/api/sessions/${id}/wait`, {
+    method: "DELETE",
+    headers,
+  });
+
+  expect(cancelled.status).toBe(200);
+  expect(await cancelled.json()).toMatchObject({ state: "cancelled" });
+  expect(await wait(id)).toBeNull();
+
+  const again = await SELF.fetch(`https://worker/api/sessions/${id}/wait`, {
+    method: "DELETE",
+    headers,
+  });
+
+  expect(again.status).toBe(404);
+
+  github.checks = [done("lint", "failure")];
+
+  for (const ms of [20_000, 60_000, 120_000]) await at(ms);
+  expect(wakes).toHaveLength(0);
 });

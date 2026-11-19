@@ -757,6 +757,32 @@ app.delete("/api/sessions/:id/scheduled/:scheduleId", (c) =>
   ),
 );
 
+app.get("/api/sessions/:id/wait", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const agent = yield* AgentApi;
+      const result = yield* agent.ciWait(c.req.param("id"));
+
+      return result ? c.json(result) : c.json({ error: "Session not found" }, 404);
+    }),
+  ),
+);
+
+app.delete("/api/sessions/:id/wait", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const agent = yield* AgentApi;
+      const result = yield* agent.cancelCiWait(c.req.param("id"));
+
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 404 : 200);
+    }),
+  ),
+);
+
 app.post("/api/sessions/:id/abort", (c) =>
   handle(
     c,

@@ -61,6 +61,12 @@ function makeAgentApi(env: Env) {
       (id: string, scheduleId: string) =>
         rpc("agent.schedule.cancel", async () => await agent.cancelScheduledPrompt(id, scheduleId)),
     ),
+    ciWait: Effect.fn("AgentApi.ciWait")((id: string) =>
+      rpc("agent.ci-wait.read", async () => await agent.ciWait(id)),
+    ),
+    cancelCiWait: Effect.fn("AgentApi.cancelCiWait")((id: string) =>
+      rpc("agent.ci-wait.cancel", async () => await agent.cancelCiWait(id)),
+    ),
     abort: Effect.fn("AgentApi.abort")((id: string) =>
       rpc("agent.abort", async () => await agent.abort(id)),
     ),

@@ -223,6 +223,80 @@ const WorkflowJobs = Schema.Struct({
   ),
 });
 
+const StateCounts = Schema.NullOr(
+  Schema.Array(Schema.Struct({ state: Schema.String, count: Schema.Number })),
+);
+
+const CheckCountsResponse = Schema.Struct({
+  data: Schema.NullOr(
+    Schema.Struct({
+      repository: Schema.NullOr(
+        Schema.Struct({
+          pullRequest: Schema.NullOr(
+            Schema.Struct({
+              state: Schema.String,
+              headRefOid: Schema.String,
+              commits: Schema.Struct({
+                nodes: Schema.Array(
+                  Schema.Struct({
+                    commit: Schema.Struct({
+                      statusCheckRollup: Schema.NullOr(
+                        Schema.Struct({
+                          contexts: Schema.Struct({
+                            checkRunCountsByState: StateCounts,
+                            statusContextCountsByState: StateCounts,
+                          }),
+                        }),
+                      ),
+                    }),
+                  }),
+                ),
+              }),
+            }),
+          ),
+        }),
+      ),
+    }),
+  ),
+});
+
+/** State, head and check counts by state from one 1-point GraphQL query. */
+const CHECK_COUNTS_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      state
+      headRefOid
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 1) {
+                checkRunCountsByState { state count }
+                statusContextCountsByState { state count }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/** A GraphQL PullRequestState as the REST-shaped state waits compare. */
+function pullState(state: string): PullRequestState {
+  if (state === "MERGED") return "merged";
+
+  return state === "CLOSED" ? "closed" : "open";
+}
+
+/** A PR's cheap read: enough to see that checks are plainly still running, nothing more. */
+export type PullCheckCounts = {
+  state: PullRequestState;
+  headSha: string;
+  /** Count per uppercase GraphQL state (QUEUED, IN_PROGRESS, SUCCESS, FAILURE, PENDING...). */
+  counts: { state: string; count: number }[];
+};
+
 /** One CI check as a wait sees it: a check run or a commit status, by name. */
 export type CiCheck = {
   name: string;
@@ -334,6 +408,7 @@ type GitHubBody =
       permissions: Readonly<Record<string, string>>;
     }
   | { body: string }
+  | { query: string; variables: Readonly<Record<string, string | number>> }
   | { ref: string; sha: string }
   | { head: string; base: string; title: string; body: string }
   | PullRequestEdit
@@ -906,7 +981,16 @@ function makeGitHub(
         public: true,
         redirect_url: `${value.origin}/api/setup/github/callback`,
         default_permissions: GITHUB_APP_GRANT_PERMISSIONS,
-        default_events: ["issue_comment"],
+        // CI events let durable waits wake as soon as checks change, instead of at the next poll.
+        default_events: [
+          "issue_comment",
+          "check_run",
+          "check_suite",
+          "status",
+          "workflow_run",
+          "workflow_job",
+          "pull_request",
+        ],
         hook_attributes: { url: hook, active: true },
       },
     };
@@ -1534,13 +1618,14 @@ function makeGitHub(
     const verified = yield* verifyWebhook(profile, body, signature, event);
 
     if (verified.status !== 202) return verified;
+    // CI events nudge waits; they pass the same account and installation checks as commands.
+    const subject = verified.kind === "ci" ? verified.ci : verified.event;
 
-    if (!(yield* accountAllowed(verified.event.repository.split("/")[0])))
-      return { status: 403 as const };
+    if (!(yield* accountAllowed(subject.repository.split("/")[0]))) return { status: 403 as const };
     const connected = yield* read();
 
     const installation = yield* api(
-      `/repos/${verified.event.repository}/installation`,
+      `/repos/${subject.repository}/installation`,
       yield* jwt(connected.app),
     ).pipe(
       Effect.flatMap(decode(Schema.Struct({ id: Schema.Number }))),
@@ -1555,7 +1640,7 @@ function makeGitHub(
       }),
     );
 
-    if (!installation || installation.id !== verified.event.installationId)
+    if (!installation || installation.id !== subject.installationId)
       return { status: 403 as const };
 
     return verified;
@@ -1687,6 +1772,41 @@ function makeGitHub(
     return result;
   });
 
+  const pullCheckCounts = Effect.fn("GitHub.pullCheckCounts")(function* (
+    repository: string,
+    number: number,
+  ) {
+    const token = yield* tokenFor(yield* read(), repository, "read");
+    const [owner = "", name = ""] = repository.split("/");
+
+    const response = yield* api("/graphql", token, {
+      query: CHECK_COUNTS_QUERY,
+      variables: { owner, name, number },
+    }).pipe(Effect.flatMap(decode(CheckCountsResponse)));
+
+    const pull = response.data?.repository?.pullRequest;
+
+    if (!pull)
+      return yield* new OperationError({
+        operation: "github.graphql",
+        message: `GitHub returned no pull request ${repository}#${number}`,
+        details: null,
+      });
+
+    const contexts = pull.commits.nodes[0]?.commit.statusCheckRollup?.contexts;
+
+    const result: PullCheckCounts = {
+      state: pullState(pull.state),
+      headSha: pull.headRefOid,
+      counts: [
+        ...(contexts?.checkRunCountsByState ?? []),
+        ...(contexts?.statusContextCountsByState ?? []),
+      ],
+    };
+
+    return result;
+  });
+
   /** The run a wait watches with its latest attempt's jobs, or undefined before it exists. */
   const workflowRun = Effect.fn("GitHub.workflowRun")(function* (
     repository: string,
@@ -1743,6 +1863,7 @@ function makeGitHub(
 
   return {
     pullChecks,
+    pullCheckCounts,
     workflowRun,
     status,
     botIdentity,

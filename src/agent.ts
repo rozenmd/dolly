@@ -189,6 +189,12 @@ export class Agent extends DurableObject<Env> {
             Effect.provide(this.services),
           ),
         ),
+      pullCheckCounts: (repository, number) =>
+        Effect.runPromise(
+          Effect.flatMap(GitHub, (github) => github.pullCheckCounts(repository, number)).pipe(
+            Effect.provide(this.services),
+          ),
+        ),
       workflowRun: (repository, target) =>
         Effect.runPromise(
           Effect.flatMap(GitHub, (github) => github.workflowRun(repository, target)).pipe(
@@ -1234,6 +1240,15 @@ export class Agent extends DurableObject<Env> {
         );
 
         if (verified.status !== 202) return verified;
+
+        // A CI change only pulls matching waits' next poll forward; no model runs for it.
+        if (verified.kind === "ci") {
+          const ci = verified.ci;
+          yield* this.arm({ active: true });
+          yield* attempt("ci-wait.nudge", () => this.ciWaiter.nudge(ci));
+
+          return { status: 202 as const };
+        }
 
         if (Option.isNone(yield* this.credentials.get("openai"))) return { status: 503 as const };
         yield* this.arm({ active: true });
@@ -2571,6 +2586,37 @@ export class Agent extends DurableObject<Env> {
         return yield* attempt("schedule.cancel", () =>
           this.scheduler.cancel(conversation.value.id, scheduleId),
         );
+      }),
+    );
+  }
+
+  /** This session's CI wait, for the composer's indicator. */
+  ciWait(id: string) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        const wait = yield* attempt("ci-wait.read", () =>
+          this.ciWaiter.current(conversation.value.id),
+        );
+
+        return { wait: wait ?? null };
+      }),
+    );
+  }
+
+  cancelCiWait(id: string) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        yield* this.arm({ active: true });
+
+        return yield* attempt("ci-wait.cancel", () => this.ciWaiter.cancel(conversation.value.id));
       }),
     );
   }

@@ -1041,6 +1041,44 @@ select.input {
   font-size: 12px;
   color: var(--muted);
 }
+/* The agent is waiting on CI (wait_for): above the composer, like queued messages. */
+.ci-wait-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 20px;
+  border-bottom: 1px solid var(--line);
+  background: rgb(255 255 255 / 2%);
+}
+.ci-wait-strip:first-child {
+  border-radius: 16px 16px 0 0;
+}
+.ci-wait-strip-icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  color: var(--amber);
+}
+.ci-wait-strip-text {
+  flex: 1;
+  min-width: 0;
+}
+.ci-wait-strip-text p {
+  margin: 0;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ci-wait-strip-text .ci-wait-strip-seen {
+  color: var(--muted);
+}
+.ci-wait-strip-text .ci-wait-strip-seen {
+  font-size: 12px;
+}
+.queue-steer.ci-wait-cancel {
+  color: var(--muted);
+}
 .queue-steer {
   display: grid;
   flex-shrink: 0;

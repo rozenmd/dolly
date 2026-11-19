@@ -45,6 +45,7 @@ import { TurnRail } from "./turn-rail";
 import { markEntry, railMarks, wholeRail, type RailMark } from "../lib/turn-rail";
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import { ScheduleButton } from "./schedule";
+import { CiWaitStrip } from "./ci-wait";
 import type { Attachment } from "../lib/images";
 import {
   spawnedThreadId,
@@ -885,6 +886,7 @@ export function Composer({
   return (
     <div className="composer-area">
       <div className={queued.length > 0 ? "composer-shell has-queue" : "composer-shell"}>
+        <CiWaitStrip session={draftKey} activity={activity} />
         {queued.length > 0 && (
           <section className="message-queue" aria-label="Queued messages">
             <h2>

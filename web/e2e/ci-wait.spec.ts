@@ -112,8 +112,18 @@ function entries(start: number) {
   ];
 }
 
-async function open(page: Page) {
+type Wait = {
+  id: string;
+  waiting_on: string;
+  timeout: string;
+  next_poll: string;
+  last_seen?: string;
+};
+
+async function open(page: Page, active?: Wait) {
   const start = Date.now() - 8 * 60_000;
+  let current = active ?? null;
+  const cancelled: string[] = [];
 
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.addInitScript(() =>
@@ -129,6 +139,15 @@ async function open(page: Page) {
 
     if (path === "/api/auth") return route.fulfill({ json: signedIn });
 
+    if (path === "/api/sessions/ci/wait" && route.request().method() === "DELETE") {
+      cancelled.push(current?.id ?? "");
+      current = null;
+
+      return route.fulfill({ json: { state: "cancelled" } });
+    }
+
+    if (path === "/api/sessions/ci/wait") return route.fulfill({ json: { wait: current } });
+
     if (path === "/api/sessions/ci/scheduled")
       return route.fulfill({ json: { now: new Date().toISOString(), scheduled: [] } });
 
@@ -138,6 +157,8 @@ async function open(page: Page) {
     socket.send(JSON.stringify({ entries: entries(start), docs: { "pi.live": {} } })),
   );
   await page.goto("/", { waitUntil: "networkidle" });
+
+  return { cancelled };
 }
 
 test("a CI wake-up reads as an outcome notice, and wait_for's row names the PR", async ({
@@ -162,4 +183,31 @@ test("a CI wake-up reads as an outcome notice, and wait_for's row names the PR",
   await page.getByText("Worked", { exact: true }).first().click();
   await page.getByText("1 step", { exact: true }).click();
   await expect(page.getByText("octocat/project#8", { exact: true })).toBeVisible();
+});
+
+test("while the agent waits on CI, the composer says on what, and the owner can stop it", async ({
+  page,
+}) => {
+  const { cancelled } = await open(page, {
+    id: "33",
+    waiting_on: "octocat/project#8 checks",
+    timeout: new Date(Date.now() + 2 * 3_600_000).toISOString(),
+    next_poll: new Date(Date.now() + 20_000).toISOString(),
+    last_seen: "3 passed, 0 failed, 2 pending of 5 on aaaaaaa",
+  });
+
+  const strip = page.getByRole("region", { name: "Waiting on CI" });
+  await expect(strip).toContainText("Waiting on octocat/project#8 checks");
+  await expect(strip).toContainText(/next check in \d+s/);
+  await expect(strip).toContainText("last seen 3 passed, 0 failed, 2 pending of 5 on aaaaaaa");
+
+  await strip.getByRole("button", { name: "Stop waiting on CI" }).click();
+  await expect(strip).toHaveCount(0);
+  expect(cancelled).toEqual(["33"]);
+});
+
+test("there's no CI strip when nothing is being waited on", async ({ page }) => {
+  await open(page);
+  await expect(page.getByText("Lint failed on an unused import; fixing it.")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Waiting on CI" })).toHaveCount(0);
 });
