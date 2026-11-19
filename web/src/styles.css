@@ -2783,3 +2783,45 @@ label.connection-row {
     width: calc(100% - 16px);
   }
 }
+.workspace-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 14px 6px 20px;
+  overflow-x: auto;
+  flex-shrink: 0;
+  scrollbar-width: none;
+}
+.workspace-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.workspace-tab span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.workspace-tab:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+.workspace-tab.active {
+  color: var(--text);
+  background: var(--surface);
+}
+@media (max-width: 760px) {
+  .workspace-tabs {
+    padding: 0 8px 6px;
+  }
+}
+.workspace-tab.archived span:last-child {
+  text-decoration: line-through;
+  opacity: 0.6;
+}

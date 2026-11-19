@@ -92,6 +92,8 @@ export const NewSession = Schema.Struct({
   speed: Schema.optional(Speed),
   autoFallback: Schema.optional(Schema.Boolean),
   workspace: Schema.optional(WorkspaceInput),
+  /** Start the session in this existing workspace instead of a new one. */
+  workspaceId: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(100))),
 });
 
 export const ChildMessage = Schema.Struct({

@@ -113,7 +113,7 @@ test("archives and restores sessions across reloads, with older sessions discove
   await expect(workspaces).not.toContainText("Task 7");
   await page.reload();
   await expect(page.getByRole("heading", { name: "Task 6", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Archived sessions (1)", exact: true }).click();
+  await page.getByRole("button", { name: "Archived workspaces (1)", exact: true }).click();
   await expect(workspaces.getByRole("button")).toHaveCount(1);
   await workspaces.getByRole("button", { name: /Task 7/ }).click();
   await page.getByRole("button", { name: "Restore session", exact: true }).click();
@@ -122,7 +122,7 @@ test("archives and restores sessions across reloads, with older sessions discove
   await page.reload();
   await expect(page.getByRole("heading", { name: "Task 7", exact: true })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Archived sessions (0)", exact: true }),
+    page.getByRole("button", { name: "Archived workspaces (0)", exact: true }),
   ).toBeVisible();
 });
 
@@ -131,7 +131,7 @@ test("archives sidebar sessions on hover or keyboard focus without opening them"
 }) => {
   const workspaces = page.getByRole("navigation", { name: "Workspaces", exact: true });
   const row = workspaces.locator(".workspace-item").filter({ hasText: "Task 6" });
-  const archive = row.getByRole("button", { name: "Archive session: Task 6", exact: true });
+  const archive = row.getByRole("button", { name: "Archive workspace: Task 6", exact: true });
 
   await expect(page.getByRole("heading", { name: "Task 7", exact: true })).toBeVisible();
   await expect(archive).toHaveCSS("opacity", "0");
@@ -147,7 +147,7 @@ test("archives sidebar sessions on hover or keyboard focus without opening them"
   await selectedRow.locator(".workspace-row").focus();
 
   const selectedArchive = selectedRow.getByRole("button", {
-    name: "Archive session: Task 7",
+    name: "Archive workspace: Task 7",
     exact: true,
   });
 
@@ -159,7 +159,7 @@ test("archives sidebar sessions on hover or keyboard focus without opening them"
 
   await page.reload();
   await expect(page.getByRole("heading", { name: "Task 5", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Archived sessions (2)", exact: true }).click();
+  await page.getByRole("button", { name: "Archived workspaces (2)", exact: true }).click();
   await expect(workspaces).toContainText("Task 6");
   await expect(workspaces).toContainText("Task 7");
 });

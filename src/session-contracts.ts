@@ -14,6 +14,12 @@ export const SavedSession = Schema.Struct({
   repository: Schema.String,
   updatedAt: Schema.Number,
   archived: Schema.optional(Schema.Boolean),
+  /**
+   * The workspace grouping the sessions about one piece of work. Spawned sessions belong to
+   * their root's workspace; sessions from before workspaces were recorded are their own.
+   */
+  workspaceId: Schema.optional(Schema.String),
+  createdAt: Schema.optional(Schema.Number),
   /** The session that spawned this one (Pi's ownership edge); absent for top-level sessions. */
   parentId: Schema.optional(Schema.String),
   /** A spawned session the owner chose to keep in the sidebar. */

@@ -113,14 +113,15 @@ test("summary card stands at the top right beside the conversation and follows e
   await expect(summary(page)).toHaveCount(0);
   await expect(toggle(page)).toHaveAttribute("aria-expanded", "false");
   expect((await layout(page)).composerRight).toBeGreaterThan(open.composerRight);
+  // The reload reopens the session in the URL.
   await page.reload({ waitUntil: "networkidle" });
-  await expect(page.getByRole("heading", { name: "Pulled task", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Plain task", exact: true })).toBeVisible();
   await expect(summary(page)).toHaveCount(0);
 
   // A standing card ignores clicks elsewhere and Escape.
   await toggle(page).click();
   await expect(summary(page)).toBeVisible();
-  await page.getByRole("heading", { name: "Pulled task", exact: true }).click();
+  await page.getByRole("heading", { name: "Plain task", exact: true }).click();
   await page.keyboard.press("Escape");
   await expect(summary(page)).toBeVisible();
 });

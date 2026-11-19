@@ -211,7 +211,7 @@ export function Sidebar({
                 </button>
                 {!row.archived && (
                   <IconButton
-                    label={`Archive session: ${row.title}`}
+                    label={`Archive workspace: ${row.title}`}
                     className="workspace-archive"
                     onClick={() => onArchive(row.id)}
                   >
@@ -226,7 +226,7 @@ export function Sidebar({
           )}
           {connected && rows.length === 0 && <p className="sidebar-empty">No workspaces yet.</p>}
           {archived && !query && filtered.length === 0 && (
-            <p className="sidebar-empty">No archived sessions.</p>
+            <p className="sidebar-empty">No archived workspaces.</p>
           )}
         </nav>
         {!archived && lists.older > 0 && !query.trim() && (
@@ -240,7 +240,7 @@ export function Sidebar({
           aria-pressed={archived}
           onClick={() => setArchived(!archived)}
         >
-          {archived ? "Back to recent" : `Archived sessions (${lists.archived.length})`}
+          {archived ? "Back to recent" : `Archived workspaces (${lists.archived.length})`}
         </button>
       </aside>
     </>

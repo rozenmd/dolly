@@ -18,12 +18,15 @@ import { imagesBody, type Attachment } from "../lib/images";
 /** Create the conversation only on submit; retries reuse both its ID and prompt receipt. */
 export function NewSessionComposer({
   initial,
+  workspace,
   onClose,
   onImport,
   onSaved,
   onCreated,
 }: {
   initial: ApiBody;
+  /** The workspace the session joins; without one it starts a new workspace. */
+  workspace?: { id: string; title: string } | undefined;
   onClose: () => void;
   onImport: () => void;
   onSaved: (session: SavedSession) => void;
@@ -94,6 +97,8 @@ export function NewSessionComposer({
       if (!session) {
         const body: ApiBody = {};
 
+        if (workspace) body.workspaceId = workspace.id;
+
         if (model) body.model = model;
         body.thinkingLevel = effort;
         body.speed = speed;
@@ -118,6 +123,7 @@ export function NewSessionComposer({
           repository,
           ref,
           updatedAt: Date.now(),
+          createdAt: Date.now(),
         };
         setCreated(session);
         // Keep a recoverable link even if prompt admission fails or the dialog is closed.
@@ -139,7 +145,12 @@ export function NewSessionComposer({
   }
 
   return (
-    <Modal title="New session" className="new-session-modal" bare onClose={onClose}>
+    <Modal
+      title={workspace ? `New session in ${workspace.title || "this workspace"}` : "New session"}
+      className="new-session-modal"
+      bare
+      onClose={onClose}
+    >
       <form
         className="new-session-form"
         onSubmit={(event) => void submit(event)}

@@ -63,6 +63,8 @@ it("discovers legacy sessions without browser storage and retains their public I
   const expected = [
     {
       id: "legacy-id",
+      // Sessions from before workspaces were recorded are workspaces of their own.
+      workspaceId: "legacy-id",
       title: "Fix mobile discovery",
       model: "gpt-6-luna",
       thinkingLevel: "medium",
