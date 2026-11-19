@@ -221,3 +221,33 @@ test("archives and restores a whole workspace", async ({ page }) => {
   await page.getByRole("button", { name: "Archived workspaces (1)", exact: true }).click();
   await expect(sidebar(page)).toContainText("Coordinate the release");
 });
+
+test("the feed has its own URL that survives reloads and history", async ({ page }) => {
+  await page.goto("/workspace/w2/session/other");
+  await expect(heading(page, "Polish the settings page")).toBeVisible();
+
+  const link = page.getByRole("link", { name: "Feed", exact: true });
+  await expect(link).toHaveAttribute("href", "/feed");
+  await link.click();
+  await expect(heading(page, "Feed")).toBeVisible();
+  await expect.poll(() => path(page)).toBe("/feed");
+  await expect(sidebar(page).locator(".workspace-row.active")).toHaveCount(0);
+
+  // A reload stays on the feed rather than jumping to a session.
+  await page.reload();
+  await expect(heading(page, "Feed")).toBeVisible();
+  await expect.poll(() => path(page)).toBe("/feed");
+
+  // Back returns to the session; forward to the feed.
+  await page.evaluate(() => history.back());
+  await expect(heading(page, "Polish the settings page")).toBeVisible();
+  await expect.poll(() => path(page)).toBe("/workspace/w2/session/other");
+  await page.evaluate(() => history.forward());
+  await expect(heading(page, "Feed")).toBeVisible();
+  await expect.poll(() => path(page)).toBe("/feed");
+
+  // Choosing the session that was open behind the feed still leaves it.
+  await page.locator(".feed-list button").filter({ hasText: "Polish the settings page" }).click();
+  await expect(heading(page, "Polish the settings page")).toBeVisible();
+  await expect.poll(() => path(page)).toBe("/workspace/w2/session/other");
+});

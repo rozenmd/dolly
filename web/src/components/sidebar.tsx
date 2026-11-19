@@ -1,4 +1,5 @@
 import { useState, type SVGProps } from "react";
+import { Link } from "@tanstack/react-router";
 import { ChevronDownIcon, XMarkIcon } from "@heroicons/react/16/solid";
 import {
   ArchiveBoxIcon,
@@ -144,15 +145,15 @@ export function Sidebar({
             <XMarkIcon />
           </IconButton>
         </div>
-        <button
-          type="button"
+        <Link
+          to="/feed"
           className={`nav-row ${feed ? "active" : ""}`}
           aria-current={feed ? "page" : undefined}
           onClick={onFeed}
         >
           <SignalIcon />
           <span>Feed</span>
-        </button>
+        </Link>
         <div className="sidebar-heading">
           <h2>Workspaces</h2>
           <IconButton

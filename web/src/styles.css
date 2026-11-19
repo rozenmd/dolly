@@ -272,6 +272,7 @@ select.input {
   border-radius: 8px;
   font-size: 14px;
   color: #d4d4d4;
+  text-decoration: none;
 }
 .nav-row svg {
   color: var(--muted);
@@ -2446,9 +2447,6 @@ code.summary-label {
   padding: 14px 10px;
   background: var(--sidebar);
   border-right: 1px solid var(--line);
-}
-.settings-nav .nav-row {
-  text-decoration: none;
 }
 .settings-nav-heading {
   margin: 18px 0 4px;

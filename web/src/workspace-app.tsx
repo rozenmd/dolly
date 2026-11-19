@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useMatch, useNavigate, useParams } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import { Bars3Icon, ChevronRightIcon, LinkIcon } from "@heroicons/react/16/solid";
 import {
@@ -73,7 +73,9 @@ export function WorkspaceApp() {
   const [selected, setSelected] = useState(routed);
   const [snapshot, setSnapshot] = useState<typeof Snapshot.Type | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [feed, setFeed] = useState(false);
+  // The feed has its own URL, /feed, so it survives reloads and can be linked to. Read from the
+  // route match, not the location, so it changes in step with `params` on back/forward.
+  const feed = Boolean(useMatch({ from: "/_app/feed", shouldThrow: false }));
   const [modal, setModal] = useState<"chatgpt" | "new" | "import" | null>(null);
   // The workspace a new session joins; undefined starts a new workspace.
   const [joining, setJoining] = useState<string>();
@@ -404,14 +406,14 @@ export function WorkspaceApp() {
   /** Moves the address to `id`'s canonical URL, or the app root when nothing is open. */
   function route(id: string, list: readonly SavedSession[], replace: boolean) {
     if (!id) {
-      if (routed) void navigate({ to: "/", replace });
+      if (routed || feed) void navigate({ to: "/", replace });
 
       return;
     }
 
     const workspace = workspaceOf(list, id);
 
-    if (routed === id && params.workspaceId === workspace) return;
+    if (!feed && routed === id && params.workspaceId === workspace) return;
 
     void navigate({
       to: "/workspace/$workspaceId/session/$sessionId",
@@ -424,7 +426,6 @@ export function WorkspaceApp() {
   useEffect(() => {
     if (!routed) return;
     setSelected(routed);
-    setFeed(false);
   }, [routed]);
 
   // Keeps the address on the open session's canonical URL: a bare /session/<id> link, the root
@@ -433,23 +434,23 @@ export function WorkspaceApp() {
     // The URL moved first (a link or back/forward); the effect above catches the selection up.
     if (routed && routed !== selected) return;
 
+    // The feed keeps its own URL while a session stays selected behind it.
+    if (feed) return;
+
     if (!selected || !sessions.some((item) => item.id === selected)) return;
 
     // A workspace link waits for the effect below to open that workspace.
     if (!routed && params.workspaceId && workspaceOf(sessions, selected) !== params.workspaceId)
       return;
     route(selected, sessions, true);
-  }, [routed, params.workspaceId, selected, sessions]);
+  }, [routed, params.workspaceId, selected, sessions, feed]);
 
   // A workspace link (/workspace/<id>) opens the session that started it.
   useEffect(() => {
     if (routed || !params.workspaceId) return;
     const main = workspaceMain(sessions, params.workspaceId);
 
-    if (main) {
-      setSelected(main.id);
-      setFeed(false);
-    }
+    if (main) setSelected(main.id);
   }, [routed, params.workspaceId, sessions]);
 
   function openWorkspace(id: string) {
@@ -461,7 +462,6 @@ export function WorkspaceApp() {
   function select(id: string, list = sessions) {
     setSelected(id);
     route(id, list, false);
-    setFeed(false);
     setMobileOpen(false);
     setError("");
     setStreamError("");
@@ -788,10 +788,7 @@ export function WorkspaceApp() {
           void navigate({ to: "/settings" });
         }}
         onClose={() => setMobileOpen(false)}
-        onFeed={() => {
-          setFeed(true);
-          setMobileOpen(false);
-        }}
+        onFeed={() => setMobileOpen(false)}
       />
       <main
         id="main-content"
