@@ -13,6 +13,7 @@ import { Composer, Conversation } from "./components/conversation";
 import { IconButton, Input, Modal, RepoBadge } from "./components/ui";
 import { ChatGPTLogin } from "./components/chatgpt-login";
 import { GitHubSetup, GitHubSignIn } from "./components/github";
+import { GetStarted } from "./components/get-started";
 import { NewSessionComposer } from "./components/new-session";
 import {
   DEFAULT_EFFORT,
@@ -930,17 +931,29 @@ export function WorkspaceApp() {
                 />
               </>
             ) : (
-              <div className="empty-state">
-                <span className="brand-mark large" aria-hidden="true">
-                  D
-                </span>
-                <h2>
-                  {chatgpt === false && !anthropic ? "Connect a model" : "No workspace selected"}
-                </h2>
-                <button type="button" className="primary-button" onClick={() => newSession()}>
-                  {chatgpt === false && !anthropic ? "Connect a model" : "New session"}
-                </button>
-              </div>
+              <GetStarted
+                // An unknown model state (still loading, or unreadable) does not nag.
+                modelConnected={chatgpt !== false || anthropic}
+                installUrl={auth.github.connected ? auth.github.installUrl : ""}
+                settingsUrl={auth.github.connected ? auth.github.settingsUrl : ""}
+                onConnectModel={() => setModal("chatgpt")}
+                onNewSession={() => newSession()}
+                fallback={
+                  <div className="empty-state">
+                    <span className="brand-mark large" aria-hidden="true">
+                      D
+                    </span>
+                    <h2>
+                      {chatgpt === false && !anthropic
+                        ? "Connect a model"
+                        : "No workspace selected"}
+                    </h2>
+                    <button type="button" className="primary-button" onClick={() => newSession()}>
+                      {chatgpt === false && !anthropic ? "Connect a model" : "New session"}
+                    </button>
+                  </div>
+                }
+              />
             )}
           </div>
         </div>

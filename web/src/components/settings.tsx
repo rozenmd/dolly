@@ -22,6 +22,7 @@ import {
 import { AnthropicConnection } from "./anthropic";
 import { ChatGPTLogin } from "./chatgpt-login";
 import { ingressHook } from "./github";
+import { AppHealth, useOnboarding } from "./get-started";
 import { RepositoryPicker } from "./repositories";
 import { EFFORTS, ModelPicker, SPEEDS, effortName, modelName, speedName } from "./model-select";
 import { Picker } from "./picker";
@@ -400,6 +401,7 @@ export function GitHubSettings() {
   const [senders, setSenders] = useState(github.senders.join(", "));
   const [saved, setSaved] = useState("");
   const { pending, run, alert } = useAction();
+  const onboarding = useOnboarding();
 
   useEffect(() => {
     let active = true;
@@ -463,6 +465,9 @@ export function GitHubSettings() {
 
   return (
     <Section title="GitHub" description="How GitHub reaches dolly, and who can use it.">
+      {onboarding.state && (
+        <AppHealth onboarding={onboarding.state} settingsUrl={github.settingsUrl} />
+      )}
       <form className="settings-card" onSubmit={saveIngress}>
         <label htmlFor="settings-ingress">Ingress URL</label>
         <Input
@@ -480,7 +485,7 @@ export function GitHubSettings() {
         <p id="settings-ingress-help" className="field-help">
           {saved === "ingress"
             ? "Saved. GitHub now sends comments to this URL."
-            : "Where GitHub sends issue and pull request comments."}
+            : "Where GitHub sends comments and CI updates."}
         </p>
         <div className="modal-actions">
           <button type="submit" className="primary-button" disabled={pending}>

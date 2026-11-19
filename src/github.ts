@@ -36,6 +36,8 @@ import {
   GITHUB_APP_READ_PERMISSIONS,
   GITHUB_APP_WRITE_PERMISSIONS,
   GITHUB_APP_CODE_PERMISSIONS,
+  GITHUB_APP_EVENTS,
+  appGaps,
 } from "./github-permissions";
 
 const App = Schema.Struct({
@@ -56,6 +58,21 @@ const Pending = Schema.Struct({
   setup: GitHubSetup,
   phase: Schema.Literals(["pending", "converting"]),
 });
+
+const Grants = {
+  permissions: Schema.Record(Schema.String, Schema.String),
+  events: Schema.Array(Schema.String),
+};
+
+const AppGrants = Schema.Struct(Grants);
+
+const Installations = Schema.Array(
+  Schema.Struct({
+    ...Grants,
+    account: Schema.Struct({ login: Schema.String }),
+    html_url: Schema.String,
+  }),
+);
 
 const Token = Schema.Struct({ token: Schema.NonEmptyString, expires_at: Schema.String });
 const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
@@ -656,6 +673,51 @@ function makeGitHub(
     }));
   });
 
+  /**
+   * Where first-run setup stands: which accounts installed the App and whether each is allowed,
+   * how many repositories are enrolled, and what the App or an installation lacks compared with
+   * the manifest, so older Apps learn which settings to tick.
+   */
+  const onboarding = Effect.gen(function* () {
+    const connected = yield* read();
+    const appToken = yield* jwt(connected.app);
+    const app = yield* api("/app", appToken).pipe(Effect.flatMap(decode(AppGrants)));
+    const allowed = yield* accounts;
+    const installations = [];
+
+    for (let page = 1; ; page++) {
+      const batch = yield* api(`/app/installations?per_page=100&page=${page}`, appToken).pipe(
+        Effect.flatMap(decode(Installations)),
+      );
+
+      installations.push(...batch);
+
+      if (batch.length < 100) break;
+    }
+
+    const gaps = appGaps(app);
+
+    return {
+      accounts: allowed,
+      installations: installations.map((installation) => {
+        const pending = appGaps(installation);
+
+        return {
+          login: installation.account.login,
+          allowed: allowed.includes(installation.account.login.toLowerCase()),
+          // Changes the App asks for that this installation has not approved yet.
+          pendingApproval:
+            pending.permissions.length > gaps.permissions.length ||
+            pending.events.length > gaps.events.length,
+          settingsUrl: installation.html_url,
+        };
+      }),
+      enrolled: (yield* enrolledRepositories).length,
+      missingPermissions: gaps.permissions,
+      missingEvents: gaps.events,
+    };
+  });
+
   const resolveRepository = Effect.fn("GitHub.resolveRepository")(function* (name: string) {
     const fullName = Schema.decodeUnknownOption(Repository)(name);
 
@@ -982,15 +1044,7 @@ function makeGitHub(
         redirect_url: `${value.origin}/api/setup/github/callback`,
         default_permissions: GITHUB_APP_GRANT_PERMISSIONS,
         // CI events let durable waits wake as soon as checks change, instead of at the next poll.
-        default_events: [
-          "issue_comment",
-          "check_run",
-          "check_suite",
-          "status",
-          "workflow_run",
-          "workflow_job",
-          "pull_request",
-        ],
+        default_events: GITHUB_APP_EVENTS,
         hook_attributes: { url: hook, active: true },
       },
     };
@@ -1874,6 +1928,7 @@ function makeGitHub(
     configureAccounts,
     enrolledRepositories,
     availableRepositories,
+    onboarding,
     enrollRepository,
     removeRepository,
     resolveRepository,

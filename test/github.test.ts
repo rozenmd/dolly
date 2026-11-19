@@ -1985,3 +1985,83 @@ it("lists one public directory level anonymously without fetching the recursive 
   expect(fetch.mock.calls.some(([input]) => String(input).includes("/git/trees/"))).toBe(false);
   expect(fetch.mock.calls.some(([input]) => String(input).includes("/installation"))).toBe(false);
 });
+
+it("reports first-run setup: installations, allowed accounts, enrollment and App gaps", async () => {
+  expect((await SELF.fetch("https://worker/api/integrations/github/onboarding")).status).toBe(401);
+  await connect();
+  await setAccounts(["Example"]);
+
+  // Earlier tests in this file may have enrolled repositories; the count must match the list.
+  const { repositories } = await (
+    await SELF.fetch("https://worker/api/integrations/github/repositories", { headers })
+  ).json<{ repositories: unknown[] }>();
+
+  const granted = {
+    actions: "write",
+    checks: "write",
+    statuses: "read",
+    contents: "write",
+    pull_requests: "write",
+    issues: "write",
+    members: "read",
+    deployments: "write",
+    metadata: "read",
+  };
+
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = new URL(String(input));
+
+    // An older App: no CI events, and checks only readable.
+    if (url.pathname === "/app")
+      return Response.json({
+        permissions: { ...granted, checks: "read" },
+        events: ["issue_comment", "pull_request"],
+      });
+
+    if (url.pathname === "/app/installations")
+      return Response.json([
+        {
+          account: { login: "Example" },
+          permissions: { ...granted, checks: "read" },
+          events: ["issue_comment", "pull_request"],
+          html_url: "https://github.com/organizations/Example/settings/installations/7",
+        },
+        {
+          // Has not approved the App's newer issues permission.
+          account: { login: "stranger" },
+          permissions: { ...granted, checks: "read", issues: "read" },
+          events: ["pull_request"],
+          html_url: "https://github.com/settings/installations/8",
+        },
+      ]);
+
+    throw new Error(`Unexpected request ${url}`);
+  });
+
+  const response = await SELF.fetch("https://worker/api/integrations/github/onboarding", {
+    headers,
+  });
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    accounts: ["example"],
+    installations: [
+      {
+        login: "Example",
+        allowed: true,
+        pendingApproval: false,
+        settingsUrl: "https://github.com/organizations/Example/settings/installations/7",
+      },
+      {
+        login: "stranger",
+        allowed: false,
+        pendingApproval: true,
+        settingsUrl: "https://github.com/settings/installations/8",
+      },
+    ],
+    enrolled: repositories.length,
+    missingPermissions: ["checks: write"],
+    missingEvents: ["check_run", "check_suite", "status", "workflow_run", "workflow_job"],
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
