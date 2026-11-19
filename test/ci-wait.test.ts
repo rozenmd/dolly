@@ -95,7 +95,7 @@ type WaitArguments = {
   timeout_minutes?: number;
 };
 
-const call = (name: string, input: WaitArguments) =>
+const call = (name: string, input: WaitArguments | typeof openPull) =>
   sse({
     type: "function_call",
     id: `fc_${name}`,
@@ -158,6 +158,8 @@ type FakeGitHub = {
   reads: number;
   pulls: number;
   graphql: number;
+  /** Pull requests opened through the API. */
+  opened: number;
 };
 
 const github: FakeGitHub = {
@@ -166,6 +168,7 @@ const github: FakeGitHub = {
   reads: 0,
   pulls: 0,
   graphql: 0,
+  opened: 0,
 };
 
 /** The GraphQL rollup state GitHub would count a fake check under. */
@@ -226,6 +229,17 @@ function fakeGitHub(url: URL) {
         },
       },
     });
+  }
+
+  if (path === `/repos/${repository}`) return Response.json({ default_branch: "main" });
+
+  if (path === `/repos/${repository}/pulls`) {
+    github.opened += 1;
+
+    return Response.json(
+      { number: 8, html_url: `https://github.com/${repository}/pull/8` },
+      { status: 201 },
+    );
   }
 
   if (path === `/repos/${repository}/pulls/8`) github.pulls += 1;
@@ -395,6 +409,7 @@ beforeEach(async () => {
   github.reads = 0;
   github.pulls = 0;
   github.graphql = 0;
+  github.opened = 0;
   modelCalls = 0;
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("credential:openai", {
@@ -544,6 +559,78 @@ it("doesn't wake a re-armed wait for results it already reported, but does once 
   for (const ms of [600_000, 640_000, 680_000]) await at(ms);
   await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(2);
   expect(wakes[1]).toContain("on ccccccc");
+});
+
+const openPull = {
+  operation: {
+    action: "open_pull_request",
+    repository,
+    branch: "dolly/test",
+    base: "main",
+    title: "Change",
+    body: "Body",
+  },
+};
+
+it("opening a pull request subscribes the session to its checks, unasked", async () => {
+  github.checks = [pending("lint"), pending("test")];
+  const wakes: string[] = [];
+  const outputs: string[] = [];
+
+  model = ({ lastUser, toolOutput, lastIsTool }) => {
+    if (lastIsTool && toolOutput) {
+      outputs.push(toolOutput);
+
+      return answer("Opened");
+    }
+
+    if (lastUser.includes("[CI wait ")) {
+      wakes.push(lastUser);
+
+      return answer(`Woken ${wakes.length}`);
+    }
+
+    return call("github", openPull);
+  };
+
+  const id = await root();
+  await prompt(id, "Open a PR");
+  await expect.poll(() => transcript(id)).toContain("Opened");
+  expect(github.opened).toBe(1);
+  expect(outputs[0]).toContain('"ciWait"');
+  expect(outputs[0]).toContain(`${repository}#8 checks`);
+  expect((await wait(id))?.waiting_on).toBe(`${repository}#8 checks`);
+
+  github.checks = [done("lint", "failure"), pending("test")];
+
+  for (const ms of [20_000, 55_000, 90_000, 125_000]) await at(ms);
+  await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(1);
+  expect(wakes[0]).toContain("failed · PR #8");
+  expect(wakes[0]).toContain("This is the pull request you opened in this session.");
+});
+
+it("opening a pull request leaves an explicit wait in place", async () => {
+  github.run = { id: 99, status: "in_progress", conclusion: null, jobs: [] };
+  const outputs: string[] = [];
+  let step = 0;
+
+  model = ({ lastIsTool, toolOutput }) => {
+    if (lastIsTool && toolOutput) outputs.push(toolOutput);
+    step += 1;
+
+    if (step === 1) return call("wait_for", { kind: "workflow_run", repository, run_id: 99 });
+
+    if (step === 2) return call("github", openPull);
+
+    return answer("Done");
+  };
+
+  const id = await root();
+  await prompt(id, "Wait for the run, then open a PR");
+  await expect.poll(() => transcript(id)).toContain("Done");
+  expect(github.opened).toBe(1);
+  expect(outputs[1]).not.toContain('"ciWait"');
+  expect((await wait(id))?.waiting_on).toBe(`${repository} Actions run 99`);
 });
 
 it("watches a workflow run named by workflow and ref before it exists", async () => {
