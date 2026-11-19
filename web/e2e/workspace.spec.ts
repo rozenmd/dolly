@@ -1030,9 +1030,9 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   await expect(main).toContainText("GitHub now sends comments to this URL.");
   expect(ingress).toEqual({ url: "https://new-ingress.example/hooks/github" });
   await expect(main.getByLabel("Accounts dolly can work in")).toHaveValue("octocat");
-  await expect(main.getByLabel("Who can run /pi commands")).toHaveValue("octocat");
+  await expect(main.getByLabel("Who can run /dolly commands")).toHaveValue("octocat");
   await main.getByLabel("Accounts dolly can work in").fill("octocat, @acme");
-  await main.getByLabel("Who can run /pi commands").fill("octocat hubot");
+  await main.getByLabel("Who can run /dolly commands").fill("octocat hubot");
   await main.getByRole("button", { name: "Save", exact: true }).last().click();
   await expect(main.getByText("Saved.", { exact: true })).toBeVisible();
   expect(accounts).toEqual({ accounts: ["octocat", "acme"] });
@@ -1040,8 +1040,8 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   // Leaving and returning keeps what was saved, and clearing the list saves an empty list.
   await nav.getByRole("link", { name: "Account" }).click();
   await nav.getByRole("link", { name: "GitHub" }).click();
-  await expect(main.getByLabel("Who can run /pi commands")).toHaveValue("octocat, hubot");
-  await main.getByLabel("Who can run /pi commands").fill("");
+  await expect(main.getByLabel("Who can run /dolly commands")).toHaveValue("octocat, hubot");
+  await main.getByLabel("Who can run /dolly commands").fill("");
   await main.getByRole("button", { name: "Save", exact: true }).last().click();
   await expect(main.getByText("Saved.", { exact: true })).toBeVisible();
   expect(senders).toEqual({ senders: [] });

@@ -453,7 +453,7 @@ export function GitHubSettings() {
 
       const next = logins(senders);
 
-      // Saved whenever it changed, including to empty, which stops every /pi command.
+      // Saved whenever it changed, including to empty, which stops every /dolly command.
       if (next.join(",") !== github.senders.join(",")) {
         await request("/integrations/github/webhook", { senders: next }, undefined, "PUT");
         update({ ...github, senders: next });
@@ -511,7 +511,7 @@ export function GitHubSettings() {
             ? "GitHub users and organizations whose repositories agents may use, separated by commas."
             : "No GitHub accounts are allowed. Add the repository owner and Save. Installing the App does not populate this list."}
         </p>
-        <label htmlFor="settings-senders">Who can run /pi commands</label>
+        <label htmlFor="settings-senders">Who can run /dolly commands</label>
         <Input
           id="settings-senders"
           name="senders"
@@ -526,7 +526,7 @@ export function GitHubSettings() {
         <p id="settings-senders-help" className="field-help">
           {saved === "access"
             ? "Saved."
-            : "GitHub users whose /pi comments on pull requests start an agent."}
+            : "GitHub users whose /dolly comments on pull requests start an agent."}
         </p>
         <div className="modal-actions">
           <button type="submit" className="primary-button" disabled={pending}>

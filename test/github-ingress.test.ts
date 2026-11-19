@@ -44,7 +44,7 @@ const payload = {
     number: 3,
     pull_request: { url: "https://api.github.com/repos/example/project/pulls/3" },
   },
-  comment: { id: 123, body: "/pi Read the README", user: { login: "trusted" } },
+  comment: { id: 123, body: "/dolly Read the README", user: { login: "trusted" } },
 };
 
 const profile = {
@@ -172,7 +172,7 @@ it("validates signatures over raw bytes and rejects unauthorized installations a
   expect(
     (
       await hook(
-        { ...payload, comment: { ...payload.comment, body: "/pi changed" } },
+        { ...payload, comment: { ...payload.comment, body: "/dolly changed" } },
         "issue_comment",
         valid,
       )
@@ -192,7 +192,13 @@ it("validates signatures over raw bytes and rejects unauthorized installations a
   expect((await hook({ ...payload, issue: { number: 3 } })).status).toBe(204);
   expect((await hook({ ...payload, sender: { login: "trusted", type: "Bot" } })).status).toBe(204);
 
-  for (const text of ["please /pi do this", "/pilot hello", "/pi", "/pi " + "x".repeat(16_385)])
+  for (const text of [
+    "please /dolly do this",
+    "/dollyhello",
+    "/pi Read the README",
+    "/dolly",
+    "/dolly " + "x".repeat(16_385),
+  ])
     expect((await hook({ ...payload, comment: { ...payload.comment, body: text } })).status).toBe(
       204,
     );
