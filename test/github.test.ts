@@ -844,21 +844,6 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
     ).json(),
   ).toMatchObject({ ok: false, code: "workflow_denied" });
 
-  // Nobody granted these branches, so nothing reaches GitHub.
-  for (const branch of ["main", "feature/audit"])
-    expect(
-      await (
-        await execute({
-          action: "write_file",
-          repository,
-          branch,
-          path: "a.ts",
-          sha,
-          content: "change",
-          message: "Fix",
-        })
-      ).json(),
-    ).toMatchObject({ ok: false, code: "branch_denied" });
   defaultBranch = "dolly/fix";
   expect(
     await (
@@ -1243,7 +1228,7 @@ it("discovers repositories across App installations and paginates GitHub's repos
   expect(result.result.repositories).toContain("third-owner/newly-granted");
 });
 
-it("brokers real Worker RPC Git requests without exposing credentials or allowing other branch updates", async () => {
+it("brokers real Worker RPC Git requests without exposing credentials or allowing default branch updates", async () => {
   await connect();
   const { workspaceConfig } = await import("../src/workspace");
   const config = workspaceConfig({ repository: "another-owner/project" }, "42");
@@ -1298,23 +1283,23 @@ it("brokers real Worker RPC Git requests without exposing credentials or allowin
       config,
     );
 
-    expect(response.status).toBe(branch === config.branch ? 200 : 403);
+    expect(response.status).toBe(branch === "main" ? 403 : 200);
     await response.body?.cancel();
   }
 
-  expect(upstream).toBe(2);
+  expect(upstream).toBe(3);
 });
 
-it("lets a person-granted push branch replace the session branch, but never the default branch", async () => {
+it("lets a session push and force-push any branch but the default one", async () => {
   await connect();
   const { workspaceConfig } = await import("../src/workspace");
 
-  const granted = workspaceConfig(
+  const config = workspaceConfig(
     { repository: "another-owner/project", branch: "investigate-audit-headers-null" },
     "42",
   );
 
-  expect(granted).toMatchObject({
+  expect(config).toMatchObject({
     branch: "investigate-audit-headers-null",
     ref: "investigate-audit-headers-null",
   });
@@ -1341,8 +1326,8 @@ it("lets a person-granted push branch replace the session branch, but never the 
   });
   const agent = env.AGENT.getByName("owner");
 
-  const push = async (config: typeof granted, branch: string) => {
-    const command = `${"a".repeat(40)} ${"b".repeat(40)} refs/heads/${branch}\0report-status\n`;
+  const push = async (branch: string, next = "b".repeat(40)) => {
+    const command = `${"a".repeat(40)} ${next} refs/heads/${branch}\0report-status\n`;
     const body = (command.length + 4).toString(16).padStart(4, "0") + command + "0000PACK";
 
     const response = await agent.gitTransport(
@@ -1353,29 +1338,20 @@ it("lets a person-granted push branch replace the session branch, but never the 
       config,
     );
 
-    const text = await response.text();
-
-    return { status: response.status, text };
+    return { status: response.status, text: await response.text() };
   };
 
-  expect(await push(granted, "investigate-audit-headers-null")).toEqual({
-    status: 200,
-    text: "Git response",
-  });
+  for (const branch of ["investigate-audit-headers-null", "dolly/session-7", "other-feature"])
+    expect(await push(branch)).toEqual({ status: 200, text: "Git response" });
 
-  for (const branch of ["dolly/session-42", "main", "other-feature"])
-    expect(await push(granted, branch)).toEqual({
-      status: 403,
-      text: "Only non-deleting updates to this session's push branch (investigate-audit-headers-null) are allowed",
-    });
-
-  // Naming the default branch grants nothing: every write is refused before reading the body.
-  const main = workspaceConfig({ repository: "another-owner/project", branch: "main" }, "42");
-  expect(await push(main, "main")).toEqual({
+  const refused = {
     status: 403,
-    text: "Default branch writes are forbidden",
-  });
-  expect(upstream).toBe(1);
+    text: "Pushes may update any branch except the default branch (main), and may not delete branches or push tags",
+  };
+
+  expect(await push("main")).toEqual(refused);
+  expect(await push("other-feature", "0".repeat(40))).toEqual(refused);
+  expect(upstream).toBe(3);
 });
 
 async function setAccounts(accounts: string[]) {
@@ -1531,7 +1507,7 @@ const pullDetails = {
   draft: false,
   user: { login: "author" },
   base: { ref: "main", sha },
-  head: { ref: "feature", sha: head },
+  head: { ref: "feature", sha: head, repo: { full_name: "example/project" } },
   labels: [{ name: "enhancement" }],
   requested_reviewers: [{ login: "reviewer" }],
   created_at: "2026-01-01T00:00:00Z",
@@ -1611,7 +1587,7 @@ it("reads public pull requests, files, comment threads and checks anonymously", 
       kind: "pull_request_details",
       data: {
         author: "author",
-        head: { ref: "feature", sha: head },
+        head: { ref: "feature", sha: head, repository: "example/project" },
         labels: ["enhancement"],
         requested_reviewers: ["reviewer"],
       },

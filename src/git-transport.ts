@@ -10,77 +10,82 @@ const packageRegistries = new Set([
   "repo.yarnpkg.com",
 ]);
 
-/** The first receive-pack command must update exactly the session branch, never delete it. */
-export async function checkedPush(body: ReadableStream<Uint8Array> | null, branch: string) {
+/**
+ * Every receive-pack command must update a branch other than `defaultBranch` and never delete
+ * one. Force pushes are allowed: to the server they are ordinary updates.
+ */
+export async function checkedPush(body: ReadableStream<Uint8Array> | null, defaultBranch: string) {
   if (!body) return null;
   const reader = body.getReader();
   let prefix = new Uint8Array(0);
   let offset = 0;
+  let commands = 0;
+
+  const forward = () =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(prefix);
+      },
+      async pull(controller) {
+        try {
+          const value = await reader.read();
+
+          if (value.done) {
+            reader.releaseLock();
+            controller.close();
+          } else controller.enqueue(value.value);
+        } catch (error) {
+          reader.releaseLock();
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        try {
+          await reader.cancel(reason);
+        } finally {
+          reader.releaseLock();
+        }
+      },
+    });
 
   try {
-    while (true) {
-      if (prefix.length >= offset + 4) {
+    read: while (true) {
+      while (prefix.length >= offset + 4) {
         const header = new TextDecoder().decode(prefix.subarray(offset, offset + 4));
 
-        if (!/^[0-9a-f]{4}$/.test(header)) break;
+        if (!/^[0-9a-f]{4}$/.test(header)) break read;
         const length = Number.parseInt(header, 16);
 
-        if (length < 5) break;
+        // A flush ends the command list, which must hold at least one update.
+        if (length === 0) {
+          if (commands === 0) break read;
 
-        if (prefix.length >= offset + length) {
-          const packet = new TextDecoder()
-            .decode(prefix.subarray(offset + 4, offset + length))
-            .trimEnd();
-
-          // Shallow clones announce their boundary commits before ref updates.
-          // These are not writes; still validate every subsequent update.
-          if (/^shallow [0-9a-f]{40}$/.test(packet)) {
-            offset += length;
-
-            if (offset > 65_536) break;
-            continue;
-          }
-
-          if (prefix.length >= offset + length + 4) {
-            const command = packet.split("\0")[0];
-            const match = /^([0-9a-f]{40}) ([0-9a-f]{40}) (refs\/heads\/[^\s]+)$/.exec(command);
-
-            if (
-              !match ||
-              /^0+$/.test(match[2]) ||
-              match[3] !== `refs/heads/${branch}` ||
-              new TextDecoder().decode(prefix.subarray(offset + length, offset + length + 4)) !==
-                "0000"
-            )
-              break;
-
-            return new ReadableStream<Uint8Array>({
-              start(controller) {
-                controller.enqueue(prefix);
-              },
-              async pull(controller) {
-                try {
-                  const value = await reader.read();
-
-                  if (value.done) {
-                    reader.releaseLock();
-                    controller.close();
-                  } else controller.enqueue(value.value);
-                } catch (error) {
-                  reader.releaseLock();
-                  controller.error(error);
-                }
-              },
-              async cancel(reason) {
-                try {
-                  await reader.cancel(reason);
-                } finally {
-                  reader.releaseLock();
-                }
-              },
-            });
-          }
+          return forward();
         }
+
+        if (length < 5) break read;
+
+        if (prefix.length < offset + length) break;
+
+        const packet = new TextDecoder()
+          .decode(prefix.subarray(offset + 4, offset + length))
+          .trimEnd();
+
+        offset += length;
+
+        if (offset > 65_536) break read;
+
+        // Shallow clones announce their boundary commits before ref updates.
+        if (/^shallow [0-9a-f]{40}$/.test(packet)) {
+          if (commands > 0) break read;
+          continue;
+        }
+
+        const command = packet.split("\0")[0];
+        const match = /^[0-9a-f]{40} ([0-9a-f]{40}) refs\/heads\/(\S+)$/.exec(command);
+
+        if (!match || /^0+$/.test(match[1]) || match[2] === defaultBranch) break read;
+        commands++;
       }
 
       const next = await reader.read();

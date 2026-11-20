@@ -58,7 +58,7 @@ function selection(id: string) {
       BACKGROUND_CONTEXT,
     );
 
-    return { id: conversationId, conversationId: String(conversationId), config: doc?.config };
+    return { conversationId: String(conversationId), config: doc?.config };
   });
 }
 
@@ -172,36 +172,4 @@ it("pushes a session to the branch a person chose without passing it on to joine
     expect((await create({ workspace: { repository: "octocat/project", branch } })).status).toBe(
       400,
     );
-
-  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
-    const write = (conversationId: ConversationId, repository: string, branch: string) =>
-      agent["githubForSession"](conversationId, {
-        operation: {
-          action: "write_file",
-          repository,
-          branch,
-          path: "a.ts",
-          content: "change",
-          message: "Fix",
-        },
-      });
-
-    // The github tool may write the granted branch (this fails later: GitHub is not connected).
-    const allowed = await write(chosen.id, "octocat/project", "investigate-audit-headers-null");
-
-    expect(allowed).toMatchObject({ ok: false });
-    expect(allowed).not.toMatchObject({ code: "branch_denied" });
-
-    const denied: [ConversationId, string, string][] = [
-      [chosen.id, "octocat/project", "other-feature"],
-      [chosen.id, "octocat/other", "investigate-audit-headers-null"],
-      [inherited.id, "octocat/project", "investigate-audit-headers-null"],
-    ];
-
-    for (const [conversationId, repository, branch] of denied)
-      expect(await write(conversationId, repository, branch)).toMatchObject({
-        ok: false,
-        code: "branch_denied",
-      });
-  });
 });

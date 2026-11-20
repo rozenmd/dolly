@@ -135,7 +135,12 @@ const PullDetails = Schema.Struct({
   mergeable_state: Schema.optional(Schema.String),
   user: User,
   base: Schema.Struct({ ref: Schema.String, sha: Sha }),
-  head: Schema.Struct({ ref: Schema.String, sha: Sha }),
+  head: Schema.Struct({
+    ref: Schema.String,
+    sha: Sha,
+    // null when the fork the PR came from has been deleted.
+    repo: Schema.optional(Schema.NullOr(Schema.Struct({ full_name: Schema.String }))),
+  }),
   labels: Schema.Array(Schema.Struct({ name: Schema.String })),
   requested_reviewers: Schema.Array(Schema.Struct({ login: Schema.String })),
   commits: Schema.optional(Schema.Number),
@@ -1378,7 +1383,11 @@ function makeGitHub(
             author: pull.user?.login ?? null,
             user: undefined,
             base: { ref: pull.base.ref, sha: pull.base.sha },
-            head: { ref: pull.head.ref, sha: pull.head.sha },
+            head: {
+              ref: pull.head.ref,
+              sha: pull.head.sha,
+              repository: pull.head.repo?.full_name ?? null,
+            },
             labels: pull.labels.map((label) => label.name),
             requested_reviewers: pull.requested_reviewers.map((user) => user.login),
             body: truncate(pull.body ?? "", 16_384),

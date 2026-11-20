@@ -11,7 +11,7 @@ const Ref = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200));
 
 /**
  * A plain branch name: no refs/ prefix, leading punctuation, "..", empty or dot-led components,
- * trailing dot or slash, or .lock component. Which branches a write may target is decided by `branchWriteAllowed`.
+ * trailing dot or slash, or .lock component. Writes to the default branch are refused separately.
  */
 export const BranchName = Schema.String.check(
   Schema.isPattern(
@@ -20,18 +20,6 @@ export const BranchName = Schema.String.check(
 );
 
 const Branch = BranchName;
-
-/** Agent tools write dolly/* branches, plus any branch a person granted the session. */
-export const branchWriteAllowed = (
-  repository: string,
-  branch: string,
-  granted: readonly { repository: string; branch: string }[] = [],
-) =>
-  /^dolly\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(branch) ||
-  granted.some(
-    (grant) =>
-      grant.branch === branch && grant.repository.toLowerCase() === repository.toLowerCase(),
-  );
 
 const Path = Schema.String.check(
   Schema.isMinLength(1),
