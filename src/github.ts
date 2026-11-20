@@ -1890,7 +1890,12 @@ function makeGitHub(
     if (raw === undefined) return { status: 503 as const };
     const profile = yield* decode(WebhookProfile)(raw);
 
-    const verified = yield* verifyWebhook(profile, body, signature, event);
+    // The App's own bot opens the PRs Dolly sessions create; those are reviewed too.
+    const app = yield* attempt("github.read", () => storage.get("github:connected"));
+
+    const bot = app === undefined ? undefined : `${(yield* decode(Connected)(app)).app.slug}[bot]`;
+
+    const verified = yield* verifyWebhook(profile, body, signature, event, bot);
 
     if (verified.status !== 202) return verified;
 

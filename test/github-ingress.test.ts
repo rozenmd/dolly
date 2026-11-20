@@ -652,6 +652,9 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
     { ...pullRequest, pull_request: { draft: false, head: { sha, repo: null } } },
     { ...pullRequest, sender: { login: "outsider", type: "User" } },
     { ...pullRequest, sender: { login: "trusted", type: "Bot" } },
+    // Other Apps' bots are not trusted, only this App's own.
+    { ...pullRequest, sender: { login: "other-app[bot]", type: "Bot" } },
+    { ...pullRequest, sender: { login: "dolly-test[bot]", type: "User" } },
     { ...pullRequest, action: "synchronize" },
     { ...pullRequest, action: "edited" },
   ])
@@ -748,6 +751,21 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   ).toBe(202);
   await expect.poll(() => reactions, { timeout: 15_000 }).toContain("9:rocket");
   expect(reviews).toHaveLength(1);
+
+  // Pull requests a Dolly session opened come from this App's own bot, and are reviewed too.
+  expect(
+    (
+      await hook(
+        { ...pullRequest, number: 11, sender: { login: "dolly-test[bot]", type: "Bot" } },
+        "pull_request",
+      )
+    ).status,
+  ).toBe(202);
+  await expect.poll(() => reactions, { timeout: 15_000 }).toContain("11:rocket");
+  expect(reviews.map((review) => review.number)).toEqual([8, 11]);
+  expect(prompts.at(-1)).toContain(
+    "example/project#11 is ready for review (opened by @dolly-test[bot]",
+  );
 
   // Cleared, reviews follow the default model again.
   const cleared = await SELF.fetch("https://worker/api/settings/model", {

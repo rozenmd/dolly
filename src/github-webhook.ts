@@ -16,7 +16,7 @@ export const WebhookSetup = Schema.Struct({
   /** Who may run /dolly commands. An empty list stops every command. */
   senders: Schema.Array(Login),
   secret: Schema.optional(Schema.String.check(Schema.isMinLength(32), Schema.isMaxLength(256))),
-  /** Review new pull requests these senders open in enrolled repositories. Omitted keeps the saved choice. */
+  /** Review new pull requests these senders (or Dolly sessions) open in enrolled repositories. Omitted keeps the saved choice. */
   reviews: Schema.optional(Schema.Boolean),
 });
 
@@ -37,12 +37,15 @@ const CommentEvent = Schema.Struct({
 
 const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
 
+/** A GitHub user, or a GitHub App's bot account (`slug[bot]`). */
+const Actor = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}(?:\[bot\])?$/));
+
 /** A pull request becoming ready for review: opened, reopened or taken out of draft. */
 const ReviewEvent = Schema.Struct({
   action: Schema.Literals(["opened", "reopened", "ready_for_review"]),
   installation: Schema.Struct({ id: Id }),
   repository: Schema.Struct({ full_name: Repository }),
-  sender: Schema.Struct({ login: Login, type: Schema.Literal("User") }),
+  sender: Schema.Struct({ login: Actor, type: Schema.Literals(["User", "Bot"]) }),
   number: Id,
   pull_request: Schema.Struct({
     draft: Schema.optional(Schema.Boolean),
@@ -251,7 +254,8 @@ export const GitHubReview = Schema.Struct({
   repository: Repository,
   number: Id,
   sha: Sha,
-  sender: Login,
+  /** Who opened the PR: an allowed sender, or this App's own bot for PRs Dolly sessions open. */
+  sender: Actor,
 });
 
 /** What a GitHub thread delivers: a /dolly command or an automatic review. */
@@ -267,6 +271,8 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
   body: ArrayBuffer,
   signature: string,
   event: string,
+  /** This App's bot login (`slug[bot]`), whose own pull requests are reviewed too. */
+  bot?: string,
 ) {
   if (body.byteLength > MAX_WEBHOOK_BYTES) return { status: 413 as const };
 
@@ -293,7 +299,7 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
   if (!valid) return { status: 401 as const };
 
   if (event === "pull_request" && profile.reviews) {
-    const review = reviewEvent(profile, new TextDecoder().decode(body));
+    const review = reviewEvent(profile, new TextDecoder().decode(body), bot);
 
     if (review) return { status: 202 as const, kind: "review" as const, review };
   }
@@ -338,12 +344,15 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
 });
 
 /**
- * A pull request an allowed sender opened (or made ready) on a branch of the same repository.
+ * A pull request an allowed sender, or this App itself, opened (or made ready) on a branch of the
+ * same repository. The App opens the PRs Dolly sessions create, and those sessions were already
+ * admitted, so its own PRs are reviewed like an allowed sender's. Other bots never are.
  * Drafts wait for ready_for_review; forks are never reviewed automatically.
  */
 function reviewEvent(
   profile: typeof WebhookProfile.Type,
   text: string,
+  bot: string | undefined,
 ): typeof GitHubReview.Type | undefined {
   const value = Option.getOrUndefined(
     Schema.decodeUnknownOption(Schema.fromJsonString(ReviewEvent))(text),
@@ -354,8 +363,14 @@ function reviewEvent(
 
   if (value.pull_request.head.repo?.full_name.toLowerCase() !== repository) return undefined;
 
-  if (!profile.senders.some((login) => login.toLowerCase() === value.sender.login.toLowerCase()))
-    return undefined;
+  const sender = value.sender.login.toLowerCase();
+
+  const allowed =
+    value.sender.type === "Bot"
+      ? bot !== undefined && sender === bot.toLowerCase()
+      : profile.senders.some((login) => login.toLowerCase() === sender);
+
+  if (!allowed) return undefined;
 
   return {
     kind: "review",
