@@ -163,7 +163,7 @@ If **Save** reports that pull request events are missing, open the GitHub App se
 4. In the Slack app, open **Install App**. Choose **Install to Workspace**.
 5. Copy the **Bot User OAuth Token**. Paste it into **Bot token** in Dolly.
 6. In the Slack app, open **Basic Information > App Credentials**. Copy the **Signing Secret**. Paste it into **Signing secret** in Dolly.
-7. In Slack, open your profile. Choose **⋮**, then **Copy member ID**. Paste it into **Your Slack member ID**.
+7. In Slack, open your profile. Choose **⋮**, then **Copy member ID**. Paste it into **Who can start sessions**, then a space and your GitHub login, for example `U012ABCDEF octocat`. Add one line for each teammate who may start sessions. Leave the list empty to let everyone in the workspace start sessions.
 8. Optional: enter a **Default repository**, as `owner/repo`.
 9. Choose **Save**.
 10. In the Slack app, open **Event Subscriptions**. Choose **Retry** next to the events URL.

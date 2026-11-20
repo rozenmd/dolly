@@ -551,7 +551,7 @@ export type ApiBody = {
   enabled?: boolean;
   botToken?: string;
   signingSecret?: string;
-  allowedUserId?: string;
+  members?: readonly { slackId: string; github: string | null }[];
   defaultRepository?: string;
   callbackUrl?: string;
 };

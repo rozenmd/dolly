@@ -31,7 +31,7 @@ slackRoutes.put("/api/integrations/slack", async (c) => {
     return c.json(
       {
         error:
-          "Expected a bot token (xoxb-…), a signing secret, an optional allowed Slack member ID and an optional default repository",
+          "Expected a bot token (xoxb-…), a signing secret, teammates as Slack member IDs with optional GitHub logins, and an optional default repository",
       },
       400,
     );

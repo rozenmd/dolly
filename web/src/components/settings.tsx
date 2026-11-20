@@ -26,7 +26,7 @@ import { AppHealth, useOnboarding } from "./get-started";
 import { RepositoryPicker } from "./repositories";
 import { EFFORTS, ModelPicker, SPEEDS, effortName, modelName, speedName } from "./model-select";
 import { Picker } from "./picker";
-import { Input } from "./ui";
+import { Input, Textarea } from "./ui";
 import { UsageLimits } from "./usage";
 
 type Connected = Extract<AuthState["github"], { connected: true }>;
@@ -415,6 +415,18 @@ function logins(value: string) {
     .filter(Boolean);
 }
 
+/** Teammates from lines of `<Slack member ID> [GitHub login]`; commas also separate the two. */
+function slackMembers(value: string) {
+  return value
+    .split("\n")
+    .map((line) => line.split(/[\s,]+/).filter(Boolean))
+    .filter((parts) => parts.length > 0)
+    .map(([slackId, github]) => ({
+      slackId: slackId.toUpperCase(),
+      github: github?.replace(/^@/, "") || null,
+    }));
+}
+
 export function GitHubSettings() {
   const { login, github, update } = useSettings();
   const [ingress, setIngress] = useState(github.ingress ?? "");
@@ -585,7 +597,9 @@ export function GitHubSettings() {
 const SlackStatus = Schema.Struct({
   configured: Schema.Boolean,
   enabled: Schema.Boolean,
-  allowedUserId: Schema.NullOr(Schema.String),
+  members: Schema.Array(
+    Schema.Struct({ slackId: Schema.String, github: Schema.NullOr(Schema.String) }),
+  ),
   defaultRepository: Schema.NullOr(Schema.String),
   teamName: Schema.NullOr(Schema.String),
   eventsUrl: Schema.NullOr(Schema.String),
@@ -613,7 +627,7 @@ export function SlackSettings() {
   const [enabled, setEnabled] = useState(true);
   const [botToken, setBotToken] = useState("");
   const [signingSecret, setSigningSecret] = useState("");
-  const [allowedUserId, setAllowedUserId] = useState("");
+  const [members, setMembers] = useState("");
   const [defaultRepository, setDefaultRepository] = useState("");
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -622,7 +636,11 @@ export function SlackSettings() {
   function load(next: SlackStatus) {
     setStatus(next);
     setEnabled(next.configured ? next.enabled : true);
-    setAllowedUserId(next.allowedUserId ?? "");
+    setMembers(
+      next.members
+        .map((member) => (member.github ? `${member.slackId} ${member.github}` : member.slackId))
+        .join("\n"),
+    );
     setDefaultRepository(next.defaultRepository ?? "");
   }
 
@@ -657,7 +675,7 @@ export function SlackSettings() {
     void run(async () => {
       const body: ApiBody = {
         enabled,
-        allowedUserId: allowedUserId.trim(),
+        members: slackMembers(members),
         defaultRepository: defaultRepository.trim(),
       };
 
@@ -794,18 +812,22 @@ export function SlackSettings() {
           <strong>Basic Information</strong> → <strong>App Credentials</strong> →{" "}
           <strong>Signing Secret</strong> (choose Show).
         </p>
-        <label htmlFor="slack-allowed-user">Your Slack member ID</label>
-        <Input
-          id="slack-allowed-user"
-          name="allowedUserId"
-          placeholder="U012ABCDEF"
-          value={allowedUserId}
-          onChange={(event) => setAllowedUserId(event.target.value)}
+        <label htmlFor="slack-members">Who can start sessions</label>
+        <Textarea
+          id="slack-members"
+          name="members"
+          rows={4}
+          placeholder={`U012ABCDEF ${github.owner}`}
+          value={members}
+          onChange={(event) => setMembers(event.target.value)}
+          aria-describedby="slack-members-help"
         />
-        <p className="field-help">
-          In Slack, open your profile, choose <strong>⋮</strong> then{" "}
-          <strong>Copy member ID</strong>. Only you can start sessions; anyone in your workspace can
-          reply in a thread that already has one. Leave empty to let everyone start sessions.
+        <p id="slack-members-help" className="field-help">
+          One teammate per line: their Slack member ID, then optionally their GitHub login so
+          sessions name who asked. In Slack, open a profile, choose <strong>⋮</strong> then{" "}
+          <strong>Copy member ID</strong>. Only listed teammates can start sessions; anyone in your
+          workspace can reply in a thread that already has one. Leave empty to let everyone start
+          sessions.
         </p>
         <label htmlFor="slack-default-repository">Default repository</label>
         <Input

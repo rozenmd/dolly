@@ -62,6 +62,7 @@ import {
   readSlackProfile,
   rememberPublicBaseUrl,
   removeSlack,
+  slackMembers,
   SlackSetup,
   slackStatus,
 } from "./slack";
@@ -1579,7 +1580,7 @@ export class Agent extends DurableObject<Env> {
             reply: event.thread_ts !== undefined,
             files,
           },
-          { allowedUserId: profile.allowedUserId, agent },
+          { members: slackMembers(profile).map((member) => member.slackId), agent },
         );
 
         return { status: 200 as const };
