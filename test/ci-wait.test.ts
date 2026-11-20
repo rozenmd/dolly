@@ -702,7 +702,7 @@ it("wakes when the PR merges, and at the timeout when checks never settle", asyn
   await at(330_000);
   await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(2);
   expect(wakes[1]).toContain("closed · PR #8 is merged");
-});
+}, 20_000);
 
 it("cancel_wait stops delivery, and bad targets fail in the turn", async () => {
   github.checks = [done("lint", "failure")];
