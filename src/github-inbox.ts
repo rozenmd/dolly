@@ -12,7 +12,7 @@ import * as Result from "effect/Result";
 import * as Effect from "effect/Effect";
 import { exceptionDetails } from "./diagnostics";
 import { ConversationWorkspace, workspaceConfig } from "./workspace";
-import { GitHubEvent } from "./github-webhook";
+import { deliveryKey, type GitHubDelivery } from "./github-webhook";
 import { attempt, OperationError } from "./operations";
 import type { IntakeAgent } from "./model-defaults";
 
@@ -30,17 +30,27 @@ export const GitHubThreads = defineDoc<{
   checkpointWhen: () => false,
 });
 
+/** The prompt for an automatic review. The agent publishes the review itself, inline comments included. */
+function reviewPrompt(review: Extract<GitHubDelivery, { kind: "review" }>) {
+  return [
+    `GitHub PR ${review.repository}#${review.number} is ready for review (opened by @${review.sender}, head ${review.sha}). Review it.`,
+    `Read it with github read_pull_request and list_pull_request_files, check out the code in the sandbox when the diff alone is not enough, and look for bugs, security problems, missing tests and anything that breaks the repository's own guidance (AGENTS.md, skills). Report real problems, not style nits, and say so plainly when it looks good.`,
+    `Publish exactly one review with github create_review: event COMMENT, commit_id ${review.sha}, inline comments on the lines concerned and a short overall summary as the body. Do not push, edit the PR or open new PRs. If create_review reports that the head moved, do not review the new head; say so instead.`,
+    `Finish with the same short summary. If you could not publish the review, that answer is posted as the review instead.`,
+  ].join("\n\n");
+}
+
 type Checkpoint = { phase: "deliver" } | { phase: "reply"; text: string; attempts: number };
 
 export function githubDelivery({
   reply,
   finished,
 }: {
-  reply: (event: typeof GitHubEvent.Type, text: string) => Effect.Effect<void, OperationError>;
-  /** Marks the command's comment as done. Best effort: the answer is already posted. */
-  finished: (event: typeof GitHubEvent.Type) => Effect.Effect<void, OperationError>;
+  reply: (event: GitHubDelivery, text: string) => Effect.Effect<void, OperationError>;
+  /** Marks the command's comment (or a review's PR) as done. Best effort: the answer is already posted. */
+  finished: (event: GitHubDelivery) => Effect.Effect<void, OperationError>;
 }) {
-  return defineTask<typeof GitHubEvent.Type, Checkpoint, null>({
+  return defineTask<GitHubDelivery, Checkpoint, null>({
     name: "app.github-delivery",
     version: 1,
     initial: () => ({ phase: "deliver" }),
@@ -58,8 +68,14 @@ export function githubDelivery({
               conversation.submit(
                 {
                   type: "input",
-                  content: `GitHub PR ${task.input.repository}#${task.input.number}, comment by @${task.input.sender}:\n\n${task.input.content}\n\n${GITHUB_PR_NOTE}`,
-                  requestId: `github:comment:${task.input.commentId}`,
+                  content:
+                    "kind" in task.input
+                      ? reviewPrompt(task.input)
+                      : `GitHub PR ${task.input.repository}#${task.input.number}, comment by @${task.input.sender}:\n\n${task.input.content}\n\n${GITHUB_PR_NOTE}`,
+                  requestId:
+                    "kind" in task.input
+                      ? `github:review:${task.input.repository}#${task.input.number}:${task.input.sha}`
+                      : `github:comment:${task.input.commentId}`,
                   whenBusy: "followUp",
                 },
                 context,
@@ -166,7 +182,7 @@ export function githubDelivery({
 export const admitGitHub = Effect.fn("GitHub.admit")(function* (
   harness: Harness,
   delivery: ReturnType<typeof githubDelivery>,
-  event: typeof GitHubEvent.Type,
+  event: GitHubDelivery,
   agent: IntakeAgent,
 ) {
   return yield* attempt("github.intake", () =>
@@ -174,7 +190,7 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
       const state = await tx.doc(GitHubThreads);
       const key = `${event.repository}#${event.number}`;
       let thread = state.threads[key];
-      const receipt = thread?.events[String(event.commentId)];
+      const receipt = thread?.events[deliveryKey(event)];
 
       if (receipt)
         return {
@@ -203,7 +219,7 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
 
       state.threads[key] = {
         id: thread.id,
-        events: { ...thread.events, [String(event.commentId)]: taskId },
+        events: { ...thread.events, [deliveryKey(event)]: taskId },
       };
 
       return {

@@ -1301,11 +1301,12 @@ export class Agent extends DurableObject<Env> {
         const agent = yield* this.intakeAgent(Option.isSome(chatgpt), Option.isSome(claude));
         yield* this.arm({ active: true });
 
-        const admitted = yield* admitGitHub(this.harness, this.githubTask, verified.event, agent);
+        const delivery = verified.kind === "review" ? verified.review : verified.event;
+        const admitted = yield* admitGitHub(this.harness, this.githubTask, delivery, agent);
 
-        // Acknowledge the command on GitHub straight away. Best effort: the task is already queued.
+        // Acknowledge on GitHub straight away. Best effort: the task is already queued.
         if (!admitted.duplicate)
-          yield* Effect.flatMap(GitHub, (github) => github.react(verified.event, "eyes")).pipe(
+          yield* Effect.flatMap(GitHub, (github) => github.react(delivery, "eyes")).pipe(
             Effect.catchTag("OperationError", (error) =>
               Effect.logError({
                 event: "github_reaction_failed",

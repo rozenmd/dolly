@@ -546,6 +546,7 @@ export type ApiBody = {
   url?: string;
   accounts?: readonly string[];
   senders?: readonly string[];
+  reviews?: boolean;
   token?: string;
   enabled?: boolean;
   botToken?: string;
@@ -630,6 +631,7 @@ const GitHubApp = Schema.Union([
     settingsUrl: Schema.String,
     ingress: Schema.NullOr(Schema.String),
     senders: Schema.Array(Schema.String),
+    reviews: Schema.Boolean,
   }),
 ]);
 

@@ -4,6 +4,7 @@ import { flow } from "effect/Function";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Match from "effect/Match";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -19,8 +20,9 @@ import {
   WebhookSetup,
   WebhookProfile,
   verifyWebhook,
-  GitHubEvent,
+  GitHubReview,
   WebhookUrl,
+  type GitHubDelivery,
 } from "./github-webhook";
 import { exceptionDetails } from "./diagnostics";
 import { integrationJson } from "./integration-http";
@@ -592,11 +594,14 @@ function makeGitHub(
     return raw === undefined ? "" : yield* decode(WebhookUrl)(raw);
   });
 
-  // Who may run /dolly commands. The signing secret stays server-side.
-  const senders = Effect.gen(function* () {
+  // Who may run /dolly commands, and whether their new PRs get reviewed. The secret stays server-side.
+  const webhookAccess = Effect.gen(function* () {
     const raw = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
 
-    return raw === undefined ? [] : (yield* decode(WebhookProfile)(raw)).senders;
+    if (raw === undefined) return { senders: [], reviews: false };
+    const profile = yield* decode(WebhookProfile)(raw);
+
+    return { senders: profile.senders, reviews: profile.reviews ?? false };
   });
 
   const read = Effect.fn("GitHub.configuration")(function* () {
@@ -942,7 +947,7 @@ function makeGitHub(
       installUrl: `https://github.com/apps/${slug}/installations/new`,
       settingsUrl: settings,
       ingress: (yield* ingress) || null,
-      senders: yield* senders,
+      ...(yield* webhookAccess),
     };
   });
 
@@ -1833,6 +1838,7 @@ function makeGitHub(
             details: null,
           });
 
+        const reviews = input.reviews ?? saved?.reviews ?? false;
         const token = yield* jwt(connected.app);
 
         const app = yield* api("/app", token).pipe(
@@ -1857,11 +1863,19 @@ function makeGitHub(
             details: null,
           });
 
+        if (reviews && !app.events.includes("pull_request"))
+          return yield* new OperationError({
+            operation: "github.webhook.permissions",
+            message:
+              "Enable Pull request events in GitHub App settings to review new pull requests, then approve installation changes",
+            details: null,
+          });
+
         yield* attempt("github.webhook.save", () =>
-          storage.put("github:webhook", { secret, senders: input.senders }),
+          storage.put("github:webhook", { secret, senders: input.senders, reviews }),
         );
 
-        return { configured: true, url: webhookUrl, senders: input.senders };
+        return { configured: true, url: webhookUrl, senders: input.senders, reviews };
       }),
     ),
   );
@@ -1879,10 +1893,26 @@ function makeGitHub(
     const verified = yield* verifyWebhook(profile, body, signature, event);
 
     if (verified.status !== 202) return verified;
+
     // CI events nudge waits; they pass the same account and installation checks as commands.
-    const subject = verified.kind === "ci" ? verified.ci : verified.event;
+    const subject = Match.value(verified).pipe(
+      Match.discriminatorsExhaustive("kind")({
+        ci: (value) => value.ci,
+        review: (value) => value.review,
+        comment: (value) => value.event,
+      }),
+    );
 
     if (!(yield* accountAllowed(subject.repository.split("/")[0]))) return { status: 403 as const };
+
+    // Automatic reviews spend a subscription, so only repositories someone enrolled get them.
+    if (
+      verified.kind === "review" &&
+      !(yield* enrolledRepositories).some(
+        (repo) => repo.fullName.toLowerCase() === subject.repository,
+      )
+    )
+      return { status: 204 as const };
     const connected = yield* read();
 
     const installation = yield* api(
@@ -1907,8 +1937,10 @@ function makeGitHub(
     return verified;
   });
 
-  const reply = Effect.fn("GitHub.reply")(function* (event: typeof GitHubEvent.Type, text: string) {
+  const reply = Effect.fn("GitHub.reply")(function* (event: GitHubDelivery, text: string) {
     const connected = yield* read();
+
+    if ("kind" in event) return yield* replyReview(connected, event, text);
 
     const token = yield* tokenFor(connected, event.repository, "write");
     const root = `/repos/${event.repository}/issues/${event.number}/comments`;
@@ -1941,17 +1973,64 @@ function makeGitHub(
     }
   });
 
+  /**
+   * The agent normally publishes its own review with create_review. If it did not leave one on
+   * this head commit, its answer becomes the review body, so every automatic review is visible.
+   */
+  const replyReview = Effect.fn("GitHub.replyReview")(function* (
+    connected: typeof Connected.Type,
+    event: typeof GitHubReview.Type,
+    text: string,
+  ) {
+    const token = yield* tokenFor(connected, event.repository, "write");
+    const root = `/repos/${event.repository}/pulls/${event.number}/reviews`;
+
+    for (let page = 1; ; page++) {
+      const reviews = yield* api(`${root}?per_page=100&page=${page}`, token).pipe(
+        Effect.flatMap(
+          decode(
+            Schema.Array(
+              Schema.Struct({
+                commit_id: Schema.NullOr(Schema.String),
+                user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+              }),
+            ),
+          ),
+        ),
+      );
+
+      if (
+        reviews.some(
+          (review) =>
+            review.user?.login === `${connected.app.slug}[bot]` && review.commit_id === event.sha,
+        )
+      )
+        return;
+
+      if (reviews.length < 100) break;
+    }
+
+    yield* api(root, token, {
+      commit_id: event.sha,
+      body: `${text.slice(0, 16_384)}${REVIEW_FOOTER}`,
+      event: "COMMENT",
+      comments: [],
+    });
+  });
+
   /** GitHub keeps one reaction of each kind per user, so repeating this is harmless. */
   const react = Effect.fn("GitHub.react")(function* (
-    event: typeof GitHubEvent.Type,
+    event: GitHubDelivery,
     content: CommentReaction,
   ) {
     const connected = yield* read();
     const token = yield* tokenFor(connected, event.repository, "write");
 
-    yield* api(`/repos/${event.repository}/issues/comments/${event.commentId}/reactions`, token, {
-      content,
-    });
+    // A review has no command comment, so the pull request itself carries the reaction.
+    const target =
+      "kind" in event ? `issues/${event.number}` : `issues/comments/${event.commentId}`;
+
+    yield* api(`/repos/${event.repository}/${target}/reactions`, token, { content });
   });
 
   const authorize = Effect.fn("GitHub.authorize")(function* (repository: string, write: boolean) {

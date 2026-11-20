@@ -145,6 +145,16 @@ To use Claude instead, see [step 7](#7-optional-use-claude-instead-of-chatgpt).
 
 **Check:** go back to the main page. The checklist is gone, and you see **New session**. Choose it, pick a repository and send a prompt. This is your first agent session.
 
+### Optional: review new pull requests
+
+1. Go to **Settings > GitHub**.
+2. Under **Who can run /dolly commands**, list the GitHub users whose pull requests Dolly reviews.
+3. Turn on **Review new pull requests**. Choose **Save**.
+
+When one of those users opens a pull request in an enrolled repository, or marks a draft ready, Dolly reviews it with inline comments. It skips drafts and pull requests from forks. Comment `/dolly` on the pull request to follow up in the same session. Each review uses your model subscription.
+
+If **Save** reports that pull request events are missing, open the GitHub App settings, subscribe to **Pull request** events, and approve the change on each installation.
+
 ## 6. Optional: connect Slack
 
 1. In Dolly, go to **Settings > Slack**.
