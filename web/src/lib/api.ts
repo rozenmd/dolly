@@ -538,7 +538,13 @@ export type ApiBody = {
   thinkingLevel?: string | null;
   speed?: Speed | null;
   autoFallback?: boolean | null;
-  workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] };
+  workspace?: {
+    repository: string;
+    ref?: string;
+    networkHosts?: readonly string[];
+    /** The branch the session pushes to, instead of a new dolly/session-<id> branch. */
+    branch?: string;
+  };
   repository?: string;
   owner?: string;
   ownerType?: "personal" | "organization";

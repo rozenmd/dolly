@@ -28,7 +28,10 @@ beforeEach(async () => {
 
 afterEach(() => vi.restoreAllMocks());
 
-const create = (body: { workspace?: { repository: string; ref: string }; workspaceId?: string }) =>
+const create = (body: {
+  workspace?: { repository: string; ref?: string; branch?: string };
+  workspaceId?: string;
+}) =>
   SELF.fetch("https://worker/api/sessions", {
     method: "POST",
     headers,
@@ -55,7 +58,7 @@ function selection(id: string) {
       BACKGROUND_CONTEXT,
     );
 
-    return { conversationId: String(conversationId), config: doc?.config };
+    return { id: conversationId, conversationId: String(conversationId), config: doc?.config };
   });
 }
 
@@ -143,5 +146,62 @@ it("treats a session from before workspaces as a workspace keyed by its own ID",
   expect((await selection(session.id)).config).toMatchObject({
     repository: "octocat/legacy",
     ref: "trunk",
+  });
+});
+
+it("pushes a session to the branch a person chose without passing it on to joined sessions", async () => {
+  const started = await create({
+    workspace: { repository: "octocat/project", branch: "investigate-audit-headers-null" },
+  });
+
+  expect(started.status).toBe(201);
+  const a = await started.json<{ id: string; workspaceId: string }>();
+  const chosen = await selection(a.id);
+  expect(chosen.config).toMatchObject({
+    repository: "octocat/project",
+    ref: "investigate-audit-headers-null",
+    branch: "investigate-audit-headers-null",
+  });
+
+  // Joining the workspace inherits the checkout, not the push branch.
+  const joined = await (await create({ workspaceId: a.workspaceId })).json<{ id: string }>();
+  const inherited = await selection(joined.id);
+  expect(inherited.config?.branch).toBe(`dolly/session-${inherited.conversationId}`);
+
+  for (const branch of ["refs/heads/main", "-f", "a..b", "trailing/", "x.lock", "has space"])
+    expect((await create({ workspace: { repository: "octocat/project", branch } })).status).toBe(
+      400,
+    );
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const write = (conversationId: ConversationId, repository: string, branch: string) =>
+      agent["githubForSession"](conversationId, {
+        operation: {
+          action: "write_file",
+          repository,
+          branch,
+          path: "a.ts",
+          content: "change",
+          message: "Fix",
+        },
+      });
+
+    // The github tool may write the granted branch (this fails later: GitHub is not connected).
+    const allowed = await write(chosen.id, "octocat/project", "investigate-audit-headers-null");
+
+    expect(allowed).toMatchObject({ ok: false });
+    expect(allowed).not.toMatchObject({ code: "branch_denied" });
+
+    const denied: [ConversationId, string, string][] = [
+      [chosen.id, "octocat/project", "other-feature"],
+      [chosen.id, "octocat/other", "investigate-audit-headers-null"],
+      [inherited.id, "octocat/project", "investigate-audit-headers-null"],
+    ];
+
+    for (const [conversationId, repository, branch] of denied)
+      expect(await write(conversationId, repository, branch)).toMatchObject({
+        ok: false,
+        code: "branch_denied",
+      });
   });
 });

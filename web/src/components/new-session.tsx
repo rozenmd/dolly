@@ -8,7 +8,7 @@ import {
   type DefaultModel,
   type SavedSession,
 } from "../lib/api";
-import { Modal, Textarea } from "./ui";
+import { Input, Modal, Textarea } from "./ui";
 import { ArrowUturnLeftIcon } from "@heroicons/react/16/solid";
 import { DEFAULT_EFFORT, ModelControl, normalizeEffort, type Speed } from "./model-select";
 import { RepositoryPicker } from "./repositories";
@@ -35,6 +35,8 @@ export function NewSessionComposer({
   const [content, setContent] = useState("");
   const [repository, setRepository] = useState(initial.workspace?.repository ?? "");
   const [ref, setRef] = useState(initial.workspace?.ref ?? "");
+  // Empty pushes to the session's own dolly/session-<id> branch.
+  const [branch, setBranch] = useState("");
   const [model, setModel] = useState(initial.model ?? "");
   const [defaults, setDefaults] = useState<DefaultModel | null>(null);
   // `null` follows the owner's defaults until a choice is made here.
@@ -107,7 +109,9 @@ export function NewSessionComposer({
         if (repository) {
           body.workspace = { repository };
 
-          if (ref) body.workspace.ref = ref;
+          if (branch.trim()) body.workspace.branch = branch.trim();
+          // A push branch is checked out from itself, not the repository's default branch.
+          else if (ref) body.workspace.ref = ref;
 
           if (repository === initial.workspace?.repository && initial.workspace.networkHosts)
             body.workspace.networkHosts = initial.workspace.networkHosts;
@@ -161,14 +165,36 @@ export function NewSessionComposer({
           disabled={pending || input.reading || Boolean(created)}
           className="new-session-fields"
         >
-          <RepositoryPicker
-            compact
-            value={repository}
-            onChange={(name, branch) => {
-              setRepository(name);
-              setRef(branch);
-            }}
-          />
+          <div className="new-session-target">
+            <RepositoryPicker
+              compact
+              value={repository}
+              onChange={(name, defaultBranch) => {
+                setRepository(name);
+                setRef(defaultBranch);
+                setBranch("");
+              }}
+            />
+            {repository && (
+              <>
+                <label htmlFor="new-session-branch" className="sr-only">
+                  Push branch
+                </label>
+                <Input
+                  id="new-session-branch"
+                  name="branch"
+                  className="new-session-branch"
+                  placeholder="Push to existing branch (optional)"
+                  title="Check out this branch and push to it instead of a new dolly/session branch. Never the default branch."
+                  autoComplete="off"
+                  spellCheck={false}
+                  maxLength={200}
+                  value={branch}
+                  onChange={(event) => setBranch(event.target.value)}
+                />
+              </>
+            )}
+          </div>
           <label htmlFor="new-session-prompt" className="sr-only">
             Task
           </label>

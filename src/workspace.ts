@@ -1,6 +1,6 @@
 import { defineDoc } from "@earendil-works/pi-durable";
 import * as Schema from "effect/Schema";
-import { Repository } from "./github-contracts";
+import { BranchName, Repository } from "./github-contracts";
 
 export const WorkspaceInput = Schema.Struct({
   repository: Repository,
@@ -18,9 +18,17 @@ export const WorkspaceInput = Schema.Struct({
       ),
     ),
   ),
+  /**
+   * The branch this session pushes to instead of its own dolly/session-<id>. Only a person
+   * starting a session can choose it: the agent's checkout and attach never carry one.
+   */
+  branch: Schema.optional(BranchName),
 });
 
-export type WorkspaceConfig = Omit<typeof WorkspaceInput.Type, "networkHosts" | "ref"> & {
+export type WorkspaceConfig = Omit<
+  typeof WorkspaceInput.Type,
+  "networkHosts" | "ref" | "branch"
+> & {
   branch: string;
   ref: string;
   networkHosts: string[];
@@ -29,9 +37,10 @@ export type WorkspaceConfig = Omit<typeof WorkspaceInput.Type, "networkHosts" | 
 export function workspaceConfig(input: typeof WorkspaceInput.Type, id: string): WorkspaceConfig {
   return {
     repository: input.repository,
-    ref: input.ref ?? "HEAD",
+    // A granted branch is usually an existing one, so start from it and push fast-forwards.
+    ref: input.ref ?? input.branch ?? "HEAD",
     networkHosts: Array.from(input.networkHosts ?? []),
-    branch: `dolly/session-${id}`,
+    branch: input.branch ?? `dolly/session-${id}`,
   };
 }
 
@@ -119,8 +128,13 @@ export function selectRepository(
     );
 
   if (!existing) {
+    // Never spread input: a push branch is granted by a person, not chosen by the agent.
     const config = workspaceConfig(
-      { ...input, networkHosts: state.config?.networkHosts ?? [] },
+      {
+        repository: input.repository,
+        ...(input.ref && { ref: input.ref }),
+        networkHosts: state.config?.networkHosts ?? [],
+      },
       id,
     );
 
@@ -170,6 +184,7 @@ export function workspacePrompt(state: WorkspaceState | null | undefined) {
     "Shell and relative read_file, write_file and edit_file paths use the active repo's /workspace/repo. Each attachment has its own sandbox. Use workspace attach to activate another repo without replacing the primary or losing changes.",
     "An empty repository discovery/enrolment list does not establish that a known selected repo is inaccessible. Try the selected repo directly with workspace checkout and report the actual authorization or checkout error. Do not treat repository selection as an authorization grant.",
     "If GitHub access is denied, explain the concrete configuration step from the tool result. Never claim that no repository access is available merely because discovery returned an empty list.",
+    "Each checkout pushes only to its branch above (never the default branch); the github tool writes only dolly/* branches and those. To work on another existing branch, the user starts a new session with that branch set as its push branch: in the web app's New session form, or as workspace.branch when creating a session through the API. A request in chat cannot grant it.",
   ].join("\n");
 }
 

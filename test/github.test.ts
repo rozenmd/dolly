@@ -601,7 +601,7 @@ it("requires both existing API authentication gates and validates operation cont
     {
       action: "write_file",
       repository,
-      branch: "main",
+      branch: "refs/heads/main",
       path: "src/a.ts",
       message: "change",
       content: "x",
@@ -843,6 +843,22 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
       })
     ).json(),
   ).toMatchObject({ ok: false, code: "workflow_denied" });
+
+  // Nobody granted these branches, so nothing reaches GitHub.
+  for (const branch of ["main", "feature/audit"])
+    expect(
+      await (
+        await execute({
+          action: "write_file",
+          repository,
+          branch,
+          path: "a.ts",
+          sha,
+          content: "change",
+          message: "Fix",
+        })
+      ).json(),
+    ).toMatchObject({ ok: false, code: "branch_denied" });
   defaultBranch = "dolly/fix";
   expect(
     await (
@@ -1287,6 +1303,79 @@ it("brokers real Worker RPC Git requests without exposing credentials or allowin
   }
 
   expect(upstream).toBe(2);
+});
+
+it("lets a person-granted push branch replace the session branch, but never the default branch", async () => {
+  await connect();
+  const { workspaceConfig } = await import("../src/workspace");
+
+  const granted = workspaceConfig(
+    { repository: "another-owner/project", branch: "investigate-audit-headers-null" },
+    "42",
+  );
+
+  expect(granted).toMatchObject({
+    branch: "investigate-audit-headers-null",
+    ref: "investigate-audit-headers-null",
+  });
+
+  let upstream = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = new URL(String(input));
+
+    if (url.hostname === "github.com") {
+      upstream++;
+
+      return new Response("Git response");
+    }
+
+    if (url.pathname.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (url.pathname.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+
+    return Response.json({ default_branch: "main" });
+  });
+  const agent = env.AGENT.getByName("owner");
+
+  const push = async (config: typeof granted, branch: string) => {
+    const command = `${"a".repeat(40)} ${"b".repeat(40)} refs/heads/${branch}\0report-status\n`;
+    const body = (command.length + 4).toString(16).padStart(4, "0") + command + "0000PACK";
+
+    const response = await agent.gitTransport(
+      new Request("http://github.workspace/another-owner/project.git/git-receive-pack", {
+        method: "POST",
+        body,
+      }),
+      config,
+    );
+
+    const text = await response.text();
+
+    return { status: response.status, text };
+  };
+
+  expect(await push(granted, "investigate-audit-headers-null")).toEqual({
+    status: 200,
+    text: "Git response",
+  });
+
+  for (const branch of ["dolly/session-42", "main", "other-feature"])
+    expect(await push(granted, branch)).toEqual({
+      status: 403,
+      text: "Only non-deleting updates to this session's push branch (investigate-audit-headers-null) are allowed",
+    });
+
+  // Naming the default branch grants nothing: every write is refused before reading the body.
+  const main = workspaceConfig({ repository: "another-owner/project", branch: "main" }, "42");
+  expect(await push(main, "main")).toEqual({
+    status: 403,
+    text: "Default branch writes are forbidden",
+  });
+  expect(upstream).toBe(1);
 });
 
 async function setAccounts(accounts: string[]) {

@@ -62,7 +62,13 @@ import {
   verifySlackSignature,
 } from "./slack-events";
 import { GitHub } from "./github";
-import { GitHubRequest, GitHubAccounts, GitHubSetup, GitHubReply } from "./github-contracts";
+import {
+  GitHubRequest,
+  GitHubAccounts,
+  GitHubSetup,
+  GitHubReply,
+  branchWriteAllowed,
+} from "./github-contracts";
 import {
   ChildRequest,
   ChildMessage,
@@ -425,7 +431,7 @@ export class Agent extends DurableObject<Env> {
       name: "github",
       description:
         "Publish screenshot evidence with upload_screenshot: repository, open PR number, image (the r2:// reference returned in preview screenshot text), and caption (e.g. Before — desktop 1280×800). This copies that image to a PUBLIC R2 URL that expires after 30 days and returns image_url and markdown; it does not post anything to the PR. Put the images in the PR description: read_pull_request, then update_pull_request with the whole existing body plus a Screenshots section using the returned markdown. Only publish when the user or repository guidance asks for PR screenshots/evidence; inspect for secrets or private data first. Other conversation images remain private. " +
-        "Read UTF-8 files from any public GitHub repository using read_file with a full owner/repository, path and ref; reads return up to 2000 lines or 50 KiB from an optional 1-based offset (limit for fewer), and nextOffset says where to continue. Discover paths with list_files (repository, ref, optional directory path, page) instead of guessing; it lists one directory level, directories end in / and can be listed in turn; no App connection, approved account or sandbox checkout is needed for public reads. Private reads and all writes require the connected App and an approved account. List App repositories, create dolly/* branches, write files with an expected sha, and open pull requests without sandbox credentials. Review pull requests: read_pull_request (metadata, head SHA), list_pull_request_files (paged diff patches), list_pull_request_comments (discussion, inline threads, reviews) and read_pull_request_checks work anonymously for public repos. Read GitHub Actions logs here, never through the sandbox: read_job_log (repository, job_id) returns the job's failed steps, the line numbers of ##[error] annotations and the last 300 lines (timestamps and colour codes stripped); pass offset/limit (up to 2000 lines or 50 KiB) to read elsewhere. A job_id is a check run id from read_pull_request_checks or the number after /job/ in an Actions URL; list_workflow_jobs (repository, run_id) lists a run's jobs with ids and steps. Logs exist only once a job completes. Workflow: read the PR, list its files, optionally check out the head SHA in the sandbox, then create_review with commit_id set to that head SHA and inline comments anchored by path, line and side (RIGHT for new or context lines, LEFT for removed lines; start_line for ranges). Lines must fall inside the diff hunks. Use event PENDING to leave the review unsubmitted for a human, COMMENT to publish; approvals and change requests are not available. reply_to_review_comment answers an existing thread. update_pull_request edits only a pull request's title and/or body (repository, number, title?, body?); body replaces the whole description, so read_pull_request first to keep what should stay. Never merges, closes, reopens or retargets pull requests and never writes the default branch. Mutations are not automatically replayed; inspect GitHub (list_pull_request_comments) after an interrupted write before trying again, to avoid duplicate reviews.",
+        "Read UTF-8 files from any public GitHub repository using read_file with a full owner/repository, path and ref; reads return up to 2000 lines or 50 KiB from an optional 1-based offset (limit for fewer), and nextOffset says where to continue. Discover paths with list_files (repository, ref, optional directory path, page) instead of guessing; it lists one directory level, directories end in / and can be listed in turn; no App connection, approved account or sandbox checkout is needed for public reads. Private reads and all writes require the connected App and an approved account. List App repositories, create branches, write files with an expected sha, and open pull requests without sandbox credentials; writes target dolly/* branches or this session's push branch only. Review pull requests: read_pull_request (metadata, head SHA), list_pull_request_files (paged diff patches), list_pull_request_comments (discussion, inline threads, reviews) and read_pull_request_checks work anonymously for public repos. Read GitHub Actions logs here, never through the sandbox: read_job_log (repository, job_id) returns the job's failed steps, the line numbers of ##[error] annotations and the last 300 lines (timestamps and colour codes stripped); pass offset/limit (up to 2000 lines or 50 KiB) to read elsewhere. A job_id is a check run id from read_pull_request_checks or the number after /job/ in an Actions URL; list_workflow_jobs (repository, run_id) lists a run's jobs with ids and steps. Logs exist only once a job completes. Workflow: read the PR, list its files, optionally check out the head SHA in the sandbox, then create_review with commit_id set to that head SHA and inline comments anchored by path, line and side (RIGHT for new or context lines, LEFT for removed lines; start_line for ranges). Lines must fall inside the diff hunks. Use event PENDING to leave the review unsubmitted for a human, COMMENT to publish; approvals and change requests are not available. reply_to_review_comment answers an existing thread. update_pull_request edits only a pull request's title and/or body (repository, number, title?, body?); body replaces the whole description, so read_pull_request first to keep what should stay. Never merges, closes, reopens or retargets pull requests and never writes the default branch. Mutations are not automatically replayed; inspect GitHub (list_pull_request_comments) after an interrupted write before trying again, to avoid duplicate reviews.",
       parameters: githubSchema,
       replay: "unsafe",
       executionMode: "sequential",
@@ -1176,11 +1182,26 @@ export class Agent extends DurableObject<Env> {
   githubComplete(state: string, code: string) {
     return this.githubRun(Effect.flatMap(GitHub, (github) => github.complete(state, code)));
   }
-  githubExecute(input: typeof GitHubRequest.Type): Promise<typeof GitHubReply.Type> {
+  /** `granted` names the branches a person chose for a session, besides dolly/*. */
+  githubExecute(
+    input: typeof GitHubRequest.Type,
+    granted: readonly { repository: string; branch: string }[] = [],
+  ): Promise<typeof GitHubReply.Type> {
     return Effect.runPromise(
       Schema.decodeUnknownEffect(GitHubRequest)(input).pipe(
         Effect.orDie,
-        Effect.flatMap((parsed) => Effect.flatMap(GitHub, (github) => github.execute(parsed))),
+        Effect.flatMap((parsed) => {
+          const op = parsed.operation;
+
+          if ("branch" in op && !branchWriteAllowed(op.repository, op.branch, granted))
+            return Effect.succeed({
+              ok: false as const,
+              code: "branch_denied",
+              message: `Writes are limited to dolly/* branches and this session's push branch, not ${op.branch}. A person can start a session with ${op.branch} as its push branch.`,
+            });
+
+          return Effect.flatMap(GitHub, (github) => github.execute(parsed));
+        }),
         Effect.provide(this.services),
         Effect.catchTag("OperationError", (error) =>
           Effect.logError({
@@ -1197,7 +1218,13 @@ export class Agent extends DurableObject<Env> {
   }
 
   private async githubForSession(id: ConversationId, input: typeof GitHubRequest.Type) {
-    const reply = await this.githubExecute(input);
+    const state = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
+
+    const granted = [state?.config, ...(state?.attached ?? [])].flatMap((config) =>
+      config ? [{ repository: config.repository, branch: config.branch }] : [],
+    );
+
+    const reply = await this.githubExecute(input, granted);
 
     if (
       input.operation.action === "open_pull_request" &&
@@ -1627,9 +1654,10 @@ export class Agent extends DurableObject<Env> {
             : request.body;
 
         if (request.method === "POST" && route.write && !body)
-          return new Response("Only non-deleting updates to the session branch are allowed", {
-            status: 403,
-          });
+          return new Response(
+            `Only non-deleting updates to this session's push branch (${workspace.branch}) are allowed`,
+            { status: 403 },
+          );
         const headers = new Headers();
 
         for (const name of ["Content-Type", "Accept", "Git-Protocol", "Content-Encoding"]) {
