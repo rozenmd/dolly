@@ -486,7 +486,9 @@ test("connects Claude without ChatGPT, explicitly tests Worker inference, and st
     "Hello from Claude",
   );
   expect(selectedModel).toBe("claude-haiku-5-5");
-  expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.v1"))).not.toContain(token);
+  expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.cache.v1"))).not.toContain(
+    token,
+  );
   await page.reload();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByRole("article", { name: "assistant message" })).toContainText(

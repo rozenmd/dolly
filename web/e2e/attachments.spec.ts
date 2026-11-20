@@ -151,5 +151,7 @@ test("attaches screenshots in both composers with picker, paste and drop, and pr
   expect(screenshotOnly).toHaveLength(2);
   expect(screenshotOnly[1]).toEqual(screenshotOnly[0]);
   expect(screenshotOnly[0].images).toEqual([{ mimeType: "image/png", data: png }]);
-  expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.v1"))).not.toContain(png);
+  expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.cache.v1"))).not.toContain(
+    png,
+  );
 });

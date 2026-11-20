@@ -152,6 +152,14 @@ function placeholderModel(stored: string | null) {
   return stored && modelProvider(stored) === "openai" ? stored : DEFAULT_OPENAI_MODEL;
 }
 
+type SessionPull = NonNullable<SavedSession["pullRequest"]>;
+
+type CachedPullSummary = { summary: PullRequestSummary; checked: number };
+
+function pullSummaryKey(pull: SessionPull) {
+  return `pull-summary:${pull.repository.toLowerCase()}#${pull.number}`;
+}
+
 /** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
 export class Agent extends DurableObject<Env> {
   private harness!: Harness;
@@ -2126,44 +2134,96 @@ export class Agent extends DurableObject<Env> {
     };
   });
 
-  private pullSummaries = new Map<string, { summary: PullRequestSummary; checked: number }>();
+  private pullSummaryRefresh?: Promise<void>;
+  private pullSummaryRetryAfter = new Map<string, number>();
+
+  private refreshPullSummaries(pulls: ReadonlyArray<readonly [string, SessionPull]>) {
+    if (!pulls.length || this.pullSummaryRefresh) return;
+    const queue = pulls.values();
+
+    const sweep = async () => {
+      for (const [key, pull] of queue) {
+        const summary = await Effect.runPromise(
+          Effect.flatMap(GitHub, (github) =>
+            github.pullRequestSummary(pull.repository, pull.number),
+          ).pipe(
+            Effect.provide(this.services),
+            Effect.orElseSucceed(() => undefined),
+          ),
+        ).catch(() => undefined);
+
+        if (summary) {
+          await this.ctx.storage.put(key, {
+            summary,
+            checked: Date.now(),
+          } satisfies CachedPullSummary);
+          this.pullSummaryRetryAfter.delete(key);
+        } else this.pullSummaryRetryAfter.set(key, Date.now() + 300_000);
+      }
+    };
+
+    this.pullSummaryRefresh = Promise.allSettled(
+      Array.from({ length: Math.min(4, pulls.length) }, sweep),
+    )
+      .then((results) => {
+        for (const result of results) {
+          if (result.status === "rejected")
+            console.warn("pull_summary_refresh_failed", exceptionDetails(result.reason));
+        }
+      })
+      .finally(() => {
+        this.pullSummaryRefresh = undefined;
+      });
+    this.ctx.waitUntil(this.pullSummaryRefresh);
+  }
 
   async sessions() {
     const secrets = await Effect.runPromise(this.credentials.secrets);
     const sessions = await listSessions(this.harness, this.ctx.storage, secrets);
-    const now = Date.now();
+    const pulls = new Map<string, SessionPull>();
 
-    // Ask GitHub for PR state, title and diff size, cached briefly so sidebar
-    // polling stays within rate limits.
-    return Promise.all(
-      sessions.map(async (session) => {
+    // Prefer active sessions when equally stale. Several sessions may link the same PR.
+    for (const archived of [false, true]) {
+      for (const session of sessions) {
         const pull = session.pullRequest;
 
-        if (!pull) return session;
-        const key = `${pull.repository}#${pull.number}`;
-        let cached = this.pullSummaries.get(key);
-        const state = cached?.summary.state;
+        if (pull && Boolean(session.archived) === archived) pulls.set(pullSummaryKey(pull), pull);
+      }
+    }
+
+    const cached = new Map<string, CachedPullSummary>();
+    const now = Date.now();
+    const keys = [...pulls.keys()];
+
+    for (let offset = 0; offset < keys.length; offset += 100) {
+      const page = await this.ctx.storage.get<CachedPullSummary>(keys.slice(offset, offset + 100));
+
+      for (const [key, value] of page) cached.set(key, value);
+    }
+
+    if (!this.pullSummaryRefresh) {
+      const stale = [...pulls].filter(([key]) => {
+        const value = cached.get(key);
+        const state = value?.summary.state;
         const ttl = state === "merged" || state === "closed" ? 600_000 : 60_000;
 
-        if (!cached || now - cached.checked > ttl) {
-          const summary = await Effect.runPromise(
-            Effect.flatMap(GitHub, (github) =>
-              github.pullRequestSummary(pull.repository, pull.number),
-            ).pipe(
-              Effect.provide(this.services),
-              Effect.orElseSucceed(() => undefined),
-            ),
-          ).catch(() => undefined);
+        return (
+          (!value || value.checked + ttl <= now) &&
+          (this.pullSummaryRetryAfter.get(key) ?? 0) <= now
+        );
+      });
 
-          if (summary) {
-            cached = { summary, checked: now };
-            this.pullSummaries.set(key, cached);
-          }
-        }
+      stale.sort(([a], [b]) => (cached.get(a)?.checked ?? 0) - (cached.get(b)?.checked ?? 0));
+      // Bound network fan-out per request; later polls pick up the rest without blocking the list.
+      this.refreshPullSummaries(stale.slice(0, 12));
+    }
 
-        return cached ? { ...session, pullRequest: { ...pull, ...cached.summary } } : session;
-      }),
-    );
+    return sessions.map((session) => {
+      const pull = session.pullRequest;
+      const summary = pull && cached.get(pullSummaryKey(pull))?.summary;
+
+      return summary ? { ...session, pullRequest: { ...pull, ...summary } } : session;
+    });
   }
 
   async archiveSession(id: string, archived: boolean) {

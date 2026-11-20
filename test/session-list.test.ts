@@ -107,6 +107,86 @@ it("paginates historical conversations and includes sessions without browser ali
   expect((await SELF.fetch(`https://worker/api/sessions/${ids[0]}`, { headers })).status).toBe(200);
 });
 
+it("reuses saved transcript summaries for 35 active and 85 archived sessions after restart", async () => {
+  const firstId = await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    const harness = agent["harness"];
+    const ids: ConversationId[] = [];
+
+    await harness.commit(async (tx) => {
+      for (let i = 0; i < 120; i++) {
+        const { id } = await tx.createConversation({ ownership: { kind: "ownerless" } });
+        ids.push(id);
+        await tx.appendEntry(id, {
+          kind: "pi.input",
+          model: [{ role: "user", content: `Session ${i}`, timestamp: 100 + i }],
+        });
+      }
+    }, BACKGROUND_CONTEXT);
+
+    for (const id of ids.slice(35))
+      await state.storage.put(`session-meta:${id}`, { archived: true });
+
+    return ids[0]!;
+  });
+
+  const initial = await list();
+  expect(initial).toHaveLength(120);
+  expect(initial.filter((session) => session.archived)).toHaveLength(85);
+  await abortAllDurableObjects();
+
+  // Count full transcript-page reads, not the lightweight tip check used for invalidation.
+  const entries = await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const conversation = await agent["harness"].conversation(firstId, BACKGROUND_CONTEXT);
+
+    const prototype: Pick<NonNullable<typeof conversation>, "entries"> = Object.getPrototypeOf(
+      conversation!,
+    );
+
+    return vi.spyOn(prototype, "entries");
+  });
+
+  expect(await list()).toEqual(initial);
+  expect(entries).not.toHaveBeenCalled();
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    await agent["harness"].commit(async (tx) => {
+      await tx.appendEntry(firstId, {
+        kind: "pi.input",
+        model: [{ role: "user", content: "Follow-up prompt", timestamp: 500 }],
+      });
+    }, BACKGROUND_CONTEXT);
+  });
+
+  expect((await list())[0]).toMatchObject({
+    id: String(firstId),
+    title: "Session 0",
+    updatedAt: 500,
+  });
+  expect(entries).toHaveBeenCalledTimes(1);
+});
+
+it("redacts cached titles again when credentials change", async () => {
+  const key = "fixture-opaque-credential";
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const harness = agent["harness"];
+
+    await harness.commit(async (tx) => {
+      const { id } = await tx.createConversation({ ownership: { kind: "ownerless" } });
+      await tx.appendEntry(id, {
+        kind: "pi.input",
+        model: [{ role: "user", content: `Check ${key}`, timestamp: 100 }],
+      });
+    }, BACKGROUND_CONTEXT);
+  });
+
+  expect((await list())[0].title).toBe(`Check ${key}`);
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("credential:anthropic", { type: "api_key", key });
+  });
+  expect((await list())[0].title).toBe("Check [redacted]");
+});
+
 it("migrates browser archive state once and shares later archive changes with every device", async () => {
   await seed();
 
