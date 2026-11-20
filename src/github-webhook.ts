@@ -212,6 +212,29 @@ function ciEvent(event: string, text: string): CiEvent | undefined {
   return undefined;
 }
 
+const PullRequestEvent = Schema.Struct({
+  repository: Schema.Struct({ full_name: Repository }),
+  number: Id,
+  pull_request: Schema.Struct({}),
+});
+
+/**
+ * The pull request any `pull_request` event (merged, closed, reopened, drafted, edited...) is
+ * about. Call it only on a body whose signature has been verified.
+ */
+export function pullRequestChange(
+  event: string,
+  text: string,
+): { repository: string; number: number } | undefined {
+  if (event !== "pull_request") return undefined;
+
+  const value = Option.getOrUndefined(
+    Schema.decodeUnknownOption(Schema.fromJsonString(PullRequestEvent))(text),
+  );
+
+  return value && { repository: value.repository.full_name.toLowerCase(), number: value.number };
+}
+
 export const GitHubEvent = Schema.Struct({
   installationId: Id,
   repository: Repository,

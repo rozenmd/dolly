@@ -41,7 +41,7 @@ import {
   type DefaultModel,
 } from "./lib/api";
 import { ago } from "./lib/time";
-import { watchSession } from "./lib/session-stream";
+import { watchSession, watchSessions } from "./lib/session-stream";
 import { extendTranscript, prependHistory } from "./lib/transcript-history";
 import { indexedMarks, type RailMark } from "./lib/turn-rail";
 import { imagesBody, type Attachment } from "./lib/images";
@@ -208,9 +208,19 @@ export function WorkspaceApp() {
     const { signal } = controller;
     let initial = true;
     let inFlight = false;
+    // A change announced mid-request may not be in its answer: fetch once more after it.
+    let again = false;
 
-    const refresh = async (startup = false) => {
-      if (inFlight || (!startup && document.visibilityState === "hidden")) return;
+    const refresh = async (startup = false, announced = false) => {
+      if (!startup && document.visibilityState === "hidden") return;
+
+      // Focus and timer refreshes coalesce; an announced change must not be lost to one.
+      if (inFlight) {
+        again ||= announced;
+
+        return;
+      }
+
       inFlight = true;
       const before = sessionListRef.current;
 
@@ -237,6 +247,11 @@ export function WorkspaceApp() {
       } finally {
         inFlight = false;
 
+        if (again && !signal.aborted) {
+          again = false;
+          void refresh();
+        }
+
         if (!signal.aborted && initial) {
           initial = false;
 
@@ -254,11 +269,17 @@ export function WorkspaceApp() {
 
     const refreshVisible = () => void refresh();
     void refresh(true);
-    const timer = window.setInterval(refreshVisible, 15_000);
+    // The server announces changes over a socket; polling only covers a socket that died quietly.
+    const unwatch = watchSessions(() => void refresh(false, true));
+    const timer = window.setInterval(refreshVisible, 60_000);
     window.addEventListener("focus", refreshVisible);
+    // Hidden tabs skip announced changes; catch up when shown again.
+    document.addEventListener("visibilitychange", refreshVisible);
 
     return () => {
       controller.abort();
+      unwatch();
+      document.removeEventListener("visibilitychange", refreshVisible);
       window.clearInterval(timer);
       window.removeEventListener("focus", refreshVisible);
     };

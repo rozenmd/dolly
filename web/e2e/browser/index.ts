@@ -49,6 +49,8 @@ beforeEach(async () => {
   // Pages may load from a different origin than the server (see setup.ts); requests to it
   // are served from the server.
   current = await Page.create(connection, process.env.E2E_PAGE_URL ?? baseURL, baseURL);
+  // The sidebar's change feed stays open and quiet unless a spec routes it itself.
+  await current.routeWebSocket("**/api/events", () => {});
 });
 
 afterEach(async (context) => {

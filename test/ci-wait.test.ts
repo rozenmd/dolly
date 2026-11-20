@@ -324,6 +324,8 @@ const entry = new GitHubIngress(createExecutionContext(), env);
 /** The event-specific part of a fake CI webhook payload; installation and repository are added. */
 type WebhookPayload = {
   action?: string;
+  number?: number;
+  pull_request?: { merged: boolean; head: { sha: string } };
   sha?: string;
   state?: string;
   check_run?: { head_sha: string; conclusion: string | null; pull_requests: { number: number }[] };
@@ -807,6 +809,115 @@ it("a matching webhook pulls the next poll forward; others don't", async () => {
     }),
   ).toBe(202);
   expect(wakes).toHaveLength(1);
+});
+
+/** The sidebar's change feed, as the web app opens it. */
+async function sidebarFeed() {
+  const response = await SELF.fetch("https://worker/api/events", {
+    headers: { ...headers, Upgrade: "websocket", Origin: "https://worker" },
+  });
+
+  expect(response.status).toBe(101);
+  const socket = response.webSocket!;
+  const messages: string[] = [];
+  socket.addEventListener("message", (event) => messages.push(String(event.data)));
+  socket.accept();
+
+  return { socket, messages };
+}
+
+it("the sidebar feed announces runs starting and ending, and archiving", async () => {
+  model = () => answer("Done");
+
+  const id = await root();
+  const feed = await sidebarFeed();
+
+  const running = async () =>
+    (
+      await (
+        await SELF.fetch("https://worker/api/sessions", { headers })
+      ).json<{ id: string; running?: boolean; archived?: boolean }[]>()
+    ).find((session) => session.id === id);
+
+  await prompt(id, "Hello");
+  await expect.poll(() => transcript(id)).toContain("Done");
+  await expect.poll(async () => (await running())?.running).toBe(false);
+  // Restoring the session on prompt, the run starting and the run ending.
+  await expect.poll(() => feed.messages.length, { timeout: 4000 }).toBeGreaterThanOrEqual(3);
+
+  // Let the turn's trailing work (titling, checkpoints) finish announcing itself first.
+  let before = -1;
+
+  while (before !== feed.messages.length) {
+    before = feed.messages.length;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  const archived = await SELF.fetch(`https://worker/api/sessions/${id}`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ archived: true }),
+  });
+
+  expect(archived.status).toBe(200);
+  await expect.poll(() => feed.messages.length).toBeGreaterThan(before);
+  expect(new Set(feed.messages)).toEqual(new Set(['{"type":"sessions"}']));
+  feed.socket.close();
+});
+
+it("a pull_request webhook updates the sidebar's PR state before the cache expires", async () => {
+  model = ({ lastIsTool, lastUser }) => {
+    if (lastIsTool) return answer("Opened");
+
+    if (lastUser.includes("[CI wait ")) return answer("Woken");
+
+    return call("github", openPull);
+  };
+
+  const id = await root();
+  await prompt(id, "Open a PR");
+  await expect.poll(() => transcript(id)).toContain("Opened");
+
+  const state = async () => {
+    const sessions = await (
+      await SELF.fetch("https://worker/api/sessions", { headers })
+    ).json<{ id: string; pullRequest?: { number: number; state?: string } }[]>();
+
+    return sessions.find((session) => session.id === id)?.pullRequest;
+  };
+
+  // The first list reads GitHub in the background; a later one shows what it found.
+  await expect.poll(state, { timeout: 4000 }).toMatchObject({ number: 8, state: "open" });
+
+  const feed = await sidebarFeed();
+  await expect.poll(() => feed.messages.length).toBe(0);
+
+  // Merged on GitHub, well inside the 60 second cache: only the webhook can tell the sidebar.
+  github.pull = { state: "closed", merged: true, sha: "a".repeat(40) };
+  expect(
+    await webhook("pull_request", {
+      action: "closed",
+      number: 8,
+      pull_request: { merged: true, head: { sha: "a".repeat(40) } },
+    }),
+  ).toBe(202);
+  // The feed announces it once the new state is stored, so the very next list shows it.
+  await expect.poll(() => feed.messages.length, { timeout: 4000 }).toBeGreaterThan(0);
+  expect(feed.messages).toContain('{"type":"sessions"}');
+  expect((await state())?.state).toBe("merged");
+  feed.socket.close();
+
+  // A PR no session shows is not read at all.
+  const after = github.reads;
+  expect(
+    await webhook("pull_request", {
+      action: "closed",
+      number: 9,
+      pull_request: { merged: true, head: { sha: "e".repeat(40) } },
+    }),
+  ).toBe(202);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(github.reads).toBe(after);
 });
 
 it("a workflow_run webhook wakes a release wait at once, without an alarm", async () => {

@@ -52,7 +52,7 @@ import {
 } from "./workspace";
 import { gitRoute, checkedPush } from "./git-transport";
 import { BROWSER_SESSION_MS, MAX_BROWSER_SESSIONS } from "./browser-workspace";
-import { WebhookSetup } from "./github-webhook";
+import { pullRequestChange, WebhookSetup } from "./github-webhook";
 import { STEER_TOOL_SKIP, SteerInterrupts, steerInterrupts, steerQueued } from "./steer-interrupt";
 import { admitGitHub, githubDelivery, GitHubThreads } from "./github-inbox";
 import { admitSlack, slackDelivery } from "./slack-inbox";
@@ -139,6 +139,7 @@ import type { Env } from "./env";
 import type { FileResult } from "./sandbox";
 import { resolveImages, storeImages, type PromptImage } from "./images";
 import { listSessions } from "./session-list";
+import { SessionsFeed } from "./sessions-feed";
 import type { PullRequestSummary, SavedSession } from "./session-contracts";
 import { PreviewOutbound, PreviewRequest, PreviewToolInput } from "./preview";
 import { capturePreview } from "./browser-preview";
@@ -181,7 +182,10 @@ type SessionPull = NonNullable<SavedSession["pullRequest"]>;
 
 type CachedPullSummary = { summary: PullRequestSummary; checked: number };
 
-function pullSummaryKey(pull: SessionPull) {
+/** What the pull summary cache needs to name and re-read a pull request. */
+type PullRef = Pick<SessionPull, "repository" | "number">;
+
+function pullSummaryKey(pull: PullRef) {
   return `pull-summary:${pull.repository.toLowerCase()}#${pull.number}`;
 }
 
@@ -222,6 +226,7 @@ export class Agent extends DurableObject<Env> {
       ),
   });
   private readonly steerInterrupts = new SteerInterrupts();
+  private readonly sessionsFeed: SessionsFeed;
   private readonly alarmPermit = Semaphore.makeUnsafe(1);
   private readonly scheduler = new Scheduler(
     () => this.harness,
@@ -262,6 +267,7 @@ export class Agent extends DurableObject<Env> {
     super(ctx, env);
     this.credentials = new Credentials(ctx.storage);
     this.papercuts = new Papercuts(ctx.storage.sql);
+    this.sessionsFeed = new SessionsFeed(ctx, () => this.harness);
     this.services = Layer.mergeAll(
       Layer.succeed(Account, this.credentials),
       ChatGPTProtocol.layer,
@@ -273,7 +279,10 @@ export class Agent extends DurableObject<Env> {
       credentials: this.credentials,
       screenshots: env.SCREENSHOTS,
     }).pipe(Layer.provide(this.services));
-    void ctx.blockConcurrencyWhile(() => Effect.runPromise(this.initialize()));
+    void ctx
+      .blockConcurrencyWhile(() => Effect.runPromise(this.initialize()))
+      // Sidebars that stayed connected through hibernation get running dots again.
+      .then(() => this.sessionsFeed.resume());
   }
 
   private initialize = Effect.fn("Agent.initialize")(function* (this: Agent) {
@@ -1370,6 +1379,7 @@ export class Agent extends DurableObject<Env> {
         number: reply.result.number,
         url: reply.result.url,
       });
+      this.sessionsFeed.changed();
 
       // Subscribe the session to its own PR's checks, so failing CI comes back here unasked.
       const ciWait = await this.ciWaiter.watchOpenedPull(
@@ -1417,6 +1427,23 @@ export class Agent extends DurableObject<Env> {
         const verified = yield* Effect.flatMap(GitHub, (github) =>
           github.receiveWebhook(body, signature, event),
         );
+
+        // 202 and 204 both mean the signature checked out.
+        const changed =
+          verified.status === 202 || verified.status === 204
+            ? pullRequestChange(event, new TextDecoder().decode(body))
+            : undefined;
+
+        // Best effort: the sidebar still catches up when the cached summary expires.
+        if (changed)
+          yield* attempt("pull-summary.invalidate", () => this.pullChanged(changed)).pipe(
+            Effect.catchTag("OperationError", (error) =>
+              Effect.logWarning({
+                event: "pull_summary_invalidate_failed",
+                error: exceptionDetails(error),
+              }),
+            ),
+          );
 
         if (verified.status !== 202) return verified;
 
@@ -2106,7 +2133,7 @@ export class Agent extends DurableObject<Env> {
         // An `undefined` field reads back as unset, which clears that setting.
         await tx.put(key, { ...(await tx.get<SessionMetadata>(key)), ...patch });
       }),
-    );
+    ).pipe(Effect.tap(() => Effect.sync(() => this.sessionsFeed.changed())));
 
   configureSession(id: string, settings: typeof SessionSettings.Type) {
     return Effect.runPromise(
@@ -2288,6 +2315,8 @@ export class Agent extends DurableObject<Env> {
             ),
           );
 
+        this.sessionsFeed.changed();
+
         return { id, workspaceId, model: modelId, thinkingLevel, speed, autoFallback };
       }),
     );
@@ -2339,7 +2368,7 @@ export class Agent extends DurableObject<Env> {
   private pullSummaryRefresh?: Promise<void>;
   private pullSummaryRetryAfter = new Map<string, number>();
 
-  private refreshPullSummaries(pulls: ReadonlyArray<readonly [string, SessionPull]>) {
+  private refreshPullSummaries(pulls: ReadonlyArray<readonly [string, PullRef]>) {
     if (!pulls.length || this.pullSummaryRefresh) return;
     const queue = pulls.values();
 
@@ -2355,11 +2384,16 @@ export class Agent extends DurableObject<Env> {
         ).catch(() => undefined);
 
         if (summary) {
+          const previous = await this.ctx.storage.get<CachedPullSummary>(key);
           await this.ctx.storage.put(key, {
             summary,
             checked: Date.now(),
           } satisfies CachedPullSummary);
           this.pullSummaryRetryAfter.delete(key);
+
+          // Only real changes: every list request may start a refresh, so pinging on a no-op would loop.
+          if (JSON.stringify(previous?.summary) !== JSON.stringify(summary))
+            this.sessionsFeed.changed();
         } else this.pullSummaryRetryAfter.set(key, Date.now() + 300_000);
       }
     };
@@ -2377,6 +2411,22 @@ export class Agent extends DurableObject<Env> {
         this.pullSummaryRefresh = undefined;
       });
     this.ctx.waitUntil(this.pullSummaryRefresh);
+  }
+
+  /**
+   * GitHub says a pull request changed, so re-read it now rather than when its cached summary
+   * expires. Only PRs a session already shows are cached, so other events cost nothing. A sweep
+   * already in flight skips this one, but checked: 0 puts it first for the next list request.
+   */
+  private async pullChanged(pull: PullRef) {
+    const key = pullSummaryKey(pull);
+    const cached = await this.ctx.storage.get<CachedPullSummary>(key);
+
+    if (!cached) return;
+
+    await this.ctx.storage.put(key, { ...cached, checked: 0 } satisfies CachedPullSummary);
+    this.pullSummaryRetryAfter.delete(key);
+    this.refreshPullSummaries([[key, pull]]);
   }
 
   async sessions() {
@@ -2439,7 +2489,7 @@ export class Agent extends DurableObject<Env> {
     if (Option.isNone(conversation)) return undefined;
     const key = `session-meta:${conversation.value.id}`;
 
-    return this.ctx.storage.transaction(async (tx) => {
+    const result = await this.ctx.storage.transaction(async (tx) => {
       const metadata = await tx.get<{ archived?: boolean; kept?: boolean; createdAt?: number }>(
         key,
       );
@@ -2449,6 +2499,10 @@ export class Agent extends DurableObject<Env> {
 
       return patch.kept === undefined ? { archived: next.archived } : patch;
     });
+
+    this.sessionsFeed.changed();
+
+    return result;
   }
 
   /** The `dolly` tool's view of this instance, for one calling conversation (see self-query.ts). */
@@ -2607,6 +2661,7 @@ export class Agent extends DurableObject<Env> {
           ),
         );
 
+        // Restoring pings the sidebar, which also picks up this prompt's new time.
         yield* attempt("session.restore", () => this.archiveSession(id, false));
 
         return { submissionId: submission.id };
@@ -2680,6 +2735,8 @@ export class Agent extends DurableObject<Env> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket")
       return new Response("Expected a WebSocket upgrade", { status: 426 });
 
+    if (new URL(request.url).pathname === "/sessions") return this.sessionsFeed.accept();
+
     const id = new URL(request.url).searchParams.get("session") ?? "";
     const conversation = await Effect.runPromise(this.conversation(id));
 
@@ -2737,6 +2794,24 @@ export class Agent extends DurableObject<Env> {
     }
 
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /** Sidebar sockets hibernate (sessions-feed.ts); they only listen, so messages are ignored. */
+  override webSocketMessage() {}
+
+  override webSocketClose(socket: WebSocket, code: number, reason: string) {
+    if (!this.sessionsFeed.isFeed(socket)) return;
+    this.sessionsFeed.closed(socket);
+
+    try {
+      socket.close(code, reason);
+    } catch {
+      // Already closed.
+    }
+  }
+
+  override webSocketError(socket: WebSocket) {
+    if (this.sessionsFeed.isFeed(socket)) this.sessionsFeed.closed(socket);
   }
 
   transcript(id: string) {
