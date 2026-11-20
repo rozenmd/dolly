@@ -42,7 +42,7 @@ export default defineConfig({
       Agent: exports.durableObject({ storage: "sqlite" }),
       Sandbox: exports.durableObject({ storage: "sqlite", container: sandbox }),
     },
-    observability: { enabled: true },
+    observability: { enabled: true, issues: { enabled: true } },
   },
   containers: [sandbox],
 });
