@@ -691,15 +691,42 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   expect(prompts).toHaveLength(1);
   expect(prompts[0]).toContain("example/project#8 is ready for review");
   expect(prompts[0]).toContain(`commit_id ${sha}`);
+  expect(prompts[0]).toContain("This session is read-only");
+
+  // A review session is only offered read-only tools.
+  // SAFETY: the mock above only records Responses API request bodies, whose input is an item array.
+  const offered = (JSON.parse(prompts[0]).input as { type: string; tools?: { name: string }[] }[])
+    .flatMap((item) => (item.type === "additional_tools" ? (item.tools ?? []) : []))
+    .map((tool) => tool.name);
+
+  expect(offered).toEqual(expect.arrayContaining(["shell", "read_file", "github", "workspace"]));
+
+  for (const name of ["write_file", "edit_file", "preview", "spawn_task", "schedule_prompt"])
+    expect(offered).not.toContain(name);
   await expect.poll(() => reactions).toEqual(["8:eyes", "8:rocket"]);
 
   const threads = await (
     await SELF.fetch("https://worker/api/integrations/github/threads", { headers })
   ).json<{ thread: string; deliveries: { commentId: string; outcome: string | null }[] }[]>();
 
-  expect(threads.find((thread) => thread.thread === "example/project#8")?.deliveries).toEqual([
-    expect.objectContaining({ commentId: `review:${sha}`, outcome: "completed" }),
-  ]);
+  expect(
+    threads.find((thread) => thread.thread === "review:example/project#8")?.deliveries,
+  ).toEqual([expect.objectContaining({ commentId: `review:${sha}`, outcome: "completed" })]);
+
+  // The review session is read-only; a /dolly command on the same PR starts a writable session.
+  const sessions = await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const state = await agent["harness"].snapshot(GitHubThreads, BACKGROUND_CONTEXT);
+    const reviewed = state?.threads["review:example/project#8"];
+
+    if (!reviewed) throw new Error("Expected a review session");
+
+    return {
+      review: await agent["isReadOnly"](reviewed.id),
+      commands: state?.threads["example/project#8"],
+    };
+  });
+
+  expect(sessions).toEqual({ review: true, commands: undefined });
 
   // A draft made ready is reviewed; the agent already published its review, so nothing is added.
   expect(

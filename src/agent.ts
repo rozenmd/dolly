@@ -39,6 +39,10 @@ import {
   ConversationWorkspace,
   workspaceConfig,
   activeWorkspace,
+  isReadOnly,
+  READ_ONLY_GITHUB_ACTIONS,
+  READ_ONLY_REFUSAL,
+  READ_ONLY_WORKSPACE_ACTIONS,
   selectRepository,
   workspacePrompt,
   WorkspaceRequest,
@@ -410,6 +414,7 @@ export class Agent extends DurableObject<Env> {
       execute: ({ path, content }: { path: string; content: string }, api) =>
         Effect.runPromise(
           rpc("sandbox.writeFile", async () => {
+            await this.refuseReadOnly(api.conversationId);
             const file = await sandboxFile(api.conversationId, path);
 
             return withRestoreNotice<FileResult>(
@@ -438,6 +443,7 @@ export class Agent extends DurableObject<Env> {
       ) =>
         Effect.runPromise(
           rpc("sandbox.editFile", async () => {
+            await this.refuseReadOnly(api.conversationId);
             const file = await sandboxFile(api.conversationId, input.path);
 
             return withRestoreNotice<FileResult>(
@@ -1343,6 +1349,9 @@ export class Agent extends DurableObject<Env> {
   }
 
   private async githubForSession(id: ConversationId, input: typeof GitHubRequest.Type) {
+    if (!READ_ONLY_GITHUB_ACTIONS.has(input.operation.action) && (await this.isReadOnly(id)))
+      return { ok: false as const, code: "read_only", message: READ_ONLY_REFUSAL };
+
     const reply = await this.githubExecute(input);
 
     if (
@@ -1621,7 +1630,24 @@ export class Agent extends DurableObject<Env> {
     };
   }
 
+  /** Whether a session is read-only (see WorkspaceConfig.readOnly). */
+  private async isReadOnly(id: ConversationId) {
+    return isReadOnly(await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT));
+  }
+
+  private async refuseReadOnly(id: ConversationId) {
+    if (await this.isReadOnly(id))
+      throw new OperationError({
+        operation: "session.read_only",
+        message: READ_ONLY_REFUSAL,
+        details: null,
+      });
+  }
+
   private async runWorkspace(id: ConversationId, input: typeof WorkspaceRequest.Type) {
+    if (!READ_ONLY_WORKSPACE_ACTIONS.has(input.action) && (await this.isReadOnly(id)))
+      return { ok: false, code: "read_only", message: READ_ONLY_REFUSAL };
+
     if (input.action === "diagnostics" || input.action === "restart") {
       const state = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
       const active = activeWorkspace(state, String(id));
@@ -1764,6 +1790,9 @@ export class Agent extends DurableObject<Env> {
         const route = gitRoute(request, workspace.repository);
 
         if (!route) return new Response("Git route denied", { status: 403 });
+
+        if (route.write && workspace.readOnly)
+          return new Response(READ_ONLY_REFUSAL, { status: 403 });
 
         const authorized = yield* Effect.flatMap(GitHub, (github) =>
           github.authorize(workspace.repository, route.write),

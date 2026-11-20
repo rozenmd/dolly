@@ -1,5 +1,6 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
+  AgentDoc,
   AssistantEntry,
   configure,
   defineDoc,
@@ -11,7 +12,7 @@ import {
 import * as Result from "effect/Result";
 import * as Effect from "effect/Effect";
 import { exceptionDetails } from "./diagnostics";
-import { ConversationWorkspace, workspaceConfig } from "./workspace";
+import { ConversationWorkspace, READ_ONLY_TOOLS, workspaceConfig } from "./workspace";
 import { deliveryKey, type GitHubDelivery } from "./github-webhook";
 import { attempt, OperationError } from "./operations";
 import type { IntakeAgent } from "./model-defaults";
@@ -35,7 +36,7 @@ function reviewPrompt(review: Extract<GitHubDelivery, { kind: "review" }>) {
   return [
     `GitHub PR ${review.repository}#${review.number} is ready for review (opened by @${review.sender}, head ${review.sha}). Review it.`,
     `Read it with github read_pull_request and list_pull_request_files, check out the code in the sandbox when the diff alone is not enough, and look for bugs, security problems, missing tests and anything that breaks the repository's own guidance (AGENTS.md, skills). Report real problems, not style nits, and say so plainly when it looks good.`,
-    `Publish exactly one review with github create_review: event COMMENT, commit_id ${review.sha}, inline comments on the lines concerned and a short overall summary as the body. Do not push, edit the PR or open new PRs. If create_review reports that the head moved, do not review the new head; say so instead.`,
+    `Publish exactly one review with github create_review: event COMMENT, commit_id ${review.sha}, inline comments on the lines concerned and a short overall summary as the body. This session is read-only: it cannot change files, push, edit the PR or open new PRs, so suggest fixes in the review instead. If create_review reports that the head moved, do not review the new head; say so instead.`,
     `Finish with the same short summary. If you could not publish the review, that answer is posted as the review instead.`,
   ].join("\n\n");
 }
@@ -188,7 +189,9 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
   return yield* attempt("github.intake", () =>
     harness.commit(async (tx) => {
       const state = await tx.doc(GitHubThreads);
-      const key = `${event.repository}#${event.number}`;
+      const review = "kind" in event;
+      // Reviews get their own read-only session; /dolly commands on the same PR get a writable one.
+      const key = `${review ? "review:" : ""}${event.repository}#${event.number}`;
       let thread = state.threads[key];
       const receipt = thread?.events[deliveryKey(event)];
 
@@ -203,10 +206,14 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
       if (!thread) {
         const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
         await configure(tx, conversation.id, agent);
+
+        // An allowlist, so tools added later are not offered to a read-only session.
+        if (review) (await tx.doc(AgentDoc, conversation.id)).tools = [...READ_ONLY_TOOLS];
         const workspace = await tx.doc(ConversationWorkspace, conversation.id);
         workspace.config = workspaceConfig(
           { repository: event.repository, ref: `refs/pull/${event.number}/head` },
           String(conversation.id),
+          { readOnly: review },
         );
         thread = { id: conversation.id, events: {} };
       }
