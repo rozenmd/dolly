@@ -16,6 +16,10 @@ import { GitHubEvent } from "./github-webhook";
 import { attempt, OperationError } from "./operations";
 import type { IntakeAgent } from "./model-defaults";
 
+/** Code changes land on the PR itself, the way a person fixing it would push them. */
+const GITHUB_PR_NOTE =
+  "To change this PR, read it with github read_pull_request. If it is open and head.repository is this repository, commit to its head branch and push with git push origin HEAD:<head.ref> (force-push only when you rewrote history). If it is closed, merged or from a fork, push to this session's branch and open a new PR instead.";
+
 export const GitHubThreads = defineDoc<{
   threads: Record<string, { id: ConversationId; events: Record<string, TaskId<null>> }>;
 }>({
@@ -54,7 +58,7 @@ export function githubDelivery({
               conversation.submit(
                 {
                   type: "input",
-                  content: `GitHub PR ${task.input.repository}#${task.input.number}, comment by @${task.input.sender}:\n\n${task.input.content}`,
+                  content: `GitHub PR ${task.input.repository}#${task.input.number}, comment by @${task.input.sender}:\n\n${task.input.content}\n\n${GITHUB_PR_NOTE}`,
                   requestId: `github:comment:${task.input.commentId}`,
                   whenBusy: "followUp",
                 },

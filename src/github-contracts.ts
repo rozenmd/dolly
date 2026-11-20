@@ -9,7 +9,17 @@ export const Repository = Schema.String.check(
 
 const Ref = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200));
 
-const Branch = Schema.String.check(Schema.isPattern(/^dolly\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/));
+/**
+ * A plain branch name: no refs/ prefix, leading punctuation, "..", empty or dot-led components,
+ * trailing dot or slash, or .lock component. Writes to the default branch are refused separately.
+ */
+export const BranchName = Schema.String.check(
+  Schema.isPattern(
+    /^(?!refs\/)(?!.*(?:\.\.|\/\/|\/\.|\.lock(?:\/|$)|[./]$))[a-zA-Z0-9][a-zA-Z0-9._/-]{0,199}$/,
+  ),
+);
+
+const Branch = BranchName;
 
 const Path = Schema.String.check(
   Schema.isMinLength(1),

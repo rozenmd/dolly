@@ -170,6 +170,7 @@ export function workspacePrompt(state: WorkspaceState | null | undefined) {
     "Shell and relative read_file, write_file and edit_file paths use the active repo's /workspace/repo. Each attachment has its own sandbox. Use workspace attach to activate another repo without replacing the primary or losing changes.",
     "An empty repository discovery/enrolment list does not establish that a known selected repo is inaccessible. Try the selected repo directly with workspace checkout and report the actual authorization or checkout error. Do not treat repository selection as an authorization grant.",
     "If GitHub access is denied, explain the concrete configuration step from the tool result. Never claim that no repository access is available merely because discovery returned an empty list.",
+    "workspace push and open_pull_request use the branch above. With git in the shell you may push (or force-push) any branch except the repository's default branch, such as an existing PR's head branch; deleting branches and pushing tags are refused.",
   ].join("\n");
 }
 

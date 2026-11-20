@@ -111,6 +111,7 @@ function packet(command: string) {
 }
 
 const branch = "dolly/session-42";
+const defaultBranch = "main";
 
 const update = (ref: string, next = "b".repeat(40)) =>
   packet(`${"a".repeat(40)} ${next} ${ref}\0report-status side-band-64k\n`);
@@ -151,26 +152,37 @@ it("streams an accepted push unchanged across fragmented packets", async () => {
     },
   });
 
-  const checked = await checkedPush(stream, branch);
+  const checked = await checkedPush(stream, defaultBranch);
   expect(checked).not.toBeNull();
   expect(await new Response(checked).text()).toBe(text);
 });
 
-it("accepts shallow boundary announcements without relaxing session branch restrictions", async () => {
+it("accepts shallow boundary announcements without relaxing the default branch restriction", async () => {
   const shallow = packet(`shallow ${"c".repeat(40)}\n`);
   const text = shallow + update(`refs/heads/${branch}`) + "0000PACKbinary-payload";
-  const checked = await checkedPush(new Blob([text]).stream(), branch);
+  const checked = await checkedPush(new Blob([text]).stream(), defaultBranch);
   expect(checked).not.toBeNull();
   expect(await new Response(checked).text()).toBe(text);
   expect(
     await checkedPush(
       new Blob([shallow + update("refs/heads/main") + "0000PACK"]).stream(),
-      branch,
+      defaultBranch,
     ),
   ).toBeNull();
 });
 
-it("refuses other branches, tags, deletes, multiple ref updates and malformed pushes, cancelling rejected bodies", async () => {
+it("accepts updates, including force pushes, to any branches but the default", async () => {
+  // A force push is an update whose old commit is not an ancestor; the request looks the same.
+  const text =
+    update("refs/heads/investigate-audit-headers-null") +
+    update("refs/heads/feature/x", "c".repeat(40)) +
+    "0000PACK";
+
+  const checked = await checkedPush(new Blob([text]).stream(), defaultBranch);
+  expect(await new Response(checked).text()).toBe(text);
+});
+
+it("refuses the default branch, tags, deletes and malformed pushes, cancelling rejected bodies", async () => {
   for (const text of [
     update("refs/heads/main") + "0000PACK",
     update("refs/tags/v1") + "0000PACK",
@@ -196,7 +208,7 @@ it("refuses other branches, tags, deletes, multiple ref updates and malformed pu
       },
     });
 
-    expect(await checkedPush(stream, branch)).toBeNull();
+    expect(await checkedPush(stream, defaultBranch)).toBeNull();
     expect(cancelled || !stream.locked).toBe(true);
     expect(stream.locked).toBe(false);
   }
