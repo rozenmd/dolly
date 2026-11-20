@@ -23,7 +23,6 @@ describe("Hono Worker in workerd", () => {
       ["settings/model", "PUT"],
       ["sessions", "POST"],
       ["sessions", "GET"],
-      ["sessions/import", "POST"],
       ["sessions/missing", "PUT"],
       ["sessions/missing", "GET"],
       ["sessions/missing/events", "GET"],

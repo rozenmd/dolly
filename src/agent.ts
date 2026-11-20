@@ -2249,22 +2249,6 @@ export class Agent extends DurableObject<Env> {
     });
   }
 
-  /** Import browser-only archive state once, without overwriting later server changes. */
-  async importSessions(sessions: readonly SavedSession[]) {
-    for (const session of sessions) {
-      const conversation = await Effect.runPromise(this.conversation(session.id));
-
-      if (Option.isNone(conversation)) continue;
-      const key = `session-meta:${conversation.value.id}`;
-      await this.ctx.storage.transaction(async (tx) => {
-        if (await tx.get(key)) return;
-        await tx.put(key, { archived: session.archived ?? false, createdAt: session.updatedAt });
-      });
-    }
-
-    return { imported: true };
-  }
-
   /** The `dolly` tool's view of this instance, for one calling conversation (see self-query.ts). */
   private selfQueryDeps(caller: ConversationId) {
     return {

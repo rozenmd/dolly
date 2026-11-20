@@ -33,63 +33,35 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
-test("retains legacy archive choices through a failed batch and stops importing after success", async ({
-  page,
-}) => {
-  const legacy = [
-    session("visible", "Visible task"),
-    ...Array.from({ length: 49 }, (_, i) => session(`old-${i}`, `Old task ${i}`, true)),
-    session("last", "Last archived task", true),
-  ];
-
-  let server = [legacy[0], { ...legacy[50], archived: false }];
-  let failLastBatch = true;
-  const imports: (typeof legacy)[] = [];
+test("ignores retired browser archive data and uses the server list", async ({ page }) => {
+  const legacy = [session("task", "Old browser title", true)];
+  let imports = 0;
 
   await page.addInitScript((sessions) => {
-    if (sessionStorage.getItem("seeded")) return;
-    sessionStorage.setItem("seeded", "true");
-    localStorage.setItem("dolly.sessions.v1", JSON.stringify(sessions));
+    const key = "dolly.sessions.v1";
+    localStorage.setItem(key, JSON.stringify(sessions));
+    const getItem = Storage.prototype.getItem;
+    Storage.prototype.getItem = function (name) {
+      if (name === key) document.documentElement.dataset.legacySessionRead = "true";
+
+      return getItem.call(this, name);
+    };
   }, legacy);
   await page.route("**/api/sessions/import", (route) => {
-    const { sessions } = route.request().postDataJSON();
-    imports.push(sessions);
+    imports++;
 
-    if (sessions[0]?.id === "last" && failLastBatch)
-      return route.fulfill({ status: 503, json: { error: "Try again" } });
-
-    if (sessions[0]?.id === "last") server = [server[0], sessions[0]];
-
-    return route.fulfill({ json: { imported: true } });
+    return route.fulfill({ status: 404 });
   });
-  await page.route("**/api/sessions", (route) => route.fulfill({ json: server }));
-
-  const batches = [legacy.slice(0, 50), legacy.slice(50)];
-  const warning = page.getByText("Could not import browser archive choices", { exact: false });
-  const archived = page.getByRole("button", { name: "Archived workspaces (1)", exact: true });
-
-  await page.goto("/", { waitUntil: "networkidle" });
-  await expect(warning).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Visible task", exact: true })).toBeVisible();
-  expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.v1"))).toBe(
-    JSON.stringify(legacy),
+  await page.route("**/api/sessions", (route) =>
+    route.fulfill({ json: [session("task", "Server task")] }),
   );
-  expect(imports).toEqual(batches);
 
-  await page.reload({ waitUntil: "networkidle" });
-  await expect(warning).toBeVisible();
-  expect(imports).toEqual([...batches, ...batches]);
-
-  failLastBatch = false;
-  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await expect(archived).toBeVisible();
-  await expect(warning).toHaveCount(0);
-  expect(imports.slice(4)).toEqual(batches);
-  expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.v1"))).toBeNull();
-
-  await page.reload({ waitUntil: "networkidle" });
-  await expect(archived).toBeVisible();
-  expect(imports).toHaveLength(6);
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Server task", exact: true })).toBeVisible();
+  expect(
+    await page.evaluate(() => document.documentElement.dataset.legacySessionRead),
+  ).toBeUndefined();
+  expect(imports).toBe(0);
 });
 
 test("loads server sessions while provider discovery waits and coalesces focus refreshes", async ({

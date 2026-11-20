@@ -51,8 +51,6 @@ import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-s
 import { useSessionSummary } from "./lib/session-summary";
 import { workspaceMain, workspaceOf, workspaceRows, workspaceTabs } from "./lib/workspaces";
 
-// Keep the migration source separate: a server refresh must not overwrite a failed import.
-const legacyStorageKey = "dolly.sessions.v1";
 const cacheStorageKey = "dolly.sessions.cache.v1";
 const decodeSessions = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(SavedSession)));
 
@@ -93,7 +91,6 @@ export function WorkspaceApp() {
   const [streamError, setStreamError] = useState("");
   const [sessionError, setSessionError] = useState("");
   const [notice, setNotice] = useState("");
-  const [importFailed, setImportFailed] = useState(false);
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(false);
   // The `before` an older-history request is in flight for, so one scroll asks once.
@@ -165,9 +162,7 @@ export function WorkspaceApp() {
     }
 
     try {
-      const cached = readSessions(
-        localStorage.getItem(cacheStorageKey) ?? localStorage.getItem(legacyStorageKey) ?? "[]",
-      );
+      const cached = readSessions(localStorage.getItem(cacheStorageKey) ?? "[]");
 
       sessionListRef.current = cached;
       setSessions(cached);
@@ -213,39 +208,6 @@ export function WorkspaceApp() {
     const { signal } = controller;
     let initial = true;
     let inFlight = false;
-    let legacyImported = false;
-
-    async function importLegacy() {
-      if (legacyImported) return;
-
-      try {
-        const raw = localStorage.getItem(legacyStorageKey);
-
-        if (raw !== null) {
-          const legacy = decodeSessions(raw);
-
-          for (let offset = 0; offset < legacy.length; offset += 50) {
-            await request(
-              "/sessions/import",
-              { sessions: legacy.slice(offset, offset + 50) },
-              signal,
-            );
-          }
-
-          if (signal.aborted) return;
-
-          // Only retire the legacy data after all batches succeed, and don't remove a newer value.
-          if (localStorage.getItem(legacyStorageKey) === raw)
-            localStorage.removeItem(legacyStorageKey);
-        }
-
-        legacyImported = true;
-        setImportFailed(false);
-      } catch {
-        // Leave the complete payload intact for a later refresh. Batch replay is safe server-side.
-        if (!signal.aborted) setImportFailed(true);
-      }
-    }
 
     const refresh = async (startup = false) => {
       if (inFlight || (!startup && document.visibilityState === "hidden")) return;
@@ -253,10 +215,6 @@ export function WorkspaceApp() {
       const before = sessionListRef.current;
 
       try {
-        await importLegacy();
-
-        if (signal.aborted) return;
-
         const saved = decodeSessions(await request("/sessions", undefined, signal));
 
         if (signal.aborted) return;
@@ -749,13 +707,7 @@ export function WorkspaceApp() {
     }
   }
 
-  const feedback =
-    error ||
-    streamError ||
-    sessionError ||
-    (importFailed &&
-      "Could not import browser archive choices. Server sessions will still be loaded.") ||
-    notice;
+  const feedback = error || streamError || sessionError || notice;
 
   if (!auth?.user)
     return (

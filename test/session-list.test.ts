@@ -187,38 +187,29 @@ it("redacts cached titles again when credentials change", async () => {
   expect((await list())[0].title).toBe("Check [redacted]");
 });
 
-it("migrates browser archive state once and shares later archive changes with every device", async () => {
+it("persists archive choices across restarts and rejects the retired browser import", async () => {
   await seed();
 
-  const imported = (archived: boolean) =>
-    SELF.fetch("https://worker/api/sessions/import", {
-      method: "POST",
+  const update = (archived: boolean) =>
+    SELF.fetch("https://worker/api/sessions/legacy-id", {
+      method: "PUT",
       headers,
-      body: JSON.stringify({
-        sessions: [
-          {
-            id: "legacy-id",
-            model: "Existing session",
-            title: "Local title",
-            repository: "",
-            updatedAt: 50,
-            archived,
-          },
-        ],
-      }),
+      body: JSON.stringify({ archived }),
     });
 
-  expect((await imported(true)).status).toBe(200);
+  expect((await update(true)).status).toBe(200);
+  await abortAllDurableObjects();
   expect((await list())[0].archived).toBe(true);
 
-  const restore = await SELF.fetch("https://worker/api/sessions/legacy-id", {
-    method: "PUT",
+  expect((await update(false)).status).toBe(200);
+
+  const retired = await SELF.fetch("https://worker/api/sessions/import", {
+    method: "POST",
     headers,
-    body: JSON.stringify({ archived: false }),
+    body: JSON.stringify({ sessions: [{ ...(await list())[0], archived: true }] }),
   });
 
-  expect(restore.status).toBe(200);
-  await imported(true);
+  expect(retired.status).toBe(404);
   await abortAllDurableObjects();
   expect((await list())[0].archived).toBe(false);
   expect(

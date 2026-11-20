@@ -18,7 +18,7 @@ import { AnthropicSetup, AnthropicProbe } from "./anthropic";
 import { LoginCallback } from "./chatgpt-login";
 import type { Env } from "./env";
 import { PromptImage, MAX_IMAGES, MAX_PROMPT_BYTES } from "./images";
-import { SavedSession, SessionUpdate } from "./session-contracts";
+import { SessionUpdate } from "./session-contracts";
 import { HISTORY_PAGE_LIMIT } from "./transcript-window";
 
 export { Agent } from "./agent";
@@ -375,28 +375,6 @@ app.get("/api/sessions", (c) =>
   handle(
     c,
     rpc("sessions.list", async () => c.json(await owner(c).sessions())),
-  ),
-);
-
-app.post("/api/sessions/import", (c) =>
-  handle(
-    c,
-    Effect.gen(function* () {
-      const sessions = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
-        Effect.flatMap(
-          Schema.decodeUnknownEffect(
-            Schema.Struct({
-              sessions: Schema.Array(SavedSession).check(Schema.isMaxLength(100)),
-            }),
-          ),
-        ),
-        Effect.mapError(() => new InvalidInput({ message: "Expected up to 100 saved sessions" })),
-      );
-
-      return yield* rpc("sessions.import", async () =>
-        c.json(await owner(c).importSessions(sessions.sessions)),
-      );
-    }),
   ),
 );
 
