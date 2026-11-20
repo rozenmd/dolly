@@ -567,6 +567,10 @@ export const DefaultModel = Schema.Struct({
   autoFallback: Schema.Boolean,
   /** The ChatGPT login is on a plan that serves Ultrafast (Pro). */
   ultrafastAvailable: Schema.Boolean,
+  /** The saved model for automatic GitHub reviews; `null` follows the default model. */
+  reviewModel: Schema.NullOr(Schema.String),
+  /** What the next automatic GitHub review would run on. */
+  reviewEffective: Schema.String,
 });
 
 export type DefaultModel = typeof DefaultModel.Type;
@@ -577,6 +581,7 @@ export type DefaultModelChange = {
   thinkingLevel?: string | null;
   speed?: Speed | null;
   autoFallback?: boolean | null;
+  reviewModel?: string | null;
 };
 
 /** Reads the defaults for new sessions, or saves a change to them. */

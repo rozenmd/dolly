@@ -163,6 +163,7 @@ import {
   retriedByPi,
   sessionMetadataKey,
   writeDefaults,
+  effectiveReviewModel,
   type IntakeAgent,
   type SessionMetadata,
   FALLBACK_ENTRY,
@@ -1430,7 +1431,12 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(chatgpt) && Option.isNone(claude)) return { status: 503 as const };
 
-        const agent = yield* this.intakeAgent(Option.isSome(chatgpt), Option.isSome(claude));
+        const agent = yield* this.intakeAgent(
+          Option.isSome(chatgpt),
+          Option.isSome(claude),
+          verified.kind === "review",
+        );
+
         yield* this.arm({ active: true });
 
         const delivery = verified.kind === "review" ? verified.review : verified.event;
@@ -1927,11 +1933,16 @@ export class Agent extends DurableObject<Env> {
   private storedDefaults = () =>
     attempt("settings.model.read", () => readDefaults(this.ctx.storage));
 
-  /** Model and effort for a session GitHub or Slack starts: the owner's effective defaults. */
-  private intakeAgent = (chatgpt: boolean, claude: boolean) =>
+  /**
+   * Model and effort for a session GitHub or Slack starts: the owner's effective defaults,
+   * or the review model for an automatic pull request review.
+   */
+  private intakeAgent = (chatgpt: boolean, claude: boolean, review = false) =>
     this.storedDefaults().pipe(
       Effect.map((stored): IntakeAgent => {
-        const modelId = effectiveDefaultModel(stored.model, chatgpt, claude);
+        const modelId = review
+          ? effectiveReviewModel(stored, chatgpt, claude)
+          : effectiveDefaultModel(stored.model, chatgpt, claude);
 
         return {
           model: { provider: modelProvider(modelId), modelId },
@@ -1975,7 +1986,7 @@ export class Agent extends DurableObject<Env> {
                 operation: "settings.model",
                 message: "Unknown model setting",
                 details:
-                  "Select a model from the pinned OpenAI or Anthropic catalog, a thinking level, a speed or auto-fallback",
+                  "Select a model from the pinned OpenAI or Anthropic catalog, a thinking level, a speed, auto-fallback or a review model",
               }),
           ),
         );
