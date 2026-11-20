@@ -640,7 +640,15 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
     // Before a review starts, its head is checked against the pull request's current one.
     const head = parsed.pathname.match(/^\/repos\/example\/project\/pulls\/(\d+)$/);
 
-    if (head) return Response.json({ state: "open", head: { sha: heads[head[1]!] ?? sha } });
+    if (head)
+      return Response.json({
+        state: "open",
+        head: {
+          sha: heads[head[1]!] ?? sha,
+          ref: "feature",
+          repo: { full_name: "example/project" },
+        },
+      });
 
     const pull = parsed.pathname.match(/^\/repos\/example\/project\/pulls\/(\d+)\/reviews$/);
 

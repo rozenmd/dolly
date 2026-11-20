@@ -2038,24 +2038,113 @@ function makeGitHub(
     yield* api(`/repos/${event.repository}/${target}/reactions`, token, { content });
   });
 
-  /** Whether `sha` is still the head of an open pull request. */
-  const isOpenHead = Effect.fn("GitHub.isOpenHead")(function* (
-    repository: string,
-    number: number,
-    sha: string,
-  ) {
+  /** Whether automatic reviews are on right now. Missing or unreadable settings count as off. */
+  const reviewsEnabled = Effect.gen(function* () {
+    const raw = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
+
+    return Option.match(Schema.decodeUnknownOption(WebhookProfile)(raw), {
+      onNone: () => false,
+      onSome: (profile) => profile.reviews === true,
+    });
+  });
+
+  /** A pull request's state and head, read fresh. */
+  const pullHead = Effect.fn("GitHub.pullHead")(function* (repository: string, number: number) {
     const connected = yield* read();
     const token = yield* tokenFor(connected, repository, "read");
 
     const pull = yield* api(`/repos/${repository}/pulls/${number}`, token).pipe(
       Effect.flatMap(
         decode(
-          Schema.Struct({ state: Schema.String, head: Schema.Struct({ sha: Schema.String }) }),
+          Schema.Struct({
+            state: Schema.String,
+            head: Schema.Struct({
+              sha: Schema.String,
+              ref: Schema.String,
+              repo: Schema.NullOr(Schema.Struct({ full_name: Schema.String })),
+            }),
+          }),
         ),
       ),
     );
 
-    return pull.state === "open" && pull.head.sha === sha;
+    return {
+      open: pull.state === "open",
+      sha: pull.head.sha,
+      ref: pull.head.ref,
+      repository: pull.head.repo?.full_name.toLowerCase() ?? null,
+    };
+  });
+
+  /**
+   * This App's own latest review of exactly `sha`, with its inline comments. Other authors'
+   * reviews and comments on the pull request are never included.
+   */
+  const ownReview = Effect.fn("GitHub.ownReview")(function* (
+    repository: string,
+    number: number,
+    sha: string,
+  ) {
+    const connected = yield* read();
+    const token = yield* tokenFor(connected, repository, "read");
+    const bot = `${connected.app.slug}[bot]`;
+    const root = `/repos/${repository}/pulls/${number}/reviews`;
+    let found: { id: number; body: string } | undefined;
+
+    for (let page = 1; ; page++) {
+      const reviews = yield* api(`${root}?per_page=100&page=${page}`, token).pipe(
+        Effect.flatMap(
+          decode(
+            Schema.Array(
+              Schema.Struct({
+                id: Schema.Number,
+                body: Schema.NullOr(Schema.String),
+                commit_id: Schema.NullOr(Schema.String),
+                user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+              }),
+            ),
+          ),
+        ),
+      );
+
+      // Reviews are listed oldest first, so the last match is the newest.
+      for (const review of reviews)
+        if (review.user?.login === bot && review.commit_id === sha)
+          found = { id: review.id, body: review.body ?? "" };
+
+      if (reviews.length < 100) break;
+    }
+
+    if (!found) return undefined;
+
+    const comments = yield* api(`${root}/${found.id}/comments?per_page=100`, token).pipe(
+      Effect.flatMap(
+        decode(
+          Schema.Array(
+            Schema.Struct({
+              id: Schema.Number,
+              path: Schema.String,
+              line: Schema.optional(Schema.NullOr(Schema.Number)),
+              body: Schema.String,
+              user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+            }),
+          ),
+        ),
+      ),
+    );
+
+    return {
+      id: found.id,
+      body: found.body,
+      comments: comments
+        .filter((comment) => comment.user?.login === bot)
+        .map((comment) => ({
+          id: comment.id,
+          path: comment.path,
+          line: comment.line ?? null,
+          body: comment.body,
+        })),
+    };
   });
 
   /** A plain comment on a pull request, as the App's bot. */
@@ -2276,7 +2365,9 @@ function makeGitHub(
     receiveWebhook,
     reply,
     react,
-    isOpenHead,
+    reviewsEnabled,
+    pullHead,
+    ownReview,
     comment,
     authorize,
   };

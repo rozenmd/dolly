@@ -12,7 +12,12 @@ import {
 import * as Result from "effect/Result";
 import * as Effect from "effect/Effect";
 import { exceptionDetails } from "./diagnostics";
-import { ConversationWorkspace, READ_ONLY_TOOLS, workspaceConfig } from "./workspace";
+import {
+  ConversationWorkspace,
+  pinReviewWorkspace,
+  READ_ONLY_TOOLS,
+  workspaceConfig,
+} from "./workspace";
 import { deliveryKey, type GitHubDelivery, type GitHubReview } from "./github-webhook";
 import {
   cappedComment,
@@ -24,6 +29,7 @@ import {
   ReviewHandoffs,
   stripVerdict,
   VERDICT_INSTRUCTION,
+  type ReviewFindings,
   type ReviewVerdict,
 } from "./review-handoff";
 import { attempt, OperationError } from "./operations";
@@ -58,16 +64,26 @@ function reviewPrompt(review: Extract<GitHubDelivery, { kind: "review" }>) {
 
 type Review = typeof GitHubReview.Type;
 
+type PullHead = { open: boolean; sha: string; ref: string; repository: string | null };
+
+/** Whether `head` is still the open pull request head `review` was made for, on the same repository. */
+const isCurrent = (review: Review, head: PullHead) =>
+  head.open && head.sha === review.sha && head.repository === review.repository;
+
 type Checkpoint =
   | { phase: "deliver" }
   | { phase: "reply"; text: string; attempts: number; verdict?: ReviewVerdict }
   | { phase: "handoff"; text: string; verdict: ReviewVerdict };
 
 export type HandoffDeps = {
-  /** Whether `review.sha` is still the open PR's head; a stale head is neither reviewed nor handed off. */
-  current: (review: Review) => Effect.Effect<boolean, OperationError>;
-  /** The live, writable session that opened the PR, if any. */
-  owner: (review: Review) => Promise<ConversationId | undefined>;
+  /** Whether automatic reviews are still turned on; checked again before each review and handoff. */
+  enabled: () => Effect.Effect<boolean, OperationError>;
+  /** The PR's state and head, read fresh: a stale head is neither reviewed nor handed off. */
+  head: (review: Review) => Effect.Effect<PullHead, OperationError>;
+  /** This App's own review of `review.sha`, and nothing any other author wrote. */
+  findings: (review: Review) => Effect.Effect<ReviewFindings | undefined, OperationError>;
+  /** The live, writable session that opened the PR and owns its head `branch`, if any. */
+  owner: (review: Review, branch: string) => Promise<ConversationId | undefined>;
   /** Posts a comment on the PR. */
   comment: (review: Review, body: string) => Effect.Effect<void, OperationError>;
 };
@@ -96,30 +112,49 @@ export function githubDelivery({
 
             if (!conversation) return yield* Effect.die("GitHub conversation missing");
 
-            // Pushes queue reviews behind each other: once it is this review's turn, skip a head
-            // that has since moved on. The newest head's own review covers it.
+            // Pushes queue reviews behind each other. Once it is this review's turn, skip it if
+            // reviews were turned off meanwhile, or if the head has moved on (the newest head's own
+            // review covers it); otherwise pin the session's checkout to exactly this head.
             if ("kind" in task.input) {
               yield* attempt("github.idle", () => conversation.waitForIdle(context));
               const review = task.input;
 
-              const current = yield* handoff
-                .current(review)
-                .pipe(Effect.catchTag("OperationError", () => Effect.succeed(true)));
+              const enabled = yield* handoff.enabled();
+
+              const current =
+                enabled &&
+                (yield* handoff.head(review).pipe(
+                  Effect.map((head) => isCurrent(review, head)),
+                  Effect.catchTag("OperationError", () => Effect.succeed(true)),
+                ));
 
               if (!current) {
                 yield* Effect.logInfo({
-                  event: "github_review_skipped_stale",
+                  event: enabled ? "github_review_skipped_stale" : "github_review_skipped_disabled",
                   pull: `${review.repository}#${review.number}`,
                   sha: review.sha,
                 });
 
-                return yield* attempt("github.stale", () =>
+                return yield* attempt("github.skipped", () =>
                   runtime.commit(
                     () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
                     context,
                   ),
                 );
               }
+
+              yield* attempt("github.pin", () =>
+                runtime.commit(async (tx) => {
+                  pinReviewWorkspace(
+                    await tx.doc(ConversationWorkspace, task.conversationId),
+                    review.repository,
+                    review.sha,
+                    String(task.conversationId),
+                  );
+
+                  return undefined;
+                }, context),
+              );
             }
 
             const submission = yield* attempt("github.submit", () =>
@@ -246,7 +281,7 @@ export function githubDelivery({
       handoff: (task, runtime, context) =>
         Effect.runPromise(
           Effect.gen(function* () {
-            const { verdict, text } = task.state.checkpoint;
+            const { verdict } = task.state.checkpoint;
 
             const done = {
               status: "terminal",
@@ -260,26 +295,38 @@ export function githubDelivery({
             const review = task.input;
             const key = handoffKey(review.repository, review.number);
 
+            // Turning reviews off stops the loop, also for reviews admitted before that.
+            const enabled = yield* handoff.enabled();
+
             // Findings about a head that has moved on would only confuse the session.
-            const current = yield* handoff.current(review);
+            const head = enabled ? yield* handoff.head(review) : undefined;
+            const current = head !== undefined && isCurrent(review, head);
 
-            const owner = current
-              ? yield* attempt("github.handoff.owner", () => handoff.owner(review))
-              : undefined;
+            // Only the session that owns the PR's head branch gets the findings, and only Dolly's
+            // own review of this exact head: never comments or reviews by anyone else.
+            const owner =
+              head && current
+                ? yield* attempt("github.handoff.owner", () => handoff.owner(review, head.ref))
+                : undefined;
 
-            const target = owner
-              ? yield* attempt("github.handoff.target", () => runtime.conversation(owner, context))
-              : undefined;
+            const findings = owner ? yield* handoff.findings(review) : undefined;
+
+            const target =
+              owner && findings
+                ? yield* attempt("github.handoff.target", () =>
+                    runtime.conversation(owner, context),
+                  )
+                : undefined;
 
             let announce = false;
 
             yield* attempt("github.handoff.commit", () =>
               runtime.commit(async (tx) => {
-                if (!target) return done;
+                if (!target || !findings || !head) return done;
                 const state = await tx.doc(ReviewHandoffs);
                 const prior = state.pulls[key];
                 const plan = planHandoff(prior, review.sha, verdict);
-                const content = handoffMessage(review, verdict, text, plan);
+                const content = handoffMessage(review, verdict, findings, head.ref, plan);
 
                 if (content)
                   await target.submit(tx, {
@@ -307,7 +354,9 @@ export function githubDelivery({
               pull: key,
               sha: review.sha,
               owner: owner ? String(owner) : null,
+              enabled,
               current,
+              findings: findings?.id ?? null,
               verdict,
             });
 

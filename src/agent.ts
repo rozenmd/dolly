@@ -44,6 +44,7 @@ import {
   READ_ONLY_REFUSAL,
   READ_ONLY_WORKSPACE_ACTIONS,
   selectRepository,
+  workspaceSandboxes,
   workspacePrompt,
   WorkspaceRequest,
   WorkspaceToolInput,
@@ -231,11 +232,19 @@ export class Agent extends DurableObject<Env> {
         Effect.provide(this.services),
       ),
     handoff: {
-      current: (review) =>
+      enabled: () =>
+        Effect.flatMap(GitHub, (github) => github.reviewsEnabled).pipe(
+          Effect.provide(this.services),
+        ),
+      head: (review) =>
+        Effect.flatMap(GitHub, (github) => github.pullHead(review.repository, review.number)).pipe(
+          Effect.provide(this.services),
+        ),
+      findings: (review) =>
         Effect.flatMap(GitHub, (github) =>
-          github.isOpenHead(review.repository, review.number, review.sha),
+          github.ownReview(review.repository, review.number, review.sha),
         ).pipe(Effect.provide(this.services)),
-      owner: (review) => this.pullOwner(review.repository, review.number),
+      owner: (review, branch) => this.pullOwner(review.repository, review.number, branch),
       comment: (review, body) =>
         Effect.flatMap(GitHub, (github) =>
           github.comment(review.repository, review.number, body),
@@ -721,12 +730,7 @@ export class Agent extends DurableObject<Env> {
           afterRun: async (run, api, context) => {
             const state = await api.snapshot(ConversationWorkspace, api.conversationId, context);
 
-            const sandboxes = [
-              ...(state?.config ? [String(api.conversationId)] : []),
-              ...(state?.attached ?? []).map(
-                (config) => `${api.conversationId}:repo:${config.repository.toLowerCase()}`,
-              ),
-            ];
+            const sandboxes = workspaceSandboxes(state, String(api.conversationId));
 
             return sandboxes.length
               ? {
@@ -2567,14 +2571,25 @@ export class Agent extends DurableObject<Env> {
    * out of them; child sessions inherit their root's answer.
    */
   /**
-   * The session that opened a pull request, while it can still act on review findings: not
-   * archived, writable, and started from the web app (like CI waits: a GitHub or Slack thread has
-   * nowhere to show a turn nobody asked for).
+   * The session that opened a pull request, while it can still act on review findings: it owns
+   * the PR's head branch, and is not archived, writable, and started from the web app (like CI
+   * waits: a GitHub or Slack thread has nowhere to show a turn nobody asked for).
    */
-  private async pullOwner(repository: string, number: number) {
+  private async pullOwner(repository: string, number: number, branch: string) {
     const id = await this.ctx.storage.get<ConversationId>(pullOwnerKey(repository, number));
 
     if (id === undefined) return undefined;
+
+    // The PR's head must be this session's own branch of that repository, so its fixes land on
+    // the PR and nowhere else it didn't create.
+    const workspace = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
+
+    const owns = [workspace?.config, ...(workspace?.attached ?? [])].some(
+      (config) =>
+        config?.repository.toLowerCase() === repository.toLowerCase() && config.branch === branch,
+    );
+
+    if (!owns) return undefined;
 
     const meta = await this.ctx.storage.get<{ archived?: boolean }>(`session-meta:${id}`);
 
