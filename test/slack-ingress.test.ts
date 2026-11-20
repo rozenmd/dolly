@@ -12,6 +12,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { ingress } from "../src/ingress";
 import { SlackIngress } from "../src/slack-ingress";
 import { SlackThreads } from "../src/slack-inbox";
+import { ASK_MODE_NOTE, SLACK_SESSION_NOTE } from "../src/slack-intent";
 import { ConversationWorkspace } from "../src/workspace";
 import { headers, signIn } from "./session";
 
@@ -132,6 +133,7 @@ type Posted = { method: string; body: Record<string, string> };
 function fakeServices(classification: string) {
   const posted: Posted[] = [];
   const models: string[] = [];
+  const requests: { model: string; messages: unknown[] }[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     const parsed = new URL(String(url));
 
@@ -150,8 +152,10 @@ function fakeServices(classification: string) {
     }
 
     if (parsed.hostname === "api.anthropic.com") {
-      const model = JSON.parse(String(init?.body)).model;
+      const request = JSON.parse(String(init?.body));
+      const model = request.model;
       models.push(model);
+      requests.push(request);
 
       return claudeReply(model === "claude-haiku-5-5" ? classification : "**Done** for Slack");
     }
@@ -159,7 +163,7 @@ function fakeServices(classification: string) {
     throw new Error(`Unexpected request to ${parsed.hostname}`);
   });
 
-  return { posted, models };
+  return { posted, models, requests };
 }
 
 const open = Harness.open;
@@ -487,4 +491,29 @@ it("falls back to a code task in the default repository when Claude is not conne
   expect(posted.filter((call) => call.method === "chat.postMessage").at(-1)?.body.text).toBe(
     "Codex answer",
   );
+}, 30_000);
+
+it("leads the session prompt with the request, then the mode and Slack notes", async () => {
+  const { posted, requests } = fakeServices(
+    '{"action":"none","prNumber":null,"mode":"ask","repo":null}',
+  );
+
+  expect(
+    (await post("/slack/events", mention("400.1", "<@UBOT> how does &lt;Foo&gt; work?"))).status,
+  ).toBe(200);
+  await expect
+    .poll(() => posted.filter((call) => call.method === "chat.postMessage"), { timeout: 15_000 })
+    .toHaveLength(2);
+
+  const session = requests.find((request) => request.model === "claude-sonnet-5-5");
+  const first = JSON.stringify(session?.messages[0]);
+
+  // No header or brackets: the person's words first, then plain-paragraph notes.
+  expect(first).toContain(
+    JSON.stringify(`how does <Foo> work?\n\n${ASK_MODE_NOTE}\n\n${SLACK_SESSION_NOTE}`).slice(
+      1,
+      -1,
+    ),
+  );
+  expect(first).not.toContain("Slack mention from");
 }, 30_000);
