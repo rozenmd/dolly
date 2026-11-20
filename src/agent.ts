@@ -52,7 +52,7 @@ import {
 } from "./workspace";
 import { gitRoute, checkedPush } from "./git-transport";
 import { BROWSER_SESSION_MS, MAX_BROWSER_SESSIONS } from "./browser-workspace";
-import { WebhookSetup } from "./github-webhook";
+import { pullRequestChange, WebhookSetup } from "./github-webhook";
 import { STEER_TOOL_SKIP, SteerInterrupts, steerInterrupts, steerQueued } from "./steer-interrupt";
 import { admitGitHub, githubDelivery, GitHubThreads } from "./github-inbox";
 import { admitSlack, slackDelivery } from "./slack-inbox";
@@ -178,7 +178,10 @@ type SessionPull = NonNullable<SavedSession["pullRequest"]>;
 
 type CachedPullSummary = { summary: PullRequestSummary; checked: number };
 
-function pullSummaryKey(pull: SessionPull) {
+/** What the pull summary cache needs to name and re-read a pull request. */
+type PullRef = Pick<SessionPull, "repository" | "number">;
+
+function pullSummaryKey(pull: PullRef) {
   return `pull-summary:${pull.repository.toLowerCase()}#${pull.number}`;
 }
 
@@ -1415,6 +1418,23 @@ export class Agent extends DurableObject<Env> {
           github.receiveWebhook(body, signature, event),
         );
 
+        // 202 and 204 both mean the signature checked out.
+        const changed =
+          verified.status === 202 || verified.status === 204
+            ? pullRequestChange(event, new TextDecoder().decode(body))
+            : undefined;
+
+        // Best effort: the sidebar still catches up when the cached summary expires.
+        if (changed)
+          yield* attempt("pull-summary.invalidate", () => this.pullChanged(changed)).pipe(
+            Effect.catchTag("OperationError", (error) =>
+              Effect.logWarning({
+                event: "pull_summary_invalidate_failed",
+                error: exceptionDetails(error),
+              }),
+            ),
+          );
+
         if (verified.status !== 202) return verified;
 
         // A CI change only pulls matching waits' next poll forward; no model runs for it.
@@ -2320,7 +2340,7 @@ export class Agent extends DurableObject<Env> {
   private pullSummaryRefresh?: Promise<void>;
   private pullSummaryRetryAfter = new Map<string, number>();
 
-  private refreshPullSummaries(pulls: ReadonlyArray<readonly [string, SessionPull]>) {
+  private refreshPullSummaries(pulls: ReadonlyArray<readonly [string, PullRef]>) {
     if (!pulls.length || this.pullSummaryRefresh) return;
     const queue = pulls.values();
 
@@ -2358,6 +2378,22 @@ export class Agent extends DurableObject<Env> {
         this.pullSummaryRefresh = undefined;
       });
     this.ctx.waitUntil(this.pullSummaryRefresh);
+  }
+
+  /**
+   * GitHub says a pull request changed, so re-read it now rather than when its cached summary
+   * expires. Only PRs a session already shows are cached, so other events cost nothing. A sweep
+   * already in flight skips this one, but checked: 0 puts it first for the next list request.
+   */
+  private async pullChanged(pull: PullRef) {
+    const key = pullSummaryKey(pull);
+    const cached = await this.ctx.storage.get<CachedPullSummary>(key);
+
+    if (!cached) return;
+
+    await this.ctx.storage.put(key, { ...cached, checked: 0 } satisfies CachedPullSummary);
+    this.pullSummaryRetryAfter.delete(key);
+    this.refreshPullSummaries([[key, pull]]);
   }
 
   async sessions() {

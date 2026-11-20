@@ -324,6 +324,8 @@ const entry = new GitHubIngress(createExecutionContext(), env);
 /** The event-specific part of a fake CI webhook payload; installation and repository are added. */
 type WebhookPayload = {
   action?: string;
+  number?: number;
+  pull_request?: { merged: boolean; head: { sha: string } };
   sha?: string;
   state?: string;
   check_run?: { head_sha: string; conclusion: string | null; pull_requests: { number: number }[] };
@@ -803,6 +805,54 @@ it("a matching webhook pulls the next poll forward; others don't", async () => {
     }),
   ).toBe(202);
   expect(wakes).toHaveLength(1);
+});
+
+it("a pull_request webhook updates the sidebar's PR state before the cache expires", async () => {
+  model = ({ lastIsTool, lastUser }) => {
+    if (lastIsTool) return answer("Opened");
+
+    if (lastUser.includes("[CI wait ")) return answer("Woken");
+
+    return call("github", openPull);
+  };
+
+  const id = await root();
+  await prompt(id, "Open a PR");
+  await expect.poll(() => transcript(id)).toContain("Opened");
+
+  const state = async () => {
+    const sessions = await (
+      await SELF.fetch("https://worker/api/sessions", { headers })
+    ).json<{ id: string; pullRequest?: { number: number; state?: string } }[]>();
+
+    return sessions.find((session) => session.id === id)?.pullRequest;
+  };
+
+  // The first list reads GitHub in the background; a later one shows what it found.
+  await expect.poll(state, { timeout: 4000 }).toMatchObject({ number: 8, state: "open" });
+
+  // Merged on GitHub, well inside the 60 second cache: only the webhook can tell the sidebar.
+  github.pull = { state: "closed", merged: true, sha: "a".repeat(40) };
+  expect(
+    await webhook("pull_request", {
+      action: "closed",
+      number: 8,
+      pull_request: { merged: true, head: { sha: "a".repeat(40) } },
+    }),
+  ).toBe(202);
+  await expect.poll(async () => (await state())?.state, { timeout: 4000 }).toBe("merged");
+
+  // A PR no session shows is not read at all.
+  const after = github.reads;
+  expect(
+    await webhook("pull_request", {
+      action: "closed",
+      number: 9,
+      pull_request: { merged: true, head: { sha: "e".repeat(40) } },
+    }),
+  ).toBe(202);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(github.reads).toBe(after);
 });
 
 it("a workflow_run webhook wakes a release wait at once, without an alarm", async () => {
