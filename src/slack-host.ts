@@ -135,7 +135,7 @@ function makeSlackHost(
       }
     }
 
-    const text = `[${note}]\n\n${origin} from <@${input.user}>:\n\n${task}`;
+    const text = `${origin} from <@${input.user}>:\n\n${task}\n\n[${note}]`;
     const blocks = input.files.length ? yield* images(slack.botToken, input) : [];
 
     return {
