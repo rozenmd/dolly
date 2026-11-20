@@ -12,7 +12,7 @@ It runs on the ChatGPT or Claude subscription you already pay for. You don't nee
 
 - Close your laptop: sessions run on Cloudflare, not in your terminal. Work survives restarts, and your files are saved at the end of every turn.
 
-- Start from anywhere: use the web app, a Slack DM or @-mention, or comment `/dolly fix the failing test` on a pull request. Turn on **Review new pull requests** in Settings > GitHub and Dolly reviews each new PR with inline comments. Your sessions show up on every device you sign in from.
+- Start from anywhere: use the web app, a Slack DM or @-mention, or comment `/dolly fix the failing test` on a pull request. Turn on **Review new pull requests** in Settings > GitHub and Dolly reviews each new PR and each push with inline comments; findings on a PR a Dolly session opened go back to that session to fix. Your sessions show up on every device you sign in from.
 
 - Direct a team: agents can start child agents, each in its own sandbox, and wait for their results.
 

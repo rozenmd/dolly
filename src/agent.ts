@@ -44,6 +44,7 @@ import {
   READ_ONLY_REFUSAL,
   READ_ONLY_WORKSPACE_ACTIONS,
   selectRepository,
+  workspaceSandboxes,
   workspacePrompt,
   WorkspaceRequest,
   WorkspaceToolInput,
@@ -208,6 +209,11 @@ function pullSummaryKey(pull: PullRef) {
   return `pull-summary:${pull.repository.toLowerCase()}#${pull.number}`;
 }
 
+/** Which session opened a pull request, for handing its review findings back (review-handoff.ts). */
+function pullOwnerKey(repository: string, number: number) {
+  return `pr-owner:${repository.toLowerCase()}#${number}`;
+}
+
 /** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
 export class Agent extends DurableObject<Env> {
   private harness!: Harness;
@@ -225,6 +231,25 @@ export class Agent extends DurableObject<Env> {
       Effect.flatMap(GitHub, (github) => github.react(event, "rocket")).pipe(
         Effect.provide(this.services),
       ),
+    handoff: {
+      enabled: () =>
+        Effect.flatMap(GitHub, (github) => github.reviewsEnabled).pipe(
+          Effect.provide(this.services),
+        ),
+      head: (review) =>
+        Effect.flatMap(GitHub, (github) => github.pullHead(review.repository, review.number)).pipe(
+          Effect.provide(this.services),
+        ),
+      findings: (review) =>
+        Effect.flatMap(GitHub, (github) =>
+          github.ownReview(review.repository, review.number, review.sha),
+        ).pipe(Effect.provide(this.services)),
+      owner: (review, branch) => this.pullOwner(review.repository, review.number, branch),
+      comment: (review, body) =>
+        Effect.flatMap(GitHub, (github) =>
+          github.comment(review.repository, review.number, body),
+        ).pipe(Effect.provide(this.services)),
+    },
   });
   private readonly slackTask = slackDelivery({
     prepare: (input, isNew) =>
@@ -705,12 +730,7 @@ export class Agent extends DurableObject<Env> {
           afterRun: async (run, api, context) => {
             const state = await api.snapshot(ConversationWorkspace, api.conversationId, context);
 
-            const sandboxes = [
-              ...(state?.config ? [String(api.conversationId)] : []),
-              ...(state?.attached ?? []).map(
-                (config) => `${api.conversationId}:repo:${config.repository.toLowerCase()}`,
-              ),
-            ];
+            const sandboxes = workspaceSandboxes(state, String(api.conversationId));
 
             return sandboxes.length
               ? {
@@ -1397,10 +1417,14 @@ export class Agent extends DurableObject<Env> {
     ) {
       // Record before returning: workspace RPCs need not produce transcript entries,
       // and a long conversation may outlive the historical transcript scan window.
-      await this.ctx.storage.put(`session-created-pr:${id}`, {
-        repository: input.operation.repository,
-        number: reply.result.number,
-        url: reply.result.url,
+      await this.ctx.storage.put({
+        [`session-created-pr:${id}`]: {
+          repository: input.operation.repository,
+          number: reply.result.number,
+          url: reply.result.url,
+        },
+        // The other direction, for handing the PR's review findings back to this session.
+        [pullOwnerKey(input.operation.repository, reply.result.number)]: id,
       });
       this.sessionsFeed.changed();
 
@@ -2546,6 +2570,39 @@ export class Agent extends DurableObject<Env> {
    * thread. Intake threads can be read by people other than the owner, so session history stays
    * out of them; child sessions inherit their root's answer.
    */
+  /**
+   * The session that opened a pull request, while it can still act on review findings: it owns
+   * the PR's head branch, and is not archived, writable, and started from the web app (like CI
+   * waits: a GitHub or Slack thread has nowhere to show a turn nobody asked for).
+   */
+  private async pullOwner(repository: string, number: number, branch: string) {
+    const id = await this.ctx.storage.get<ConversationId>(pullOwnerKey(repository, number));
+
+    if (id === undefined) return undefined;
+
+    // The PR's head must be this session's own branch of that repository, so its fixes land on
+    // the PR and nowhere else it didn't create.
+    const workspace = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
+
+    const owns = [workspace?.config, ...(workspace?.attached ?? [])].some(
+      (config) =>
+        config?.repository.toLowerCase() === repository.toLowerCase() && config.branch === branch,
+    );
+
+    if (!owns) return undefined;
+
+    const meta = await this.ctx.storage.get<{ archived?: boolean }>(`session-meta:${id}`);
+
+    if (meta?.archived) return undefined;
+
+    // Also false for a conversation that no longer exists.
+    if (!(await this.startedFromWeb(id))) return undefined;
+
+    if (await this.isReadOnly(id)) return undefined;
+
+    return id;
+  }
+
   private async startedFromWeb(conversationId: ConversationId) {
     const root = await this.harness.commit(async (tx) => {
       let record = await tx.conversation(conversationId);

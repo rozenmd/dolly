@@ -40,9 +40,9 @@ const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
 /** A GitHub user, or a GitHub App's bot account (`slug[bot]`). */
 const Actor = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}(?:\[bot\])?$/));
 
-/** A pull request becoming ready for review: opened, reopened or taken out of draft. */
+/** A pull request becoming ready for review (opened, reopened or taken out of draft), or a push to one. */
 const ReviewEvent = Schema.Struct({
-  action: Schema.Literals(["opened", "reopened", "ready_for_review"]),
+  action: Schema.Literals(["opened", "reopened", "ready_for_review", "synchronize"]),
   installation: Schema.Struct({ id: Id }),
   repository: Schema.Struct({ full_name: Repository }),
   sender: Schema.Struct({ login: Actor, type: Schema.Literals(["User", "Bot"]) }),
@@ -254,8 +254,10 @@ export const GitHubReview = Schema.Struct({
   repository: Repository,
   number: Id,
   sha: Sha,
-  /** Who opened the PR: an allowed sender, or this App's own bot for PRs Dolly sessions open. */
+  /** Who opened or pushed to the PR: an allowed sender, or this App's own bot for Dolly sessions. */
   sender: Actor,
+  /** New commits on a PR that may have been reviewed before, rather than a PR becoming ready. */
+  pushed: Schema.optional(Schema.Boolean),
 });
 
 /** What a GitHub thread delivers: a /dolly command or an automatic review. */
@@ -344,8 +346,9 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
 });
 
 /**
- * A pull request an allowed sender, or this App itself, opened (or made ready) on a branch of the
- * same repository. The App opens the PRs Dolly sessions create, and those sessions were already
+ * A pull request an allowed sender, or this App itself, opened (or made ready, or pushed to) on a
+ * branch of the same repository. Every push is reviewed, so a fix gets its own review (the review
+ * loop, see review-handoff.ts). The App opens the PRs Dolly sessions create, and those sessions were already
  * admitted, so its own PRs are reviewed like an allowed sender's. Other bots never are.
  * Drafts wait for ready_for_review; forks are never reviewed automatically.
  */
@@ -372,7 +375,7 @@ function reviewEvent(
 
   if (!allowed) return undefined;
 
-  return {
+  const review: typeof GitHubReview.Type = {
     kind: "review",
     installationId: value.installation.id,
     repository,
@@ -380,4 +383,8 @@ function reviewEvent(
     sha: value.pull_request.head.sha,
     sender: value.sender.login,
   };
+
+  if (value.action === "synchronize") return { ...review, pushed: true };
+
+  return review;
 }

@@ -53,6 +53,11 @@ export type WorkspaceState = {
   config: WorkspaceConfig | null;
   attached?: WorkspaceConfig[];
   activeRepository?: string;
+  /**
+   * The commit a read-only review session is pinned to. Each pin gets its own sandboxes, so a
+   * review of a new head never reads an earlier review's checkout (see pinReviewWorkspace).
+   */
+  pin?: string;
 };
 
 export const ConversationWorkspace = defineDoc<WorkspaceState>({
@@ -191,18 +196,49 @@ export const READ_ONLY_TOOLS = [
 export const READ_ONLY_REFUSAL =
   "This session is read-only: it can read code and comment on pull requests, but cannot change files, commit, push, open or edit pull requests. Ask with /dolly in a pull request comment, or start a new session, to make changes.";
 
+/** The sandbox that holds `config`'s checkout in this conversation. */
+function sandboxFor(state: WorkspaceState | null | undefined, config: WorkspaceConfig, id: string) {
+  const base =
+    config.repository === state?.config?.repository
+      ? id
+      : `${id}:repo:${config.repository.toLowerCase()}`;
+
+  return state?.pin ? `${base}@${state.pin}` : base;
+}
+
 export function activeWorkspace(state: WorkspaceState | null | undefined, id: string) {
   const config =
     state?.attached?.find((item) => item.repository === state.activeRepository) ?? state?.config;
 
   if (!config) return null;
 
-  const sandboxId =
-    config.repository === state?.config?.repository
-      ? id
-      : `${id}:repo:${config.repository.toLowerCase()}`;
+  return { config, sandboxId: sandboxFor(state, config, id) };
+}
 
-  return { config, sandboxId };
+/** Every sandbox holding one of this conversation's checkouts, primary first. */
+export function workspaceSandboxes(state: WorkspaceState | null | undefined, id: string) {
+  return [...(state?.config ? [state.config] : []), ...(state?.attached ?? [])].map((config) =>
+    sandboxFor(state, config, id),
+  );
+}
+
+/**
+ * Point a read-only review session at exactly `sha`, in sandboxes of its own. A sandbox never
+ * switches its checkout to another ref, and the review transcript lives in the conversation, so a
+ * review of a new head gets fresh sandboxes instead. Checkouts of earlier heads are left as they
+ * were; earlier attachments are dropped with them.
+ */
+export function pinReviewWorkspace(
+  state: WorkspaceState,
+  repository: string,
+  sha: string,
+  id: string,
+) {
+  if (state.pin === sha && state.config?.ref === sha) return;
+  state.config = workspaceConfig({ repository, ref: sha }, id, { readOnly: true });
+  state.pin = sha;
+  delete state.attached;
+  delete state.activeRepository;
 }
 
 /** Configuration is context for the model, not an access grant or a claim that checkout succeeded. */

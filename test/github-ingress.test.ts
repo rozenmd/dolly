@@ -574,6 +574,7 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   const prompts: string[] = [];
   const reactions: string[] = [];
   const reviews: { number: number; body: unknown }[] = [];
+  const heads: Record<string, string> = {};
   // PR 9 already has the agent's own review on its head, so nothing more is posted there.
   const ownReview = [{ commit_id: sha, user: { login: "dolly-test[bot]" } }];
 
@@ -588,7 +589,13 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
         id: "msg_review",
         role: "assistant",
         status: "completed",
-        content: [{ type: "output_text", text: "Looks good to me", annotations: [] }],
+        content: [
+          {
+            type: "output_text",
+            text: "Looks good to me\n\nVERDICT: blocking=0 findings=0 confidence=5",
+            annotations: [],
+          },
+        ],
       };
 
       const events = [
@@ -630,6 +637,19 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
       return Response.json({ id: 1 }, { status: 201 });
     }
 
+    // Before a review starts, its head is checked against the pull request's current one.
+    const head = parsed.pathname.match(/^\/repos\/example\/project\/pulls\/(\d+)$/);
+
+    if (head)
+      return Response.json({
+        state: "open",
+        head: {
+          sha: heads[head[1]!] ?? sha,
+          ref: "feature",
+          repo: { full_name: "example/project" },
+        },
+      });
+
     const pull = parsed.pathname.match(/^\/repos\/example\/project\/pulls\/(\d+)\/reviews$/);
 
     if (pull) {
@@ -655,7 +675,6 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
     // Other Apps' bots are not trusted, only this App's own.
     { ...pullRequest, sender: { login: "other-app[bot]", type: "Bot" } },
     { ...pullRequest, sender: { login: "dolly-test[bot]", type: "User" } },
-    { ...pullRequest, action: "synchronize" },
     { ...pullRequest, action: "edited" },
   ])
     expect((await hook(ignored, "pull_request")).status).toBe(204);
@@ -698,13 +717,15 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
     number: 8,
     body: {
       commit_id: sha,
-      body: expect.stringContaining("Looks good to me"),
+      body: expect.not.stringContaining("VERDICT"),
       event: "COMMENT",
       comments: [],
     },
   });
+  expect(reviews[0]?.body).toMatchObject({ body: expect.stringContaining("Looks good to me") });
   expect(prompts).toHaveLength(1);
   expect(prompts[0]).toContain("example/project#8 is ready for review");
+  expect(prompts[0]).toContain("VERDICT: blocking=");
   expect(prompts[0]).toContain(`commit_id ${sha}`);
   expect(prompts[0]).toContain("This session is read-only");
 
@@ -766,6 +787,60 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   expect(prompts.at(-1)).toContain(
     "example/project#11 is ready for review (opened by @dolly-test[bot]",
   );
+
+  // A push to a pull request is reviewed again, in the same review session.
+  const pushed = "b".repeat(40);
+  heads["8"] = pushed;
+
+  const synchronize = {
+    ...pullRequest,
+    action: "synchronize",
+    pull_request: {
+      ...pullRequest.pull_request,
+      head: { ...pullRequest.pull_request.head, sha: pushed },
+    },
+  };
+
+  expect((await hook(synchronize, "pull_request")).status).toBe(202);
+  await expect.poll(() => reviews, { timeout: 15_000 }).toHaveLength(3);
+  expect(reviews[2]).toMatchObject({ number: 8, body: { commit_id: pushed } });
+  expect(prompts.at(-1)).toContain("example/project#8 has new commits (pushed by @trusted");
+  expect(prompts.at(-1)).toContain("Any earlier reviews of this PR are above");
+
+  // A push whose head has already moved on by the time its review would start is skipped.
+  const promptCount = prompts.length;
+  heads["8"] = "c".repeat(40);
+  expect(
+    (
+      await hook(
+        {
+          ...synchronize,
+          pull_request: {
+            ...synchronize.pull_request,
+            head: { ...synchronize.pull_request.head, sha: "d".repeat(40) },
+          },
+        },
+        "pull_request",
+      )
+    ).status,
+  ).toBe(202);
+  await expect
+    .poll(
+      async () =>
+        (
+          await (
+            await SELF.fetch("https://worker/api/integrations/github/threads", { headers })
+          ).json<
+            { thread: string; deliveries: { commentId: string; outcome: string | null }[] }[]
+          >()
+        ).find((thread) => thread.thread === "review:example/project#8")?.deliveries,
+      { timeout: 15_000 },
+    )
+    .toContainEqual(
+      expect.objectContaining({ commentId: `review:${"d".repeat(40)}`, outcome: "completed" }),
+    );
+  expect(prompts).toHaveLength(promptCount);
+  expect(reviews).toHaveLength(3);
 
   // Cleared, reviews follow the default model again.
   const cleared = await SELF.fetch("https://worker/api/settings/model", {

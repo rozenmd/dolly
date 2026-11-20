@@ -151,7 +151,9 @@ To use Claude instead, see [step 7](#7-optional-use-claude-instead-of-chatgpt).
 2. Under **Who can run /dolly commands**, list the GitHub users whose pull requests Dolly reviews.
 3. Turn on **Review new pull requests**. Choose **Save**.
 
-When one of those users or a Dolly session opens a pull request in an enrolled repository, or marks a draft ready, Dolly reviews it with inline comments. Pull requests opened by other bots are skipped. It skips drafts and pull requests from forks. Comment `/dolly` on the pull request to follow up in the same session. Each review uses your model subscription.
+When one of those users or a Dolly session opens a pull request in an enrolled repository, marks a draft ready, or pushes to it, Dolly reviews it with inline comments. Pull requests opened by other bots are skipped. It skips drafts and pull requests from forks. Comment `/dolly` on the pull request to follow up in the same session. Each review uses your model subscription, and every push gets its own review.
+
+If a Dolly session opened the pull request, the review loop is on. When the review finds a problem that blocks merging, or finds problems and isn't confident the PR is safe to merge, the findings go back to the session that opened the PR. That session fixes them and pushes, and the push is reviewed again. The loop stops when a review is satisfied or after 6 fix rounds; at the cap, Dolly comments on the PR and leaves it to you. Findings only go back to sessions started in the web app that aren't archived, and only when the PR's branch is the session's own working branch. The session gets just Dolly's own review of that exact commit, marked as untrusted evidence to check, never other people's comments. Each push is reviewed in a fresh read-only checkout of exactly that commit. To stop the loop, turn reviews off: queued reviews are skipped and finished ones aren't handed back.
 
 If **Save** reports that pull request events are missing, open the GitHub App settings, subscribe to **Pull request** events, and approve the change on each installation.
 

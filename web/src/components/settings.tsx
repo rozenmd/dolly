@@ -554,9 +554,11 @@ export function GitHubSettings() {
           <span className="connection-label">
             Review new pull requests
             <span className="muted">
-              When one of these users opens a pull request in an enrolled repository, or marks a
-              draft ready, dolly reviews it with inline comments. Each review uses your model
-              subscription; choose its model under Models.
+              When one of these users or a dolly session opens a pull request in an enrolled
+              repository, marks a draft ready or pushes to it, dolly reviews it with inline
+              comments. Findings on a pull request a dolly session opened go back to that session to
+              fix, for up to 6 rounds. Each review uses your model subscription; choose its model
+              under Models.
             </span>
           </span>
           <input
