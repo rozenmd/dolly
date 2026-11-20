@@ -128,6 +128,60 @@ export const configureSlack = Effect.fn("Slack.configure")(function* (
   return { configured: true };
 });
 
+/** The web app's origin, recorded from signed-in requests so Slack replies can link to sessions. */
+const PUBLIC_BASE_URL_KEY = "slack:public-base-url";
+
+export const rememberPublicBaseUrl = Effect.fn("Slack.rememberPublicBaseUrl")(function* (
+  storage: DurableObjectStorage,
+  url: string,
+) {
+  if (!url.startsWith("https://")) return;
+
+  const saved = yield* attempt("slack.base-url.read", () =>
+    storage.get<string>(PUBLIC_BASE_URL_KEY),
+  );
+
+  if (saved !== url)
+    yield* attempt("slack.base-url.save", () => storage.put(PUBLIC_BASE_URL_KEY, url));
+});
+
+export const readPublicBaseUrl = (storage: DurableObjectStorage) =>
+  attempt("slack.base-url.read", () => storage.get<string>(PUBLIC_BASE_URL_KEY)).pipe(
+    Effect.map((url) => url ?? null),
+  );
+
+/** The thread reply that names the session a new Slack thread started. */
+export function slackSessionAnnouncement(publicBaseUrl: string | null, conversationId: string) {
+  const link = publicBaseUrl
+    ? `<${publicBaseUrl.replace(/\/+$/, "")}/session/${encodeURIComponent(conversationId)}|this session>`
+    : "this session";
+
+  return `Created and started working on ${link}`;
+}
+
+const isRepeatedReaction = Schema.is(
+  Schema.Struct({ error: Schema.Literals(["already_reacted", "no_reaction"]) }),
+);
+
+/** Add or remove a reaction. Repeats are not failures, so retries stay idempotent. */
+export const setSlackReaction = Effect.fn("Slack.reaction")(function* (
+  token: string,
+  channel: string,
+  ts: string,
+  name: string,
+  on: boolean,
+) {
+  yield* slackApi(token, on ? "reactions.add" : "reactions.remove", {
+    channel,
+    timestamp: ts,
+    name,
+  }).pipe(
+    Effect.catchTag("OperationError", (error) =>
+      isRepeatedReaction(error.details) ? Effect.void : Effect.fail(error),
+    ),
+  );
+});
+
 export const removeSlack = (storage: DurableObjectStorage) =>
   attempt("slack.delete", () => storage.delete("slack:profile")).pipe(
     Effect.as({ configured: false }),

@@ -34,7 +34,9 @@ export type SlackPrepared = {
 };
 
 type Checkpoint =
+  | { phase: "acknowledge" }
   | { phase: "prepare" }
+  | { phase: "announce"; content: SlackPrepared["content"] }
   | { phase: "deliver"; content: SlackPrepared["content"] }
   | { phase: "reply"; text: string; attempts: number };
 
@@ -42,7 +44,19 @@ export interface SlackHost {
   /** Route, download attachments and build the prompt. Runs once per message; its result is checkpointed. */
   prepare(input: SlackDelivery, isNew: boolean): Effect.Effect<SlackPrepared, OperationError>;
   reply(input: SlackDelivery, text: string): Effect.Effect<void, OperationError>;
+  /** Add or remove the :eyes: reaction that shows a message has been picked up. */
+  working(input: SlackDelivery, on: boolean): Effect.Effect<void, OperationError>;
+  /** Tell the thread which Dolly session now owns it. */
+  announce(input: SlackDelivery, conversationId: string): Effect.Effect<void, OperationError>;
 }
+
+/** Reactions and the session link are courtesy signals: a failure is logged, never retried into a duplicate. */
+const bestEffort = (event: string, effect: Effect.Effect<void, OperationError>) =>
+  effect.pipe(
+    Effect.catchTag("OperationError", (error) =>
+      Effect.logWarning({ event, error: exceptionDetails(error), details: error.details }),
+    ),
+  );
 
 type TaskInput = SlackDelivery & { isNew: boolean };
 
@@ -50,8 +64,21 @@ export function slackDelivery(host: SlackHost) {
   return defineTask<TaskInput, Checkpoint, null>({
     name: "app.slack-delivery",
     version: 1,
-    initial: () => ({ phase: "prepare" }),
+    initial: () => ({ phase: "acknowledge" }),
     phases: {
+      acknowledge: (task, runtime, context) =>
+        Effect.runPromise(
+          Effect.gen(function* () {
+            yield* bestEffort("slack_working_failed", host.working(task.input, true));
+            yield* attempt("slack.acknowledged", () =>
+              runtime.commit(
+                () => ({ status: "running", checkpoint: { phase: "prepare" } }),
+                context,
+              ),
+            );
+          }),
+          { signal: context.abortSignal },
+        ),
       prepare: (task, runtime, context) =>
         Effect.runPromise(
           Effect.gen(function* () {
@@ -81,9 +108,33 @@ export function slackDelivery(host: SlackHost) {
 
                 return {
                   status: "running",
-                  checkpoint: { phase: "deliver", content: prepared.content },
+                  checkpoint: { phase: "announce", content: prepared.content },
                 };
               }, context),
+            );
+          }),
+          { signal: context.abortSignal },
+        ),
+      // A new thread hears which session took it, then loses :eyes:; follow-ups keep it until answered.
+      announce: (task, runtime, context) =>
+        Effect.runPromise(
+          Effect.gen(function* () {
+            if (task.input.isNew) {
+              yield* bestEffort(
+                "slack_announce_failed",
+                host.announce(task.input, String(task.conversationId)),
+              );
+              yield* bestEffort("slack_working_failed", host.working(task.input, false));
+            }
+
+            yield* attempt("slack.announced", () =>
+              runtime.commit(
+                () => ({
+                  status: "running",
+                  checkpoint: { phase: "deliver", content: task.state.checkpoint.content },
+                }),
+                context,
+              ),
             );
           }),
           { signal: context.abortSignal },
@@ -160,6 +211,9 @@ export function slackDelivery(host: SlackHost) {
               : Result.succeed(undefined);
 
             if (Result.isSuccess(result)) {
+              if (!task.input.isNew)
+                yield* bestEffort("slack_working_failed", host.working(task.input, false));
+
               yield* attempt("slack.replied", () =>
                 runtime.commit(
                   () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
@@ -177,6 +231,9 @@ export function slackDelivery(host: SlackHost) {
             });
 
             if (task.state.checkpoint.attempts >= 4) {
+              if (!task.input.isNew)
+                yield* bestEffort("slack_working_failed", host.working(task.input, false));
+
               yield* attempt("slack.failed", () =>
                 runtime.commit(
                   () => ({

@@ -53,7 +53,14 @@ import { STEER_TOOL_SKIP, SteerInterrupts, steerInterrupts, steerQueued } from "
 import { admitGitHub, githubDelivery, GitHubThreads } from "./github-inbox";
 import { admitSlack, slackDelivery } from "./slack-inbox";
 import { SlackHostService } from "./slack-host";
-import { configureSlack, readSlackProfile, removeSlack, SlackSetup, slackStatus } from "./slack";
+import {
+  configureSlack,
+  readSlackProfile,
+  rememberPublicBaseUrl,
+  removeSlack,
+  SlackSetup,
+  slackStatus,
+} from "./slack";
 import {
   isExternalSlackSender,
   parseSlackEvent,
@@ -184,6 +191,14 @@ export class Agent extends DurableObject<Env> {
       ),
     reply: (input, text) =>
       Effect.flatMap(SlackHostService, (host) => host.reply(input, text)).pipe(
+        Effect.provide(this.slackServices),
+      ),
+    working: (input, on) =>
+      Effect.flatMap(SlackHostService, (host) => host.working(input, on)).pipe(
+        Effect.provide(this.slackServices),
+      ),
+    announce: (input, conversationId) =>
+      Effect.flatMap(SlackHostService, (host) => host.announce(input, conversationId)).pipe(
         Effect.provide(this.slackServices),
       ),
   });
@@ -1322,14 +1337,18 @@ export class Agent extends DurableObject<Env> {
           this.ctx.storage.get<string>("github:ingress"),
         );
 
+        // Opening Slack settings records the web origin that session links in Slack point to.
+        yield* rememberPublicBaseUrl(this.ctx.storage, publicBaseUrl);
+
         return yield* slackStatus(this.ctx.storage, { ingress: ingress ?? "", publicBaseUrl });
       }),
     );
   }
 
-  slackConfigure(input: typeof SlackSetup.Type) {
+  slackConfigure(input: typeof SlackSetup.Type, publicBaseUrl: string) {
     return this.githubRun(
       Schema.decodeUnknownEffect(SlackSetup)(input).pipe(
+        Effect.tap(() => rememberPublicBaseUrl(this.ctx.storage, publicBaseUrl)),
         Effect.mapError(
           () =>
             new OperationError({

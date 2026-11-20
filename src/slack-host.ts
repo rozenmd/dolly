@@ -11,8 +11,11 @@ import {
   downloadSlackFile,
   MAX_SLACK_IMAGES,
   postSlackReply,
+  readPublicBaseUrl,
   readSlackProfile,
+  setSlackReaction,
   slackApi,
+  slackSessionAnnouncement,
   slackThreadContext,
 } from "./slack";
 import { markdownToSlack, type SlackDelivery } from "./slack-events";
@@ -146,7 +149,28 @@ function makeSlackHost(
     yield* postSlackReply(slack.botToken, input.channel, input.threadTs, markdownToSlack(text));
   });
 
-  return { prepare, reply };
+  const working = Effect.fn("Slack.working")(function* (input: SlackDelivery, on: boolean) {
+    const slack = yield* profile;
+    yield* setSlackReaction(slack.botToken, input.channel, input.ts, "eyes", on);
+  });
+
+  const announce = Effect.fn("Slack.announce")(function* (
+    input: SlackDelivery,
+    conversationId: string,
+  ) {
+    const slack = yield* profile;
+    const base = yield* readPublicBaseUrl(deps.storage).pipe(Effect.orElseSucceed(() => null));
+
+    // Already Slack mrkdwn: the link must not pass through markdownToSlack's escaping.
+    yield* postSlackReply(
+      slack.botToken,
+      input.channel,
+      input.threadTs,
+      slackSessionAnnouncement(base, conversationId),
+    );
+  });
+
+  return { prepare, reply, working, announce };
 }
 
 /** Slack routing, attachments and thread replies for the durable delivery task. */
