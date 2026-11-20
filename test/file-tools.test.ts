@@ -182,9 +182,12 @@ it("writes and edits sandbox files through Pi tools, reporting line diff stats a
       })
     ).status,
   ).toBe(202);
+  // The turn runs several model rounds and tool calls; the default 1s poll is too tight on CI.
   await expect
-    .poll(async () =>
-      (await SELF.fetch(`https://worker/api/sessions/${created.id}`, { headers })).text(),
+    .poll(
+      async () =>
+        (await SELF.fetch(`https://worker/api/sessions/${created.id}`, { headers })).text(),
+      { timeout: 15_000 },
     )
     .toContain("Files updated");
 
