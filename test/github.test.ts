@@ -1375,6 +1375,128 @@ it("lets a session push and force-push any branch but the default one", async ()
   expect(upstream).toBe(3);
 });
 
+it("keeps a read-only session from changing repositories", async () => {
+  await connect();
+  const { ConversationWorkspace, workspaceConfig } = await import("../src/workspace");
+
+  const config = workspaceConfig({ repository: "another-owner/project" }, "43", { readOnly: true });
+
+  const upstream: string[] = [];
+  const api: string[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = new URL(String(input));
+
+    if (url.hostname === "github.com") {
+      upstream.push(url.pathname + url.search);
+
+      return new Response("Git response");
+    }
+
+    if (url.pathname.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (url.pathname.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+
+    api.push(url.pathname);
+
+    return Response.json({ default_branch: "main" });
+  });
+  const agent = env.AGENT.getByName("owner");
+
+  // Fetching still works; every push request is refused before it reaches GitHub.
+  const fetched = await agent.gitTransport(
+    new Request(
+      "http://github.workspace/another-owner/project.git/info/refs?service=git-upload-pack",
+    ),
+    config,
+  );
+
+  expect(await fetched.text()).toBe("Git response");
+
+  const command = `${"a".repeat(40)} ${"b".repeat(40)} refs/heads/${config.branch}\0report-status\n`;
+
+  for (const request of [
+    new Request(
+      "http://github.workspace/another-owner/project.git/info/refs?service=git-receive-pack",
+    ),
+    new Request("http://github.workspace/another-owner/project.git/git-receive-pack", {
+      method: "POST",
+      body: (command.length + 4).toString(16).padStart(4, "0") + command + "0000PACK",
+    }),
+  ]) {
+    const response = await agent.gitTransport(request, config);
+
+    expect(response.status).toBe(403);
+    expect(await response.text()).toContain("This session is read-only");
+  }
+
+  expect(upstream).toEqual(["/another-owner/project.git/info/refs?service=git-upload-pack"]);
+  api.length = 0;
+
+  await runInDurableObject(agent, async (instance) => {
+    const harness = instance["harness"];
+
+    const conversation = await harness.createConversation(
+      { ownership: { kind: "ownerless" } },
+      BACKGROUND_CONTEXT,
+    );
+
+    await harness.commit(async (tx) => {
+      (await tx.doc(ConversationWorkspace, conversation.id)).config = config;
+    }, BACKGROUND_CONTEXT);
+
+    const refused = { ok: false, code: "read_only" };
+
+    for (const operation of [
+      {
+        action: "open_pull_request" as const,
+        repository: "another-owner/project",
+        branch: config.branch,
+        base: "main",
+        title: "Change",
+        body: "Details",
+      },
+      {
+        action: "update_pull_request" as const,
+        repository: "another-owner/project",
+        number: 8,
+        title: "Renamed",
+      },
+      {
+        action: "write_file" as const,
+        repository: "another-owner/project",
+        branch: config.branch,
+        path: "README.md",
+        content: "changed",
+        message: "Change",
+      },
+    ])
+      expect(await instance["githubForSession"](conversation.id, { operation })).toMatchObject(
+        refused,
+      );
+
+    for (const input of [
+      { action: "commit" as const, message: "Change" },
+      { action: "push" as const },
+      { action: "open_pull_request" as const, title: "Change", body: "Details" },
+    ])
+      expect(await instance["runWorkspace"](conversation.id, input)).toMatchObject(refused);
+
+    expect(api).toEqual([]);
+
+    // Reading pull requests is still allowed: it reaches GitHub.
+    expect(
+      await instance["githubForSession"](conversation.id, {
+        operation: { action: "read_pull_request", repository: "another-owner/project", number: 8 },
+      }),
+    ).not.toMatchObject(refused);
+    expect(api).toContain("/repos/another-owner/project/pulls/8");
+  });
+});
+
 async function setAccounts(accounts: string[]) {
   return SELF.fetch("https://worker/api/integrations/github/accounts", {
     method: "PUT",

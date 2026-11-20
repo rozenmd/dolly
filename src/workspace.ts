@@ -24,15 +24,28 @@ export type WorkspaceConfig = Omit<typeof WorkspaceInput.Type, "networkHosts" | 
   branch: string;
   ref: string;
   networkHosts: string[];
+  /**
+   * A read-only session (an automatic review) reads code and comments on pull requests but never
+   * changes a repository: its git transport refuses pushes and its tools refuse writes.
+   */
+  readOnly?: true;
 };
 
-export function workspaceConfig(input: typeof WorkspaceInput.Type, id: string): WorkspaceConfig {
-  return {
+export function workspaceConfig(
+  input: typeof WorkspaceInput.Type,
+  id: string,
+  options: { readOnly?: boolean } = {},
+): WorkspaceConfig {
+  const config: WorkspaceConfig = {
     repository: input.repository,
     ref: input.ref ?? "HEAD",
     networkHosts: Array.from(input.networkHosts ?? []),
     branch: `dolly/session-${id}`,
   };
+
+  if (options.readOnly) config.readOnly = true;
+
+  return config;
 }
 
 /** The primary repository stays fixed; additional repositories have isolated checkouts. */
@@ -119,9 +132,11 @@ export function selectRepository(
     );
 
   if (!existing) {
+    // Repositories attached to a read-only session are read-only too.
     const config = workspaceConfig(
       { ...input, networkHosts: state.config?.networkHosts ?? [] },
       id,
+      { readOnly: isReadOnly(state) },
     );
 
     if (!state.config && input.action === "checkout") state.config = config;
@@ -130,6 +145,51 @@ export function selectRepository(
 
   state.activeRepository = existing?.repository ?? input.repository;
 }
+
+/** Whether a session is read-only: fixed when it is created, never upgraded. */
+export function isReadOnly(state: WorkspaceState | null | undefined) {
+  return state?.config?.readOnly === true;
+}
+
+/** Workspace actions a read-only session may use: they inspect checkouts, never commit or push. */
+export const READ_ONLY_WORKSPACE_ACTIONS: ReadonlySet<string> = new Set([
+  "repositories",
+  "diagnostics",
+  "restart",
+  "checkout",
+  "attach",
+  "status",
+  "wait_for_dependencies",
+  "diff",
+]);
+
+/** GitHub actions a read-only session may use: reads, plus reviews and replies on pull requests. */
+export const READ_ONLY_GITHUB_ACTIONS: ReadonlySet<string> = new Set([
+  "repositories",
+  "read_file",
+  "list_files",
+  "read_pull_request",
+  "list_pull_request_files",
+  "list_pull_request_comments",
+  "read_pull_request_checks",
+  "list_workflow_jobs",
+  "read_job_log",
+  "create_review",
+  "reply_to_review_comment",
+]);
+
+/** The only tools a read-only session is offered. An allowlist, so tools added later stay out. */
+export const READ_ONLY_TOOLS = [
+  "shell",
+  "read_file",
+  "github",
+  "workspace",
+  "papercuts",
+  "dolly",
+] as const;
+
+export const READ_ONLY_REFUSAL =
+  "This session is read-only: it can read code and comment on pull requests, but cannot change files, commit, push, open or edit pull requests. Ask with /dolly in a pull request comment, or start a new session, to make changes.";
 
 export function activeWorkspace(state: WorkspaceState | null | undefined, id: string) {
   const config =
@@ -170,7 +230,9 @@ export function workspacePrompt(state: WorkspaceState | null | undefined) {
     "Shell and relative read_file, write_file and edit_file paths use the active repo's /workspace/repo. Each attachment has its own sandbox. Use workspace attach to activate another repo without replacing the primary or losing changes.",
     "An empty repository discovery/enrolment list does not establish that a known selected repo is inaccessible. Try the selected repo directly with workspace checkout and report the actual authorization or checkout error. Do not treat repository selection as an authorization grant.",
     "If GitHub access is denied, explain the concrete configuration step from the tool result. Never claim that no repository access is available merely because discovery returned an empty list.",
-    "workspace push and open_pull_request use the branch above. With git in the shell you may push (or force-push) any branch except the repository's default branch, such as an existing PR's head branch; deleting branches and pushing tags are refused.",
+    isReadOnly(state)
+      ? "This session is read-only. Read code, run commands and comment on pull requests (github create_review and reply_to_review_comment), but do not change the repository: write_file, edit_file, commits, pushes and opening or editing pull requests are refused, and git push from the shell is rejected."
+      : "workspace push and open_pull_request use the branch above. With git in the shell you may push (or force-push) any branch except the repository's default branch, such as an existing PR's head branch; deleting branches and pushing tags are refused.",
   ].join("\n");
 }
 
