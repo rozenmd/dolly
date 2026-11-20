@@ -78,16 +78,15 @@ async function open(page: Page, { rounds, window }: { rounds: number; window: nu
   const asked: number[] = [];
 
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.addInitScript(() =>
-    localStorage.setItem(
-      "dolly.sessions.v1",
-      JSON.stringify([
-        { id: "long", model: "gpt-6-sol", title: "Long task", repository: "", updatedAt: 1 },
-      ]),
-    ),
-  );
   await page.route("**/api/**", (route) => {
     const url = new URL(route.request().url());
+
+    if (url.pathname === "/api/sessions")
+      return route.fulfill({
+        json: [
+          { id: "long", model: "gpt-6-sol", title: "Long task", repository: "", updatedAt: 1 },
+        ],
+      });
 
     if (url.pathname === "/api/auth") return route.fulfill({ json: signedIn });
 

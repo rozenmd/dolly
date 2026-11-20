@@ -51,7 +51,8 @@ import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-s
 import { useSessionSummary } from "./lib/session-summary";
 import { workspaceMain, workspaceOf, workspaceRows, workspaceTabs } from "./lib/workspaces";
 
-const storageKey = "dolly.sessions.v1";
+const cacheStorageKey = "dolly.sessions.cache.v1";
+const decodeSessions = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(SavedSession)));
 
 /** Model settings the composer can change on a session; each applies from the next request. */
 type SessionChange = {
@@ -66,7 +67,9 @@ export function WorkspaceApp() {
   const [authError, setAuthError] = useState("");
   const [setupError, setSetupError] = useState("");
   const [sessions, setSessions] = useState<readonly SavedSession[]>([]);
-  const sessionRevision = useRef(0);
+  const sessionListRef = useRef(sessions);
+  const [sessionsReady, setSessionsReady] = useState(false);
+  const startupPrompted = useRef(false);
   // The session the URL names: /workspace/<workspaceId>/session/<sessionId>, or /session/<sessionId>.
   const params = useParams({ strict: false });
   const routed = params.sessionId ?? "";
@@ -158,126 +161,106 @@ export function WorkspaceApp() {
       window.history.replaceState(null, "", url);
     }
 
-    void loadAuth();
-
     try {
-      setSessions(readSessions(localStorage.getItem(storageKey) ?? "[]"));
+      const cached = readSessions(localStorage.getItem(cacheStorageKey) ?? "[]");
+
+      sessionListRef.current = cached;
+      setSessions(cached);
     } catch {
       setNotice("Browser storage is unavailable. Sessions will be loaded from the server.");
     }
+
+    void loadAuth();
   }, []);
 
   useEffect(() => {
     if (!connected) return;
-
     let active = true;
-    const revision = sessionRevision.current;
 
-    Promise.all([
+    // Providers can be slow or unavailable; neither holds up the session list.
+    void Promise.all([
       chatgptLogin().catch(() => null),
       anthropicStatus().catch(() => ({ connected: false })),
-      (async () => {
-        try {
-          for (let offset = 0; offset < sessions.length; offset += 50) {
-            await request("/sessions/import", { sessions: sessions.slice(offset, offset + 50) });
-          }
-        } catch {
-          if (active)
-            setNotice(
-              "Could not import browser archive choices. Server sessions will still be loaded.",
-            );
-        }
+    ]).then(([status, claude]) => {
+      if (!active) return;
+      setChatGPT(status?.state === "connected");
+      setAnthropic(claude.connected);
+    });
 
-        const saved = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(SavedSession)))(
-          await request("/sessions"),
-        );
+    return () => {
+      active = false;
+    };
+  }, [connected]);
 
-        if (active) setSessionError("");
+  useEffect(() => {
+    if (!connected || !sessionsReady || chatgpt === null || startupPrompted.current) return;
+    startupPrompted.current = true;
 
-        return saved;
-      })().catch((cause) => {
-        if (active)
-          setSessionError(
-            `Could not sync sessions: ${cause instanceof Error ? cause.message : "Server unavailable"}`,
-          );
+    // Never replace a dialog the user opened while startup was in flight.
+    setModal(
+      (current) => current ?? (!chatgpt && !anthropic ? "chatgpt" : sessions.length ? null : "new"),
+    );
+  }, [connected, sessionsReady, chatgpt, anthropic, sessions.length]);
 
-        return sessions;
-      }),
-    ]).then(
-      ([status, claude, saved]) => {
-        if (!active) return;
+  useEffect(() => {
+    if (!connected) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    let initial = true;
+    let inFlight = false;
 
-        const signedIn = status?.state === "connected";
-        setChatGPT(signedIn);
-        setAnthropic(claude.connected);
+    const refresh = async (startup = false) => {
+      if (inFlight || (!startup && document.visibilityState === "hidden")) return;
+      inFlight = true;
+      const before = sessionListRef.current;
 
-        if (sessionRevision.current !== revision) {
-          // Do not replace sessions created or changed while sign-in discovery was in flight.
+      try {
+        const saved = decodeSessions(await request("/sessions", undefined, signal));
+
+        if (signal.aborted) return;
+        setSessionError("");
+
+        if (sessionListRef.current === before) {
+          save(saved);
+        } else if (initial) {
+          // Keep local changes made during startup, without hiding sessions only the server knows.
           updateSessions((current) => [
             ...current,
             ...saved.filter((item) => !current.some((local) => local.id === item.id)),
           ]);
-
-          return;
-        }
-
-        save(saved);
-        setSelected(
-          (current) =>
-            current ||
-            sessionList(saved.filter(belongsInSidebar), "", Date.now()).active[0]?.id ||
-            "",
-        );
-
-        // Only prompt when nothing is open: a dialog the user opened while sessions were
-        // loading (e.g. a half-typed new session) must never be closed or swapped out.
-        setModal(
-          (current) =>
-            current ?? (!signedIn && !claude.connected ? "chatgpt" : saved.length ? null : "new"),
-        );
-      },
-      () => active && setChatGPT(null),
-    );
-
-    return () => {
-      active = false;
-    };
-    // Checked once per sign-in; the saved session list does not change who is signed in.
-  }, [connected]);
-
-  useEffect(() => {
-    if (!connected) return;
-    let active = true;
-
-    const refresh = async () => {
-      if (document.visibilityState === "hidden") return;
-      const revision = sessionRevision.current;
-
-      try {
-        const saved = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(SavedSession)))(
-          await request("/sessions"),
-        );
-
-        if (active) {
-          setSessionError("");
-
-          if (sessionRevision.current === revision) save(saved);
         }
       } catch (cause) {
-        if (active)
+        if (!signal.aborted)
           setSessionError(
             `Could not sync sessions: ${cause instanceof Error ? cause.message : "Server unavailable"}`,
           );
+      } finally {
+        inFlight = false;
+
+        if (!signal.aborted && initial) {
+          initial = false;
+
+          const recent = sessionList(
+            sessionListRef.current.filter(belongsInSidebar),
+            "",
+            Date.now(),
+          );
+
+          setSelected((current) => current || recent.active[0]?.id || "");
+          setSessionsReady(true);
+        }
       }
     };
 
-    const timer = window.setInterval(() => void refresh(), 15_000);
-    window.addEventListener("focus", refresh);
+    const refreshVisible = () => void refresh();
+    void refresh(true);
+    const timer = window.setInterval(refreshVisible, 15_000);
+    window.addEventListener("focus", refreshVisible);
 
     return () => {
-      active = false;
+      controller.abort();
       window.clearInterval(timer);
-      window.removeEventListener("focus", refresh);
+      window.removeEventListener("focus", refreshVisible);
     };
   }, [connected]);
 
@@ -330,22 +313,21 @@ export function WorkspaceApp() {
   }
 
   function updateSessions(update: (current: readonly SavedSession[]) => readonly SavedSession[]) {
-    setSessions((current) => {
-      const next = update(current);
+    const current = sessionListRef.current;
+    const next = update(current);
 
-      if (next === current) return current;
-      sessionRevision.current++;
+    if (next === current) return;
 
-      try {
-        localStorage.setItem(storageKey, JSON.stringify(next));
-      } catch {
-        setNotice(
-          "Could not cache the session list in this browser. Your sessions are still on the server.",
-        );
-      }
+    sessionListRef.current = next;
+    setSessions(next);
 
-      return next;
-    });
+    try {
+      localStorage.setItem(cacheStorageKey, JSON.stringify(next));
+    } catch {
+      setNotice(
+        "Could not cache the session list in this browser. Your sessions are still on the server.",
+      );
+    }
   }
 
   // Index the prompts before the window once per session, and again only if a reconnect leaves a gap

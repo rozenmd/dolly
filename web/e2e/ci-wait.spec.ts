@@ -126,16 +126,13 @@ async function open(page: Page, active?: Wait) {
   const cancelled: string[] = [];
 
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.addInitScript(() =>
-    localStorage.setItem(
-      "dolly.sessions.v1",
-      JSON.stringify([
-        { id: "ci", model: "gpt-6-sol", title: "CI wait", repository: "", updatedAt: 1 },
-      ]),
-    ),
-  );
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
+
+    if (path === "/api/sessions")
+      return route.fulfill({
+        json: [{ id: "ci", model: "gpt-6-sol", title: "CI wait", repository: "", updatedAt: 1 }],
+      });
 
     if (path === "/api/auth") return route.fulfill({ json: signedIn });
 

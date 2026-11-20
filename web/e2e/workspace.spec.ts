@@ -19,15 +19,20 @@ for (const width of [1280, 320]) {
     page,
   }) => {
     await page.setViewportSize({ width, height: 800 });
-    await page.addInitScript(() =>
-      localStorage.setItem(
-        "dolly.sessions.v1",
-        JSON.stringify([
-          { id: "progress", model: "gpt-6-sol", title: "Run tests", repository: "", updatedAt: 1 },
-        ]),
-      ),
-    );
     await page.route("**/api/**", (route) => {
+      if (new URL(route.request().url()).pathname === "/api/sessions")
+        return route.fulfill({
+          json: [
+            {
+              id: "progress",
+              model: "gpt-6-sol",
+              title: "Run tests",
+              repository: "",
+              updatedAt: 1,
+            },
+          ],
+        });
+
       if (new URL(route.request().url()).pathname === "/api/auth")
         return route.fulfill({ json: signedIn });
 
@@ -140,25 +145,24 @@ test.beforeEach(async ({ page }) => {
 test("queues a message while running and promotes it with Send now, including after reload", async ({
   page,
 }) => {
-  await page.addInitScript(() =>
-    localStorage.setItem(
-      "dolly.sessions.v1",
-      JSON.stringify([
-        {
-          id: "queue-session",
-          model: "gpt-6-luna",
-          title: "Queue test",
-          repository: "",
-          updatedAt: 1,
-        },
-      ]),
-    ),
-  );
   const items: { id: number; mode: string; content: string }[] = [];
   let submissions = 0;
   let promotions = 0;
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
+
+    if (path === "/api/sessions")
+      return route.fulfill({
+        json: [
+          {
+            id: "queue-session",
+            model: "gpt-6-luna",
+            title: "Queue test",
+            repository: "",
+            updatedAt: 1,
+          },
+        ],
+      });
 
     if (path === "/api/auth") return route.fulfill({ json: signedIn });
 
@@ -214,21 +218,6 @@ test("queues a message while running and promotes it with Send now, including af
 test("one composer pill switches the session's model, effort, speed and fallback, rolls back a refusal, and saves and restores defaults", async ({
   page,
 }) => {
-  await page.addInitScript(() =>
-    localStorage.setItem(
-      "dolly.sessions.v1",
-      JSON.stringify([
-        {
-          id: "pill",
-          model: "gpt-6-luna",
-          thinkingLevel: "medium",
-          title: "Model pill",
-          repository: "",
-          updatedAt: 1,
-        },
-      ]),
-    ),
-  );
   const changes: unknown[] = [];
   const saved: unknown[] = [];
 
@@ -243,6 +232,20 @@ test("one composer pill switches the session's model, effort, speed and fallback
 
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
+
+    if (path === "/api/sessions")
+      return route.fulfill({
+        json: [
+          {
+            id: "pill",
+            model: "gpt-6-luna",
+            thinkingLevel: "medium",
+            title: "Model pill",
+            repository: "",
+            updatedAt: 1,
+          },
+        ],
+      });
 
     if (path === "/api/auth") return route.fulfill({ json: signedIn });
 
@@ -486,7 +489,9 @@ test("connects Claude without ChatGPT, explicitly tests Worker inference, and st
     "Hello from Claude",
   );
   expect(selectedModel).toBe("claude-haiku-5-5");
-  expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.v1"))).not.toContain(token);
+  expect(await page.evaluate(() => localStorage.getItem("dolly.sessions.cache.v1"))).not.toContain(
+    token,
+  );
   await page.reload();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByRole("article", { name: "assistant message" })).toContainText(
@@ -498,21 +503,6 @@ for (const outcome of ["answered", "failed", "retrying"] as const) {
   test(`renders an actual-shaped ${outcome} model response instead of a silent user-only transcript`, async ({
     page,
   }) => {
-    await page.addInitScript(() =>
-      localStorage.setItem(
-        "dolly.sessions.v1",
-        JSON.stringify([
-          {
-            id: "response-session",
-            model: "gpt-6.1-terra",
-            title: "hi",
-            repository: "octocat/project",
-            updatedAt: 1,
-          },
-        ]),
-      ),
-    );
-
     const message =
       outcome === "answered"
         ? {
@@ -634,10 +624,6 @@ for (const repository of ["octocat/project", ""]) {
       updatedAt: 1,
     };
 
-    await page.addInitScript(
-      (session) => localStorage.setItem("dolly.sessions.v1", JSON.stringify([session])),
-      source,
-    );
     const creates: unknown[] = [];
     const messages: { content: string; requestId: string }[] = [];
 
@@ -1298,15 +1284,14 @@ test("cancelling ChatGPT sign-in ignores a connection that was already in flight
 });
 
 test("starts steps collapsed and respects what the user opens or closes", async ({ page }) => {
-  await page.addInitScript(() =>
-    localStorage.setItem(
-      "dolly.sessions.v1",
-      JSON.stringify([
-        { id: "steps", model: "gpt-6-sol", title: "Run tests", repository: "", updatedAt: 1 },
-      ]),
-    ),
-  );
   await page.route("**/api/**", (route) => {
+    if (new URL(route.request().url()).pathname === "/api/sessions")
+      return route.fulfill({
+        json: [
+          { id: "steps", model: "gpt-6-sol", title: "Run tests", repository: "", updatedAt: 1 },
+        ],
+      });
+
     if (new URL(route.request().url()).pathname === "/api/auth")
       return route.fulfill({ json: signedIn });
 

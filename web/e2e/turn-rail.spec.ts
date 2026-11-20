@@ -84,17 +84,14 @@ async function open(
   const asked = { history, prompts };
 
   await page.setViewportSize({ width, height: 800 });
-  await page.addInitScript(() =>
-    localStorage.setItem(
-      "dolly.sessions.v1",
-      JSON.stringify([
-        { id: "rail", model: "gpt-6-sol", title: "Rail", repository: "", updatedAt: 1 },
-      ]),
-    ),
-  );
   await page.route("**/api/**", (route) => {
     const url = new URL(route.request().url());
     const through = Number(url.searchParams.get("through"));
+
+    if (url.pathname === "/api/sessions")
+      return route.fulfill({
+        json: [{ id: "rail", model: "gpt-6-sol", title: "Rail", repository: "", updatedAt: 1 }],
+      });
 
     if (url.pathname === "/api/auth") return route.fulfill({ json: signedIn });
 

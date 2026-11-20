@@ -171,14 +171,19 @@ it("persists session PR creation without a transcript and retains it after failu
     changedFiles: 2,
   };
 
-  const sessions = () => env.AGENT.getByName("owner").sessions();
-  expect(
-    (await sessions()).find((session: SavedSession) => session.id === id)?.pullRequest,
-  ).toEqual(expected);
+  const pull = async () => {
+    const response = await SELF.fetch("https://worker/api/sessions", { headers });
+    expect(response.status).toBe(200);
+
+    return (await response.json<SavedSession[]>()).find((session) => session.id === id)
+      ?.pullRequest;
+  };
+
+  // A cold list returns the durable link without waiting for the GitHub lookup.
+  expect(await pull()).toEqual({ repository, number: 8, url: expected.url });
+  await expect.poll(pull).toEqual(expected);
   await abortAllDurableObjects();
-  expect(
-    (await sessions()).find((session: SavedSession) => session.id === id)?.pullRequest,
-  ).toEqual(expected);
+  expect(await pull()).toEqual(expected);
 });
 
 const publicFile = {

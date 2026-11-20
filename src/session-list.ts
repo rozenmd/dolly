@@ -1,10 +1,16 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import * as Schema from "effect/Schema";
-import type { ConversationId, Cursor, EntryRecord, Harness } from "@earendil-works/pi-durable";
+import type {
+  ConversationId,
+  Cursor,
+  EntryId,
+  EntryRecord,
+  Harness,
+} from "@earendil-works/pi-durable";
 import { ConversationWorkspace } from "./workspace";
 import { redact } from "./diagnostics";
 import type { SavedSession } from "./session-contracts";
-import { indexSession } from "./coordination";
+import { SessionIndex } from "./coordination";
 import { sessionMetadataKey, type SessionMetadata } from "./model-defaults";
 
 type PullRequestRef = { repository: string; number: number; url: string };
@@ -47,6 +53,110 @@ function lastPromptAt(entries: readonly EntryRecord[]): number {
 
 const LIVE_STATUSES = ["running", "waiting", "sleeping"] as const;
 
+type TranscriptSummary = {
+  tip: EntryId;
+  redaction: string;
+  title: string;
+  updatedAt: number;
+  pullRequest?: PullRequestRef;
+};
+
+type Conversation = NonNullable<Awaited<ReturnType<Harness["conversation"]>>>;
+
+/** Reuse the projection until the transcript advances or the redaction inputs change. */
+async function summarizeTranscript(
+  conversation: Conversation,
+  storage: DurableObjectStorage,
+  tip: EntryId | undefined,
+  secrets: readonly string[],
+  redaction: string,
+): Promise<TranscriptSummary | undefined> {
+  if (tip === undefined) return undefined;
+  const key = `session-transcript-summary:${conversation.id}`;
+  const saved = await storage.get<TranscriptSummary>(key);
+
+  if (saved?.tip === tip && saved.redaction === redaction) return saved;
+
+  // First prompts are immutable, including inherited history. Don't persist unredacted titles.
+  let title = saved?.redaction === redaction ? saved.title : "";
+  let history: Cursor | undefined;
+
+  while (!title) {
+    const entries = await conversation.entries(
+      { order: "ascending", maxEntryId: tip },
+      50,
+      history,
+      BACKGROUND_CONTEXT,
+    );
+
+    for (const entry of entries.items) {
+      const prompt = entry.model?.find((message) => message.role === "user");
+
+      if (!prompt) continue;
+
+      const text = Schema.is(Schema.String)(prompt.content)
+        ? prompt.content
+        : prompt.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+
+      // Redact before truncating: a secret cut at the limit would no longer match.
+      title = redact(text.trim().split("\n")[0] ?? "", secrets).slice(0, 80);
+
+      if (title) break;
+    }
+
+    history = entries.next;
+
+    if (!history) break;
+  }
+
+  // Keep PR links found by the old listing, including those now beyond the scan window.
+  const legacy = saved
+    ? undefined
+    : await storage.get<PullRequestRef & { seen: string }>(`session-pr:${conversation.id}`);
+
+  const previousTip = saved ? String(saved.tip) : legacy?.seen;
+
+  const fallbackPull =
+    saved?.pullRequest ??
+    (legacy?.url
+      ? { repository: legacy.repository, number: legacy.number, url: legacy.url }
+      : undefined);
+
+  let pullRequest: PullRequestRef | undefined;
+  let checkingPull = previousTip !== String(tip);
+  let updatedAt = 0;
+  let cursor: Cursor | undefined;
+  let scanned = 0;
+
+  do {
+    const page = await conversation.entries(
+      { order: "descending", maxEntryId: tip },
+      50,
+      cursor,
+      BACKGROUND_CONTEXT,
+    );
+
+    if (!updatedAt) updatedAt = lastPromptAt(page.items);
+
+    if (checkingPull) {
+      const boundary = previousTip
+        ? page.items.findIndex((entry) => String(entry.id) === previousTip)
+        : -1;
+
+      pullRequest = findPullRequest(boundary < 0 ? page.items : page.items.slice(0, boundary));
+      checkingPull = !pullRequest && boundary < 0;
+    }
+
+    scanned += page.items.length;
+    cursor = page.next;
+  } while ((!updatedAt || checkingPull) && cursor && scanned < PULL_SCAN_LIMIT);
+
+  const summary = { tip, redaction, title, updatedAt, pullRequest: pullRequest ?? fallbackPull };
+  await storage.put(key, summary);
+
+  return summary;
+}
+
 /** Discover history, not just sessions created after this feature was deployed. */
 export async function listSessions(
   harness: Harness,
@@ -67,153 +177,87 @@ export async function listSessions(
     start = page.size === 1000 ? [...page.keys()].at(-1) : undefined;
   } while (start);
 
+  const redaction = Array.from(
+    new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(secrets))),
+    ),
+  ).join(",");
+
+  const running = await harness.commit(async (tx) => {
+    const live = new Set<ConversationId>();
+
+    for (const status of LIVE_STATUSES) {
+      let cursor: Cursor | undefined;
+
+      do {
+        const page = await tx.scanTasks({ status, background: false }, 100, cursor);
+
+        for (const task of page.items) live.add(task.conversationId);
+        cursor = page.next;
+      } while (cursor);
+    }
+
+    return live;
+  }, BACKGROUND_CONTEXT);
+
   const sessions: SavedSession[] = [];
   let cursor: Cursor | undefined;
 
   do {
     const page = await harness.commit(async (tx) => {
       const page = await tx.scanConversations({}, 100, cursor);
-
-      // Make discovered pre-index conversations openable by their canonical ID too.
-      const running = new Set<ConversationId>();
+      const index = await tx.doc(SessionIndex);
+      const records = [];
 
       for (const record of page.items) {
-        await indexSession(tx, record.id);
-
-        for (const status of LIVE_STATUSES) {
-          const tasks = await tx.scanTasks(
-            { conversationId: record.id, status, background: false },
-            1,
-          );
-
-          if (tasks.items.length) {
-            running.add(record.id);
-            break;
-          }
-        }
+        // Make discovered pre-index conversations openable by their canonical ID too.
+        if (!Object.hasOwn(index.ids, record.id)) index.ids[record.id] = record.id;
+        records.push({ record, tip: await tx.latestEntryId(record.id) });
       }
 
-      return { ...page, running };
+      return { records, next: page.next };
     }, BACKGROUND_CONTEXT);
 
-    for (const record of page.items) {
-      const conversation = await harness.conversation(record.id, BACKGROUND_CONTEXT);
+    // Keep cold backfill bounded without serializing every storage read across all sessions.
+    for (let offset = 0; offset < page.records.length; offset += 8) {
+      const batch = await Promise.all(
+        page.records.slice(offset, offset + 8).map(async ({ record, tip }) => {
+          const conversation = await harness.conversation(record.id, BACKGROUND_CONTEXT);
 
-      if (!conversation) continue;
+          if (!conversation) return;
 
-      const [agent, workspace, metadata, latest, savedPull, createdPull] = await Promise.all([
-        conversation.agent(BACKGROUND_CONTEXT),
-        harness.snapshot(ConversationWorkspace, record.id, BACKGROUND_CONTEXT),
-        storage.get<SessionMetadata>(sessionMetadataKey(record.id)),
-        conversation.entries({ order: "descending" }, 50, undefined, BACKGROUND_CONTEXT),
-        storage.get<PullRequestRef & { seen: string }>(`session-pr:${record.id}`),
-        storage.get<PullRequestRef>(`session-created-pr:${record.id}`),
-      ]);
+          const [agent, workspace, metadata, transcript, createdPull] = await Promise.all([
+            conversation.agent(BACKGROUND_CONTEXT),
+            harness.snapshot(ConversationWorkspace, record.id, BACKGROUND_CONTEXT),
+            storage.get<SessionMetadata>(sessionMetadataKey(record.id)),
+            summarizeTranscript(conversation, storage, tip, secrets, redaction),
+            storage.get<PullRequestRef>(`session-created-pr:${record.id}`),
+          ]);
 
-      // Newest first; stop at the cached result so old transcripts are scanned once.
-      let pullRequest = createdPull ?? findPullRequest(latest.items);
-      const newest = latest.items[0] ? String(latest.items[0].id) : "";
+          const parent = record.owner?.conversationId;
 
-      if (!pullRequest && savedPull?.seen !== newest) {
-        let older = latest.next;
-        let scanned = latest.items.length;
+          return {
+            id: aliases.get(record.id) ?? String(record.id),
+            ...(metadata?.workspaceId && { workspaceId: metadata.workspaceId }),
+            ...(metadata?.createdAt && { createdAt: metadata.createdAt }),
+            model: agent.model?.modelId ?? "Existing session",
+            thinkingLevel: agent.thinkingLevel,
+            ...(metadata?.speed && { speed: metadata.speed }),
+            ...(metadata?.autoFallback !== undefined && { autoFallback: metadata.autoFallback }),
+            title: transcript?.title || "Untitled session",
+            repository: workspace?.config?.repository ?? "",
+            ref: workspace?.config?.ref,
+            updatedAt: Math.max(transcript?.updatedAt ?? 0, metadata?.createdAt ?? 0),
+            archived: metadata?.archived ?? false,
+            ...(parent && { parentId: aliases.get(parent) ?? String(parent) }),
+            ...(parent && metadata?.kept && { kept: true }),
+            running: running.has(record.id),
+            pullRequest: createdPull ?? transcript?.pullRequest,
+          } satisfies SavedSession;
+        }),
+      );
 
-        while (!pullRequest && older && scanned < PULL_SCAN_LIMIT) {
-          const entries = await conversation.entries(
-            { order: "descending" },
-            50,
-            older,
-            BACKGROUND_CONTEXT,
-          );
-
-          if (savedPull && entries.items.some((entry) => String(entry.id) === savedPull.seen))
-            break;
-          pullRequest = findPullRequest(entries.items);
-          scanned += entries.items.length;
-          older = entries.next;
-        }
-      }
-
-      pullRequest ??= savedPull?.url
-        ? { repository: savedPull.repository, number: savedPull.number, url: savedPull.url }
-        : undefined;
-
-      if (savedPull?.seen !== newest || savedPull?.url !== pullRequest?.url)
-        await storage.put(`session-pr:${record.id}`, { ...pullRequest, seen: newest });
-
-      let title = "";
-      let history: Cursor | undefined;
-
-      // The first prompt may be outside the recent transcript window.
-      do {
-        const entries = await conversation.entries(
-          { order: "ascending" },
-          50,
-          history,
-          BACKGROUND_CONTEXT,
-        );
-
-        for (const entry of entries.items) {
-          const prompt = entry.model?.find((message) => message.role === "user");
-
-          if (!prompt) continue;
-
-          const text = Schema.is(Schema.String)(prompt.content)
-            ? prompt.content
-            : prompt.content
-                .flatMap((block) => (block.type === "text" ? [block.text] : []))
-                .join("\n");
-
-          // Redact before truncating: a secret cut at the limit would no longer match.
-          title = redact(text.trim().split("\n")[0] ?? "", secrets).slice(0, 80);
-
-          if (title) break;
-        }
-
-        history = entries.next;
-      } while (!title && history);
-
-      // Order by the last human prompt so agent activity does not reshuffle the list.
-      let updatedAt = lastPromptAt(latest.items);
-      let older = latest.next;
-      let scanned = latest.items.length;
-
-      while (!updatedAt && older && scanned < PULL_SCAN_LIMIT) {
-        const entries = await conversation.entries(
-          { order: "descending" },
-          50,
-          older,
-          BACKGROUND_CONTEXT,
-        );
-
-        updatedAt = lastPromptAt(entries.items);
-        scanned += entries.items.length;
-        older = entries.next;
-      }
-
-      updatedAt = Math.max(updatedAt, metadata?.createdAt ?? 0);
-
-      // Spawned children are owned by a task in their parent conversation.
-      const parent = record.owner?.conversationId;
-
-      sessions.push({
-        id: aliases.get(record.id) ?? String(record.id),
-        ...(metadata?.workspaceId && { workspaceId: metadata.workspaceId }),
-        ...(metadata?.createdAt && { createdAt: metadata.createdAt }),
-        model: agent.model?.modelId ?? "Existing session",
-        thinkingLevel: agent.thinkingLevel,
-        ...(metadata?.speed && { speed: metadata.speed }),
-        ...(metadata?.autoFallback !== undefined && { autoFallback: metadata.autoFallback }),
-        title: title || "Untitled session",
-        repository: workspace?.config?.repository ?? "",
-        ref: workspace?.config?.ref,
-        updatedAt,
-        archived: metadata?.archived ?? false,
-        ...(parent && { parentId: aliases.get(parent) ?? String(parent) }),
-        ...(parent && metadata?.kept && { kept: true }),
-        running: page.running.has(record.id),
-        pullRequest,
-      });
+      for (const session of batch) if (session) sessions.push(session);
     }
 
     cursor = page.next;

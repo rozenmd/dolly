@@ -392,7 +392,8 @@ it("indexes every prompt before a window, with each turn's answer, for the rail"
   expect((await prompts("missing", newest)).status).toBe(404);
 });
 
-it("keeps the prompt of a live-streamed turn that outgrows the window", async () => {
+// The outer timeout must cover the generation and stream-settlement polls (30s + 10s).
+it("keeps the live prompt after a turn outgrows the window", { timeout: 45_000 }, async () => {
   // 40 rounds of three entries pass the 100-entry window, which then drops the prompt.
   const rounds = 40;
   const model = longTurnModel(rounds);
