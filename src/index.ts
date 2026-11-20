@@ -542,6 +542,21 @@ app.get("/api/sessions/:id/tasks/:taskId", (c) =>
   ),
 );
 
+/** The sidebar's change feed (sessions-feed.ts): `{"type":"sessions"}` means refetch the list. */
+app.get("/api/events", (c) => {
+  const origin = c.req.header("Origin");
+
+  if (origin && origin !== new URL(c.req.url).origin)
+    return c.json({ error: "Cross-origin WebSocket connections are forbidden" }, 403);
+
+  if (c.req.header("Upgrade")?.toLowerCase() !== "websocket")
+    return c.json({ error: "Expected a WebSocket upgrade" }, 426);
+
+  return owner(c).fetch(
+    new Request("https://agent/sessions", { headers: { Upgrade: "websocket" } }),
+  );
+});
+
 app.get("/api/sessions/:id/events", async (c) => {
   const origin = c.req.header("Origin");
 

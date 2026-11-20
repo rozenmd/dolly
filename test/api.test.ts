@@ -26,6 +26,7 @@ describe("Hono Worker in workerd", () => {
       ["sessions/missing", "PUT"],
       ["sessions/missing", "GET"],
       ["sessions/missing/events", "GET"],
+      ["events", "GET"],
       ["sessions/missing/messages", "POST"],
       ["sessions/missing/abort", "POST"],
       ["sessions/missing/queue/1/steer", "POST"],
@@ -85,6 +86,17 @@ describe("Hono Worker in workerd", () => {
         })
       ).status,
     ).toBe(404);
+  });
+  it("checks the sidebar feed's WebSocket upgrade and origin", async () => {
+    const url = "https://worker/api/events";
+    expect((await SELF.fetch(url, { headers })).status).toBe(426);
+    expect(
+      (
+        await SELF.fetch(url, {
+          headers: { ...headers, Upgrade: "websocket", Origin: "https://evil.example" },
+        })
+      ).status,
+    ).toBe(403);
   });
   it("checks WebSocket upgrades, origins and missing sessions", async () => {
     const url = "https://worker/api/sessions/missing/events";
