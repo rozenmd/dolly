@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { Repository } from "./github-contracts";
+import { Login } from "./github-webhook";
 import { integrationJson } from "./integration-http";
 import { attempt, OperationError } from "./operations";
 import { SlackId } from "./slack-events";
@@ -14,21 +15,41 @@ import {
 const BotToken = Schema.String.check(Schema.isPattern(/^xoxb-[A-Za-z0-9-]{10,250}$/));
 const SigningSecret = Schema.String.check(Schema.isPattern(/^[a-f0-9]{32,64}$/));
 
+/**
+ * A teammate who may start sessions from Slack, by Slack member ID (the only thing a Slack
+ * event proves about its sender), with the GitHub login the work is attributed to.
+ */
+export const SlackMember = Schema.Struct({
+  slackId: SlackId,
+  github: Schema.NullOr(Login),
+});
+
+export type SlackMember = typeof SlackMember.Type;
+
+const MAX_SLACK_MEMBERS = 200;
+const SlackMembers = Schema.Array(SlackMember).check(Schema.isMaxLength(MAX_SLACK_MEMBERS));
+
 /** What the setup form sends. Omitted secrets keep their saved values; "" clears optional fields. */
 export const SlackSetup = Schema.Struct({
   enabled: Schema.Boolean,
   botToken: Schema.optional(BotToken),
   signingSecret: Schema.optional(SigningSecret),
-  allowedUserId: Schema.Union([SlackId, Schema.Literal("")]),
   defaultRepository: Schema.Union([Repository, Schema.Literal("")]),
 });
+
+/** The whole teammate list, saved on its own so editing one person never touches the credentials. */
+export const SlackMembersUpdate = Schema.Struct({ members: SlackMembers });
+
+export type SlackSetup = typeof SlackSetup.Type;
 
 export const SlackProfile = Schema.Struct({
   enabled: Schema.Boolean,
   botToken: BotToken,
   signingSecret: SigningSecret,
-  /** Unset means every sender admitted by routing may drive Dolly. */
-  allowedUserId: Schema.NullOr(SlackId),
+  /** Who may start sessions. Empty or unset means every sender admitted by routing. */
+  members: Schema.optional(SlackMembers),
+  /** Profiles saved before `members` held a single allowed sender. */
+  allowedUserId: Schema.optional(Schema.NullOr(SlackId)),
   defaultRepository: Schema.NullOr(Repository),
   teamId: Schema.String,
   teamName: Schema.String,
@@ -36,6 +57,17 @@ export const SlackProfile = Schema.Struct({
 });
 
 export type SlackProfile = typeof SlackProfile.Type;
+
+/** The saved teammates, reading a single legacy allowed sender as a member without a login. */
+export function slackMembers(profile: SlackProfile): readonly SlackMember[] {
+  if (profile.members) return profile.members;
+
+  return profile.allowedUserId ? [{ slackId: profile.allowedUserId, github: null }] : [];
+}
+
+export function slackMember(profile: SlackProfile, slackId: string) {
+  return slackMembers(profile).find((member) => member.slackId === slackId) ?? null;
+}
 
 const SlackResponse = Schema.Struct({ ok: Schema.Boolean, error: Schema.optional(Schema.String) });
 
@@ -116,7 +148,8 @@ export const configureSlack = Effect.fn("Slack.configure")(function* (
     enabled: input.enabled,
     botToken,
     signingSecret,
-    allowedUserId: input.allowedUserId || null,
+    // Reconnecting keeps the teammates; they are edited separately.
+    members: saved ? slackMembers(saved) : [],
     defaultRepository: input.defaultRepository || null,
     teamId: identity.value.team_id,
     teamName: identity.value.team,
@@ -126,6 +159,32 @@ export const configureSlack = Effect.fn("Slack.configure")(function* (
   yield* attempt("slack.save", () => storage.put("slack:profile", profile));
 
   return { configured: true };
+});
+
+/** Replace the teammate list. One entry per Slack member ID and per GitHub login; the last wins. */
+export const saveSlackMembers = Effect.fn("Slack.saveMembers")(function* (
+  storage: DurableObjectStorage,
+  members: readonly SlackMember[],
+) {
+  const saved = yield* readSlackProfile(storage);
+
+  if (!saved) return { error: "Connect Slack before adding teammates." };
+
+  const byLogin = new Map<string, SlackMember>();
+
+  for (const member of members)
+    byLogin.set(member.github?.toLowerCase() ?? `slack:${member.slackId}`, member);
+
+  const unique = [
+    ...new Map([...byLogin.values()].map((member) => [member.slackId, member])).values(),
+  ];
+
+  const { allowedUserId: _legacy, ...rest } = saved;
+  const profile: SlackProfile = { ...rest, members: unique };
+
+  yield* attempt("slack.members.save", () => storage.put("slack:profile", profile));
+
+  return { members: unique };
 });
 
 /** The web app's origin, recorded from signed-in requests so Slack replies can link to sessions. */
@@ -203,7 +262,7 @@ export const slackStatus = Effect.fn("Slack.status")(function* (
   return {
     configured: profile !== null,
     enabled: profile?.enabled ?? false,
-    allowedUserId: profile?.allowedUserId ?? null,
+    members: profile ? slackMembers(profile) : [],
     defaultRepository: profile?.defaultRepository ?? null,
     teamName: profile?.teamName ?? null,
     botUserId: profile?.botUserId ?? null,
@@ -216,6 +275,43 @@ export const slackStatus = Effect.fn("Slack.status")(function* (
     events: SLACK_BOT_EVENTS,
   };
 });
+
+const UserInfo = Schema.Struct({
+  user: Schema.Struct({
+    real_name: Schema.optional(Schema.String),
+    profile: Schema.optional(
+      Schema.Struct({
+        display_name: Schema.optional(Schema.String),
+        real_name: Schema.optional(Schema.String),
+      }),
+    ),
+  }),
+});
+
+/** A sender's Slack name, for reading only: authorization never depends on it. */
+export const slackUserName = Effect.fn("Slack.userName")(function* (token: string, user: string) {
+  const info = yield* slackApi(token, "users.info", { user }).pipe(
+    Effect.flatMap(Schema.decodeUnknownEffect(UserInfo)),
+  );
+
+  const name =
+    info.user.profile?.display_name?.trim() ||
+    info.user.profile?.real_name?.trim() ||
+    info.user.real_name?.trim() ||
+    "";
+
+  // Names are user-controlled; keep them to one short line in the prompt.
+  return name.replace(/\s+/g, " ").slice(0, 80) || null;
+});
+
+/** Who sent a message, as the prompt names them: the Slack name, mention and attributed login. */
+export function slackSenderLabel(user: string, name: string | null, member: SlackMember | null) {
+  const details = [`<@${user}>`, ...(member?.github ? [`GitHub @${member.github}`] : [])].join(
+    ", ",
+  );
+
+  return name ? `${name} (${details})` : details;
+}
 
 /** Post (part of) a reply to a thread. Slack caps text at 40,000 characters. */
 export const postSlackReply = Effect.fn("Slack.reply")(function* (

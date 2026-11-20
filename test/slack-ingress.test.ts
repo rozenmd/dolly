@@ -12,6 +12,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { ingress } from "../src/ingress";
 import { SlackIngress } from "../src/slack-ingress";
 import { SlackThreads } from "../src/slack-inbox";
+import type { SlackSetup } from "../src/slack";
 import { ASK_MODE_NOTE, SLACK_SESSION_NOTE } from "../src/slack-intent";
 import { ConversationWorkspace } from "../src/workspace";
 import { headers, signIn } from "./session";
@@ -26,6 +27,7 @@ const profile = {
   enabled: true,
   botToken,
   signingSecret,
+  // Saved before teammates were a list: read as one member without a GitHub login.
   allowedUserId: "UOWNER",
   defaultRepository: "example/project",
   teamId: "THOME",
@@ -129,6 +131,12 @@ function claudeReply(text: string) {
 
 type Posted = { method: string; body: Record<string, string> };
 
+/** Slack display names for users.info. */
+const names = new Map([
+  ["UOWNER", "Ada Owner"],
+  ["UPARTNER", "Pat Partner"],
+]);
+
 /** Fake Slack and Claude: Haiku classifies, Sonnet answers the session, Slack records posts. */
 function fakeServices(classification: string) {
   const posted: Posted[] = [];
@@ -140,6 +148,13 @@ function fakeServices(classification: string) {
     if (parsed.hostname === "slack.com") {
       const method = parsed.pathname.slice(5);
       const body = JSON.parse(String(init?.body ?? "{}"));
+
+      // Name lookups are reads, kept out of the recorded posts.
+      if (method === "users.info")
+        return names.has(body.user)
+          ? Response.json({ ok: true, user: { profile: { display_name: names.get(body.user) } } })
+          : Response.json({ ok: false, error: "user_not_found" });
+
       posted.push({ method, body });
 
       if (method === "auth.test")
@@ -268,26 +283,51 @@ it("saves Slack settings through auth.test and never returns the credentials", a
     await state.storage.put("github:ingress", "https://hooks.example.com/hooks/github");
   });
 
-  const put = (body: Record<string, string | boolean>) =>
-    SELF.fetch("https://dolly.example.com/api/integrations/slack", {
+  const put = (path: string, body: SlackSetup | { members: unknown[] }) =>
+    SELF.fetch(`https://dolly.example.com/api/integrations/slack${path}`, {
       method: "PUT",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
 
-  expect((await put({ enabled: true, allowedUserId: "", defaultRepository: "" })).status).toBe(409);
+  const members = (list: unknown[]) => put("/members", { members: list });
+
+  expect((await put("", { enabled: true, defaultRepository: "" })).status).toBe(409);
+  // Teammates need a connected Slack app.
+  expect((await members([{ slackId: "UOWNER", github: "octocat" }])).status).toBe(409);
   expect(
     (
-      await put({
+      await put("", {
         enabled: true,
         botToken,
         signingSecret,
-        allowedUserId: "UOWNER",
         defaultRepository: "example/project",
       })
     ).status,
   ).toBe(200);
-  expect(posted.map((call) => call.method)).toEqual(["auth.test"]);
+  // Member IDs and GitHub logins are validated.
+  expect((await members([{ slackId: "not an id", github: "octocat" }])).status).toBe(400);
+  expect((await members([{ slackId: "UOWNER", github: "not a login!" }])).status).toBe(400);
+
+  const saved = await members([
+    { slackId: "UOLD", github: "octocat" },
+    { slackId: "UPARTNER", github: "hubot" },
+    // A later entry for the same person replaces the earlier one.
+    { slackId: "UOWNER", github: "OctoCat" },
+  ]);
+
+  expect(saved.status).toBe(200);
+  expect(await saved.json()).toEqual({
+    members: [
+      { slackId: "UOWNER", github: "OctoCat" },
+      { slackId: "UPARTNER", github: "hubot" },
+    ],
+  });
+  // Reconnecting keeps the teammates.
+  expect(
+    (await put("", { enabled: true, botToken, signingSecret, defaultRepository: "" })).status,
+  ).toBe(200);
+  expect(posted.map((call) => call.method)).toEqual(["auth.test", "auth.test"]);
 
   const status = await SELF.fetch("https://dolly.example.com/api/integrations/slack", { headers });
   const text = await status.text();
@@ -298,7 +338,10 @@ it("saves Slack settings through auth.test and never returns the credentials", a
   expect(body).toMatchObject({
     configured: true,
     enabled: true,
-    allowedUserId: "UOWNER",
+    members: [
+      { slackId: "UOWNER", github: "OctoCat" },
+      { slackId: "UPARTNER", github: "hubot" },
+    ],
     teamName: "Home",
     eventsUrl: "https://hooks.example.com/slack/events",
     actionsUrl: "https://hooks.example.com/slack/actions",
@@ -395,6 +438,49 @@ it("turns a DM into a session, replies in its thread, and gates who may start an
       ["chat.postMessage", "100.1", undefined],
       ["reactions.remove", "103.1", "eyes"],
     ]);
+}, 30_000);
+
+it("lets only listed teammates start sessions and names who asked", async () => {
+  const { posted, requests } = fakeServices("{}");
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const { allowedUserId: _legacy, ...rest } = profile;
+    await state.storage.put("slack:profile", {
+      ...rest,
+      members: [
+        { slackId: "UOWNER", github: "octocat" },
+        { slackId: "UPARTNER", github: null },
+      ],
+    });
+  });
+
+  const answered = (count: number) =>
+    expect
+      .poll(() => posted.filter((call) => call.method === "chat.postMessage"), { timeout: 15_000 })
+      .toHaveLength(count);
+
+  expect((await post("/slack/events", dm("400.1", "<@UBOT> hello"))).status).toBe(200);
+  await answered(2);
+  expect(JSON.stringify(requests.at(-1))).toContain(
+    "Sent by Ada Owner (<@UOWNER>, GitHub @octocat) in a Slack DM.",
+  );
+
+  // A listed teammate without a login is named by their Slack name alone.
+  expect((await post("/slack/events", dm("401.1", "hi", { user: "UPARTNER" }))).status).toBe(200);
+  await answered(4);
+  expect(JSON.stringify(requests.at(-1))).toContain(
+    "Sent by Pat Partner (<@UPARTNER>) in a Slack DM.",
+  );
+
+  // Nobody else can start a session, and being listed does not admit a Slack Connect partner.
+  expect((await post("/slack/events", dm("402.1", "hi", { user: "USTRANGER" }))).status).toBe(200);
+  expect(
+    (await post("/slack/events", dm("403.1", "hi", { user: "UPARTNER", team: "TOTHER" }))).status,
+  ).toBe(200);
+
+  const started = Object.keys(await threads());
+  expect(started).toEqual(expect.arrayContaining(["D0DM:400.1", "D0DM:401.1"]));
+  expect(started).not.toContain("D0DM:402.1");
+  expect(started).not.toContain("D0DM:403.1");
 }, 30_000);
 
 it("starts Slack sessions with the owner's saved default model", async () => {

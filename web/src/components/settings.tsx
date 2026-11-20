@@ -26,7 +26,7 @@ import { AppHealth, useOnboarding } from "./get-started";
 import { RepositoryPicker } from "./repositories";
 import { EFFORTS, ModelPicker, SPEEDS, effortName, modelName, speedName } from "./model-select";
 import { Picker } from "./picker";
-import { Input } from "./ui";
+import { Input, Modal } from "./ui";
 import { UsageLimits } from "./usage";
 
 type Connected = Extract<AuthState["github"], { connected: true }>;
@@ -582,10 +582,17 @@ export function GitHubSettings() {
   );
 }
 
+const SlackMember = Schema.Struct({
+  slackId: Schema.String,
+  github: Schema.NullOr(Schema.String),
+});
+
+type SlackMember = typeof SlackMember.Type;
+
 const SlackStatus = Schema.Struct({
   configured: Schema.Boolean,
   enabled: Schema.Boolean,
-  allowedUserId: Schema.NullOr(Schema.String),
+  members: Schema.Array(SlackMember),
   defaultRepository: Schema.NullOr(Schema.String),
   teamName: Schema.NullOr(Schema.String),
   eventsUrl: Schema.NullOr(Schema.String),
@@ -613,7 +620,6 @@ export function SlackSettings() {
   const [enabled, setEnabled] = useState(true);
   const [botToken, setBotToken] = useState("");
   const [signingSecret, setSigningSecret] = useState("");
-  const [allowedUserId, setAllowedUserId] = useState("");
   const [defaultRepository, setDefaultRepository] = useState("");
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -622,7 +628,6 @@ export function SlackSettings() {
   function load(next: SlackStatus) {
     setStatus(next);
     setEnabled(next.configured ? next.enabled : true);
-    setAllowedUserId(next.allowedUserId ?? "");
     setDefaultRepository(next.defaultRepository ?? "");
   }
 
@@ -657,7 +662,6 @@ export function SlackSettings() {
     void run(async () => {
       const body: ApiBody = {
         enabled,
-        allowedUserId: allowedUserId.trim(),
         defaultRepository: defaultRepository.trim(),
       };
 
@@ -794,19 +798,6 @@ export function SlackSettings() {
           <strong>Basic Information</strong> → <strong>App Credentials</strong> →{" "}
           <strong>Signing Secret</strong> (choose Show).
         </p>
-        <label htmlFor="slack-allowed-user">Your Slack member ID</label>
-        <Input
-          id="slack-allowed-user"
-          name="allowedUserId"
-          placeholder="U012ABCDEF"
-          value={allowedUserId}
-          onChange={(event) => setAllowedUserId(event.target.value)}
-        />
-        <p className="field-help">
-          In Slack, open your profile, choose <strong>⋮</strong> then{" "}
-          <strong>Copy member ID</strong>. Only you can start sessions; anyone in your workspace can
-          reply in a thread that already has one. Leave empty to let everyone start sessions.
-        </p>
         <label htmlFor="slack-default-repository">Default repository</label>
         <Input
           id="slack-default-repository"
@@ -873,7 +864,204 @@ export function SlackSettings() {
           . Then invite the bot to channels it should read and send it a DM.
         </p>
       </section>
+      {connected && status && (
+        <SlackTeammates
+          members={status.members}
+          senders={github.senders}
+          onSaved={(members) => setStatus({ ...status, members })}
+        />
+      )}
       {alert}
     </Section>
+  );
+}
+
+/** One row per person: everyone approved for /dolly commands, plus anyone given a Slack ID here. */
+function teammateRows(members: readonly SlackMember[], senders: readonly string[]) {
+  const rows: { github: string | null; slackId: string | null }[] = members.map((member) => ({
+    ...member,
+  }));
+
+  for (const login of senders)
+    if (!rows.some((row) => row.github?.toLowerCase() === login.toLowerCase()))
+      rows.push({ github: login, slackId: null });
+
+  return rows.sort((a, b) =>
+    (a.github ?? a.slackId ?? "").localeCompare(b.github ?? b.slackId ?? ""),
+  );
+}
+
+type TeammateDraft = {
+  github: string;
+  slackId: string;
+  original: SlackMember | null;
+  /** Fixed when the dialog opens, so typing a login does not rename it. */
+  title: string;
+};
+
+/**
+ * Who may start sessions from Slack. Slack only proves a sender's member ID, so each person is a
+ * GitHub login with the Slack member ID that stands for them.
+ */
+function SlackTeammates({
+  members,
+  senders,
+  onSaved,
+}: {
+  members: readonly SlackMember[];
+  senders: readonly string[];
+  onSaved: (members: readonly SlackMember[]) => void;
+}) {
+  const [draft, setDraft] = useState<TeammateDraft | null>(null);
+  const { pending, run, alert } = useAction();
+  const rows = teammateRows(members, senders);
+
+  async function save(next: readonly SlackMember[]) {
+    const result = Schema.decodeUnknownSync(
+      Schema.fromJsonString(Schema.Struct({ members: Schema.Array(SlackMember) })),
+    )(await request("/integrations/slack/members", { members: next }, undefined, "PUT"));
+
+    onSaved(result.members);
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+
+    if (!draft) return;
+    const login = draft.github.trim().replace(/^@/, "");
+    const slackId = draft.slackId.trim().toUpperCase();
+
+    void run(async () => {
+      const rest = members.filter(
+        (member) =>
+          member !== draft.original &&
+          member.slackId !== slackId &&
+          (!login || member.github?.toLowerCase() !== login.toLowerCase()),
+      );
+
+      await save([...rest, { slackId, github: login || null }]);
+      setDraft(null);
+    }, "Could not save the teammate.");
+  }
+
+  function remove(member: SlackMember) {
+    void run(
+      () => save(members.filter((other) => other !== member)),
+      "Could not remove the teammate.",
+    );
+  }
+
+  return (
+    <section className="settings-card" aria-labelledby="slack-teammates">
+      <div className="teammates-header">
+        <h2 id="slack-teammates" className="settings-step">
+          Teammates
+        </h2>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={pending}
+          onClick={() =>
+            setDraft({ github: "", slackId: "", original: null, title: "Add teammate" })
+          }
+        >
+          Add teammate
+        </button>
+      </div>
+      {rows.length ? (
+        <ul className="teammate-list">
+          {rows.map((row) => {
+            const member = members.find(
+              (candidate) => candidate.slackId === row.slackId && candidate.github === row.github,
+            );
+
+            return (
+              <li key={row.github ?? row.slackId} className="teammate-row">
+                <span className="connection-label">
+                  {row.github ? `@${row.github}` : "No GitHub login"}
+                  <span className="muted">
+                    {row.slackId ? `Slack ${row.slackId}` : "No Slack member ID"}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={pending}
+                  onClick={() =>
+                    setDraft({
+                      github: row.github ?? "",
+                      slackId: row.slackId ?? "",
+                      original: member ?? null,
+                      title: row.github ? `Slack ID for @${row.github}` : "Edit teammate",
+                    })
+                  }
+                  aria-label={`Edit ${row.github ?? row.slackId}`}
+                >
+                  {row.slackId ? "Edit" : "Add Slack ID"}
+                </button>
+                {member && (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={pending}
+                    onClick={() => remove(member)}
+                    aria-label={`Remove ${row.github ?? row.slackId} from Slack`}
+                  >
+                    Remove
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="field-help">No teammates yet.</p>
+      )}
+      <p className="field-help">
+        {members.length
+          ? "Only teammates with a Slack member ID can start sessions from Slack, and sessions name who asked. Anyone in your workspace can reply in a thread that already has a session."
+          : "Anyone in your workspace can start sessions. Add a Slack member ID to a teammate to limit it to them."}{" "}
+        People who can run /dolly commands appear here automatically.
+      </p>
+      {alert}
+      {draft && (
+        <Modal title={draft.title} onClose={() => setDraft(null)}>
+          <form onSubmit={submit}>
+            <label htmlFor="teammate-github">GitHub login</label>
+            <Input
+              id="teammate-github"
+              required
+              autoCapitalize="none"
+              spellCheck={false}
+              placeholder="octocat"
+              value={draft.github}
+              onChange={(event) => setDraft({ ...draft, github: event.target.value })}
+            />
+            <label htmlFor="teammate-slack">Slack member ID</label>
+            <Input
+              id="teammate-slack"
+              required
+              autoCapitalize="characters"
+              spellCheck={false}
+              placeholder="U012ABCDEF"
+              value={draft.slackId}
+              onChange={(event) => setDraft({ ...draft, slackId: event.target.value })}
+            />
+            <p className="field-help">
+              In Slack, open their profile, choose <strong>⋮</strong> then{" "}
+              <strong>Copy member ID</strong>.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="secondary-button" onClick={() => setDraft(null)}>
+                Cancel
+              </button>
+              <button type="submit" className="primary-button" disabled={pending}>
+                Save
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+    </section>
   );
 }

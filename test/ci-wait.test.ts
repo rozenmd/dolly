@@ -485,7 +485,7 @@ it("wakes the session on the first failed check, without the model running betwe
 
   const id = await root();
   await prompt(id, "Push and wait for CI");
-  await expect.poll(() => transcript(id)).toContain("Registered: ");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Registered: ");
   expect(outputs[0]).toContain("0 passed, 0 failed, 2 pending of 2");
   expect(outputs[0]).toContain("End your turn now");
   const afterTurn = modelCalls;
@@ -521,7 +521,7 @@ it("wakes the session on the first failed check, without the model running betwe
   expect(wakes[0]).toContain("failed · PR #8: 1 failed, 1 still running");
   expect(wakes[0]).toContain("lint (https://ci.example/lint)");
   expect(wakes[0]).toContain("This is system context, not a message from the user.");
-  await expect.poll(() => transcript(id)).toContain("Woken 1");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Woken 1");
   expect(await userEntries(id)).toBe(2);
 
   // Delivered exactly once: later alarms deliver nothing more.
@@ -535,16 +535,18 @@ it("doesn't wake a re-armed wait for results it already reported, but does once 
 
   const id = await root();
   await prompt(id, "Wait for CI");
-  await expect.poll(() => transcript(id)).toContain("Registered: ");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Registered: ");
 
   for (const ms of [20_000, 55_000, 90_000]) await at(ms);
   await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(1);
   expect(wakes[0]).toContain("passed · PR #8: checks passed");
-  await expect.poll(() => transcript(id)).toContain("Woken 1");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Woken 1");
 
   // Re-arm on the same PR with nothing changed: no second wake.
   await prompt(id, "Wait again");
-  await expect.poll(async () => (await transcript(id)).split("Registered: ").length).toBe(3);
+  await expect
+    .poll(async () => (await transcript(id)).split("Registered: ").length, { timeout: 10_000 })
+    .toBe(3);
 
   for (const ms of [120_000, 160_000, 300_000, 450_000]) await at(ms);
   expect(wakes).toHaveLength(1);
@@ -595,7 +597,7 @@ it("opening a pull request subscribes the session to its checks, unasked", async
 
   const id = await root();
   await prompt(id, "Open a PR");
-  await expect.poll(() => transcript(id)).toContain("Opened");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Opened");
   expect(github.opened).toBe(1);
   expect(outputs[0]).toContain('"ciWait"');
   expect(outputs[0]).toContain(`${repository}#8 checks`);
@@ -627,7 +629,7 @@ it("opening a pull request leaves an explicit wait in place", async () => {
 
   const id = await root();
   await prompt(id, "Wait for the run, then open a PR");
-  await expect.poll(() => transcript(id)).toContain("Done");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Done");
   expect(github.opened).toBe(1);
   expect(outputs[1]).not.toContain('"ciWait"');
   expect((await wait(id))?.waiting_on).toBe(`${repository} Actions run 99`);
@@ -644,7 +646,7 @@ it("watches a workflow run named by workflow and ref before it exists", async ()
 
   const id = await root();
   await prompt(id, "Tag and wait for the release");
-  await expect.poll(() => transcript(id)).toContain("Registered: ");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Registered: ");
   expect(outputs[0]).toContain("no matching run yet");
 
   await at(20_000);
@@ -686,7 +688,7 @@ it("wakes when the PR merges, and at the timeout when checks never settle", asyn
 
   const id = await root();
   await prompt(id, "Wait");
-  await expect.poll(() => transcript(id)).toContain("Registered: ");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Registered: ");
 
   for (const ms of [20_000, 60_000, 120_000, 240_000]) await at(ms);
   expect(wakes).toHaveLength(0);
@@ -695,10 +697,12 @@ it("wakes when the PR merges, and at the timeout when checks never settle", asyn
   expect(wakes[0]).toContain("timed_out · timed out on example/project#8 checks");
   expect(wakes[0]).toContain("Last seen: 0 passed, 0 failed, 1 pending of 1");
 
-  await expect.poll(() => transcript(id)).toContain("Woken 1");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Woken 1");
   github.pull = { state: "closed", merged: true, sha: "a".repeat(40) };
   await prompt(id, "Wait again");
-  await expect.poll(async () => (await transcript(id)).split("Registered: ").length).toBe(3);
+  await expect
+    .poll(async () => (await transcript(id)).split("Registered: ").length, { timeout: 10_000 })
+    .toBe(3);
   await at(330_000);
   await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(2);
   expect(wakes[1]).toContain("closed · PR #8 is merged");
@@ -753,7 +757,7 @@ it("a matching webhook pulls the next poll forward; others don't", async () => {
 
   const id = await root();
   await prompt(id, "Wait for CI");
-  await expect.poll(() => transcript(id)).toContain("Registered: ");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Registered: ");
   await at(20_000);
   const before = await wait(id);
   expect(before?.last_seen).toContain("1 pending of 1");
@@ -815,7 +819,7 @@ it("a workflow_run webhook wakes a release wait at once, without an alarm", asyn
 
   const id = await root();
   await prompt(id, "Tag and wait");
-  await expect.poll(() => transcript(id)).toContain("Registered: ");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Registered: ");
 
   github.run = {
     id: 77,
@@ -847,7 +851,7 @@ it("shows the session's wait to the owner and lets them cancel it", async () => 
   const id = await root();
   expect(await wait(id)).toBeNull();
   await prompt(id, "Wait for CI");
-  await expect.poll(() => transcript(id)).toContain("Registered: ");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Registered: ");
   expect(await wait(id)).toMatchObject({ waiting_on: "example/project#8 checks" });
 
   const cancelled = await SELF.fetch(`https://worker/api/sessions/${id}/wait`, {

@@ -266,14 +266,15 @@ export function slackDelivery(host: SlackHost) {
 export const slackThreadKey = (channel: string, threadTs: string) => `${channel}:${threadTs}`;
 
 /**
- * Durably admit one Slack message before acknowledging Slack. A message in a thread already linked to a session steers it even when the sender is
- * not the allowed user; anything else must come from the allowed user (when one is set).
+ * Durably admit one Slack message before acknowledging Slack. A message in a thread already linked
+ * to a session steers it from anyone in the workspace; a new thread must come from a listed member
+ * (when any are listed).
  */
 export const admitSlack = Effect.fn("Slack.admit")(function* (
   harness: Harness,
   delivery: ReturnType<typeof slackDelivery>,
   event: SlackDelivery,
-  options: { allowedUserId: string | null; agent: IntakeAgent },
+  options: { members: readonly string[]; agent: IntakeAgent },
 ) {
   return yield* attempt("slack.intake", () =>
     harness.commit(async (tx) => {
@@ -284,7 +285,7 @@ export const admitSlack = Effect.fn("Slack.admit")(function* (
 
       if (receipt) return { status: "duplicate" as const, id: String(thread.id) };
 
-      if (!thread && options.allowedUserId && event.user !== options.allowedUserId)
+      if (!thread && options.members.length && !options.members.includes(event.user))
         return { status: "forbidden" as const };
 
       const isNew = !thread;

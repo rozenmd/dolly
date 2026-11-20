@@ -62,6 +62,9 @@ import {
   readSlackProfile,
   rememberPublicBaseUrl,
   removeSlack,
+  saveSlackMembers,
+  slackMembers,
+  SlackMembersUpdate,
   SlackSetup,
   slackStatus,
 } from "./slack";
@@ -1505,6 +1508,22 @@ export class Agent extends DurableObject<Env> {
     return this.githubRun(removeSlack(this.ctx.storage));
   }
 
+  slackSaveMembers(input: typeof SlackMembersUpdate.Type) {
+    return this.githubRun(
+      Schema.decodeUnknownEffect(SlackMembersUpdate)(input).pipe(
+        Effect.mapError(
+          () =>
+            new OperationError({
+              operation: "slack.members",
+              message: "Invalid Slack teammates",
+              details: null,
+            }),
+        ),
+        Effect.flatMap((parsed) => saveSlackMembers(this.ctx.storage, parsed.members)),
+      ),
+    );
+  }
+
   /** Slack's Events API. Every request must carry a valid v0 signature; without a profile all fail closed. */
   slackEvents(body: ArrayBuffer, timestamp: string, signature: string) {
     return Effect.runPromise(
@@ -1579,7 +1598,7 @@ export class Agent extends DurableObject<Env> {
             reply: event.thread_ts !== undefined,
             files,
           },
-          { allowedUserId: profile.allowedUserId, agent },
+          { members: slackMembers(profile).map((member) => member.slackId), agent },
         );
 
         return { status: 200 as const };

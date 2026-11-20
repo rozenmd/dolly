@@ -5,7 +5,7 @@ import { Repository } from "./github-contracts";
 import { attempt } from "./operations";
 
 export const MAX_WEBHOOK_BYTES = 262_144;
-const Login = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$/));
+export const Login = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$/));
 const Id = Schema.Int.check(Schema.isGreaterThan(0));
 
 export const WebhookUrl = Schema.String.check(

@@ -15,8 +15,11 @@ import {
   readSlackProfile,
   setSlackReaction,
   slackApi,
+  slackMember,
+  slackSenderLabel,
   slackSessionAnnouncement,
   slackThreadContext,
+  slackUserName,
 } from "./slack";
 import { markdownToSlack, type SlackDelivery } from "./slack-events";
 import type { SlackHost, SlackPrepared } from "./slack-inbox";
@@ -134,8 +137,18 @@ function makeSlackHost(
       }
     }
 
-    // The request leads; the mode and transport notes follow as plain paragraphs.
-    const text = [task, mode, SLACK_SESSION_NOTE].filter(Boolean).join("\n\n");
+    const name = yield* slackUserName(slack.botToken, input.user).pipe(
+      Effect.orElseSucceed(() => null),
+    );
+
+    const sender = slackSenderLabel(input.user, name, slackMember(slack, input.user));
+    const origin = input.kind === "direct_message" ? "a Slack DM" : "a Slack mention";
+
+    // The request leads; the mode, transport and sender notes follow as plain paragraphs.
+    const text = [task, mode, SLACK_SESSION_NOTE, `Sent by ${sender} in ${origin}.`]
+      .filter(Boolean)
+      .join("\n\n");
+
     const blocks = input.files.length ? yield* images(slack.botToken, input) : [];
 
     return {
