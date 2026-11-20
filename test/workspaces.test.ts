@@ -28,10 +28,7 @@ beforeEach(async () => {
 
 afterEach(() => vi.restoreAllMocks());
 
-const create = (body: {
-  workspace?: { repository: string; ref?: string; branch?: string };
-  workspaceId?: string;
-}) =>
+const create = (body: { workspace?: { repository: string; ref: string }; workspaceId?: string }) =>
   SELF.fetch("https://worker/api/sessions", {
     method: "POST",
     headers,
@@ -147,29 +144,4 @@ it("treats a session from before workspaces as a workspace keyed by its own ID",
     repository: "octocat/legacy",
     ref: "trunk",
   });
-});
-
-it("pushes a session to the branch a person chose without passing it on to joined sessions", async () => {
-  const started = await create({
-    workspace: { repository: "octocat/project", branch: "investigate-audit-headers-null" },
-  });
-
-  expect(started.status).toBe(201);
-  const a = await started.json<{ id: string; workspaceId: string }>();
-  const chosen = await selection(a.id);
-  expect(chosen.config).toMatchObject({
-    repository: "octocat/project",
-    ref: "investigate-audit-headers-null",
-    branch: "investigate-audit-headers-null",
-  });
-
-  // Joining the workspace inherits the checkout, not the push branch.
-  const joined = await (await create({ workspaceId: a.workspaceId })).json<{ id: string }>();
-  const inherited = await selection(joined.id);
-  expect(inherited.config?.branch).toBe(`dolly/session-${inherited.conversationId}`);
-
-  for (const branch of ["refs/heads/main", "-f", "a..b", "trailing/", "x.lock", "has space"])
-    expect((await create({ workspace: { repository: "octocat/project", branch } })).status).toBe(
-      400,
-    );
 });

@@ -1294,15 +1294,7 @@ it("lets a session push and force-push any branch but the default one", async ()
   await connect();
   const { workspaceConfig } = await import("../src/workspace");
 
-  const config = workspaceConfig(
-    { repository: "another-owner/project", branch: "investigate-audit-headers-null" },
-    "42",
-  );
-
-  expect(config).toMatchObject({
-    branch: "investigate-audit-headers-null",
-    ref: "investigate-audit-headers-null",
-  });
+  const config = workspaceConfig({ repository: "another-owner/project" }, "42");
 
   let upstream = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

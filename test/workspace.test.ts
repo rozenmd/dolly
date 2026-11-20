@@ -97,18 +97,6 @@ it("keeps the primary repo anchored while attaching and switching isolated check
   expect(activeWorkspace(restored, "other-session")?.sandboxId).not.toBe(secondary?.sandboxId);
 });
 
-it("never takes a push branch from the agent's checkout or attach", () => {
-  const state: WorkspaceState = { config: null };
-  // Tool input is decoded first, but selection must not trust stray fields either.
-  const checkout = { action: "checkout" as const, repository: "octocat/project", branch: "main" };
-  const attach = { ...checkout, action: "attach" as const, repository: "octocat/other" };
-
-  selectRepository(state, checkout, "42");
-  selectRepository(state, attach, "42");
-  expect(state.config).toMatchObject({ ref: "HEAD", branch: "dolly/session-42" });
-  expect(state.attached?.[0]).toMatchObject({ ref: "HEAD", branch: "dolly/session-42" });
-});
-
 it("can attach a repo to a repo-less workspace without anchoring it or reusing its scratch sandbox", () => {
   const state: WorkspaceState = { config: null };
   expect(activeWorkspace(state, "42")).toBeNull();

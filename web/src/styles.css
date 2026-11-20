@@ -1577,29 +1577,9 @@ code.summary-label {
   margin: 0;
   padding: 0;
 }
-.new-session-target {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.new-session-target > .repository-picker {
+.new-session-fields > .repository-picker {
   max-width: 100%;
-}
-.new-session-branch {
-  flex: 1 1 220px;
-  max-width: 320px;
-  min-width: 0;
-  padding: 5px 10px;
-  font-size: 13px;
-}
-@media (max-width: 760px) {
-  /* 16px stops iOS zooming the page when the field takes focus. */
-  .new-session-branch {
-    max-width: none;
-    font-size: 16px;
-  }
+  justify-self: start;
 }
 .new-session-fields textarea {
   min-height: 150px;
