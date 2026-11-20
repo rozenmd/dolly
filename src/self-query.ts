@@ -200,7 +200,7 @@ async function listSessions(
       pullRequest: session.pullRequest,
     })),
     notes: [
-      "Titles are the first line of each session's first prompt. query matches titles and repositories only, not transcripts; use read_session to read one.",
+      "Titles are the first line of each session's first prompt unless retitle_session generated one. query matches titles and repositories only, not transcripts; use read_session to read one.",
     ],
   };
 }

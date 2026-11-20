@@ -116,6 +116,8 @@ export type SessionMetadata = {
   autoFallback?: boolean;
   /** The model an automatic fallback last switched to; it never falls back again from there. */
   fellBackTo?: string;
+  /** A generated title (session-title.ts); replaces the first line of the first prompt. */
+  title?: string;
 };
 
 /** Transcript entry recording an automatic model switch: `{ from, to, reason }`. */

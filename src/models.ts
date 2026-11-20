@@ -36,6 +36,15 @@ export const SessionModel = Schema.Union([OpenAIModel, AnthropicModel]);
 export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5";
 export const DEFAULT_OPENAI_MODEL = "gpt-6-luna";
 
+/**
+ * Each provider's cheapest catalog model, for tool-less one-shots such as session titles.
+ * opensession runs those on Haiku and crosses to GPT-6 Luna, its OpenAI peer.
+ */
+export const CHEAPEST_MODEL = {
+  anthropic: "claude-haiku-5-5",
+  openai: "gpt-6-luna",
+} as const satisfies Record<"anthropic" | "openai", string>;
+
 /** Call only after validating against SessionModel. */
 export const modelProvider = (model: string) =>
   model.startsWith("claude-") ? "anthropic" : "openai";
