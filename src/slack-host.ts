@@ -94,9 +94,8 @@ function makeSlackHost(
         : null;
 
     const fallback = enrolledName(slack.defaultRepository);
-    const origin = input.kind === "direct_message" ? "Slack DM" : "Slack mention";
     let task = input.text;
-    let note = SLACK_SESSION_NOTE;
+    let mode: string | null = null;
     let workspace: SlackPrepared["workspace"] = null;
 
     if (isNew) {
@@ -130,12 +129,13 @@ function makeSlackHost(
           const repository = enrolledName(intent.repo) ?? fallback;
           workspace = repository ? { repository } : null;
 
-          if (intent.mode === "ask") note = `${note} ${ASK_MODE_NOTE}`;
+          if (intent.mode === "ask") mode = ASK_MODE_NOTE;
         }
       }
     }
 
-    const text = `${origin} from <@${input.user}>:\n\n${task}\n\n[${note}]`;
+    // The request leads; the mode and transport notes follow as plain paragraphs.
+    const text = [task, mode, SLACK_SESSION_NOTE].filter(Boolean).join("\n\n");
     const blocks = input.files.length ? yield* images(slack.botToken, input) : [];
 
     return {
