@@ -283,43 +283,51 @@ it("saves Slack settings through auth.test and never returns the credentials", a
     await state.storage.put("github:ingress", "https://hooks.example.com/hooks/github");
   });
 
-  const put = (body: Omit<Partial<SlackSetup>, "members"> & { members: unknown[] }) =>
-    SELF.fetch("https://dolly.example.com/api/integrations/slack", {
+  const put = (path: string, body: SlackSetup | { members: unknown[] }) =>
+    SELF.fetch(`https://dolly.example.com/api/integrations/slack${path}`, {
       method: "PUT",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
 
-  expect((await put({ enabled: true, members: [], defaultRepository: "" })).status).toBe(409);
-  // Member IDs and GitHub logins are validated.
+  const members = (list: unknown[]) => put("/members", { members: list });
+
+  expect((await put("", { enabled: true, defaultRepository: "" })).status).toBe(409);
+  // Teammates need a connected Slack app.
+  expect((await members([{ slackId: "UOWNER", github: "octocat" }])).status).toBe(409);
   expect(
     (
-      await put({
+      await put("", {
         enabled: true,
         botToken,
         signingSecret,
-        members: [{ slackId: "not an id", github: null }],
-        defaultRepository: "",
-      })
-    ).status,
-  ).toBe(400);
-  expect(
-    (
-      await put({
-        enabled: true,
-        botToken,
-        signingSecret,
-        members: [
-          { slackId: "UOWNER", github: null },
-          { slackId: "UPARTNER", github: null },
-          // A later entry for the same member replaces the earlier one.
-          { slackId: "UOWNER", github: "octocat" },
-        ],
         defaultRepository: "example/project",
       })
     ).status,
   ).toBe(200);
-  expect(posted.map((call) => call.method)).toEqual(["auth.test"]);
+  // Member IDs and GitHub logins are validated.
+  expect((await members([{ slackId: "not an id", github: "octocat" }])).status).toBe(400);
+  expect((await members([{ slackId: "UOWNER", github: "not a login!" }])).status).toBe(400);
+
+  const saved = await members([
+    { slackId: "UOLD", github: "octocat" },
+    { slackId: "UPARTNER", github: "hubot" },
+    // A later entry for the same person replaces the earlier one.
+    { slackId: "UOWNER", github: "OctoCat" },
+  ]);
+
+  expect(saved.status).toBe(200);
+  expect(await saved.json()).toEqual({
+    members: [
+      { slackId: "UOWNER", github: "OctoCat" },
+      { slackId: "UPARTNER", github: "hubot" },
+    ],
+  });
+  // Reconnecting keeps the teammates.
+  expect(
+    (await put("", { enabled: true, botToken, signingSecret, defaultRepository: "" })).status,
+  ).toBe(200);
+  expect(posted.map((call) => call.method)).toEqual(["auth.test", "auth.test"]);
 
   const status = await SELF.fetch("https://dolly.example.com/api/integrations/slack", { headers });
   const text = await status.text();
@@ -331,8 +339,8 @@ it("saves Slack settings through auth.test and never returns the credentials", a
     configured: true,
     enabled: true,
     members: [
-      { slackId: "UOWNER", github: "octocat" },
-      { slackId: "UPARTNER", github: null },
+      { slackId: "UOWNER", github: "OctoCat" },
+      { slackId: "UPARTNER", github: "hubot" },
     ],
     teamName: "Home",
     eventsUrl: "https://hooks.example.com/slack/events",

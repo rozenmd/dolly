@@ -140,13 +140,15 @@ function makeSlackHost(
     const name = yield* slackUserName(slack.botToken, input.user).pipe(
       Effect.orElseSucceed(() => null),
     );
+
     const sender = slackSenderLabel(input.user, name, slackMember(slack, input.user));
     const origin = input.kind === "direct_message" ? "a Slack DM" : "a Slack mention";
 
-    // The request leads; the mode, sender and transport notes follow as plain paragraphs.
+    // The request leads; the mode, transport and sender notes follow as plain paragraphs.
     const text = [task, mode, SLACK_SESSION_NOTE, `Sent by ${sender} in ${origin}.`]
       .filter(Boolean)
       .join("\n\n");
+
     const blocks = input.files.length ? yield* images(slack.botToken, input) : [];
 
     return {

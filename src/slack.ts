@@ -34,10 +34,11 @@ export const SlackSetup = Schema.Struct({
   enabled: Schema.Boolean,
   botToken: Schema.optional(BotToken),
   signingSecret: Schema.optional(SigningSecret),
-  /** Empty means everyone in the workspace may start sessions. */
-  members: SlackMembers,
   defaultRepository: Schema.Union([Repository, Schema.Literal("")]),
 });
+
+/** The whole teammate list, saved on its own so editing one person never touches the credentials. */
+export const SlackMembersUpdate = Schema.Struct({ members: SlackMembers });
 
 export type SlackSetup = typeof SlackSetup.Type;
 
@@ -147,8 +148,8 @@ export const configureSlack = Effect.fn("Slack.configure")(function* (
     enabled: input.enabled,
     botToken,
     signingSecret,
-    // One entry per member ID; a later line for the same person replaces an earlier one.
-    members: [...new Map(input.members.map((member) => [member.slackId, member])).values()],
+    // Reconnecting keeps the teammates; they are edited separately.
+    members: saved ? slackMembers(saved) : [],
     defaultRepository: input.defaultRepository || null,
     teamId: identity.value.team_id,
     teamName: identity.value.team,
@@ -158,6 +159,32 @@ export const configureSlack = Effect.fn("Slack.configure")(function* (
   yield* attempt("slack.save", () => storage.put("slack:profile", profile));
 
   return { configured: true };
+});
+
+/** Replace the teammate list. One entry per Slack member ID and per GitHub login; the last wins. */
+export const saveSlackMembers = Effect.fn("Slack.saveMembers")(function* (
+  storage: DurableObjectStorage,
+  members: readonly SlackMember[],
+) {
+  const saved = yield* readSlackProfile(storage);
+
+  if (!saved) return { error: "Connect Slack before adding teammates." };
+
+  const byLogin = new Map<string, SlackMember>();
+
+  for (const member of members)
+    byLogin.set(member.github?.toLowerCase() ?? `slack:${member.slackId}`, member);
+
+  const unique = [
+    ...new Map([...byLogin.values()].map((member) => [member.slackId, member])).values(),
+  ];
+
+  const { allowedUserId: _legacy, ...rest } = saved;
+  const profile: SlackProfile = { ...rest, members: unique };
+
+  yield* attempt("slack.members.save", () => storage.put("slack:profile", profile));
+
+  return { members: unique };
 });
 
 /** The web app's origin, recorded from signed-in requests so Slack replies can link to sessions. */
