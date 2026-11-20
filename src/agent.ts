@@ -185,6 +185,25 @@ type CachedPullSummary = { summary: PullRequestSummary; checked: number };
 /** What the pull summary cache needs to name and re-read a pull request. */
 type PullRef = Pick<SessionPull, "repository" | "number">;
 
+/** Hibernation tag for per-session transcript streams, apart from sidebar feed sockets. */
+const STREAM_TAG = "stream";
+
+/** Stored on each session stream socket so a woken instance can resume its watch. */
+const StreamAttachment = Schema.Struct({ session: Schema.String });
+
+type StreamConversation = NonNullable<Awaited<ReturnType<Harness["conversation"]>>>;
+
+/** WebSocket close codes that may be sent explicitly; others become a normal closure. */
+function closeSocket(socket: WebSocket, code: number, reason: string) {
+  const sendable = code >= 1000 && code <= 4999 && ![1004, 1005, 1006, 1015].includes(code);
+
+  try {
+    socket.close(sendable ? code : 1000, reason);
+  } catch {
+    // Already closed.
+  }
+}
+
 function pullSummaryKey(pull: PullRef) {
   return `pull-summary:${pull.repository.toLowerCase()}#${pull.number}`;
 }
@@ -281,8 +300,12 @@ export class Agent extends DurableObject<Env> {
     }).pipe(Layer.provide(this.services));
     void ctx
       .blockConcurrencyWhile(() => Effect.runPromise(this.initialize()))
-      // Sidebars that stayed connected through hibernation get running dots again.
-      .then(() => this.sessionsFeed.resume());
+      .then(() => {
+        // Sidebars that stayed connected through hibernation get running dots again.
+        this.sessionsFeed.resume();
+
+        return this.resumeStreams();
+      });
   }
 
   private initialize = Effect.fn("Agent.initialize")(function* (this: Agent) {
@@ -2742,35 +2765,53 @@ export class Agent extends DurableObject<Env> {
 
     if (Option.isNone(conversation)) return new Response("Session not found", { status: 404 });
 
-    const view = await conversation.value.watch(
-      BACKGROUND_CONTEXT,
-      await promptWindow(conversation.value),
-    );
-
     const { 0: client, 1: server } = new WebSocketPair();
-    server.accept();
+    // Hibernatable: an idle stream does not keep this object resident or billed for duration.
+    this.ctx.acceptWebSocket(server, [STREAM_TAG]);
+    server.serializeAttachment({ session: id } satisfies typeof StreamAttachment.Type);
+
+    try {
+      await this.stream(server, conversation.value);
+    } catch (error) {
+      closeSocket(server, 1011, "Session stream ended");
+      throw error;
+    }
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /** Session streams whose in-memory watch is live in this instance, by socket. */
+  readonly streams = new Map<WebSocket, () => void>();
+
+  /**
+   * Send a snapshot, then one per change, until the socket or the view closes. The watch is
+   * memory only: after hibernation `resumeStreams` reattaches it from the socket's attachment.
+   */
+  private async stream(socket: WebSocket, conversation: StreamConversation) {
+    const view = await conversation.watch(BACKGROUND_CONTEXT, await promptWindow(conversation));
     let stopped = false;
 
     const stop = () => {
       if (stopped) return;
       stopped = true;
+      this.streams.delete(socket);
       this.ctx.waitUntil(view.stop());
     };
 
     const fail = () => {
       if (stopped) return;
       stop();
-      server.close(1011, "Session stream ended");
+      closeSocket(socket, 1011, "Session stream ended");
     };
 
     const send = async (value: ConversationView) => {
       const text = await Effect.runPromise(this.serializeTranscript(value));
 
-      if (!stopped) server.send(text);
+      if (!stopped) socket.send(text);
     };
 
-    server.addEventListener("close", stop);
-    server.addEventListener("error", stop);
+    this.streams.get(socket)?.();
+    this.streams.set(socket, stop);
     void view.closed.then(fail);
 
     try {
@@ -2792,26 +2833,55 @@ export class Agent extends DurableObject<Env> {
       fail();
       throw error;
     }
-
-    return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** Sidebar sockets hibernate (sessions-feed.ts); they only listen, so messages are ignored. */
-  override webSocketMessage() {}
+  /** Reattach watches for streams accepted before this instance woke from hibernation. */
+  async resumeStreams() {
+    for (const socket of this.ctx.getWebSockets(STREAM_TAG)) {
+      if (this.streams.has(socket)) continue;
 
-  override webSocketClose(socket: WebSocket, code: number, reason: string) {
-    if (!this.sessionsFeed.isFeed(socket)) return;
-    this.sessionsFeed.closed(socket);
+      const attachment = Schema.decodeUnknownOption(StreamAttachment)(
+        socket.deserializeAttachment(),
+      );
 
-    try {
-      socket.close(code, reason);
-    } catch {
-      // Already closed.
+      try {
+        const conversation = Option.isSome(attachment)
+          ? await Effect.runPromise(this.conversation(attachment.value.session))
+          : Option.none();
+
+        if (Option.isNone(conversation)) {
+          closeSocket(socket, 1011, "Session not found");
+          continue;
+        }
+
+        await this.stream(socket, conversation.value);
+      } catch {
+        closeSocket(socket, 1011, "Session stream ended");
+      }
     }
   }
 
-  override webSocketError(socket: WebSocket) {
+  /** Session streams and sidebar sockets (sessions-feed.ts) only listen, so messages are ignored. */
+  override webSocketMessage() {}
+
+  override webSocketClose(socket: WebSocket, code: number, reason: string) {
+    this.streams.get(socket)?.();
+
     if (this.sessionsFeed.isFeed(socket)) this.sessionsFeed.closed(socket);
+
+    closeSocket(socket, code, reason);
+  }
+
+  override webSocketError(socket: WebSocket) {
+    this.streams.get(socket)?.();
+
+    if (this.sessionsFeed.isFeed(socket)) {
+      this.sessionsFeed.closed(socket);
+
+      return;
+    }
+
+    closeSocket(socket, 1011, "Session stream failed");
   }
 
   transcript(id: string) {
