@@ -151,7 +151,7 @@ To use Claude instead, see [step 7](#7-optional-use-claude-instead-of-chatgpt).
 2. Under **Who can run /dolly commands**, list the GitHub users whose pull requests Dolly reviews.
 3. Turn on **Review new pull requests**. Choose **Save**.
 
-When one of those users opens a pull request in an enrolled repository, or marks a draft ready, Dolly reviews it with inline comments. It skips drafts and pull requests from forks. Comment `/dolly` on the pull request to follow up in the same session. Each review uses your model subscription.
+When one of those users or a Dolly session opens a pull request in an enrolled repository, or marks a draft ready, Dolly reviews it with inline comments. Pull requests opened by other bots are skipped. It skips drafts and pull requests from forks. Comment `/dolly` on the pull request to follow up in the same session. Each review uses your model subscription.
 
 If **Save** reports that pull request events are missing, open the GitHub App settings, subscribe to **Pull request** events, and approve the change on each installation.
 
