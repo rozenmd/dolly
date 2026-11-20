@@ -177,6 +177,7 @@ beforeEach(async () => {
   await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("slack:profile", profile);
+    await state.storage.put("slack:public-base-url", "https://dolly.example.com");
     await state.storage.put("github:accounts", ["example"]);
     await state.storage.put("github:repositories", [
       { fullName: "example/project", defaultBranch: "main", private: false, description: null },
@@ -320,8 +321,33 @@ it("turns a DM into a session, replies in its thread, and gates who may start an
 
   await expect
     .poll(() => posted.filter((call) => call.method === "chat.postMessage"), { timeout: 15_000 })
-    .toHaveLength(1);
-  const reply = posted.find((call) => call.method === "chat.postMessage");
+    .toHaveLength(2);
+
+  const admittedId = await runInDurableObject(env.AGENT.getByName("owner"), async () => {
+    const state = await harnesses.at(-1)!.snapshot(SlackThreads, BACKGROUND_CONTEXT);
+
+    return String(state?.threads["D0DM:100.1"]?.id);
+  });
+
+  // :eyes: first, then the session link, then :eyes: comes off before the answer.
+  expect(
+    posted
+      .filter((call) => call.method !== "auth.test")
+      .map((call) => [call.method, call.body.name ?? call.body.text]),
+  ).toEqual([
+    ["reactions.add", "eyes"],
+    [
+      "chat.postMessage",
+      `Created and started working on <https://dolly.example.com/session/${admittedId}|this session>`,
+    ],
+    ["reactions.remove", "eyes"],
+    ["chat.postMessage", "*Done* for Slack"],
+  ]);
+  expect(posted.find((call) => call.method === "reactions.add")?.body).toMatchObject({
+    channel: "D0DM",
+    timestamp: "100.1",
+  });
+  const reply = posted.filter((call) => call.method === "chat.postMessage").at(-1);
   expect(reply?.body).toMatchObject({
     channel: "D0DM",
     thread_ts: "100.1",
@@ -351,9 +377,20 @@ it("turns a DM into a session, replies in its thread, and gates who may start an
   const after = await threads();
   expect(Object.keys(after)).toEqual(["D0DM:100.1"]);
   expect(after["D0DM:100.1"].events).toEqual(["100.1", "103.1"]);
+  // A follow-up gets no new session link; its :eyes: stays until it is answered.
   await expect
-    .poll(() => posted.filter((call) => call.method === "chat.postMessage"), { timeout: 15_000 })
-    .toHaveLength(2);
+    .poll(
+      () =>
+        posted
+          .slice(-3)
+          .map((call) => [call.method, call.body.timestamp ?? call.body.thread_ts, call.body.name]),
+      { timeout: 15_000 },
+    )
+    .toEqual([
+      ["reactions.add", "103.1", "eyes"],
+      ["chat.postMessage", "100.1", undefined],
+      ["reactions.remove", "103.1", "eyes"],
+    ]);
 }, 30_000);
 
 it("starts Slack sessions with the owner's saved default model", async () => {
@@ -369,7 +406,7 @@ it("starts Slack sessions with the owner's saved default model", async () => {
   expect((await post("/slack/events", dm("150.1", "<@UBOT> hello"))).status).toBe(200);
   await expect
     .poll(() => posted.filter((call) => call.method === "chat.postMessage"), { timeout: 15_000 })
-    .toHaveLength(1);
+    .toHaveLength(2);
   expect(models).toEqual(["claude-opus-5-5"]);
 }, 30_000);
 
@@ -379,7 +416,7 @@ it("classifies a mention with Claude Haiku and starts the PR pass on the PR head
   expect((await post("/slack/events", mention("200.1", "<@UBOT> review PR 5"))).status).toBe(200);
   await expect
     .poll(() => posted.filter((call) => call.method === "chat.postMessage"), { timeout: 15_000 })
-    .toHaveLength(1);
+    .toHaveLength(2);
   expect(models[0]).toBe("claude-haiku-5-5");
   expect(models).toContain("claude-sonnet-5-5");
 
@@ -388,7 +425,9 @@ it("classifies a mention with Claude Haiku and starts the PR pass on the PR head
     repository: "example/project",
     ref: "refs/pull/5/head",
   });
-  expect(posted.find((call) => call.method === "chat.postMessage")?.body.thread_ts).toBe("200.1");
+  expect(posted.filter((call) => call.method === "chat.postMessage").at(-1)?.body.thread_ts).toBe(
+    "200.1",
+  );
 }, 30_000);
 
 it("falls back to a code task in the default repository when Claude is not connected", async () => {
@@ -439,11 +478,13 @@ it("falls back to a code task in the default repository when Claude is not conne
   expect((await post("/slack/events", mention("300.1", "<@UBOT> fix the bug"))).status).toBe(200);
   await expect
     .poll(() => posted.filter((call) => call.method === "chat.postMessage"), { timeout: 15_000 })
-    .toHaveLength(1);
+    .toHaveLength(2);
   expect(models).toEqual([]);
   expect((await threads())["C0CHAN:300.1"].workspace).toMatchObject({
     repository: "example/project",
     ref: "HEAD",
   });
-  expect(posted.find((call) => call.method === "chat.postMessage")?.body.text).toBe("Codex answer");
+  expect(posted.filter((call) => call.method === "chat.postMessage").at(-1)?.body.text).toBe(
+    "Codex answer",
+  );
 }, 30_000);

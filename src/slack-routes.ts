@@ -39,7 +39,11 @@ slackRoutes.put("/api/integrations/slack", async (c) => {
   const result = await Effect.runPromise(
     rpc(
       "slack.configure",
-      async () => await c.env.AGENT.getByName("owner").slackConfigure(parsed.value),
+      async () =>
+        await c.env.AGENT.getByName("owner").slackConfigure(
+          parsed.value,
+          new URL(c.req.url).origin,
+        ),
     ),
   );
 
