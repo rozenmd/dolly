@@ -13,7 +13,19 @@ import * as Result from "effect/Result";
 import * as Effect from "effect/Effect";
 import { exceptionDetails } from "./diagnostics";
 import { ConversationWorkspace, READ_ONLY_TOOLS, workspaceConfig } from "./workspace";
-import { deliveryKey, type GitHubDelivery } from "./github-webhook";
+import { deliveryKey, type GitHubDelivery, type GitHubReview } from "./github-webhook";
+import {
+  cappedComment,
+  handoffKey,
+  handoffMessage,
+  nextHandoffState,
+  parseVerdict,
+  planHandoff,
+  ReviewHandoffs,
+  stripVerdict,
+  VERDICT_INSTRUCTION,
+  type ReviewVerdict,
+} from "./review-handoff";
 import { attempt, OperationError } from "./operations";
 import type { IntakeAgent } from "./model-defaults";
 
@@ -34,22 +46,41 @@ export const GitHubThreads = defineDoc<{
 /** The prompt for an automatic review. The agent publishes the review itself, inline comments included. */
 function reviewPrompt(review: Extract<GitHubDelivery, { kind: "review" }>) {
   return [
-    `GitHub PR ${review.repository}#${review.number} is ready for review (opened by @${review.sender}, head ${review.sha}). Review it.`,
+    review.pushed
+      ? `GitHub PR ${review.repository}#${review.number} has new commits (pushed by @${review.sender}, head ${review.sha}). Review the new head. Any earlier reviews of this PR are above: check whether their findings were addressed and don't repeat ones that were.`
+      : `GitHub PR ${review.repository}#${review.number} is ready for review (opened by @${review.sender}, head ${review.sha}). Review it.`,
     `Read it with github read_pull_request and list_pull_request_files, check out the code in the sandbox when the diff alone is not enough, and look for bugs, security problems, missing tests and anything that breaks the repository's own guidance (AGENTS.md, skills). Report real problems, not style nits, and say so plainly when it looks good.`,
     `Publish exactly one review with github create_review: event COMMENT, commit_id ${review.sha}, inline comments on the lines concerned and a short overall summary as the body. This session is read-only: it cannot change files, push, edit the PR or open new PRs, so suggest fixes in the review instead. If create_review reports that the head moved, do not review the new head; say so instead.`,
     `Finish with the same short summary. If you could not publish the review, that answer is posted as the review instead.`,
+    VERDICT_INSTRUCTION,
   ].join("\n\n");
 }
 
-type Checkpoint = { phase: "deliver" } | { phase: "reply"; text: string; attempts: number };
+type Review = typeof GitHubReview.Type;
+
+type Checkpoint =
+  | { phase: "deliver" }
+  | { phase: "reply"; text: string; attempts: number; verdict?: ReviewVerdict }
+  | { phase: "handoff"; text: string; verdict: ReviewVerdict };
+
+export type HandoffDeps = {
+  /** Whether `review.sha` is still the open PR's head; a stale head is neither reviewed nor handed off. */
+  current: (review: Review) => Effect.Effect<boolean, OperationError>;
+  /** The live, writable session that opened the PR, if any. */
+  owner: (review: Review) => Promise<ConversationId | undefined>;
+  /** Posts a comment on the PR. */
+  comment: (review: Review, body: string) => Effect.Effect<void, OperationError>;
+};
 
 export function githubDelivery({
   reply,
   finished,
+  handoff,
 }: {
   reply: (event: GitHubDelivery, text: string) => Effect.Effect<void, OperationError>;
   /** Marks the command's comment (or a review's PR) as done. Best effort: the answer is already posted. */
   finished: (event: GitHubDelivery) => Effect.Effect<void, OperationError>;
+  handoff: HandoffDeps;
 }) {
   return defineTask<GitHubDelivery, Checkpoint, null>({
     name: "app.github-delivery",
@@ -64,6 +95,32 @@ export function githubDelivery({
             );
 
             if (!conversation) return yield* Effect.die("GitHub conversation missing");
+
+            // Pushes queue reviews behind each other: once it is this review's turn, skip a head
+            // that has since moved on. The newest head's own review covers it.
+            if ("kind" in task.input) {
+              yield* attempt("github.idle", () => conversation.waitForIdle(context));
+              const review = task.input;
+
+              const current = yield* handoff
+                .current(review)
+                .pipe(Effect.catchTag("OperationError", () => Effect.succeed(true)));
+
+              if (!current) {
+                yield* Effect.logInfo({
+                  event: "github_review_skipped_stale",
+                  pull: `${review.repository}#${review.number}`,
+                  sha: review.sha,
+                });
+
+                return yield* attempt("github.stale", () =>
+                  runtime.commit(
+                    () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
+                    context,
+                  ),
+                );
+              }
+            }
 
             const submission = yield* attempt("github.submit", () =>
               conversation.submit(
@@ -102,17 +159,21 @@ export function githubDelivery({
                       ? message.content.flatMap((part) => (part.type === "text" ? [part.text] : []))
                       : [],
                   )
-                  .join("\n")
-                  .slice(0, 16_384);
+                  .join("\n");
 
-                return {
-                  status: "running",
-                  checkpoint: {
-                    phase: "reply",
-                    text: text || "The agent completed without a text response.",
-                    attempts: 0,
-                  },
+                // A review's verdict line is for the loop, not for people reading the review.
+                const verdict = "kind" in task.input ? parseVerdict(text) : undefined;
+                const shown = ("kind" in task.input ? stripVerdict(text) : text).slice(0, 16_384);
+
+                const checkpoint: Checkpoint = {
+                  phase: "reply",
+                  text: shown || "The agent completed without a text response.",
+                  attempts: 0,
                 };
+
+                if (verdict) checkpoint.verdict = verdict;
+
+                return { status: "running", checkpoint };
               }, context),
             );
           }),
@@ -134,9 +195,17 @@ export function githubDelivery({
                   }),
                 ),
               );
+              const { text, verdict } = task.state.checkpoint;
+
               yield* attempt("github.replied", () =>
                 runtime.commit(
-                  () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
+                  () =>
+                    "kind" in task.input && verdict
+                      ? {
+                          status: "running",
+                          checkpoint: { phase: "handoff", text, verdict },
+                        }
+                      : { status: "terminal", outcome: { status: "completed", result: null } },
                   context,
                 ),
               );
@@ -172,6 +241,109 @@ export function githubDelivery({
               ),
             );
           }),
+          { signal: context.abortSignal },
+        ),
+      handoff: (task, runtime, context) =>
+        Effect.runPromise(
+          Effect.gen(function* () {
+            const { verdict, text } = task.state.checkpoint;
+
+            const done = {
+              status: "terminal",
+              outcome: { status: "completed", result: null },
+            } as const;
+
+            if (!("kind" in task.input))
+              return yield* attempt("github.handoff.done", () =>
+                runtime.commit(() => done, context),
+              );
+            const review = task.input;
+            const key = handoffKey(review.repository, review.number);
+
+            // Findings about a head that has moved on would only confuse the session.
+            const current = yield* handoff.current(review);
+
+            const owner = current
+              ? yield* attempt("github.handoff.owner", () => handoff.owner(review))
+              : undefined;
+
+            const target = owner
+              ? yield* attempt("github.handoff.target", () => runtime.conversation(owner, context))
+              : undefined;
+
+            let announce = false;
+
+            yield* attempt("github.handoff.commit", () =>
+              runtime.commit(async (tx) => {
+                if (!target) return done;
+                const state = await tx.doc(ReviewHandoffs);
+                const prior = state.pulls[key];
+                const plan = planHandoff(prior, review.sha, verdict);
+                const content = handoffMessage(review, verdict, text, plan);
+
+                if (content)
+                  await target.submit(tx, {
+                    type: "input",
+                    content,
+                    requestId: `review-handoff:${key}:${review.sha}`,
+                    whenBusy: "followUp",
+                  });
+
+                announce = plan.kind === "capped" && plan.announce;
+                state.pulls[key] = nextHandoffState(
+                  prior,
+                  plan,
+                  review.sha,
+                  String(target.id),
+                  runtime.now(),
+                );
+
+                return done;
+              }, context),
+            );
+
+            yield* Effect.logInfo({
+              event: "github_review_handoff",
+              pull: key,
+              sha: review.sha,
+              owner: owner ? String(owner) : null,
+              current,
+              verdict,
+            });
+
+            // Best effort, once: the cap is already recorded and the task already finished.
+            if (announce)
+              yield* handoff.comment(review, cappedComment(review.number)).pipe(
+                Effect.catchTag("OperationError", (error) =>
+                  Effect.logError({
+                    event: "github_review_handoff_cap_comment_failed",
+                    error: exceptionDetails(error),
+                    details: error.details,
+                  }),
+                ),
+              );
+          }).pipe(
+            // A missed handoff costs a fix round, never the review, which is already posted.
+            Effect.catchTag("OperationError", (error) =>
+              Effect.logError({
+                event: "github_review_handoff_failed",
+                error: exceptionDetails(error),
+                details: error.details,
+              }).pipe(
+                Effect.andThen(
+                  attempt("github.handoff.failed", () =>
+                    runtime.commit(
+                      () => ({
+                        status: "terminal",
+                        outcome: { status: "completed", result: null },
+                      }),
+                      context,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
           { signal: context.abortSignal },
         ),
     },

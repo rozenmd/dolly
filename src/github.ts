@@ -2038,6 +2038,38 @@ function makeGitHub(
     yield* api(`/repos/${event.repository}/${target}/reactions`, token, { content });
   });
 
+  /** Whether `sha` is still the head of an open pull request. */
+  const isOpenHead = Effect.fn("GitHub.isOpenHead")(function* (
+    repository: string,
+    number: number,
+    sha: string,
+  ) {
+    const connected = yield* read();
+    const token = yield* tokenFor(connected, repository, "read");
+
+    const pull = yield* api(`/repos/${repository}/pulls/${number}`, token).pipe(
+      Effect.flatMap(
+        decode(
+          Schema.Struct({ state: Schema.String, head: Schema.Struct({ sha: Schema.String }) }),
+        ),
+      ),
+    );
+
+    return pull.state === "open" && pull.head.sha === sha;
+  });
+
+  /** A plain comment on a pull request, as the App's bot. */
+  const comment = Effect.fn("GitHub.comment")(function* (
+    repository: string,
+    number: number,
+    body: string,
+  ) {
+    const connected = yield* read();
+    const token = yield* tokenFor(connected, repository, "write");
+
+    yield* api(`/repos/${repository}/issues/${number}/comments`, token, { body });
+  });
+
   const authorize = Effect.fn("GitHub.authorize")(function* (repository: string, write: boolean) {
     const connected = yield* read();
     const token = yield* tokenFor(connected, repository, write ? "code" : "read");
@@ -2244,6 +2276,8 @@ function makeGitHub(
     receiveWebhook,
     reply,
     react,
+    isOpenHead,
+    comment,
     authorize,
   };
 }
