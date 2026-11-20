@@ -11,6 +11,6 @@ export default defineConfig({
       INGRESS: bindings.worker({ worker: "dolly", exportName: "GitHubIngress" }),
       SLACK: bindings.worker({ worker: "dolly", exportName: "SlackIngress" }),
     },
-    observability: { enabled: true },
+    observability: { enabled: true, issues: { enabled: true } },
   },
 });
