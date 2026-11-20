@@ -1096,6 +1096,7 @@ it("enables ingress in the manifest and configures allowed senders without repla
   vi.restoreAllMocks();
 
   let subscribed = true;
+  let pullRequests = false;
 
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
     expect(String(url)).toBe("https://api.github.com/app");
@@ -1103,7 +1104,7 @@ it("enables ingress in the manifest and configures allowed senders without repla
     return Response.json({
       id: 7,
       permissions: { issues: "read" },
-      events: subscribed ? ["issue_comment"] : [],
+      events: [...(subscribed ? ["issue_comment"] : []), ...(pullRequests ? ["pull_request"] : [])],
     });
   });
 
@@ -1164,6 +1165,29 @@ it("enables ingress in the manifest and configures allowed senders without repla
     ).status,
   ).toBe(200);
   expect((await configure()).status).toBe(200);
+
+  const review = () =>
+    SELF.fetch("https://worker/api/integrations/github/webhook", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ senders: ["trusted"], reviews: true }),
+    });
+
+  // Automatic reviews need the App's pull_request events; turning them on without fails closed.
+  expect((await review()).status).toBe(409);
+  expect(
+    await (await SELF.fetch("https://worker/api/integrations/github", { headers })).json(),
+  ).toMatchObject({ reviews: false });
+  pullRequests = true;
+  expect(await (await review()).json()).toMatchObject({ configured: true, reviews: true });
+  // Saving senders alone keeps reviews on.
+  expect((await configure()).status).toBe(200);
+  expect(
+    await (await SELF.fetch("https://worker/api/integrations/github", { headers })).json(),
+  ).toMatchObject({ reviews: true });
+  pullRequests = false;
+  expect((await configure()).status).toBe(409);
+  pullRequests = true;
   subscribed = false;
   expect((await configure()).status).toBe(409);
   expect(

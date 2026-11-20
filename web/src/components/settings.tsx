@@ -399,6 +399,7 @@ export function GitHubSettings() {
   const [ingress, setIngress] = useState(github.ingress ?? "");
   const [accounts, setAccounts] = useState("");
   const [senders, setSenders] = useState(github.senders.join(", "));
+  const [reviews, setReviews] = useState(github.reviews);
   const [saved, setSaved] = useState("");
   const { pending, run, alert } = useAction();
   const onboarding = useOnboarding();
@@ -454,9 +455,9 @@ export function GitHubSettings() {
       const next = logins(senders);
 
       // Saved whenever it changed, including to empty, which stops every /dolly command.
-      if (next.join(",") !== github.senders.join(",")) {
-        await request("/integrations/github/webhook", { senders: next }, undefined, "PUT");
-        update({ ...github, senders: next });
+      if (next.join(",") !== github.senders.join(",") || reviews !== github.reviews) {
+        await request("/integrations/github/webhook", { senders: next, reviews }, undefined, "PUT");
+        update({ ...github, senders: next, reviews });
       }
 
       setSaved("access");
@@ -528,6 +529,27 @@ export function GitHubSettings() {
             ? "Saved."
             : "GitHub users whose /dolly comments on pull requests start an agent."}
         </p>
+        <label className="connection-row">
+          <span className="connection-label">
+            Review new pull requests
+            <span className="muted">
+              When one of these users opens a pull request in an enrolled repository, or marks a
+              draft ready, dolly reviews it with inline comments. Each review uses your model
+              subscription.
+            </span>
+          </span>
+          <input
+            id="settings-reviews"
+            name="reviews"
+            type="checkbox"
+            className="switch"
+            checked={reviews}
+            onChange={(event) => {
+              setReviews(event.target.checked);
+              setSaved("");
+            }}
+          />
+        </label>
         <div className="modal-actions">
           <button type="submit" className="primary-button" disabled={pending}>
             Save

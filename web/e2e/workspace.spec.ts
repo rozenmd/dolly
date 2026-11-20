@@ -10,6 +10,7 @@ const app = {
   settingsUrl: "https://github.com/settings/apps/dolly-test",
   ingress: "https://dolly-ingress.example.workers.dev/hooks/github",
   senders: ["octocat"],
+  reviews: false,
 };
 
 const signedIn = { github: app, ownerClaimed: true, user: { login: "octocat" } };
@@ -1022,15 +1023,17 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   await main.getByRole("button", { name: "Save", exact: true }).last().click();
   await expect(main.getByText("Saved.", { exact: true })).toBeVisible();
   expect(accounts).toEqual({ accounts: ["octocat", "acme"] });
-  expect(senders).toEqual({ senders: ["octocat", "hubot"] });
+  expect(senders).toEqual({ senders: ["octocat", "hubot"], reviews: false });
   // Leaving and returning keeps what was saved, and clearing the list saves an empty list.
   await nav.getByRole("link", { name: "Account" }).click();
   await nav.getByRole("link", { name: "GitHub" }).click();
   await expect(main.getByLabel("Who can run /dolly commands")).toHaveValue("octocat, hubot");
   await main.getByLabel("Who can run /dolly commands").fill("");
+  // Turning on automatic reviews saves with the sender list.
+  await main.locator("#settings-reviews").click();
   await main.getByRole("button", { name: "Save", exact: true }).last().click();
   await expect(main.getByText("Saved.", { exact: true })).toBeVisible();
-  expect(senders).toEqual({ senders: [] });
+  expect(senders).toEqual({ senders: [], reviews: true });
   // Loading /settings directly opens the first section.
   await page.goto("/settings", { waitUntil: "networkidle" });
   await expect(page).toHaveURL(/\/settings\/account$/);

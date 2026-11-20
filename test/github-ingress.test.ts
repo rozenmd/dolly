@@ -531,3 +531,186 @@ it("runs a /dolly command with only Claude connected", async () => {
     ).status,
   ).toBe(202);
 });
+
+const sha = "a".repeat(40);
+
+const pullRequest = {
+  action: "opened",
+  installation: { id: 7 },
+  repository: { full_name: "example/project" },
+  sender: { login: "trusted", type: "User" },
+  number: 8,
+  pull_request: {
+    draft: false,
+    head: { sha, repo: { full_name: "example/project" } },
+  },
+};
+
+it("reviews a new pull request in an enrolled repository once, posting the answer only if the agent did not", async () => {
+  const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("github:webhook", { ...profile, reviews: true });
+    // Earlier tests leave Claude connected and chosen; this review runs on the ChatGPT mock.
+    await state.storage.delete("credential:anthropic");
+    await state.storage.put("github:connected", {
+      app: { id: 42, slug: "dolly-test", pem, owner: { login: "example" } },
+      repositories: ["example/project"],
+    });
+    await state.storage.put("github:repositories", [
+      {
+        fullName: "example/project",
+        defaultBranch: "main",
+        private: true,
+        description: null,
+      },
+    ]);
+    await state.storage.put("credential:openai", {
+      type: "oauth",
+      access,
+      refresh: "test-refresh",
+      expires: Date.now() + 3_600_000,
+    });
+  });
+  const prompts: string[] = [];
+  const reactions: string[] = [];
+  const reviews: { number: number; body: unknown }[] = [];
+  // PR 9 already has the agent's own review on its head, so nothing more is posted there.
+  const ownReview = [{ commit_id: sha, user: { login: "dolly-test[bot]" } }];
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const parsed = new URL(String(url));
+
+    if (parsed.hostname === "api.openai.com") {
+      prompts.push(String(init?.body));
+
+      const item = {
+        type: "message",
+        id: "msg_review",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Looks good to me", annotations: [] }],
+      };
+
+      const events = [
+        {
+          type: "response.created",
+          response: { id: "resp_review", status: "in_progress", output: [] },
+        },
+        { type: "response.output_item.done", output_index: 0, item },
+        {
+          type: "response.completed",
+          response: {
+            id: "resp_review",
+            status: "completed",
+            output: [item],
+            usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+          },
+        },
+      ];
+
+      return new Response(
+        events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    }
+
+    if (parsed.pathname.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (parsed.pathname.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+    const reaction = parsed.pathname.match(/^\/repos\/example\/project\/issues\/(\d+)\/reactions$/);
+
+    if (reaction) {
+      reactions.push(`${reaction[1]}:${JSON.parse(String(init?.body)).content}`);
+
+      return Response.json({ id: 1 }, { status: 201 });
+    }
+
+    const pull = parsed.pathname.match(/^\/repos\/example\/project\/pulls\/(\d+)\/reviews$/);
+
+    if (pull) {
+      if (init?.method === "GET") return Response.json(pull[1] === "9" ? ownReview : []);
+      reviews.push({ number: Number(pull[1]), body: JSON.parse(String(init?.body)) });
+
+      return Response.json({ id: 1 });
+    }
+
+    throw new Error(`Unexpected request to ${String(url)}`);
+  });
+
+  // Not eligible: drafts, forks, senders who may not run commands, other events and actions.
+  for (const ignored of [
+    { ...pullRequest, pull_request: { ...pullRequest.pull_request, draft: true } },
+    {
+      ...pullRequest,
+      pull_request: { draft: false, head: { sha, repo: { full_name: "someone/project" } } },
+    },
+    { ...pullRequest, pull_request: { draft: false, head: { sha, repo: null } } },
+    { ...pullRequest, sender: { login: "outsider", type: "User" } },
+    { ...pullRequest, sender: { login: "trusted", type: "Bot" } },
+    { ...pullRequest, action: "synchronize" },
+    { ...pullRequest, action: "edited" },
+  ])
+    expect((await hook(ignored, "pull_request")).status).toBe(204);
+  // Repositories nobody enrolled are not reviewed.
+  expect(
+    (
+      await hook(
+        {
+          ...pullRequest,
+          repository: { full_name: "example/elsewhere" },
+          pull_request: {
+            draft: false,
+            head: { sha, repo: { full_name: "example/elsewhere" } },
+          },
+        },
+        "pull_request",
+      )
+    ).status,
+  ).toBe(204);
+  expect(reactions).toEqual([]);
+
+  expect((await hook(pullRequest, "pull_request")).status).toBe(202);
+  // The same head again (a redelivery, or reopening) is the same review.
+  expect((await hook({ ...pullRequest, action: "reopened" }, "pull_request")).status).toBe(202);
+  expect(reactions.filter((reaction) => reaction === "8:eyes")).toHaveLength(1);
+  await expect.poll(() => reviews, { timeout: 15_000 }).toHaveLength(1);
+  expect(reviews[0]).toEqual({
+    number: 8,
+    body: {
+      commit_id: sha,
+      body: expect.stringContaining("Looks good to me"),
+      event: "COMMENT",
+      comments: [],
+    },
+  });
+  expect(prompts).toHaveLength(1);
+  expect(prompts[0]).toContain("example/project#8 is ready for review");
+  expect(prompts[0]).toContain(`commit_id ${sha}`);
+  await expect.poll(() => reactions).toEqual(["8:eyes", "8:rocket"]);
+
+  const threads = await (
+    await SELF.fetch("https://worker/api/integrations/github/threads", { headers })
+  ).json<{ thread: string; deliveries: { commentId: string; outcome: string | null }[] }[]>();
+
+  expect(threads.find((thread) => thread.thread === "example/project#8")?.deliveries).toEqual([
+    expect.objectContaining({ commentId: `review:${sha}`, outcome: "completed" }),
+  ]);
+
+  // A draft made ready is reviewed; the agent already published its review, so nothing is added.
+  expect(
+    (await hook({ ...pullRequest, action: "ready_for_review", number: 9 }, "pull_request")).status,
+  ).toBe(202);
+  await expect.poll(() => reactions, { timeout: 15_000 }).toContain("9:rocket");
+  expect(reviews).toHaveLength(1);
+
+  // Turned off, pull requests are ignored again.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("github:webhook", profile);
+  });
+  expect((await hook({ ...pullRequest, number: 10 }, "pull_request")).status).toBe(204);
+}, 30_000);

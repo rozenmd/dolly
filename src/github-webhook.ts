@@ -16,11 +16,14 @@ export const WebhookSetup = Schema.Struct({
   /** Who may run /dolly commands. An empty list stops every command. */
   senders: Schema.Array(Login),
   secret: Schema.optional(Schema.String.check(Schema.isMinLength(32), Schema.isMaxLength(256))),
+  /** Review new pull requests these senders open in enrolled repositories. Omitted keeps the saved choice. */
+  reviews: Schema.optional(Schema.Boolean),
 });
 
 export const WebhookProfile = Schema.Struct({
   secret: Schema.String.check(Schema.isMinLength(32), Schema.isMaxLength(256)),
   senders: Schema.Array(Login),
+  reviews: Schema.optional(Schema.Boolean),
 });
 
 const CommentEvent = Schema.Struct({
@@ -33,6 +36,23 @@ const CommentEvent = Schema.Struct({
 });
 
 const Sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
+
+/** A pull request becoming ready for review: opened, reopened or taken out of draft. */
+const ReviewEvent = Schema.Struct({
+  action: Schema.Literals(["opened", "reopened", "ready_for_review"]),
+  installation: Schema.Struct({ id: Id }),
+  repository: Schema.Struct({ full_name: Repository }),
+  sender: Schema.Struct({ login: Login, type: Schema.Literal("User") }),
+  number: Id,
+  pull_request: Schema.Struct({
+    draft: Schema.optional(Schema.Boolean),
+    head: Schema.Struct({
+      sha: Sha,
+      repo: Schema.NullOr(Schema.Struct({ full_name: Schema.String })),
+    }),
+  }),
+});
+
 const Pulls = Schema.optional(Schema.Array(Schema.Struct({ number: Id })));
 
 const CiBase = {
@@ -201,6 +221,24 @@ export const GitHubEvent = Schema.Struct({
   content: Schema.String,
 });
 
+/** An automatic review of a pull request's head commit. */
+export const GitHubReview = Schema.Struct({
+  kind: Schema.Literal("review"),
+  installationId: Id,
+  repository: Repository,
+  number: Id,
+  sha: Sha,
+  sender: Login,
+});
+
+/** What a GitHub thread delivers: a /dolly command or an automatic review. */
+export type GitHubDelivery = typeof GitHubEvent.Type | typeof GitHubReview.Type;
+
+/** The key a delivery is deduplicated by within its thread. */
+export function deliveryKey(delivery: GitHubDelivery) {
+  return "kind" in delivery ? `review:${delivery.sha}` : String(delivery.commentId);
+}
+
 export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
   profile: typeof WebhookProfile.Type,
   body: ArrayBuffer,
@@ -230,6 +268,12 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
   );
 
   if (!valid) return { status: 401 as const };
+
+  if (event === "pull_request" && profile.reviews) {
+    const review = reviewEvent(profile, new TextDecoder().decode(body));
+
+    if (review) return { status: 202 as const, kind: "review" as const, review };
+  }
 
   if (event !== "issue_comment") {
     const ci = ciEvent(event, new TextDecoder().decode(body));
@@ -269,3 +313,33 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
     },
   };
 });
+
+/**
+ * A pull request an allowed sender opened (or made ready) on a branch of the same repository.
+ * Drafts wait for ready_for_review; forks are never reviewed automatically.
+ */
+function reviewEvent(
+  profile: typeof WebhookProfile.Type,
+  text: string,
+): typeof GitHubReview.Type | undefined {
+  const value = Option.getOrUndefined(
+    Schema.decodeUnknownOption(Schema.fromJsonString(ReviewEvent))(text),
+  );
+
+  if (!value || value.pull_request.draft) return undefined;
+  const repository = value.repository.full_name.toLowerCase();
+
+  if (value.pull_request.head.repo?.full_name.toLowerCase() !== repository) return undefined;
+
+  if (!profile.senders.some((login) => login.toLowerCase() === value.sender.login.toLowerCase()))
+    return undefined;
+
+  return {
+    kind: "review",
+    installationId: value.installation.id,
+    repository,
+    number: value.number,
+    sha: value.pull_request.head.sha,
+    sender: value.sender.login,
+  };
+}
