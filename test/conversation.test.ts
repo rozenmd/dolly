@@ -383,6 +383,89 @@ it("pushes an initial snapshot and redacted live updates over an authenticated W
   }
 });
 
+it("streams over a hibernatable WebSocket that resumes its watch after a wake", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json({ error: { message: "Model unavailable" } }, { status: 400 }),
+  );
+
+  const created = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
+  const { id } = await created.json<{ id: string }>();
+
+  const response = await SELF.fetch(`https://worker/api/sessions/${id}/events`, {
+    headers: { ...headers, Upgrade: "websocket", Origin: "https://worker" },
+  });
+
+  expect(response.status).toBe(101);
+  const socket = response.webSocket!;
+  const snapshots: Array<typeof Snapshot.Type> = [];
+  socket.addEventListener("message", (event) => {
+    snapshots.push(Schema.decodeUnknownSync(Schema.fromJsonString(Snapshot))(event.data));
+  });
+  socket.accept();
+
+  // A sidebar feed socket hibernates in the same object; resuming streams must leave it open.
+  const feedResponse = await SELF.fetch("https://worker/api/events", {
+    headers: { ...headers, Upgrade: "websocket", Origin: "https://worker" },
+  });
+
+  expect(feedResponse.status).toBe(101);
+  const feed = feedResponse.webSocket!;
+  let feedClosed = false;
+  feed.addEventListener("close", () => {
+    feedClosed = true;
+  });
+  feed.accept();
+
+  const agent = env.AGENT.getByName("owner");
+
+  try {
+    await expect.poll(() => snapshots.length).toBe(1);
+
+    // Accepted through the hibernation API, tagged with its session for a woken instance.
+    await runInDurableObject(agent, async (instance, state) => {
+      const sockets = state.getWebSockets("stream");
+      expect(sockets).toHaveLength(1);
+      expect(sockets[0]!.deserializeAttachment()).toEqual({ session: id });
+      expect(state.getWebSockets("sessions")).toHaveLength(1);
+
+      // Simulate hibernation: drop the in-memory watch, then wake as a new instance would.
+      for (const stop of instance.streams.values()) stop();
+
+      expect(instance.streams.size).toBe(0);
+      await instance.resumeStreams();
+      expect(instance.streams.size).toBe(1);
+      expect(state.getWebSockets("sessions")).toHaveLength(1);
+    });
+
+    await expect.poll(() => snapshots.length).toBe(2);
+    expect(feedClosed).toBe(false);
+
+    const submitted = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content: "after wake", requestId: crypto.randomUUID() }),
+    });
+
+    expect(submitted.status).toBe(202);
+    await expect
+      .poll(() =>
+        snapshots
+          .at(-1)
+          ?.entries.some((entry) =>
+            entry.model?.some(
+              (message) => message.role === "user" && message.content === "after wake",
+            ),
+          ),
+      )
+      .toBe(true);
+  } finally {
+    socket.close();
+    feed.close();
+  }
+
+  await expect.poll(() => runInDurableObject(agent, (instance) => instance.streams.size)).toBe(0);
+});
+
 it("retains model failure details in the real transcript and browser live-state contract", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
     Response.json(
