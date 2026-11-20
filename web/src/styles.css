@@ -639,6 +639,10 @@ select.input {
   font-size: 12px;
 }
 .prompt-bubble {
+  /* Right-aligned flex items size to their content, so a long unwrapped code line would push
+     the bubble out past the left edge. Cap it at the column; code blocks scroll instead. */
+  max-width: 100%;
+  min-width: 0;
   padding: 10px 16px;
   border-radius: 12px;
   background: var(--surface);

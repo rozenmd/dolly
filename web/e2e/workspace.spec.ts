@@ -1425,3 +1425,82 @@ test("starts steps collapsed and respects what the user opens or closes", async 
   await expect(body).toHaveAttribute("data-closed", "step-group ");
   await expect(group).toHaveAttribute("data-original", "");
 });
+
+const pastedLog = [
+  "can we fix?",
+  "",
+  "# AnalyticsSQLAPIError",
+  "",
+  'Query invalid: query must include a time range (e.g., request `time_range.start: "2026-01-01T00:00:00Z"`)',
+  "",
+  "## Request",
+  "",
+  "```",
+  "GET /api/providers/p2w1yvPwXadv/activity-summary?from=2026-01-01T00:00:00Z&to=2026-01-31T23:59:59Z&granularity=hour",
+  "```",
+  "",
+  "## Stack",
+  "",
+  "```",
+  'AnalyticsSQLAPIError: Query invalid: query must include a time range (e.g., request `time_range.start: "2026-01-01T00:00:00Z"`)',
+  "    at runAnalyticsQuery (src/analytics/sql.ts:88:11)",
+  "```",
+].join("\n");
+
+for (const width of [1440, 390]) {
+  test(`keeps a pasted markdown prompt with long code lines inside the conversation at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.route("**/api/**", (route) => {
+      const path = new URL(route.request().url()).pathname;
+
+      if (path === "/api/auth") return route.fulfill({ json: signedIn });
+
+      if (path === "/api/sessions")
+        return route.fulfill({
+          json: [
+            {
+              id: "pasted",
+              model: "gpt-6-sol",
+              title: "can we fix? # AnalyticsSQLAPIError",
+              repository: "octocat/project",
+              updatedAt: 1,
+            },
+          ],
+        });
+
+      if (path === "/api/sessions/pasted")
+        return route.fulfill({
+          json: {
+            conversation: { id: 1 },
+            entries: [
+              {
+                id: 1,
+                kind: "pi.user",
+                model: [{ role: "user", content: pastedLog, timestamp: Date.now() - 5000 }],
+              },
+            ],
+            docs: {},
+          },
+        });
+
+      return route.fulfill({ json: { state: "connected" } });
+    });
+    await page.goto("/", { waitUntil: "networkidle" });
+    const prompt = page.getByRole("article", { name: "user message" });
+
+    await expect(prompt).toContainText("AnalyticsSQLAPIError");
+
+    // The bubble must not grow past the transcript column: long code lines scroll inside it.
+    const overflow = await prompt.evaluate((element) => {
+      const column = element.closest(".conversation-content")!.getBoundingClientRect();
+      const bubble = element.querySelector(".prompt-bubble")!.getBoundingClientRect();
+
+      return { left: bubble.left - column.left, right: column.right - bubble.right };
+    });
+
+    expect(overflow.left).toBeGreaterThanOrEqual(0);
+    expect(overflow.right).toBeGreaterThanOrEqual(0);
+  });
+}
