@@ -301,6 +301,27 @@ function DefaultModelSetting() {
       </div>
       <div className="connection-row">
         <span className="connection-label">
+          GitHub review model
+          <span className="muted">
+            {setting
+              ? setting.reviewModel != null && setting.reviewModel !== setting.reviewEffective
+                ? `Using ${modelName(setting.reviewEffective)} until that subscription is connected`
+                : `Automatic pull request reviews use ${modelName(setting.reviewEffective)}`
+              : "Loading…"}
+          </span>
+        </span>
+        <ModelPicker
+          id="review-model"
+          value={setting?.reviewModel ?? ""}
+          defaultLabel="Same as default"
+          disabled={!setting || pending}
+          onChange={(model) =>
+            save({ reviewModel: model || null }, "Could not save the GitHub review model.")
+          }
+        />
+      </div>
+      <div className="connection-row">
+        <span className="connection-label">
           Default effort
           <span className="muted">How long new sessions think before answering</span>
         </span>
@@ -535,7 +556,7 @@ export function GitHubSettings() {
             <span className="muted">
               When one of these users opens a pull request in an enrolled repository, or marks a
               draft ready, dolly reviews it with inline comments. Each review uses your model
-              subscription.
+              subscription; choose its model under Models.
             </span>
           </span>
           <input

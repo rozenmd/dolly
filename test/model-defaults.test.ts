@@ -107,6 +107,8 @@ it("saves default effort, speed and auto-fallback and starts new sessions with t
     speed: "fast",
     autoFallback: false,
     ultrafastAvailable: false,
+    reviewModel: null,
+    reviewEffective: "gpt-6-luna",
   });
 
   const invalid: Body[] = [
@@ -165,6 +167,8 @@ it("saves default effort, speed and auto-fallback and starts new sessions with t
     speed: "standard",
     autoFallback: true,
     ultrafastAvailable: false,
+    reviewModel: null,
+    reviewEffective: "gpt-6-luna",
   });
   expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({
     thinkingLevel: "medium",

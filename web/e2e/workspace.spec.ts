@@ -229,6 +229,8 @@ test("one composer pill switches the session's model, effort, speed and fallback
     speed: "standard",
     autoFallback: true,
     ultrafastAvailable: false,
+    reviewModel: null,
+    reviewEffective: "gpt-6-luna",
   };
 
   await page.route("**/api/**", (route) => {
@@ -405,6 +407,8 @@ test("connects Claude without ChatGPT, explicitly tests Worker inference, and st
           speed: "standard",
           autoFallback: true,
           ultrafastAvailable: false,
+          reviewModel: null,
+          reviewEffective: "claude-sonnet-5-5",
         },
       });
 

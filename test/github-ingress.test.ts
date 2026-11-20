@@ -674,6 +674,18 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   ).toBe(204);
   expect(reactions).toEqual([]);
 
+  // Reviews run on their own model, not the default for new sessions.
+  const chosen = await SELF.fetch("https://worker/api/settings/model", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ reviewModel: "gpt-6-sol" }),
+  });
+
+  expect(await chosen.json()).toMatchObject({
+    reviewModel: "gpt-6-sol",
+    reviewEffective: "gpt-6-sol",
+  });
+
   expect((await hook(pullRequest, "pull_request")).status).toBe(202);
   // The same head again (a redelivery, or reopening) is the same review.
   expect((await hook({ ...pullRequest, action: "reopened" }, "pull_request")).status).toBe(202);
@@ -703,6 +715,8 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
 
   for (const name of ["write_file", "edit_file", "preview", "spawn_task", "schedule_prompt"])
     expect(offered).not.toContain(name);
+
+  expect(JSON.parse(prompts[0]!).model).toBe("gpt-6-sol");
   await expect.poll(() => reactions).toEqual(["8:eyes", "8:rocket"]);
 
   const threads = await (
@@ -734,6 +748,15 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   ).toBe(202);
   await expect.poll(() => reactions, { timeout: 15_000 }).toContain("9:rocket");
   expect(reviews).toHaveLength(1);
+
+  // Cleared, reviews follow the default model again.
+  const cleared = await SELF.fetch("https://worker/api/settings/model", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ reviewModel: null }),
+  });
+
+  expect(await cleared.json()).toMatchObject({ reviewModel: null, reviewEffective: "gpt-6-luna" });
 
   // Turned off, pull requests are ignored again.
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {

@@ -23,6 +23,7 @@ const KEYS = {
   thinkingLevel: "settings:default-effort",
   speed: "settings:default-speed",
   autoFallback: "settings:auto-fallback",
+  reviewModel: "settings:review-model",
 } as const;
 
 export const DEFAULT_MODEL_KEY = KEYS.model;
@@ -32,6 +33,7 @@ const DECODERS = {
   thinkingLevel: Schema.decodeUnknownOption(ThinkingLevel),
   speed: Schema.decodeUnknownOption(Speed),
   autoFallback: Schema.decodeUnknownOption(Schema.Boolean),
+  reviewModel: Schema.decodeUnknownOption(SessionModel),
 };
 
 /** The owner's saved choices; `null` follows the built-in default. */
@@ -40,6 +42,8 @@ export type StoredDefaults = {
   thinkingLevel: typeof ThinkingLevel.Type | null;
   speed: Speed | null;
   autoFallback: boolean | null;
+  /** The model automatic GitHub pull request reviews run on; `null` follows `model`. */
+  reviewModel: typeof SessionModel.Type | null;
 };
 
 export async function readDefaults(storage: DurableObjectStorage): Promise<StoredDefaults> {
@@ -51,6 +55,7 @@ export async function readDefaults(storage: DurableObjectStorage): Promise<Store
     thinkingLevel: Option.getOrNull(DECODERS.thinkingLevel(values.get(KEYS.thinkingLevel))),
     speed: Option.getOrNull(DECODERS.speed(values.get(KEYS.speed))),
     autoFallback: Option.getOrNull(DECODERS.autoFallback(values.get(KEYS.autoFallback))),
+    reviewModel: Option.getOrNull(DECODERS.reviewModel(values.get(KEYS.reviewModel))),
   };
 }
 
@@ -64,6 +69,7 @@ export async function writeDefaults(
     [KEYS.thinkingLevel, setting.thinkingLevel],
     [KEYS.speed, setting.speed],
     [KEYS.autoFallback, setting.autoFallback],
+    [KEYS.reviewModel, setting.reviewModel],
   ] as const;
 
   await storage.transaction(async (tx) => {
@@ -88,6 +94,18 @@ export function effectiveDefaultModel(stored: string | null, chatgpt: boolean, c
   return stored ?? DEFAULT_OPENAI_MODEL;
 }
 
+/**
+ * The model an automatic GitHub review runs on: the owner's review model while its
+ * subscription is connected, otherwise the effective default for new sessions.
+ */
+export function effectiveReviewModel(stored: StoredDefaults, chatgpt: boolean, claude: boolean) {
+  const review = stored.reviewModel;
+
+  if (review && (modelProvider(review) === "anthropic" ? claude : chatgpt)) return review;
+
+  return effectiveDefaultModel(stored.model, chatgpt, claude);
+}
+
 /** The model and effort GitHub and Slack intake give a session they start. */
 export type IntakeAgent = {
   model: { provider: "openai" | "anthropic"; modelId: string };
@@ -102,6 +120,8 @@ export function defaultsView(stored: StoredDefaults, chatgpt: boolean, claude: b
     thinkingLevel: stored.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
     speed: stored.speed ?? DEFAULT_SPEED,
     autoFallback: stored.autoFallback ?? DEFAULT_AUTO_FALLBACK,
+    reviewModel: stored.reviewModel,
+    reviewEffective: effectiveReviewModel(stored, chatgpt, claude),
   };
 }
 
