@@ -82,7 +82,17 @@ import {
   NewSession,
   SessionSettings,
   DefaultModelSetting,
+  CHEAPEST_MODEL,
 } from "./models";
+import {
+  RETITLE_TOOL_NAME,
+  RetitleToolInput,
+  completionText,
+  promptBounds,
+  retitleDescription,
+  sanitizeTitle,
+  titlePrompt,
+} from "./session-title";
 import {
   claudeProvider,
   anthropicStatus,
@@ -170,6 +180,7 @@ function pullSummaryKey(pull: SessionPull) {
 /** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
 export class Agent extends DurableObject<Env> {
   private harness!: Harness;
+  private models!: ReturnType<typeof createModels>;
   private readonly credentials: Credentials;
   private readonly papercuts: Papercuts;
   private readonly services: Layer.Layer<Account | ChatGPTProtocol | GitHub | GitHubAuth>;
@@ -260,6 +271,7 @@ export class Agent extends DurableObject<Env> {
   private initialize = Effect.fn("Agent.initialize")(function* (this: Agent) {
     yield* this.arm({ active: true });
     const models = createModels({ credentials: this.credentials });
+    this.models = models;
     models.setProvider(
       chatgptProvider(this.usageObserver("openai"), (fn) => this.steerInterrupts.wrap(fn)),
     );
@@ -543,6 +555,19 @@ export class Agent extends DurableObject<Env> {
       },
     } satisfies ToolRegistration;
 
+    const retitleTool = {
+      name: RETITLE_TOOL_NAME,
+      description: retitleDescription,
+      parameters: toolParameters(RetitleToolInput),
+      // Re-running only asks for another title and overwrites the last one.
+      replay: "safe",
+      execute: async (_input: typeof RetitleToolInput.Type, api) => {
+        const result = await this.retitleSession(api.conversationId);
+
+        return { output: [{ type: "text", text: JSON.stringify(result) }] };
+      },
+    } satisfies ToolRegistration;
+
     const tools = [
       shell,
       readFile,
@@ -552,6 +577,7 @@ export class Agent extends DurableObject<Env> {
       workspaceTool,
       papercutsTool,
       selfQueryTool,
+      retitleTool,
       {
         name: "preview",
         description:
@@ -990,9 +1016,106 @@ export class Agent extends DurableObject<Env> {
           .then(() => this.ctx.storage.put("migration:ci-wait-tools", true)),
       );
 
+    if (
+      !(yield* attempt("retitle.migration.read", () =>
+        this.ctx.storage.get("migration:retitle-tool"),
+      ))
+    )
+      yield* attempt("retitle.tools.update", () =>
+        this.harness
+          .commit(async (tx) => {
+            let cursor: Cursor | undefined;
+
+            do {
+              const page = await tx.scanConversations({}, 100, cursor);
+
+              for (const conversation of page.items) {
+                const agent = await tx.doc(AgentDoc, conversation.id);
+
+                for (const names of [agent.tools, agent.modelTools])
+                  if (Array.isArray(names) && !names.includes(retitleTool.name))
+                    names.push(retitleTool.name);
+              }
+
+              cursor = page.next;
+            } while (cursor);
+          }, BACKGROUND_CONTEXT)
+          .then(() => this.ctx.storage.put("migration:retitle-tool", true)),
+      );
+
     yield* this.arm(this.harness.wake());
     this.harness.resume();
   });
+
+  /**
+   * Name a session from its first and latest prompts with one tool-less call on the cheapest
+   * model of the owner's default model provider (opensession's generated titles). Never touches
+   * the session's own model or transcript.
+   */
+  private async retitleSession(conversationId: ConversationId) {
+    const { openai, anthropic, stored, secrets } = await Effect.runPromise(
+      Effect.all({
+        openai: this.credentials.get("openai"),
+        anthropic: this.credentials.get("anthropic"),
+        stored: this.storedDefaults(),
+        secrets: this.credentials.secrets,
+      }),
+    );
+
+    const provider = modelProvider(
+      effectiveDefaultModel(stored.model, Option.isSome(openai), Option.isSome(anthropic)),
+    );
+
+    if (Option.isNone(provider === "openai" ? openai : anthropic))
+      return {
+        error: `Connect ${provider === "openai" ? "ChatGPT" : "Claude"} to generate titles`,
+      };
+
+    const modelId = CHEAPEST_MODEL[provider];
+    const model = this.models.getModel(provider, modelId);
+
+    if (!model) return { error: `${modelId} is not in the ${provider} model catalog` };
+
+    const conversation = await this.harness.conversation(conversationId, BACKGROUND_CONTEXT);
+    const prompts = conversation && (await promptBounds(conversation));
+
+    if (!prompts) return { error: "This session has no prompt to name yet" };
+
+    const key = sessionMetadataKey(conversationId);
+    const previous = (await this.ctx.storage.get<SessionMetadata>(key))?.title;
+
+    const answer = await this.models.completeSimple(
+      model,
+      {
+        systemPrompt:
+          "This is a tool-less one-shot text transformation. Return only the requested answer.",
+        messages: [
+          {
+            role: "user",
+            content: redact(titlePrompt({ ...prompts, current: previous }), secrets),
+            timestamp: Date.now(),
+          },
+        ],
+      },
+      { transport: "sse", timeoutMs: 60_000, cacheRetention: "none", disableContinuation: true },
+    );
+
+    const completion = completionText(answer);
+
+    if ("error" in completion) return { error: completion.error, model: modelId };
+
+    const title = redact(sanitizeTitle(completion.text), secrets);
+
+    if (!title)
+      return {
+        error: "The model did not answer with a usable title; the current title is unchanged",
+        model: modelId,
+      };
+
+    await Effect.runPromise(this.patchSessionMetadata(conversationId, { title }));
+
+    return { title, ...(previous && { previous }), model: modelId };
+  }
 
   /** Recording must never replace a tool's original result or recursively report failures. */
   private async capturePapercut(source: string, message: string, conversationId?: ConversationId) {

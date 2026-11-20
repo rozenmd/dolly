@@ -244,7 +244,10 @@ export async function listSessions(
             thinkingLevel: agent.thinkingLevel,
             ...(metadata?.speed && { speed: metadata.speed }),
             ...(metadata?.autoFallback !== undefined && { autoFallback: metadata.autoFallback }),
-            title: transcript?.title || "Untitled session",
+            title:
+              (metadata?.title && redact(metadata.title, secrets)) ||
+              transcript?.title ||
+              "Untitled session",
             repository: workspace?.config?.repository ?? "",
             ref: workspace?.config?.ref,
             updatedAt: Math.max(transcript?.updatedAt ?? 0, metadata?.createdAt ?? 0),
