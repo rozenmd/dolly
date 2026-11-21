@@ -728,6 +728,7 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   expect(prompts[0]).toContain("VERDICT: blocking=");
   expect(prompts[0]).toContain(`commit_id ${sha}`);
   expect(prompts[0]).toContain("This session is read-only");
+  expect(prompts[0]).toContain("MCP servers are not available in this session");
 
   // A review session is only offered read-only tools.
   // SAFETY: the mock above only records Responses API request bodies, whose input is an item array.
@@ -737,7 +738,7 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
 
   expect(offered).toEqual(expect.arrayContaining(["shell", "read_file", "github", "workspace"]));
 
-  for (const name of ["write_file", "edit_file", "preview", "spawn_task", "schedule_prompt"])
+  for (const name of ["write_file", "edit_file", "preview", "spawn_task", "schedule_prompt", "mcp"])
     expect(offered).not.toContain(name);
 
   expect(JSON.parse(prompts[0]!).model).toBe("gpt-6-sol");

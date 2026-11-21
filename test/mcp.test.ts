@@ -5,7 +5,10 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
 import { Live, Snapshot } from "../src/transcript";
-import type { McpToolInput } from "../src/mcp";
+import { McpConnections, toolOutput, type McpToolInput } from "../src/mcp";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
+import { ConversationWorkspace, READ_ONLY_TOOLS } from "../src/workspace";
 
 /**
  * Settings > Connections (src/mcp.ts) through the real API routes and owner Durable Object:
@@ -31,7 +34,13 @@ type Handler = (
 
 /** Route outbound fetches by origin+path; anything unexpected fails the request. */
 function network(routes: Record<string, Handler>) {
-  const seen: { url: string; method: string; headers: Headers; body: string }[] = [];
+  const seen: {
+    url: string;
+    method: string;
+    headers: Headers;
+    body: string;
+    redirect: RequestInit["redirect"];
+  }[] = [];
 
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
@@ -40,7 +49,13 @@ function network(routes: Record<string, Handler>) {
     const body =
       request.method === "GET" || request.method === "HEAD" ? "" : await request.clone().text();
 
-    seen.push({ url: url.href, method: request.method, headers: request.headers, body });
+    seen.push({
+      url: url.href,
+      method: request.method,
+      headers: request.headers,
+      body,
+      redirect: init?.redirect ?? "follow",
+    });
 
     const handler =
       routes[`${request.method} ${url.origin}${url.pathname}`] ??
@@ -56,6 +71,13 @@ function network(routes: Record<string, Handler>) {
 }
 
 const LINEAR = "https://mcp.linear.example";
+
+const Servers = Schema.Record(Schema.String, Schema.Struct({ id: Schema.String }));
+
+/** The stored id of a server added through the API. */
+async function serverId(state: DurableObjectState, name: string) {
+  return Schema.decodeUnknownSync(Servers)(await state.storage.get("mcp:servers"))[name].id;
+}
 
 /** A spec-following OAuth-protected MCP server: 401 with resource metadata, AS metadata, DCR. */
 function oauthServer(
@@ -479,7 +501,7 @@ it("lets a session list and call a connected server's tools with a refreshed gra
     return next();
   };
 
-  network({
+  const seen = network({
     ...oauthServer(LINEAR, mcpEndpoint(mcpCalls)),
     [`POST ${LINEAR}/token`]: async (_url, _init, request) => {
       refreshes.push(new URLSearchParams(await request.text()));
@@ -505,6 +527,8 @@ it("lets a session list and call a connected server's tools with a refreshed gra
       expires: Date.now() + 3_600_000,
     });
     await state.storage.put("mcp:auth:linear", {
+      serverId: await serverId(state, "linear"),
+      epoch: 0,
       serverUrl: `${LINEAR}/mcp`,
       redirectUri: "https://worker/api/connections/mcp-oauth/callback",
       endpoints: { authorize: `${LINEAR}/authorize`, token: `${LINEAR}/token` },
@@ -612,6 +636,357 @@ it("lets a session list and call a connected server's tools with a refreshed gra
       .every((entry) => entry.session === "session-1"),
   ).toBe(true);
 
+  // The refresh and every credentialed MCP request refuse redirects.
+  const credentialed = seen.filter(
+    (request) => request.url.startsWith(LINEAR) && request.method !== "GET",
+  );
+
+  expect(credentialed.length).toBeGreaterThan(mcpCalls.length);
+  expect(credentialed.every((request) => request.redirect === "manual")).toBe(true);
+
   // Tokens never reach the transcript.
   expect(JSON.stringify(snapshot)).not.toContain("fresh-access");
+}, 30_000);
+
+it("offers and accepts token connect only on the provider's own origin", async () => {
+  const seen = network({
+    "GET https://evil.example/mcp": () => new Response("method not allowed", { status: 405 }),
+    "GET https://mcp.vercel.com/": () => new Response("unauthorized", { status: 401 }),
+  });
+
+  await call("/connections/mcp", "POST", { name: "vercel", url: "https://evil.example/mcp" });
+  expect(await (await call("/connections/mcp/vercel/oauth")).json()).toEqual({
+    users: [],
+    manualToken: false,
+  });
+
+  const refused = await call("/connections/mcp/vercel/token", "POST", { token: "real-token" });
+  expect(refused.status).toBe(400);
+  expect((await refused.json<{ error: string }>()).error).toContain("no token connect flow");
+  // The token was never checked with Vercel, let alone stored for evil.example.
+  expect(seen.some((request) => request.url.startsWith("https://api.vercel.com"))).toBe(false);
+  expect(await (await call("/connections/mcp/vercel/oauth")).json()).toEqual({
+    users: [],
+    manualToken: false,
+  });
+
+  await call("/connections/mcp/vercel", "DELETE");
+  await call("/connections/mcp", "POST", { name: "vercel", url: "https://mcp.vercel.com/" });
+  expect(await (await call("/connections/mcp/vercel/oauth")).json()).toEqual({
+    users: [],
+    manualToken: true,
+  });
+});
+
+/** Start a sign-in for `linear` and return its state. */
+async function startSignIn() {
+  const started = await call("/connections/mcp/linear/oauth/start", "POST", {});
+  expect(started.status).toBe(200);
+
+  return new URL((await started.json<{ url: string }>()).url).searchParams.get("state")!;
+}
+
+it("drops a sign-in that completes after its server was removed, re-added or disconnected", async () => {
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let tokenRequests = 0;
+
+  network({
+    ...oauthServer(LINEAR),
+    [`POST ${LINEAR}/token`]: async () => {
+      tokenRequests += 1;
+      await held;
+
+      return Response.json({ access_token: "late-access", expires_in: 3600 });
+    },
+  });
+
+  await call("/connections/mcp", "POST", { name: "linear", url: `${LINEAR}/mcp` });
+  const state = await startSignIn();
+
+  // The token exchange is in flight while the owner removes and re-adds the same name and URL.
+  const callback = call(`/connections/mcp-oauth/callback?state=${state}&code=the-code`);
+  await expect.poll(() => tokenRequests).toBe(1);
+  expect((await call("/connections/mcp/linear", "DELETE")).status).toBe(200);
+  expect(
+    (await call("/connections/mcp", "POST", { name: "linear", url: `${LINEAR}/mcp` })).status,
+  ).toBe(200);
+  release();
+
+  const late = await callback;
+  expect(late.status).toBe(400);
+  expect(await late.text()).toContain("removed or disconnected");
+  expect(await (await call("/connections/mcp/linear/oauth")).json()).toEqual({
+    users: [],
+    manualToken: false,
+  });
+
+  // A sign-in started before a disconnect never reaches the token endpoint after it.
+  const stale = await startSignIn();
+  expect((await call("/connections/mcp/linear/oauth", "DELETE")).status).toBe(200);
+  expect((await call(`/connections/mcp-oauth/callback?state=${stale}&code=the-code`)).status).toBe(
+    400,
+  );
+  expect(tokenRequests).toBe(1);
+  expect(await (await call("/connections/mcp/linear/oauth")).json()).toEqual({
+    users: [],
+    manualToken: false,
+  });
+});
+
+it("never follows redirects on requests that carry credentials", async () => {
+  const seen = network({
+    ...oauthServer(LINEAR),
+    [`POST ${LINEAR}/token`]: () =>
+      new Response(null, { status: 307, headers: { Location: "https://attacker.example/steal" } }),
+  });
+
+  await call("/connections/mcp", "POST", { name: "linear", url: `${LINEAR}/mcp` });
+  const state = await startSignIn();
+
+  const callback = await call(`/connections/mcp-oauth/callback?state=${state}&code=the-code`);
+  expect(callback.status).toBe(400);
+  expect(await callback.text()).toContain("HTTP 307");
+
+  const credentialed = seen.filter(
+    (request) => request.method === "POST" || request.headers.has("authorization"),
+  );
+
+  expect(credentialed.map((request) => request.url)).toEqual([
+    `${LINEAR}/register`,
+    `${LINEAR}/token`,
+  ]);
+  expect(credentialed.every((request) => request.redirect === "manual")).toBe(true);
+  expect(seen.some((request) => request.url.startsWith("https://attacker.example"))).toBe(false);
+  expect(await (await call("/connections/mcp/linear/oauth")).json()).toEqual({
+    users: [],
+    manualToken: false,
+  });
+});
+
+/** Run the `mcp` tool directly in the owner Durable Object. */
+function runTool(request: Parameters<McpConnections["run"]>[0]) {
+  return runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+    new McpConnections(state.storage).run(request),
+  );
+}
+
+it("bounds what a server can make the Worker read", async () => {
+  let pages = 0;
+
+  network({
+    "POST https://huge.example/mcp": async (_url, _init, request) => {
+      const message = Schema.decodeUnknownSync(Schema.fromJsonString(RpcRequest))(
+        await request.text(),
+      );
+
+      if (message.id === undefined) return new Response(null, { status: 202 });
+
+      if (message.method === "initialize")
+        return Response.json({ jsonrpc: "2.0", id: message.id, result: {} });
+
+      if (message.method === "tools/list") {
+        pages += 1;
+
+        // Never advances: the same cursor forever.
+        return Response.json({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { tools: [], nextCursor: "again" },
+        });
+      }
+
+      // An event stream that never ends one event: 64 KiB chunks without a blank line.
+      const chunk = new TextEncoder().encode(`data: ${"x".repeat(65_536)}`);
+      let sent = 0;
+
+      return new Response(
+        new ReadableStream({
+          pull(controller) {
+            sent += 1;
+
+            if (sent > 200) controller.close();
+            else controller.enqueue(chunk);
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    },
+    "DELETE https://huge.example/mcp": () => new Response(null, { status: 204 }),
+  });
+
+  await call("/connections/mcp", "POST", { name: "huge", url: "https://huge.example/mcp" });
+
+  const listed = await runTool({ action: "list_tools", server: "huge" });
+  expect(pages).toBe(2);
+  expect(JSON.parse(listed.output[0].type === "text" ? listed.output[0].text : "")).toMatchObject({
+    note: expect.stringContaining("more tools"),
+    tools: [],
+  });
+
+  await expect(runTool({ action: "call_tool", server: "huge", tool: "dump" })).rejects.toThrow(
+    "exceeded 4 MiB",
+  );
+});
+
+it("caps image bytes kept from one tool result", () => {
+  const image = { type: "image" as const, data: "a".repeat(1_500_000), mimeType: "image/png" };
+  const { output } = toolOutput({ content: [image, image] });
+
+  expect(output.map((block) => block.type)).toEqual(["image", "text"]);
+  expect(output[1]).toMatchObject({ text: expect.stringContaining("image/png image omitted") });
+});
+
+async function newSession() {
+  const created = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
+
+  return (await created.json<{ id: string }>()).id;
+}
+
+/** Send a prompt and wait until the run has settled, returning the `mcp` tool results. */
+async function turn(id: string, content: string, settled: () => boolean) {
+  const sent = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ content, requestId: crypto.randomUUID() }),
+  });
+
+  expect(sent.status).toBe(202);
+  let snapshot: typeof Snapshot.Type | undefined;
+
+  await expect
+    .poll(
+      async () => {
+        snapshot = decode(
+          await (await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })).text(),
+        );
+
+        const live = Option.getOrUndefined(
+          Schema.decodeUnknownOption(Live)(snapshot.docs["pi.live"]),
+        );
+
+        return live !== undefined && live.run === undefined && settled();
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+
+  return snapshot!.entries.flatMap((entry) =>
+    (entry.model ?? []).flatMap((message) =>
+      message.role === "toolResult" && message.toolName === "mcp" && Array.isArray(message.content)
+        ? [
+            {
+              text: message.content.map((block) => block.text ?? "").join(""),
+              isError: message.isError,
+            },
+          ]
+        : [],
+    ),
+  );
+}
+
+/** The pi conversation behind a web session id. */
+async function conversationOf(state: DurableObjectState, id: string) {
+  const conversation = await state.storage.get<ConversationId>(`session:${id}`);
+
+  if (conversation === undefined) throw new Error(`No conversation for session ${id}`);
+
+  return conversation;
+}
+
+/** A conversation's tool allowlist as a plain array (it may also be a removal list). */
+const names = (tools: string[] | { remove: string[] } | undefined) =>
+  Array.isArray(tools) ? Array.from(tools) : [];
+
+const readOnlyConfig = (id: string) => ({
+  repository: "example/project",
+  ref: "HEAD",
+  branch: `dolly/session-${id}`,
+  networkHosts: [],
+  readOnly: true as const,
+});
+
+it("refuses MCP in read-only sessions and keeps the tool out of upgraded reviews", async () => {
+  const replies = [() => toolCall({ action: "servers" }), () => answer("Refused")];
+  const prompts: string[] = [];
+
+  const model: Handler = async (_url, _init, request) => {
+    prompts.push(await request.text());
+    const next = replies.shift();
+
+    if (!next) throw new Error("Unexpected model request");
+
+    return next();
+  };
+
+  const seen = network({
+    ...oauthServer(LINEAR),
+    "POST https://api.openai.com/*": model,
+    "POST https://chatgpt.com/*": model,
+  });
+
+  await call("/connections/mcp", "POST", { name: "linear", url: `${LINEAR}/mcp` });
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("credential:openai", {
+      type: "oauth",
+      access,
+      refresh: "test-refresh",
+      expires: Date.now() + 3_600_000,
+    });
+  });
+
+  // `readOnly` is read-only but still lists every tool, so execution is what must refuse.
+  // `review` and `legacy` stand for an automatic review and an ordinary session created
+  // before the mcp tool existed.
+  const readOnly = await newSession();
+  const review = await newSession();
+  const legacy = await newSession();
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    const ids = {
+      readOnly: await conversationOf(state, readOnly),
+      review: await conversationOf(state, review),
+      legacy: await conversationOf(state, legacy),
+    };
+
+    await agent["harness"].commit(async (tx) => {
+      (await tx.doc(ConversationWorkspace, ids.readOnly)).config = readOnlyConfig(readOnly);
+      (await tx.doc(ConversationWorkspace, ids.review)).config = readOnlyConfig(review);
+      (await tx.doc(AgentDoc, ids.review)).tools = [...READ_ONLY_TOOLS];
+      const agent = await tx.doc(AgentDoc, ids.legacy);
+      agent.tools = names(agent.tools).filter((name) => name !== "mcp");
+    }, BACKGROUND_CONTEXT);
+    await state.storage.delete("migration:mcp-tool");
+  });
+
+  const [refused] = await turn(readOnly, "List the MCP servers", () => replies.length === 0);
+  expect(refused.isError).toBe(true);
+  expect(refused.text).toContain("only available in writable sessions");
+  expect(seen.some((request) => request.method === "POST" && request.url === `${LINEAR}/mcp`)).toBe(
+    false,
+  );
+  expect(prompts[0]).toContain("MCP servers are not available in this session");
+  expect(prompts[0]).not.toContain("usable through the mcp tool: linear");
+
+  // The migration on the next start adds the tool to ordinary sessions only.
+  await abortAllDurableObjects();
+  await SELF.fetch("https://worker/api/sessions", { headers });
+
+  const tools = await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    const ids = {
+      review: await conversationOf(state, review),
+      legacy: await conversationOf(state, legacy),
+    };
+
+    return agent["harness"].commit(
+      async (tx) => ({
+        review: names((await tx.doc(AgentDoc, ids.review)).tools),
+        legacy: names((await tx.doc(AgentDoc, ids.legacy)).tools),
+      }),
+      BACKGROUND_CONTEXT,
+    );
+  });
+
+  expect(tools.legacy).toContain("mcp");
+  expect(tools.review).toEqual([...READ_ONLY_TOOLS]);
 }, 30_000);

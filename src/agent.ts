@@ -142,6 +142,8 @@ import {
   McpToolInput,
   MCP_TOOL_NAME,
   mcpToolDescription,
+  MCP_REFUSAL,
+  MCP_UNAVAILABLE_PROMPT,
 } from "./mcp";
 import { attempt, rpc, OperationError } from "./operations";
 import type { Env } from "./env";
@@ -655,8 +657,13 @@ export class Agent extends DurableObject<Env> {
       execute: async (input: typeof McpRequest.Type, api) => {
         const parsed = Schema.decodeUnknownSync(McpRequest)(input);
 
-        // Read-only sessions (automatic reviews) act on untrusted pull requests: no external writes.
-        if (parsed.action === "call_tool") await this.refuseReadOnly(api.conversationId);
+        // The owner's credentials, so only sessions only the owner can steer and read may use them.
+        if (!(await this.mcpAllowed(api.conversationId)))
+          throw new OperationError({
+            operation: "mcp.refused",
+            message: MCP_REFUSAL,
+            details: null,
+          });
 
         return await this.mcp.run(parsed);
       },
@@ -859,7 +866,22 @@ export class Agent extends DurableObject<Env> {
           commitAttributionPrompt(await this.commitCoauthor()),
         ),
         section("papercuts", () => papercutsPrompt),
-        section("mcp-servers", () => this.mcp.promptSection()),
+        section("mcp-servers", async ({ read, conversationId }, context) => {
+          // Snapshots only: a section cannot commit. The tool itself runs the full check.
+          const [workspace, github, slack] = await Promise.all([
+            read.snapshot(ConversationWorkspace, conversationId, context),
+            read.snapshot(GitHubThreads, context),
+            read.snapshot(SlackThreads, context),
+          ]);
+
+          const external = [github, slack].some((state) =>
+            Object.values(state?.threads ?? {}).some((thread) => thread.id === conversationId),
+          );
+
+          return external || isReadOnly(workspace)
+            ? MCP_UNAVAILABLE_PROMPT
+            : await this.mcp.promptSection();
+        }),
       ],
     });
 
@@ -1145,6 +1167,9 @@ export class Agent extends DurableObject<Env> {
 
               for (const conversation of page.items) {
                 const agent = await tx.doc(AgentDoc, conversation.id);
+
+                // Read-only review sessions get an allowlist without write_file; keep them on it.
+                if (!Array.isArray(agent.tools) || !agent.tools.includes(writeFile.name)) continue;
 
                 for (const names of [agent.tools, agent.modelTools])
                   if (Array.isArray(names) && !names.includes(mcpTool.name))
@@ -1844,6 +1869,11 @@ export class Agent extends DurableObject<Env> {
   /** Whether a session is read-only (see WorkspaceConfig.readOnly). */
   private async isReadOnly(id: ConversationId) {
     return isReadOnly(await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT));
+  }
+
+  /** MCP servers carry the owner's credentials: only writable sessions started from the web app. */
+  private async mcpAllowed(id: ConversationId) {
+    return !(await this.isReadOnly(id)) && (await this.startedFromWeb(id));
   }
 
   private async refuseReadOnly(id: ConversationId) {
