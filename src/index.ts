@@ -9,6 +9,7 @@ import { WorkspaceRequest } from "./workspace";
 import { rpc } from "./operations";
 import { githubRoutes, githubSetupRoutes } from "./github-routes";
 import { slackRoutes } from "./slack-routes";
+import { mcpRoutes } from "./mcp-routes";
 import { authorizeAccess } from "./access";
 import { AgentApi } from "./api";
 import { ChildRequest, DefaultModelSetting, NewSession, SessionSettings } from "./models";
@@ -810,6 +811,8 @@ app.onError((error, c) => {
 app.route("/", githubRoutes);
 
 app.route("/", slackRoutes);
+
+app.route("/", mcpRoutes);
 
 export default app;
 

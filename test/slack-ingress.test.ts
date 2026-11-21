@@ -603,3 +603,109 @@ it("leads the session prompt with the request, then the mode and Slack notes", a
   );
   expect(first).not.toContain("Slack mention from");
 }, 30_000);
+
+/** A Claude reply that calls one tool. */
+function claudeToolUse(name: string, input: Record<string, string>) {
+  const events = [
+    {
+      type: "message_start",
+      message: {
+        id: "msg_tool",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-5-5",
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 0 },
+      },
+    },
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_mcp", name, input: {} },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: JSON.stringify(input) },
+    },
+    { type: "content_block_stop", index: 0 },
+    {
+      type: "message_delta",
+      delta: { stop_reason: "tool_use", stop_sequence: null },
+      usage: { output_tokens: 1 },
+    },
+    { type: "message_stop" },
+  ];
+
+  return new Response(
+    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+it("never lets a Slack thread use the owner's MCP connections", async () => {
+  const { posted, requests } = fakeServices("{}");
+  const base = vi.mocked(fetch).getMockImplementation()!;
+  const mcpRequests: string[] = [];
+  let sessionTurns = 0;
+
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    const parsed = new URL(String(url));
+
+    if (parsed.hostname === "mcp.linear.example") {
+      mcpRequests.push(parsed.href);
+
+      return Response.json({ jsonrpc: "2.0", id: 1, result: {} });
+    }
+
+    if (parsed.hostname === "api.anthropic.com" && !String(init?.body).includes("claude-haiku")) {
+      sessionTurns += 1;
+
+      // The first turn tries the owner's connection; the second reports what happened.
+      if (sessionTurns === 1) {
+        await base(url, init);
+
+        return claudeToolUse("mcp", { action: "list_tools", server: "linear" });
+      }
+    }
+
+    return base(url, init);
+  });
+
+  // The owner connected Linear with a working grant.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const url = "https://mcp.linear.example/mcp";
+
+    await state.storage.put("mcp:servers", { linear: { type: "http", id: "linear-1", url } });
+    await state.storage.put("mcp:auth:linear", {
+      serverId: "linear-1",
+      epoch: 0,
+      serverUrl: url,
+      redirectUri: "https://dolly.example.com/api/connections/mcp-oauth/callback",
+      endpoints: { authorize: `${url}/authorize`, token: `${url}/token` },
+      clientId: "dolly-client",
+      shared: {
+        tokens: { accessToken: "owner-linear-token", expiresAt: Date.now() + 3_600_000 },
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  });
+
+  // The owner starts a thread; any workspace member may then steer it.
+  expect((await post("/slack/events", dm("500.1", "<@UBOT> list linear tools"))).status).toBe(200);
+  await expect
+    .poll(() => posted.filter((call) => call.method === "chat.postMessage"), { timeout: 15_000 })
+    .toHaveLength(2);
+
+  expect(mcpRequests).toEqual([]);
+
+  const session = requests.filter((request) => request.model === "claude-sonnet-5-5");
+  expect(session).toHaveLength(2);
+  const transcript = JSON.stringify(session[1]);
+  expect(transcript).toContain("only available in writable sessions");
+  expect(transcript).not.toContain("owner-linear-token");
+  expect(JSON.stringify(session[0])).toContain("MCP servers are not available in this session");
+  expect(JSON.stringify(session[0])).not.toContain("usable through the mcp tool: linear");
+}, 30_000);
