@@ -79,7 +79,14 @@ import {
   verifySlackSignature,
 } from "./slack-events";
 import { GitHub } from "./github";
-import { GitHubRequest, GitHubAccounts, GitHubSetup, GitHubReply } from "./github-contracts";
+import {
+  GitHubRequest,
+  GitHubAccounts,
+  GitHubSetup,
+  GitHubReply,
+  MAX_REVIEW_BODY,
+} from "./github-contracts";
+import { stampAutomaticReview } from "./github-review";
 import {
   ChildRequest,
   ChildMessage,
@@ -1523,7 +1530,11 @@ export class Agent extends DurableObject<Env> {
             message: `This review of ${op.repository}#${op.number} at ${op.commit_id} is already on GitHub. Don't publish another; finish with your summary.`,
           };
 
-        return this.githubExecute(input);
+        // Stamped so this head's review is told apart from GitHub's records of thread replies.
+        return this.githubExecute({
+          ...input,
+          operation: { ...op, body: stampAutomaticReview(op.body, MAX_REVIEW_BODY) },
+        });
       });
 
     this.reviewPublishes.set(key, run);

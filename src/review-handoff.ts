@@ -4,6 +4,7 @@
 // https://github.com/tellahq/opensession/blob/main/packages/core/opensession-server/src/agents/github/prompts.ts
 // MIT license: third_party/opensession/LICENSE.
 import { defineDoc } from "@earendil-works/pi-durable";
+import { AUTOMATIC_REVIEW_MARKER, isAutomaticReview } from "./github-review";
 import type { PullReviewContext } from "./review-prompt";
 
 /**
@@ -191,7 +192,25 @@ type Review = { repository: string; number: number; sha: string };
  * their summaries are settled or stale, and unresolved inline threads still carry what is open.
  */
 export function openFeedback(pull: PullReviewContext, sha: string): ReviewFindings {
-  const items: FeedbackItem[] = [];
+  // Dolly's review of this head is the stamped one: GitHub also files each thread reply as a
+  // bodiless review at the head it was made on. Unstamped reviews predate the stamp.
+  const own = pull.reviews.filter((review) => review.author === pull.self && review.commit === sha);
+
+  const current =
+    own.findLast((review) => isAutomaticReview(review.body)) ??
+    own.findLast((review) => review.body.trim());
+
+  const first: FeedbackItem[] = [];
+  const rest: FeedbackItem[] = [];
+
+  if (current)
+    first.push({
+      kind: "review",
+      id: current.id,
+      author: current.author,
+      state: current.state,
+      body: current.body,
+    });
 
   for (const thread of pull.threads) {
     if (thread.resolved || thread.outdated) continue;
@@ -200,7 +219,8 @@ export function openFeedback(pull: PullReviewContext, sha: string): ReviewFindin
 
     for (const [index, comment] of thread.comments.entries())
       if (comment.trusted && comment.body.trim())
-        items.push({
+        // The findings this review just posted go first, so the budget never crowds them out.
+        (current?.id != null && comment.review === current.id ? first : rest).push({
           kind: "comment",
           id: comment.id,
           inReplyTo: index > 0 ? root : null,
@@ -214,13 +234,12 @@ export function openFeedback(pull: PullReviewContext, sha: string): ReviewFindin
   // Reviews are listed oldest first, so the last one per author is that author's current word.
   const latest = new Map<string, PullReviewContext["reviews"][number]>();
 
-  for (const review of pull.reviews) latest.set(review.author, review);
+  for (const review of pull.reviews)
+    if (review.author !== pull.self) latest.set(review.author, review);
 
   for (const review of latest.values()) {
     if (!review.trusted || !review.body.trim() || review.state === "DISMISSED") continue;
-
-    if (review.author === pull.self && review.commit !== sha) continue;
-    items.push({
+    rest.push({
       kind: "review",
       id: review.id,
       author: review.author,
@@ -229,7 +248,7 @@ export function openFeedback(pull: PullReviewContext, sha: string): ReviewFindin
     });
   }
 
-  return { items };
+  return { items: [...first, ...rest] };
 }
 
 type Pull = { title: string; ref: string };
@@ -261,7 +280,11 @@ const commentTag = (item: Extract<FeedbackItem, { kind: "comment" }>) => {
  * repeat text from the diff; nothing inside can close the fence early.
  */
 export function fencedFindings(findings: ReviewFindings) {
-  const clean = (text: string) => text.replaceAll(FINDINGS_TAG, "untrusted review findings");
+  // The stamp goes first: escaping the fence name last means no later step can reassemble it.
+  const clean = (text: string) =>
+    text
+      .replaceAll(AUTOMATIC_REVIEW_MARKER, "")
+      .replaceAll(FINDINGS_TAG, "untrusted review findings");
 
   const lines = findings.items.map((item) =>
     item.kind === "review"
@@ -269,10 +292,22 @@ export function fencedFindings(findings: ReviewFindings) {
       : `- [@${clean(item.author)}${commentTag(item)}] ${clean(item.path)}${item.line === null ? "" : `:${item.line}`} — ${clean(oneLine(item.body, 400))}`,
   );
 
-  let text = lines.join("\n") || "(none found)";
+  // Whole items within the budget, in order: this head's review and its findings come first.
+  const kept: string[] = [];
+  let used = 0;
 
-  if (text.length > MAX_FINDINGS_CHARS)
-    text = `${text.slice(0, MAX_FINDINGS_CHARS)}\n[truncated; read the rest on GitHub with list_pull_request_comments]`;
+  for (const line of lines) {
+    if (used + line.length + 1 > MAX_FINDINGS_CHARS) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+
+  const omitted = lines.length - kept.length;
+
+  let text = kept.join("\n") || "(none found)";
+
+  if (omitted > 0)
+    text += `\n[${omitted} older feedback item${omitted === 1 ? "" : "s"} omitted for length; read them on GitHub with list_pull_request_comments]`;
 
   return `<${FINDINGS_TAG}>\n${text}\n</${FINDINGS_TAG}>`;
 }
