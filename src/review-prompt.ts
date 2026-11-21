@@ -17,7 +17,8 @@ import { VERDICT_INSTRUCTION, type LastReview } from "./review-handoff";
  * the allowed senders and installed GitHub Apps, whose feedback a fix round may act on.
  */
 export type ThreadComment = {
-  id: number;
+  /** The REST id thread replies need; null when GitHub sent none. */
+  id: number | null;
   author: string;
   bot: boolean;
   trusted: boolean;
@@ -45,7 +46,7 @@ export type PullReviewContext = {
   threads: readonly ReviewThread[];
   /** Submitted reviews, oldest first. */
   reviews: readonly {
-    id: number;
+    id: number | null;
     author: string;
     trusted: boolean;
     state: string;
@@ -150,10 +151,13 @@ export type PriorFinding = {
 };
 
 /**
- * Dolly's earlier inline findings on this PR with their live thread state: a human reply on an
- * unresolved thread is pushback, a resolved or outdated thread was addressed.
+ * Dolly's earlier inline findings on this PR with their live thread state. Only a reply from the
+ * PR's author on an unresolved thread is pushback; anyone else's reply leaves the finding open. A
+ * resolved or outdated thread was addressed.
  */
-export function classifyPriorFindings(pull: Pick<PullReviewContext, "threads" | "self">) {
+export function classifyPriorFindings(
+  pull: Pick<PullReviewContext, "threads" | "self" | "author">,
+) {
   const out: PriorFinding[] = [];
 
   for (const thread of pull.threads) {
@@ -163,23 +167,15 @@ export function classifyPriorFindings(pull: Pick<PullReviewContext, "threads" | 
 
     const replies = thread.comments
       .slice(1)
-      .filter((comment) => !comment.bot && comment.body.trim());
+      .filter((comment) => comment.author === pull.author && comment.body.trim());
 
     const title = clip(root.body.split("\n").find((line) => line.trim()) ?? "", 160);
+    const path = thread.path ?? "(file-level)";
 
-    if (replies.length && !thread.resolved)
-      out.push({
-        status: "pushback",
-        path: thread.path ?? "(file-level)",
-        title,
-        reply: clip(replies.at(-1)!.body, REPLY_CAP),
-      });
-    else
-      out.push({
-        status: thread.resolved || thread.outdated ? "addressed" : "open",
-        path: thread.path ?? "(file-level)",
-        title,
-      });
+    if (thread.resolved || thread.outdated) out.push({ status: "addressed", path, title });
+    else if (replies.length)
+      out.push({ status: "pushback", path, title, reply: clip(replies.at(-1)!.body, REPLY_CAP) });
+    else out.push({ status: "open", path, title });
   }
 
   return out.slice(-MAX_DIGEST_FINDINGS);

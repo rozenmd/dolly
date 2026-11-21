@@ -98,7 +98,11 @@ export function githubDelivery({
   finished,
   handoff,
 }: {
-  reply: (event: GitHubDelivery, text: string) => Effect.Effect<void, OperationError>;
+  /** Posts the answer; "superseded" when a review's head moved on, so nothing was posted. */
+  reply: (
+    event: GitHubDelivery,
+    text: string,
+  ) => Effect.Effect<"posted" | "superseded", OperationError>;
   /** Marks the command's comment (or a review's PR) as done. Best effort: the answer is already posted. */
   finished: (event: GitHubDelivery) => Effect.Effect<void, OperationError>;
   handoff: HandoffDeps;
@@ -184,6 +188,7 @@ export function githubDelivery({
                   pinReviewWorkspace(
                     await tx.doc(ConversationWorkspace, task.conversationId),
                     review.repository,
+                    review.number,
                     review.sha,
                     String(task.conversationId),
                   );
@@ -259,33 +264,23 @@ export function githubDelivery({
       reply: (task, runtime, context) =>
         Effect.runPromise(
           Effect.gen(function* () {
+            const result = yield* reply(task.input, task.state.checkpoint.text).pipe(Effect.result);
+
             // A review is never published against a head that moved while it ran, after
             // OpenSession: the newer head's own review covers the PR.
-            if ("kind" in task.input && task.state.checkpoint.attempts === 0) {
-              const review = task.input;
+            if (Result.isSuccess(result) && result.success === "superseded") {
+              yield* Effect.logInfo({
+                event: "github_review_superseded_during_run",
+                pull: `${task.input.repository}#${task.input.number}`,
+              });
 
-              const current = yield* handoff.head(review).pipe(
-                Effect.map((head) => isCurrent(review, head)),
-                Effect.catchTag("OperationError", () => Effect.succeed(true)),
+              return yield* attempt("github.superseded", () =>
+                runtime.commit(
+                  () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
+                  context,
+                ),
               );
-
-              if (!current) {
-                yield* Effect.logInfo({
-                  event: "github_review_superseded_during_run",
-                  pull: `${review.repository}#${review.number}`,
-                  sha: review.sha,
-                });
-
-                return yield* attempt("github.superseded", () =>
-                  runtime.commit(
-                    () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
-                    context,
-                  ),
-                );
-              }
             }
-
-            const result = yield* reply(task.input, task.state.checkpoint.text).pipe(Effect.result);
 
             if (Result.isSuccess(result)) {
               yield* finished(task.input).pipe(

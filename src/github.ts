@@ -337,6 +337,20 @@ const CHECK_COUNTS_QUERY = `query($owner: String!, $name: String!, $number: Int!
   }
 }`;
 
+/**
+ * GraphQL's BigInt, as GitHub sends `fullDatabaseId`: the REST id, which outgrew the 32-bit
+ * `databaseId`. Comment ids stay well below 2^53, so a number holds them exactly.
+ */
+const GraphId = Schema.Union([Schema.String, Schema.Number]);
+
+/** A REST id from GraphQL's `fullDatabaseId`, or undefined when GitHub sent none usable. */
+function restId(value: string | number | null) {
+  if (value === null) return undefined;
+  const id = Number(value);
+
+  return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+}
+
 const GraphActor = Schema.Struct({ login: Schema.String, __typename: Schema.String });
 
 const PullReviewResponse = Schema.Struct({
@@ -369,7 +383,7 @@ const PullReviewResponse = Schema.Struct({
                     comments: Schema.Struct({
                       nodes: Schema.Array(
                         Schema.Struct({
-                          databaseId: Schema.NullOr(Schema.Number),
+                          fullDatabaseId: Schema.NullOr(GraphId),
                           author: Schema.NullOr(GraphActor),
                           body: Schema.String,
                         }),
@@ -381,7 +395,7 @@ const PullReviewResponse = Schema.Struct({
               reviews: Schema.Struct({
                 nodes: Schema.Array(
                   Schema.Struct({
-                    databaseId: Schema.NullOr(Schema.Number),
+                    fullDatabaseId: Schema.NullOr(GraphId),
                     author: Schema.NullOr(GraphActor),
                     state: Schema.String,
                     body: Schema.String,
@@ -411,11 +425,11 @@ const PULL_REVIEW_QUERY = `query($owner: String!, $name: String!, $number: Int!)
           isOutdated
           path
           line
-          comments(first: 50) { nodes { databaseId author { login __typename } body } }
+          comments(first: 50) { nodes { fullDatabaseId author { login __typename } body } }
         }
       }
       reviews(last: 50) {
-        nodes { databaseId author { login __typename } state body commit { oid } }
+        nodes { fullDatabaseId author { login __typename } state body commit { oid } }
       }
     }
   }
@@ -1764,6 +1778,18 @@ function makeGitHub(
       // Omitting event leaves the review PENDING (unsubmitted) on GitHub.
       if (op.event === "COMMENT") request.event = "COMMENT";
 
+      // Paging through the patches takes time; a push meanwhile makes this review stale.
+      const latest = yield* api(root, token).pipe(
+        Effect.flatMap(decode(Schema.Struct({ head: Schema.Struct({ sha: Schema.String }) }))),
+      );
+
+      if (latest.head.sha !== op.commit_id)
+        return {
+          ok: false,
+          code: "stale_commit",
+          message: `The pull request head is now ${latest.head.sha}, not ${op.commit_id}. No review was posted.`,
+        };
+
       const review = yield* api(`${root}/reviews`, token, request, "POST").pipe(
         Effect.flatMap(decode(Review)),
       );
@@ -2053,12 +2079,12 @@ function makeGitHub(
             comment.user.login === `${connected.app.slug}[bot]` && comment.body.endsWith(marker),
         )
       )
-        return;
+        return "posted" as const;
 
       if (comments.length < 100) {
         yield* api(root, token, { body: `${text.slice(0, 16_384)}\n\n${marker}` });
 
-        return;
+        return "posted" as const;
       }
     }
   });
@@ -2066,6 +2092,8 @@ function makeGitHub(
   /**
    * The agent normally publishes its own review with create_review. If it did not leave one on
    * this head commit, its answer becomes the review body, so every automatic review is visible.
+   * A review of a head that has moved on is never posted: "superseded". A failed head read fails
+   * the reply, which is retried, rather than posting unchecked.
    */
   const replyReview = Effect.fn("GitHub.replyReview")(function* (
     connected: typeof Connected.Type,
@@ -2095,10 +2123,21 @@ function makeGitHub(
             review.user?.login === `${connected.app.slug}[bot]` && review.commit_id === event.sha,
         )
       )
-        return;
+        return "posted" as const;
 
       if (reviews.length < 100) break;
     }
+
+    // Checked right before the post, so a push during a retry's backoff is never missed.
+    const pull = yield* api(`/repos/${event.repository}/pulls/${event.number}`, token).pipe(
+      Effect.flatMap(
+        decode(
+          Schema.Struct({ state: Schema.String, head: Schema.Struct({ sha: Schema.String }) }),
+        ),
+      ),
+    );
+
+    if (pull.state !== "open" || pull.head.sha !== event.sha) return "superseded" as const;
 
     yield* api(root, token, {
       commit_id: event.sha,
@@ -2106,6 +2145,8 @@ function makeGitHub(
       event: "COMMENT",
       comments: [],
     });
+
+    return "posted" as const;
   });
 
   /** GitHub keeps one reaction of each kind per user, so repeating this is harmless. */
@@ -2215,13 +2256,13 @@ function makeGitHub(
         path: thread.path,
         line: thread.line,
         comments: thread.comments.nodes.map((comment) => ({
-          id: comment.databaseId ?? 0,
+          id: restId(comment.fullDatabaseId) ?? null,
           ...who(comment.author),
           body: comment.body,
         })),
       })),
       reviews: pull.reviews.nodes.map((review) => ({
-        id: review.databaseId ?? 0,
+        id: restId(review.fullDatabaseId) ?? null,
         ...who(review.author),
         state: review.state,
         body: review.body,

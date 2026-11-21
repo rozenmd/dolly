@@ -158,10 +158,11 @@ export function nextHandoffState(
 
 /** One piece of open review feedback on the pull request. */
 export type FeedbackItem =
-  | { kind: "review"; id: number; author: string; state: string; body: string }
+  | { kind: "review"; id: number | null; author: string; state: string; body: string }
   | {
       kind: "comment";
-      id: number;
+      /** The REST id thread replies need; null when GitHub sent none. */
+      id: number | null;
       author: string;
       path: string;
       line: number | null;
@@ -180,8 +181,9 @@ type Review = { repository: string; number: number; sha: string };
 /**
  * The feedback a handoff carries, after OpenSession's fetchReviewFindings: inline comments from
  * trusted authors on threads that are neither resolved nor outdated, Dolly's own review of the
- * reviewed head, and other trusted reviewers' review bodies. Dolly's reviews of older heads are
- * left out: their inline comments are already covered, and their summaries are stale.
+ * reviewed head, and each other trusted reviewer's latest review body. Dolly's reviews of older
+ * heads, dismissed reviews, and reviews their author has since followed with another are left out:
+ * their summaries are settled or stale, and unresolved inline threads still carry what is open.
  */
 export function openFeedback(pull: PullReviewContext, sha: string): ReviewFindings {
   const items: FeedbackItem[] = [];
@@ -201,8 +203,13 @@ export function openFeedback(pull: PullReviewContext, sha: string): ReviewFindin
         });
   }
 
-  for (const review of pull.reviews) {
-    if (!review.trusted || !review.body.trim()) continue;
+  // Reviews are listed oldest first, so the last one per author is that author's current word.
+  const latest = new Map<string, PullReviewContext["reviews"][number]>();
+
+  for (const review of pull.reviews) latest.set(review.author, review);
+
+  for (const review of latest.values()) {
+    if (!review.trusted || !review.body.trim() || review.state === "DISMISSED") continue;
 
     if (review.author === pull.self && review.commit !== sha) continue;
     items.push({
@@ -243,8 +250,8 @@ export function fencedFindings(findings: ReviewFindings) {
 
   const lines = findings.items.map((item) =>
     item.kind === "review"
-      ? `- [@${clean(item.author)} review ${item.id}${item.state ? ` ${item.state.toLowerCase().replace(/_/g, " ")}` : ""}] ${clean(oneLine(item.body, 600))}`
-      : `- [@${clean(item.author)} · comment ${item.id}] ${clean(item.path)}${item.line === null ? "" : `:${item.line}`} — ${clean(oneLine(item.body, 400))}`,
+      ? `- [@${clean(item.author)} review${item.id === null ? "" : ` ${item.id}`}${item.state ? ` ${item.state.toLowerCase().replace(/_/g, " ")}` : ""}] ${clean(oneLine(item.body, 600))}`
+      : `- [@${clean(item.author)}${item.id === null ? "" : ` · comment ${item.id}`}] ${clean(item.path)}${item.line === null ? "" : `:${item.line}`} — ${clean(oneLine(item.body, 400))}`,
   );
 
   let text = lines.join("\n") || "(none found)";
