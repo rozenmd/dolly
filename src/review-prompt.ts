@@ -19,6 +19,8 @@ import { VERDICT_INSTRUCTION, type LastReview } from "./review-handoff";
 export type ThreadComment = {
   /** The REST id thread replies need; null when GitHub sent none. */
   id: number | null;
+  /** The review the comment was submitted with, if known. */
+  review: number | null;
   author: string;
   bot: boolean;
   trusted: boolean;

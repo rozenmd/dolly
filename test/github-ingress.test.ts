@@ -575,8 +575,15 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   const reactions: string[] = [];
   const reviews: { number: number; body: unknown }[] = [];
   const heads: Record<string, string> = {};
+
   // PR 9 already has the agent's own review on its head, so nothing more is posted there.
-  const ownReview = [{ commit_id: sha, user: { login: "dolly-test[bot]" } }];
+  const ownReview = [
+    {
+      commit_id: sha,
+      user: { login: "dolly-test[bot]" },
+      body: "Looks fine\n\n<!-- dolly:automatic-review -->",
+    },
+  ];
 
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     const parsed = new URL(String(url));

@@ -28,7 +28,13 @@ import { exceptionDetails } from "./diagnostics";
 import { integrationJson } from "./integration-http";
 import { describeWindow, windowText } from "./file-window";
 import { JobLogWindow, type JobLogRange } from "./job-log";
-import { budgetPatches, invalidAnchors, REVIEW_FOOTER } from "./github-review";
+import {
+  AUTOMATIC_REVIEW_MARKER,
+  budgetPatches,
+  invalidAnchors,
+  isAutomaticReview,
+  REVIEW_FOOTER,
+} from "./github-review";
 import { attempt, OperationError } from "./operations";
 import { MAX_IMAGE_BYTES } from "./images";
 import type { Env } from "./env";
@@ -368,6 +374,9 @@ const ReviewThreadPage = Schema.Struct({
             fullDatabaseId: Schema.NullOr(GraphId),
             author: Schema.NullOr(GraphActor),
             body: Schema.String,
+            pullRequestReview: Schema.NullOr(
+              Schema.Struct({ fullDatabaseId: Schema.NullOr(GraphId) }),
+            ),
           }),
         ),
       }),
@@ -398,7 +407,9 @@ const REVIEW_THREADS_QUERY = `query($owner: String!, $name: String!, $number: In
           isOutdated
           path
           line
-          comments(first: 50) { nodes { fullDatabaseId author { login __typename } body } }
+          comments(first: 50) {
+            nodes { fullDatabaseId author { login __typename } body pullRequestReview { fullDatabaseId } }
+          }
         }
       }
     }
@@ -463,7 +474,9 @@ const PULL_REVIEW_QUERY = `query($owner: String!, $name: String!, $number: Int!)
           isOutdated
           path
           line
-          comments(first: 50) { nodes { fullDatabaseId author { login __typename } body } }
+          comments(first: 50) {
+            nodes { fullDatabaseId author { login __typename } body pullRequestReview { fullDatabaseId } }
+          }
         }
       }
       reviews(last: 50) {
@@ -2127,7 +2140,10 @@ function makeGitHub(
     }
   });
 
-  /** Whether this App already left a review on `sha`, read fresh from GitHub. */
+  /**
+   * Whether this App already published its automatic review of `sha`, read fresh from GitHub.
+   * Bodiless review records GitHub files for thread replies at that head don't count.
+   */
   const hasOwnReview = Effect.fn("GitHub.hasOwnReview")(function* (
     connected: typeof Connected.Type,
     repository: string,
@@ -2144,6 +2160,7 @@ function makeGitHub(
             Schema.Array(
               Schema.Struct({
                 commit_id: Schema.NullOr(Schema.String),
+                body: Schema.NullOr(Schema.String),
                 user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
               }),
             ),
@@ -2154,7 +2171,9 @@ function makeGitHub(
       if (
         reviews.some(
           (review) =>
-            review.user?.login === `${connected.app.slug}[bot]` && review.commit_id === sha,
+            review.user?.login === `${connected.app.slug}[bot]` &&
+            review.commit_id === sha &&
+            isAutomaticReview(review.body),
         )
       )
         return true;
@@ -2202,7 +2221,7 @@ function makeGitHub(
 
     yield* api(root, token, {
       commit_id: event.sha,
-      body: `${text.slice(0, 16_384)}${REVIEW_FOOTER}`,
+      body: `${text.slice(0, 16_384)}${REVIEW_FOOTER}\n\n${AUTOMATIC_REVIEW_MARKER}`,
       event: "COMMENT",
       comments: [],
     });
@@ -2334,6 +2353,7 @@ function makeGitHub(
         line: thread.line,
         comments: thread.comments.nodes.map((comment) => ({
           id: restId(comment.fullDatabaseId) ?? null,
+          review: restId(comment.pullRequestReview?.fullDatabaseId ?? null) ?? null,
           ...who(comment.author),
           body: comment.body,
         })),

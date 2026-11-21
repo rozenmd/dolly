@@ -84,6 +84,16 @@ export function invalidAnchors(
 
 export const REVIEW_FOOTER = "\n\n<sub>— posted by Dolly</sub>";
 
+/**
+ * Stamped by the host on every automatic review's body. GitHub also files each thread reply as a
+ * bodiless review on the head it was made at, so only this marks Dolly's actual review of a head.
+ */
+export const AUTOMATIC_REVIEW_MARKER = "<!-- dolly:automatic-review -->";
+
+/** Whether a review body is an automatic review the host published. */
+export const isAutomaticReview = (body: string | null | undefined) =>
+  body?.includes(AUTOMATIC_REVIEW_MARKER) ?? false;
+
 /** Keeps the agent's output bounded: patches past the budget are dropped and flagged. */
 export function budgetPatches<F extends { readonly patch?: string }>(
   files: readonly F[],
