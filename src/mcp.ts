@@ -136,6 +136,9 @@ const MAX_SCHEMA_CHARS = 16 * 1024;
 /** How long a cached tool list is used before the next run lists the server again. */
 const TOOLS_TTL_MS = 60 * 60_000;
 
+/** How long a program waits for an uncached server's tools before running without them. */
+const DISCOVERY_TIMEOUT_MS = 15_000;
+
 export const AddMcpServer = Schema.Struct({
   name: Schema.String,
   transport: Schema.optional(Schema.Literal("http")),
@@ -603,8 +606,13 @@ export class McpConnections {
   private statusCache: { data: McpConnection[]; ts: number } | null = null;
   private readonly capable = new Map<string, { capable: boolean; ts: number; soft: boolean }>();
   private readonly refreshing = new Map<string, Promise<void>>();
+  /** Tool listings in flight, shared by every program that needs the same server. */
+  private readonly listing = new Map<string, Promise<ToolList>>();
 
-  constructor(private readonly storage: DurableObjectStorage) {}
+  constructor(
+    private readonly storage: DurableObjectStorage,
+    private readonly discoveryTimeoutMs = DISCOVERY_TIMEOUT_MS,
+  ) {}
 
   async servers(): Promise<Record<string, McpServerEntry>> {
     return (await this.storage.get<Record<string, McpServerEntry>>(SERVERS_KEY)) ?? {};
@@ -1151,49 +1159,63 @@ export class McpConnections {
       : undefined;
   }
 
-  /**
-   * A server's tools, from cache or a fresh tools/list on `session`. Compacted while reading and
-   * bounded in total (MAX_CATALOG_CHARS), so a server can't make the Worker hold its whole
-   * catalog: descriptions are cut, oversized schemas dropped, and listing stops at the budget.
-   */
-  private async loadTools(name: string, entry: McpServerEntry, session: () => Promise<McpSession>) {
-    const cached = await this.cachedTools(name, entry);
+  /** List a server's tools once at a time; concurrent programs share the listing. */
+  private listTools(name: string, entry: McpServerEntry) {
+    const key = `${name}:${entry.id}:${epochOf(entry)}`;
+    const running = this.listing.get(key);
 
-    if (cached && Date.now() - cached.fetchedAt < TOOLS_TTL_MS) return cached;
-    const { request } = await session();
+    if (running) return running;
+
+    const run = this.fetchTools(name, entry).finally(() => this.listing.delete(key));
+    this.listing.set(key, run);
+
+    return run;
+  }
+
+  /**
+   * A fresh tools/list over its own MCP session, compacted while reading and bounded in total
+   * (MAX_CATALOG_CHARS), so a server can't make the Worker hold its whole catalog: descriptions
+   * are cut, oversized schemas dropped, and listing stops at the budget. Cached only if the
+   * server is still the one it was read from.
+   */
+  private async fetchTools(name: string, entry: McpServerEntry): Promise<ToolList> {
+    const session = await openSession(entry.url, await this.requestHeaders(name, entry));
     const tools: CatalogTool[] = [];
     const cursors = new Set<string>();
     let chars = 0;
     let cursor: string | undefined;
     let complete = false;
 
-    // Bounded by pages, total size and count: a server can keep returning pages.
-    for (let page = 0; page < MAX_TOOL_PAGES; page++) {
-      const result = await request(
-        "tools/list",
-        cursor === undefined ? undefined : { cursor },
-        ToolsPage,
-      );
+    try {
+      // Bounded by pages, total size and count: a server can keep returning pages.
+      for (let page = 0; page < MAX_TOOL_PAGES; page++) {
+        const result = await session.request(
+          "tools/list",
+          cursor === undefined ? undefined : { cursor },
+          ToolsPage,
+        );
 
-      for (const tool of result.tools ?? []) {
-        const compact = compactTool(tool);
-        chars += JSON.stringify(compact).length;
+        for (const tool of result.tools ?? []) {
+          const compact = compactTool(tool);
+          chars += JSON.stringify(compact).length;
 
-        if (chars > MAX_CATALOG_CHARS || tools.length >= MAX_TOOLS) break;
-        tools.push(compact);
+          if (chars > MAX_CATALOG_CHARS || tools.length >= MAX_TOOLS) break;
+          tools.push(compact);
+        }
+
+        cursor = result.nextCursor;
+        const full = chars > MAX_CATALOG_CHARS || tools.length >= MAX_TOOLS;
+
+        if (cursor === undefined && !full) {
+          complete = true;
+          break;
+        }
+
+        if (cursor === undefined || full || cursors.has(cursor)) break;
+        cursors.add(cursor);
       }
-
-      cursor = result.nextCursor;
-
-      if (cursor === undefined && chars <= MAX_CATALOG_CHARS && tools.length < MAX_TOOLS) {
-        complete = true;
-        break;
-      }
-
-      if (cursor === undefined || chars > MAX_CATALOG_CHARS || tools.length >= MAX_TOOLS) break;
-
-      if (cursors.has(cursor)) break;
-      cursors.add(cursor);
+    } finally {
+      session.close();
     }
 
     const list: ToolList = {
@@ -1205,11 +1227,51 @@ export class McpConnections {
       tools,
     };
 
-    // Listing yielded: keep the list only if the server is still the one it was read from.
     if (unchanged(entry, (await this.servers())[name]))
       await this.storage.put(toolsKey(name), list);
 
     return list;
+  }
+
+  /**
+   * A server's tools for one program, without letting one slow server hold up the rest: a cached
+   * list is used at once (and refreshed in the background once stale); an uncached one gets
+   * DISCOVERY_TIMEOUT_MS before the program runs without it, while its listing finishes and
+   * caches for the next program.
+   */
+  private async toolsFor(name: string, entry: McpServerEntry): Promise<CatalogTool[]> {
+    const cached = await this.cachedTools(name, entry);
+
+    if (cached) {
+      if (Date.now() - cached.fetchedAt >= TOOLS_TTL_MS)
+        void this.listTools(name, entry).catch(() => {});
+
+      return cached.tools;
+    }
+
+    const listing = this.listTools(name, entry);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `still listing tools after ${this.discoveryTimeoutMs / 1000} s; callTool reaches it by exact name`,
+            ),
+          ),
+        this.discoveryTimeoutMs,
+      );
+    });
+
+    // The listing goes on after a timeout; keep its rejection from going unhandled.
+    void listing.catch(() => {});
+
+    try {
+      return (await Promise.race([listing, deadline])).tools;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** The system prompt's server list and tool catalog. Reads storage only, never the network. */
@@ -1241,15 +1303,13 @@ export class McpConnections {
     const sessions = new Map<string, Promise<McpSession>>();
     const unavailable = new Map<string, string>();
     const usable = new Map<string, CatalogTool[]>();
+    const sent: string[] = [];
 
     // One MCP session per server per run, opened on first use and closed when the run ends.
-    const session = (name: string) => {
+    const session = (name: string, entry: McpServerEntry) => {
       const open = sessions.get(name);
 
       if (open) return open;
-      const entry = servers[name];
-
-      if (!entry) return Promise.reject(new Error(`No MCP server named "${name}"`));
 
       const opened = this.requestHeaders(name, entry).then((headers) =>
         openSession(entry.url, headers),
@@ -1264,7 +1324,7 @@ export class McpConnections {
       await Promise.all(
         Object.entries(servers).map(async ([name, entry]) => {
           try {
-            usable.set(name, (await this.loadTools(name, entry, () => session(name))).tools);
+            usable.set(name, await this.toolsFor(name, entry));
           } catch (error) {
             unavailable.set(
               name,
@@ -1275,12 +1335,24 @@ export class McpConnections {
       );
 
       const { result, images } = await runCode(code, usable, async (name, tool, args) => {
-        const { request } = await session(name);
+        const entry = servers[name];
+
+        if (!entry) throw new Error(`No MCP server named "${name}"`);
+
+        // Checked before every call, not only when the session opened: a Disconnect, removal
+        // or URL change during the program stops it from sending anything more.
+        if (!unchanged(entry, (await this.servers())[name]))
+          throw new Error(
+            `${name} was disconnected, removed or changed while this program ran; nothing more was sent to it`,
+          );
+        const { request } = await session(name, entry);
+
+        sent.push(`${name}.${tool}`);
 
         return request("tools/call", { name: tool, arguments: args }, CallToolResult);
       });
 
-      return resultOutput(result, images, unavailable);
+      return resultOutput(result, images, unavailable, sent);
     } finally {
       for (const opened of sessions.values())
         void opened.then((open) => open.close()).catch(() => {});

@@ -670,15 +670,14 @@ it("runs a session's code mode program against a connected server with a refresh
   // Tokens never reach the transcript.
   expect(JSON.stringify(snapshot)).not.toContain("fresh-access");
 
-  // Once listed, later prompts carry the signatures, so search() is only needed for the rest.
+  // Once listed, later prompts name the tools, but nothing the server wrote beyond the names.
   const prompt = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
     new McpConnections(state.storage).promptSection(),
   );
 
-  expect(prompt).toContain(`- linear (Linear, ${LINEAR}/mcp, 1 tool, 1 shown)`);
-  expect(prompt).toContain("tools.linear.create_issue({");
-  expect(prompt).toContain("// Create a Linear issue");
-  expect(prompt).toContain("Every tool is listed above.");
+  expect(prompt).toContain(`- linear (Linear, ${LINEAR}/mcp, 1 tool): create_issue`);
+  expect(prompt).not.toContain("Create a Linear issue");
+  expect(prompt).not.toContain("title");
 }, 30_000);
 
 it("offers and accepts token connect only on the provider's own origin", async () => {
@@ -813,10 +812,18 @@ type ToolsPage = {
   nextCursor?: string;
 };
 
+/** A tools/call answer naming the tool that was called. */
+const called = (id: number, name: string) =>
+  Response.json({
+    jsonrpc: "2.0",
+    id,
+    result: { content: [{ type: "text", text: `called ${name}` }] },
+  });
+
 /** A JSON-RPC MCP server whose tools/list and tools/call answers come from the test. */
 function scriptedServer(
-  list: (page: number) => ToolsPage,
-  callTool: (id: number) => Response,
+  list: (page: number) => ToolsPage | Promise<ToolsPage>,
+  callTool: (id: number, name: string) => Response | Promise<Response>,
 ): Handler {
   let pages = 0;
 
@@ -831,9 +838,9 @@ function scriptedServer(
       return Response.json({ jsonrpc: "2.0", id: message.id, result: {} });
 
     if (message.method === "tools/list")
-      return Response.json({ jsonrpc: "2.0", id: message.id, result: list(pages++) });
+      return Response.json({ jsonrpc: "2.0", id: message.id, result: await list(pages++) });
 
-    return callTool(message.id);
+    return callTool(message.id, message.params?.name ?? "");
   };
 }
 
@@ -909,7 +916,7 @@ it("keeps a bounded catalog when a server lists many large tools", async () => {
           nextCursor: `page-${page + 1}`,
         };
       },
-      () => new Response(null, { status: 500 }),
+      (id, name) => called(id, name),
     ),
     "DELETE https://big.example/mcp": () => new Response(null, { status: 204 }),
   });
@@ -928,6 +935,16 @@ it("keeps a bounded catalog when a server lists many large tools", async () => {
   );
 
   expect(stored.length).toBeLessThan(600 * 1024);
+
+  // A tool past the cutoff is not in search(), but callTool still reaches it by exact name.
+  const beyond = await runProgram(
+    'const hits = search({ namespace: "big", query: "tool_0_199" }).items.map((item) => item.path); return { hits, result: await callTool("big", "tool_0_199", {}) }',
+  );
+
+  expect(JSON.parse(resultText(beyond))).toEqual({
+    hits: expect.not.arrayContaining(["tools.big.tool_0_199"]),
+    result: "called tool_0_199",
+  });
   expect(JSON.parse(stored)).toMatchObject({ complete: false });
 
   // The prompt shows the count as a lower bound and only what fits its budget.
@@ -935,9 +952,9 @@ it("keeps a bounded catalog when a server lists many large tools", async () => {
     new McpConnections(state.storage).promptSection(),
   );
 
-  expect(prompt).toContain(`- big (Big, https://big.example/mcp, ${kept}+ tools,`);
-  expect(prompt.length).toBeLessThan(12_000);
-  expect(prompt).toContain("The catalog is partial");
+  expect(prompt).toContain(`- big (Big, https://big.example/mcp, ${kept}+ tools): tool_0_0, `);
+  expect(prompt.length).toBeLessThan(6_000);
+  expect(prompt).not.toContain("ddd");
 });
 
 it("attaches images from tool results within one budget", () => {
@@ -1269,4 +1286,127 @@ it("lets Disconnect win over a pasted token that was still being checked", async
     users: [],
     manualToken: true,
   });
+});
+
+it("keeps distinct tool names distinct when dots would collide with underscores", async () => {
+  network({
+    "POST https://dots.example/mcp": scriptedServer(
+      () => ({
+        tools: [
+          { name: "get.item", description: "Dotted" },
+          { name: "get_item", description: "Underscored" },
+          { name: "list.all", description: "Dotted only" },
+        ],
+      }),
+      (id, name) => called(id, name),
+    ),
+    "DELETE https://dots.example/mcp": () => new Response(null, { status: 204 }),
+  });
+
+  await call("/connections/mcp", "POST", { name: "dots", url: "https://dots.example/mcp" });
+
+  const result = await runProgram(
+    [
+      'const paths = search({ namespace: "dots" }).items.map((item) => item.path).sort()',
+      "const underscored = await tools.dots.get_item({})",
+      "const dottedOnly = await tools.dots.list_all({})",
+      'const dotted = await callTool("dots", "get.item", {})',
+      "return { paths, underscored, dottedOnly, dotted }",
+    ].join("\n"),
+  );
+
+  expect(JSON.parse(resultText(result))).toEqual({
+    paths: ["tools.dots.get_item", "tools.dots.list_all"],
+    underscored: "called get_item",
+    dottedOnly: "called list.all",
+    dotted: "called get.item",
+  });
+});
+
+it("sends nothing more to a server disconnected while a program runs", async () => {
+  const first = gate();
+  const calls: string[] = [];
+
+  network({
+    "POST https://keyed.example/mcp": scriptedServer(
+      () => ({ tools: [{ name: "write" }] }),
+      async (id, name) => {
+        calls.push(name);
+
+        if (calls.length === 1) await first.opened;
+
+        return called(id, name);
+      },
+    ),
+    "DELETE https://keyed.example/mcp": () => new Response(null, { status: 204 }),
+  });
+
+  await call("/connections/mcp", "POST", {
+    name: "keyed",
+    url: "https://keyed.example/mcp",
+    headers: { Authorization: "Bearer static-key-123456" },
+  });
+
+  const program = runProgram(
+    'await tools.keyed.write({ n: "1" })\nawait tools.keyed.write({ n: "2" })\nreturn "both"',
+  );
+
+  await expect.poll(() => calls.length).toBe(1);
+  expect((await call("/connections/mcp/keyed/oauth", "DELETE")).status).toBe(200);
+  first.open();
+
+  const result = await program;
+  expect(result.isError).toBe(true);
+  expect(resultText(result)).toContain("keyed was disconnected, removed or changed");
+  expect(resultText(result)).toContain("Tool calls already made");
+  expect(calls).toEqual(["write"]);
+});
+
+it("runs against a cached server without waiting for one whose listing stalls", async () => {
+  const stalled = gate();
+
+  network({
+    "POST https://fast.example/mcp": scriptedServer(
+      () => ({ tools: [{ name: "ping" }] }),
+      (id, name) => called(id, name),
+    ),
+    "DELETE https://fast.example/mcp": () => new Response(null, { status: 204 }),
+    "POST https://slow.example/mcp": scriptedServer(
+      async () => {
+        await stalled.opened;
+
+        return { tools: [{ name: "late" }] };
+      },
+      (id, name) => called(id, name),
+    ),
+    "DELETE https://slow.example/mcp": () => new Response(null, { status: 204 }),
+  });
+
+  await call("/connections/mcp", "POST", { name: "fast", url: "https://fast.example/mcp" });
+  // Warm the healthy server's cache before the slow one exists.
+  expect((await runProgram("await tools.fast.ping({})")).isError).toBe(false);
+  await call("/connections/mcp", "POST", { name: "slow", url: "https://slow.example/mcp" });
+
+  const started = Date.now();
+
+  const result = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+    new McpConnections(state.storage, 200).execute("await tools.fast.ping({})"),
+  );
+
+  expect(result.isError).toBe(false);
+  expect(resultText(result)).toBe("called ping");
+  expect(Date.now() - started).toBeLessThan(5_000);
+
+  // The stalled server is reported only when a program fails for want of it.
+  const missing = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+    new McpConnections(state.storage, 200).execute("await tools.slow.late({})"),
+  );
+
+  expect(resultText(missing)).toContain("Unavailable servers: slow (still listing tools");
+  stalled.open();
+
+  // Its listing finishes in the background and caches for the next program.
+  await expect
+    .poll(async () => resultText(await runProgram("await tools.slow.late({})")))
+    .toBe("called late");
 });
