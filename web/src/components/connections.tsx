@@ -11,7 +11,7 @@ import { request } from "../lib/api";
 import { Input, Modal, Textarea } from "./ui";
 
 /**
- * Settings > Connections: the MCP servers every session gets tools from. Works like Opensession's
+ * Settings > Connections: the MCP servers owner web sessions get tools from. Works like Opensession's
  * Connections page: live status per server, OAuth or API-token connect from each row's menu,
  * add and remove. Server-side behaviour lives in src/mcp.ts.
  */
@@ -240,7 +240,7 @@ export function ConnectionsSettings() {
   }
 
   async function remove(name: string) {
-    if (!confirm(`Remove MCP server "${name}"? New sessions will no longer get its tools.`)) return;
+    if (!confirm(`Remove MCP server "${name}"? Sessions will no longer get its tools.`)) return;
     setError("");
 
     try {
@@ -272,8 +272,9 @@ export function ConnectionsSettings() {
         </div>
       </div>
       <p className="settings-description">
-        MCP servers give every session extra tools. Calls run in dolly's Worker with the credentials
-        stored here; sandboxes never see them.
+        MCP servers add tools to the sessions you start here in the web app. Slack, GitHub and
+        automatic review sessions don't get them, since other people can steer those. Calls run in
+        dolly's Worker over HTTPS with the credentials stored here; sandboxes never see them.
       </p>
 
       {error && (
@@ -295,7 +296,7 @@ export function ConnectionsSettings() {
         />
       )}
 
-      <h2 className="settings-group-label">MCP servers: tools inside every session</h2>
+      <h2 className="settings-group-label">MCP servers: tools for your web sessions</h2>
       {!data ? (
         <div className="settings-card mcp-list" aria-busy="true">
           <p className="field-help">Checking connections…</p>
@@ -303,8 +304,8 @@ export function ConnectionsSettings() {
       ) : data.length === 0 ? (
         <div className="settings-card mcp-list">
           <p className="field-help">
-            No MCP servers yet. Add one, such as https://mcp.linear.app/mcp, to give every session
-            its tools.
+            No MCP servers yet. Add one, such as https://mcp.linear.app/mcp, to use its tools in
+            your web sessions.
           </p>
         </div>
       ) : (

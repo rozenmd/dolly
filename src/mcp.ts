@@ -31,6 +31,11 @@ export interface McpServerEntry {
   type: "http";
   /** New for every add, so a removed and re-added name never inherits old grants or flows. */
   id: string;
+  /**
+   * Bumped by Disconnect. Sign-ins, registrations and token checks capture it when they start
+   * and write nothing if it moved, so Disconnect wins even over a first connection in flight.
+   */
+  epoch?: number;
   url: string;
   /** Static request headers (API keys). Never returned by the API. */
   headers?: Record<string, string>;
@@ -63,7 +68,7 @@ interface Grant {
 interface ServerAuth {
   /** The McpServerEntry id this registration and grant belong to. */
   serverId: string;
-  /** Bumped by disconnect, so a sign-in started before it cannot land after it. */
+  /** The server entry's epoch this record was written under; any other epoch is stale. */
   epoch: number;
   serverUrl: string;
   redirectUri: string;
@@ -602,6 +607,18 @@ export function toolOutput(result: typeof CallToolResult.Type) {
   return { output, isError: result.isError === true };
 }
 
+const epochOf = (entry: McpServerEntry) => entry.epoch ?? 0;
+
+/** Whether a server is still the one an operation started on: same add, URL and epoch. */
+function unchanged(before: McpServerEntry, after: McpServerEntry | undefined) {
+  return (
+    after !== undefined &&
+    after.id === before.id &&
+    after.url === before.url &&
+    epochOf(after) === epochOf(before)
+  );
+}
+
 /**
  * Connections for one owner Durable Object. Storage is the DO's; a request and a refresh in the
  * same object never interleave mid-write, so in-memory de-duplication is enough.
@@ -624,7 +641,8 @@ export class McpConnections {
 
   /**
    * The server and its auth record, only when the record belongs to this very server: same
-   * entry id and URL. A record left by a removed server, or one whose URL changed, is ignored.
+   * entry id, URL and epoch. A record left by a removed server, one whose URL changed, or one
+   * written before a Disconnect is ignored.
    */
   private async current(name: string) {
     const entry = (await this.servers())[name];
@@ -634,7 +652,13 @@ export class McpConnections {
 
     return {
       entry,
-      auth: auth && auth.serverId === entry.id && auth.serverUrl === entry.url ? auth : undefined,
+      auth:
+        auth &&
+        auth.serverId === entry.id &&
+        auth.serverUrl === entry.url &&
+        auth.epoch === epochOf(entry)
+          ? auth
+          : undefined,
     };
   }
 
@@ -654,8 +678,8 @@ export class McpConnections {
       return { error: "Invalid URL" };
     }
 
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:")
-      return { error: "URL must be http(s)" };
+    // Servers receive API keys and OAuth tokens: never over plaintext.
+    if (parsed.protocol !== "https:") return { error: "URL must use https://" };
 
     if (parsed.username || parsed.password)
       return { error: "Put credentials in a header, not the URL" };
@@ -831,13 +855,18 @@ export class McpConnections {
       throw new Error(`${name}: authorization server offers no dynamic client registration`);
     const clientId = await registerClient(name, endpoints.register, redirectUri);
 
-    // Registration is a network round trip: the server may have been removed or replaced meanwhile.
-    if ((await this.servers())[name]?.id !== entry.id)
-      throw new Error(`Server "${name}" changed while connecting. Start again.`);
+    // Discovery and registration are network round trips: the server may have been removed,
+    // replaced or disconnected meanwhile, and only a fresh read of its record may be kept.
+    const { entry: after, auth: fresh } = await this.current(name);
+
+    if (!unchanged(entry, after))
+      throw new Error(
+        `Server "${name}" changed or was disconnected while connecting. Start again.`,
+      );
 
     const next: ServerAuth = {
       serverId: entry.id,
-      epoch: current?.epoch ?? 0,
+      epoch: epochOf(entry),
       serverUrl: entry.url,
       redirectUri,
       resource,
@@ -847,7 +876,7 @@ export class McpConnections {
     };
 
     // A new registration keeps the grant the old one produced until the owner reconnects.
-    if (current?.shared) next.shared = current.shared;
+    if (fresh?.shared) next.shared = fresh.shared;
 
     await this.storage.put(authKey(name), next);
 
@@ -868,7 +897,7 @@ export class McpConnections {
     await this.storage.put(pendingKey(state), {
       name,
       serverId: entry.id,
-      epoch: auth.epoch,
+      epoch: epochOf(entry),
       verifier,
       redirectUri,
       connectedBy,
@@ -896,7 +925,7 @@ export class McpConnections {
   private async flowCurrent(flow: PendingFlow) {
     const { entry, auth } = await this.current(flow.name);
 
-    return entry?.id === flow.serverId && auth?.epoch === flow.epoch ? auth : undefined;
+    return entry?.id === flow.serverId && entry && epochOf(entry) === flow.epoch ? auth : undefined;
   }
 
   /** Complete a flow from the callback redirect. Returns the server that got connected. */
@@ -955,15 +984,24 @@ export class McpConnections {
   }
 
   async disconnect(name: string): Promise<boolean> {
-    const { auth } = await this.current(name);
+    const servers = await this.servers();
+    const entry = servers[name];
 
-    if (!auth) return false;
-    const had = auth.shared !== undefined;
-    delete auth.shared;
-    // Sign-ins already in flight belong to the old epoch and cannot land now.
-    auth.epoch += 1;
-    await this.storage.put(authKey(name), auth);
-    this.statusCache = null;
+    if (!entry) return false;
+    const { auth } = await this.current(name);
+    const had = auth?.shared !== undefined;
+
+    // Every sign-in, registration or token check already running belongs to the old epoch and
+    // can no longer write, including a first connection that has no record yet.
+    entry.epoch = epochOf(entry) + 1;
+    await this.writeServers(servers);
+
+    // The registration stays reusable; only the grant goes.
+    if (auth) {
+      delete auth.shared;
+      auth.epoch = entry.epoch;
+      await this.storage.put(authKey(name), auth);
+    }
 
     return had;
   }
@@ -985,12 +1023,14 @@ export class McpConnections {
     // Validation yielded: the server must still be the one the token was checked for.
     const { entry: after, auth } = await this.current(name);
 
-    if (after?.id !== entry.id || after.url !== entry.url)
-      throw new Error(`Server "${name}" changed while checking the token. Start again.`);
+    if (!unchanged(entry, after))
+      throw new Error(
+        `Server "${name}" changed or was disconnected while checking the token. Start again.`,
+      );
 
     const next: ServerAuth = auth ?? {
       serverId: entry.id,
-      epoch: 0,
+      epoch: epochOf(entry),
       serverUrl: entry.url,
       redirectUri: "",
       endpoints: { authorize: "", token: "" },
@@ -1087,6 +1127,9 @@ export class McpConnections {
 
   /** Static headers plus the stored grant, which overrides a static Authorization header. */
   private async requestHeaders(name: string, entry: McpServerEntry) {
+    // Servers stored before HTTPS was required never receive credentials over plaintext.
+    if (new URL(entry.url).protocol !== "https:")
+      throw new Error(`${name} uses plain HTTP. Remove it and add it again with an https:// URL.`);
     const headers = { ...entry.headers };
     const grant = await this.grantHeader(name, entry);
 

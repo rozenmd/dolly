@@ -244,6 +244,16 @@ it("requires sign-in, validates servers, reports live status and never returns h
   expect(
     (await call("/connections/mcp", "POST", { name: "x", url: "ftp://files.example" })).status,
   ).toBe(400);
+  // Servers receive credentials, so plaintext HTTP is refused outright.
+  expect(
+    await (
+      await call("/connections/mcp", "POST", {
+        name: "plain",
+        url: "http://plain.example/mcp",
+        headers: { Authorization: "Bearer static-key-123456" },
+      })
+    ).json(),
+  ).toEqual({ error: "URL must use https://" });
   expect(
     (await call("/connections/mcp", "POST", { name: "linear", url: `${LINEAR}/mcp` })).status,
   ).toBe(200);
@@ -990,3 +1000,166 @@ it("refuses MCP in read-only sessions and keeps the tool out of upgraded reviews
   expect(tools.legacy).toContain("mcp");
   expect(tools.review).toEqual([...READ_ONLY_TOOLS]);
 }, 30_000);
+
+it("never sends credentials over plain HTTP, even to a server stored before HTTPS was required", async () => {
+  const seen = network({
+    "GET http://plain.example/mcp": () => new Response("method not allowed", { status: 405 }),
+  });
+
+  // A record as an older build could have written it.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("mcp:servers", {
+      plain: {
+        type: "http",
+        id: "plain-1",
+        url: "http://plain.example/mcp",
+        headers: { Authorization: "Bearer static-key-123456" },
+      },
+    });
+  });
+
+  await expect(runTool({ action: "list_tools", server: "plain" })).rejects.toThrow(
+    "uses plain HTTP",
+  );
+  expect(seen.filter((request) => request.method !== "GET")).toEqual([]);
+  expect(seen.some((request) => request.headers.has("authorization"))).toBe(false);
+});
+
+it("refuses OAuth metadata that points any endpoint at plain HTTP", async () => {
+  const seen = network({
+    ...oauthServer(LINEAR),
+    [`${LINEAR}/.well-known/oauth-authorization-server`]: () =>
+      Response.json({
+        issuer: LINEAR,
+        authorization_endpoint: `${LINEAR}/authorize`,
+        token_endpoint: "http://mcp.linear.example/token",
+        registration_endpoint: `${LINEAR}/register`,
+      }),
+  });
+
+  await call("/connections/mcp", "POST", { name: "linear", url: `${LINEAR}/mcp` });
+  const started = await call("/connections/mcp/linear/oauth/start", "POST", {});
+
+  expect(started.status).toBe(409);
+  expect(seen.some((request) => request.url.startsWith("http:"))).toBe(false);
+  expect(seen.some((request) => request.url === `${LINEAR}/register`)).toBe(false);
+});
+
+/** A promise and the function that settles it. */
+function gate() {
+  let open = () => {};
+  const opened = new Promise<void>((resolve) => (open = resolve));
+
+  return { open, opened };
+}
+
+it("lets Disconnect win over a registration that was still running", async () => {
+  const registration = gate();
+  let registrations = 0;
+
+  network({
+    ...oauthServer(LINEAR),
+    [`POST ${LINEAR}/register`]: async () => {
+      registrations += 1;
+      await registration.opened;
+
+      return Response.json({ client_id: "late-client" }, { status: 201 });
+    },
+  });
+
+  await call("/connections/mcp", "POST", { name: "linear", url: `${LINEAR}/mcp` });
+
+  // The first connect is still registering a client when the owner clicks Disconnect.
+  const start = call("/connections/mcp/linear/oauth/start", "POST", {});
+  await expect.poll(() => registrations).toBe(1);
+  expect((await call("/connections/mcp/linear/oauth", "DELETE")).status).toBe(200);
+  registration.open();
+
+  const late = await start;
+  expect(late.status).toBe(409);
+  expect((await late.json<{ error: string }>()).error).toContain("disconnected while connecting");
+
+  // Nothing was written: the late registration left no record behind.
+  expect(
+    await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+      state.storage.get("mcp:auth:linear"),
+    ),
+  ).toBeUndefined();
+});
+
+it("lets Disconnect win over a reconnect that re-registers while a grant exists", async () => {
+  const registration = gate();
+  let registrations = 0;
+
+  network({
+    ...oauthServer(LINEAR),
+    [`POST ${LINEAR}/register`]: async () => {
+      registrations += 1;
+      await registration.opened;
+
+      return Response.json({ client_id: "new-client" }, { status: 201 });
+    },
+  });
+
+  await call("/connections/mcp", "POST", { name: "linear", url: `${LINEAR}/mcp` });
+
+  // Connected through an older callback origin, so a reconnect must register again.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("mcp:auth:linear", {
+      serverId: await serverId(state, "linear"),
+      epoch: 0,
+      serverUrl: `${LINEAR}/mcp`,
+      redirectUri: "https://old.example/api/connections/mcp-oauth/callback",
+      endpoints: { authorize: `${LINEAR}/authorize`, token: `${LINEAR}/token` },
+      clientId: "old-client",
+      shared: {
+        tokens: { accessToken: "old-access", expiresAt: Date.now() + 3_600_000 },
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  });
+
+  const start = call("/connections/mcp/linear/oauth/start", "POST", {});
+  await expect.poll(() => registrations).toBe(1);
+  expect(await (await call("/connections/mcp/linear/oauth", "DELETE")).json()).toEqual({
+    ok: true,
+  });
+  registration.open();
+
+  expect((await start).status).toBe(409);
+  // The grant Disconnect removed did not come back with the new registration.
+  expect(await (await call("/connections/mcp/linear/oauth")).json()).toEqual({
+    users: [],
+    manualToken: false,
+  });
+});
+
+it("lets Disconnect win over a pasted token that was still being checked", async () => {
+  const check = gate();
+  let checks = 0;
+
+  network({
+    "GET https://mcp.vercel.com/": () => new Response("unauthorized", { status: 401 }),
+    "GET https://api.vercel.com/v2/user": async () => {
+      checks += 1;
+      await check.opened;
+
+      return Response.json({ user: { username: "octocat" } });
+    },
+  });
+
+  await call("/connections/mcp", "POST", { name: "vercel", url: "https://mcp.vercel.com/" });
+
+  const save = call("/connections/mcp/vercel/token", "POST", { token: "good-token" });
+  await expect.poll(() => checks).toBe(1);
+  expect((await call("/connections/mcp/vercel/oauth", "DELETE")).status).toBe(200);
+  check.open();
+
+  const late = await save;
+  expect(late.status).toBe(400);
+  expect((await late.json<{ error: string }>()).error).toContain("disconnected while checking");
+  expect(await (await call("/connections/mcp/vercel/oauth")).json()).toEqual({
+    users: [],
+    manualToken: true,
+  });
+});

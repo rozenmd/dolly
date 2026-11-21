@@ -29,18 +29,17 @@ export class OauthDiscoveryError extends Error {
 const MAX_METADATA_BYTES = 64 * 1024;
 const DISCOVERY_TIMEOUT_MS = 10_000;
 
-/** A configured origin is already trusted as an MCP target. Metadata may not turn that trust
- * into access to a plaintext origin elsewhere. */
+/** OAuth endpoints receive codes, verifiers and tokens, so every one must be HTTPS. */
 function discoveryUrl(raw: string, resource: URL): URL {
   if (raw.length > 4096) throw new Error("Invalid OAuth metadata URL");
   const url = new URL(raw);
 
   if (
-    !["https:", "http:"].includes(url.protocol) ||
+    url.protocol !== "https:" ||
+    resource.protocol !== "https:" ||
     url.username ||
     url.password ||
-    url.hash ||
-    (url.origin !== resource.origin && url.protocol !== "https:")
+    url.hash
   )
     throw new Error("Unsafe OAuth metadata URL");
 
