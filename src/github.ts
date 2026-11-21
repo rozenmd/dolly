@@ -33,6 +33,7 @@ import { attempt, OperationError } from "./operations";
 import { MAX_IMAGE_BYTES } from "./images";
 import type { Env } from "./env";
 import type { PullRequestState, PullRequestSummary } from "./session-contracts";
+import type { PullReviewContext } from "./review-prompt";
 
 import {
   GITHUB_APP_GRANT_PERMISSIONS,
@@ -331,6 +332,90 @@ const CHECK_COUNTS_QUERY = `query($owner: String!, $name: String!, $number: Int!
             }
           }
         }
+      }
+    }
+  }
+}`;
+
+const GraphActor = Schema.Struct({ login: Schema.String, __typename: Schema.String });
+
+const PullReviewResponse = Schema.Struct({
+  data: Schema.NullOr(
+    Schema.Struct({
+      repository: Schema.NullOr(
+        Schema.Struct({
+          pullRequest: Schema.NullOr(
+            Schema.Struct({
+              title: Schema.String,
+              body: Schema.String,
+              baseRefName: Schema.String,
+              author: Schema.NullOr(GraphActor),
+              comments: Schema.Struct({
+                nodes: Schema.Array(
+                  Schema.Struct({
+                    author: Schema.NullOr(GraphActor),
+                    body: Schema.String,
+                    createdAt: Schema.String,
+                  }),
+                ),
+              }),
+              reviewThreads: Schema.Struct({
+                nodes: Schema.Array(
+                  Schema.Struct({
+                    isResolved: Schema.Boolean,
+                    isOutdated: Schema.Boolean,
+                    path: Schema.NullOr(Schema.String),
+                    line: Schema.NullOr(Schema.Number),
+                    comments: Schema.Struct({
+                      nodes: Schema.Array(
+                        Schema.Struct({
+                          databaseId: Schema.NullOr(Schema.Number),
+                          author: Schema.NullOr(GraphActor),
+                          body: Schema.String,
+                        }),
+                      ),
+                    }),
+                  }),
+                ),
+              }),
+              reviews: Schema.Struct({
+                nodes: Schema.Array(
+                  Schema.Struct({
+                    databaseId: Schema.NullOr(Schema.Number),
+                    author: Schema.NullOr(GraphActor),
+                    state: Schema.String,
+                    body: Schema.String,
+                    commit: Schema.NullOr(Schema.Struct({ oid: Schema.String })),
+                  }),
+                ),
+              }),
+            }),
+          ),
+        }),
+      ),
+    }),
+  ),
+});
+
+const PULL_REVIEW_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      title
+      body
+      baseRefName
+      author { login __typename }
+      comments(last: 30) { nodes { author { login __typename } body createdAt } }
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          isOutdated
+          path
+          line
+          comments(first: 50) { nodes { databaseId author { login __typename } body } }
+        }
+      }
+      reviews(last: 50) {
+        nodes { databaseId author { login __typename } state body commit { oid } }
       }
     }
   }
@@ -2077,74 +2162,74 @@ function makeGitHub(
   });
 
   /**
-   * This App's own latest review of exactly `sha`, with its inline comments. Other authors'
-   * reviews and comments on the pull request are never included.
+   * What an automatic review reads about a pull request besides its diff, after OpenSession's
+   * review context: the description, the conversation, review threads with their resolved and
+   * outdated state, and submitted reviews. Each author is marked trusted when it is this App, an
+   * allowed sender, or another GitHub App; only trusted feedback ever reaches a fix round.
    */
-  const ownReview = Effect.fn("GitHub.ownReview")(function* (
-    repository: string,
-    number: number,
-    sha: string,
-  ) {
+  const pullReview = Effect.fn("GitHub.pullReview")(function* (repository: string, number: number) {
     const connected = yield* read();
     const token = yield* tokenFor(connected, repository, "read");
-    const bot = `${connected.app.slug}[bot]`;
-    const root = `/repos/${repository}/pulls/${number}/reviews`;
-    let found: { id: number; body: string } | undefined;
+    const { senders } = yield* webhookAccess;
+    const [owner = "", name = ""] = repository.split("/");
+    const self = `${connected.app.slug}[bot]`;
+    const allowed = new Set(senders.map((login) => login.toLowerCase()));
 
-    for (let page = 1; ; page++) {
-      const reviews = yield* api(`${root}?per_page=100&page=${page}`, token).pipe(
-        Effect.flatMap(
-          decode(
-            Schema.Array(
-              Schema.Struct({
-                id: Schema.Number,
-                body: Schema.NullOr(Schema.String),
-                commit_id: Schema.NullOr(Schema.String),
-                user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
-              }),
-            ),
-          ),
-        ),
-      );
+    const response = yield* api("/graphql", token, {
+      query: PULL_REVIEW_QUERY,
+      variables: { owner, name, number },
+    }).pipe(Effect.flatMap(decode(PullReviewResponse)));
 
-      // Reviews are listed oldest first, so the last match is the newest.
-      for (const review of reviews)
-        if (review.user?.login === bot && review.commit_id === sha)
-          found = { id: review.id, body: review.body ?? "" };
+    const pull = response.data?.repository?.pullRequest;
 
-      if (reviews.length < 100) break;
-    }
+    if (!pull)
+      return yield* new OperationError({
+        operation: "github.graphql",
+        message: `GitHub returned no pull request ${repository}#${number}`,
+        details: null,
+      });
 
-    if (!found) return undefined;
+    // GraphQL names an App by its slug alone; REST and the rest of Dolly use `slug[bot]`.
+    const who = (actor: typeof GraphActor.Type | null) => {
+      const bot = actor?.__typename === "Bot";
+      const login = actor?.login ?? "ghost";
+      const author = bot && !login.endsWith("[bot]") ? `${login}[bot]` : login;
 
-    const comments = yield* api(`${root}/${found.id}/comments?per_page=100`, token).pipe(
-      Effect.flatMap(
-        decode(
-          Schema.Array(
-            Schema.Struct({
-              id: Schema.Number,
-              path: Schema.String,
-              line: Schema.optional(Schema.NullOr(Schema.Number)),
-              body: Schema.String,
-              user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
-            }),
-          ),
-        ),
-      ),
-    );
+      return { author, bot, trusted: author === self || bot || allowed.has(author.toLowerCase()) };
+    };
 
-    return {
-      id: found.id,
-      body: found.body,
-      comments: comments
-        .filter((comment) => comment.user?.login === bot)
-        .map((comment) => ({
-          id: comment.id,
-          path: comment.path,
-          line: comment.line ?? null,
+    const context: PullReviewContext = {
+      title: pull.title,
+      body: pull.body,
+      baseRef: pull.baseRefName,
+      author: who(pull.author).author,
+      self,
+      discussion: pull.comments.nodes.map((comment) => {
+        const { author, bot } = who(comment.author);
+
+        return { author, bot, body: comment.body, createdAt: comment.createdAt };
+      }),
+      threads: pull.reviewThreads.nodes.map((thread) => ({
+        resolved: thread.isResolved,
+        outdated: thread.isOutdated,
+        path: thread.path,
+        line: thread.line,
+        comments: thread.comments.nodes.map((comment) => ({
+          id: comment.databaseId ?? 0,
+          ...who(comment.author),
           body: comment.body,
         })),
+      })),
+      reviews: pull.reviews.nodes.map((review) => ({
+        id: review.databaseId ?? 0,
+        ...who(review.author),
+        state: review.state,
+        body: review.body,
+        commit: review.commit?.oid ?? null,
+      })),
     };
+
+    return context;
   });
 
   /** A plain comment on a pull request, as the App's bot. */
@@ -2367,7 +2452,7 @@ function makeGitHub(
     react,
     reviewsEnabled,
     pullHead,
-    ownReview,
+    pullReview,
     comment,
     authorize,
   };

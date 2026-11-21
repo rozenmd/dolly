@@ -240,9 +240,9 @@ export class Agent extends DurableObject<Env> {
         Effect.flatMap(GitHub, (github) => github.pullHead(review.repository, review.number)).pipe(
           Effect.provide(this.services),
         ),
-      findings: (review) =>
+      pull: (review) =>
         Effect.flatMap(GitHub, (github) =>
-          github.ownReview(review.repository, review.number, review.sha),
+          github.pullReview(review.repository, review.number),
         ).pipe(Effect.provide(this.services)),
       owner: (review, branch) => this.pullOwner(review.repository, review.number, branch),
       comment: (review, body) =>

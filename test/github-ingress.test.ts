@@ -592,7 +592,7 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
         content: [
           {
             type: "output_text",
-            text: "Looks good to me\n\nVERDICT: blocking=0 findings=0 confidence=5",
+            text: "Looks good to me\n\nVERDICT: verdict=approve blocking=0 findings=0 confidence=5",
             annotations: [],
           },
         ],
@@ -647,6 +647,24 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
           sha: heads[head[1]!] ?? sha,
           ref: "feature",
           repo: { full_name: "example/project" },
+        },
+      });
+
+    // What a review reads besides the diff: the PR's description, conversation and threads.
+    if (parsed.pathname === "/graphql")
+      return Response.json({
+        data: {
+          repository: {
+            pullRequest: {
+              title: "Feature",
+              body: "Adds the feature flag",
+              baseRefName: "main",
+              author: { login: "trusted", __typename: "User" },
+              comments: { nodes: [] },
+              reviewThreads: { nodes: [] },
+              reviews: { nodes: [] },
+            },
+          },
         },
       });
 
@@ -724,8 +742,12 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   });
   expect(reviews[0]?.body).toMatchObject({ body: expect.stringContaining("Looks good to me") });
   expect(prompts).toHaveLength(1);
-  expect(prompts[0]).toContain("example/project#8 is ready for review");
-  expect(prompts[0]).toContain("VERDICT: blocking=");
+  // OpenSession's review prompt, with the PR's stated intent.
+  expect(prompts[0]).toContain("Review PR example/project#8");
+  expect(prompts[0]).toContain(`(opened by @trusted, head ${sha})`);
+  expect(prompts[0]).toContain("Blast radius: the worst bugs live OUTSIDE the diff");
+  expect(prompts[0]).toContain("Adds the feature flag");
+  expect(prompts[0]).toContain("VERDICT: verdict=");
   expect(prompts[0]).toContain(`commit_id ${sha}`);
   expect(prompts[0]).toContain("This session is read-only");
 
@@ -748,13 +770,13 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   ).json<{ thread: string; deliveries: { commentId: string; outcome: string | null }[] }[]>();
 
   expect(
-    threads.find((thread) => thread.thread === "review:example/project#8")?.deliveries,
+    threads.find((thread) => thread.thread === `review:example/project#8@${sha}`)?.deliveries,
   ).toEqual([expect.objectContaining({ commentId: `review:${sha}`, outcome: "completed" })]);
 
   // The review session is read-only; a /dolly command on the same PR starts a writable session.
   const sessions = await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
     const state = await agent["harness"].snapshot(GitHubThreads, BACKGROUND_CONTEXT);
-    const reviewed = state?.threads["review:example/project#8"];
+    const reviewed = state?.threads[`review:example/project#8@${sha}`];
 
     if (!reviewed) throw new Error("Expected a review session");
 
@@ -784,11 +806,11 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   ).toBe(202);
   await expect.poll(() => reactions, { timeout: 15_000 }).toContain("11:rocket");
   expect(reviews.map((review) => review.number)).toEqual([8, 11]);
-  expect(prompts.at(-1)).toContain(
-    "example/project#11 is ready for review (opened by @dolly-test[bot]",
-  );
+  expect(prompts.at(-1)).toContain("Review PR example/project#11");
+  expect(prompts.at(-1)).toContain("(opened by @dolly-test[bot]");
 
-  // A push to a pull request is reviewed again, in the same review session.
+  // A push to a pull request is reviewed again, in a fresh session of its own that starts from
+  // a digest of the previous review.
   const pushed = "b".repeat(40);
   heads["8"] = pushed;
 
@@ -804,8 +826,22 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   expect((await hook(synchronize, "pull_request")).status).toBe(202);
   await expect.poll(() => reviews, { timeout: 15_000 }).toHaveLength(3);
   expect(reviews[2]).toMatchObject({ number: 8, body: { commit_id: pushed } });
-  expect(prompts.at(-1)).toContain("example/project#8 has new commits (pushed by @trusted");
-  expect(prompts.at(-1)).toContain("Any earlier reviews of this PR are above");
+  expect(prompts.at(-1)).toContain("You previously reviewed PR example/project#8");
+  expect(prompts.at(-1)).toContain("New commits have been pushed (by @trusted");
+  expect(prompts.at(-1)).toContain(`You reviewed \`${sha.slice(0, 7)}\``);
+  expect(prompts.at(-1)).toContain(`You last reviewed \`${sha.slice(0, 12)}\``);
+  // A fresh session carries none of the earlier review's conversation.
+  expect(prompts.at(-1)).not.toContain("Looks good to me");
+
+  const sessionsByHead = await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const state = await agent["harness"].snapshot(GitHubThreads, BACKGROUND_CONTEXT);
+
+    return [sha, pushed].map((head) => state?.threads[`review:example/project#8@${head}`]?.id);
+  });
+
+  expect(sessionsByHead[0]).toBeDefined();
+  expect(sessionsByHead[1]).toBeDefined();
+  expect(sessionsByHead[0]).not.toBe(sessionsByHead[1]);
 
   // A push whose head has already moved on by the time its review would start is skipped.
   const promptCount = prompts.length;
@@ -833,7 +869,8 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
           ).json<
             { thread: string; deliveries: { commentId: string; outcome: string | null }[] }[]
           >()
-        ).find((thread) => thread.thread === "review:example/project#8")?.deliveries,
+        ).find((thread) => thread.thread === `review:example/project#8@${"d".repeat(40)}`)
+          ?.deliveries,
       { timeout: 15_000 },
     )
     .toContainEqual(
