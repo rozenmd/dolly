@@ -21,6 +21,7 @@ import * as Schema from "effect/Schema";
 import {
   type CatalogTool,
   catalogPrompt,
+  CODE_LIMITS,
   decodeJsonObject,
   type JsonObject,
   MCP_CODE_DESCRIPTION,
@@ -612,6 +613,7 @@ export class McpConnections {
   constructor(
     private readonly storage: DurableObjectStorage,
     private readonly discoveryTimeoutMs = DISCOVERY_TIMEOUT_MS,
+    private readonly programTimeoutMs = CODE_LIMITS.timeoutMs,
   ) {}
 
   async servers(): Promise<Record<string, McpServerEntry>> {
@@ -1304,6 +1306,7 @@ export class McpConnections {
     const unavailable = new Map<string, string>();
     const usable = new Map<string, CatalogTool[]>();
     const sent: string[] = [];
+    let ended = false;
 
     // One MCP session per server per run, opened on first use and closed when the run ends.
     const session = (name: string, entry: McpServerEntry) => {
@@ -1334,26 +1337,42 @@ export class McpConnections {
         }),
       );
 
-      const { result, images } = await runCode(code, usable, async (name, tool, args) => {
-        const entry = servers[name];
+      // Checked right before anything is sent, after every await: a Disconnect, removal or URL
+      // change, or the program ending (a timeout), stops the call. Nothing goes out unrecorded.
+      const mayCall = async (name: string, entry: McpServerEntry) => {
+        if (ended) throw new Error("The program already ended; this call was not sent");
 
-        if (!entry) throw new Error(`No MCP server named "${name}"`);
-
-        // Checked before every call, not only when the session opened: a Disconnect, removal
-        // or URL change during the program stops it from sending anything more.
         if (!unchanged(entry, (await this.servers())[name]))
           throw new Error(
             `${name} was disconnected, removed or changed while this program ran; nothing more was sent to it`,
           );
-        const { request } = await session(name, entry);
+      };
 
-        sent.push(`${name}.${tool}`);
+      const { result, images } = await runCode(
+        code,
+        usable,
+        async (name, tool, args) => {
+          const entry = servers[name];
 
-        return request("tools/call", { name: tool, arguments: args }, CallToolResult);
-      });
+          if (!entry) throw new Error(`No MCP server named "${name}"`);
+          await mayCall(name, entry);
+          const { request } = await session(name, entry);
+
+          // Opening the session awaited the network: check again before the call goes out.
+          await mayCall(name, entry);
+          sent.push(`${name}.${tool}`);
+
+          return request("tools/call", { name: tool, arguments: args }, CallToolResult);
+        },
+        this.programTimeoutMs,
+      );
+
+      ended = true;
 
       return resultOutput(result, images, unavailable, sent);
     } finally {
+      ended = true;
+
       for (const opened of sessions.values())
         void opened.then((open) => open.close()).catch(() => {});
     }

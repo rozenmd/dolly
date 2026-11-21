@@ -1394,7 +1394,7 @@ it("runs against a cached server without waiting for one whose listing stalls", 
   );
 
   expect(result.isError).toBe(false);
-  expect(resultText(result)).toBe("called ping");
+  expect(resultText(result)).toMatch(/^called ping\n\nUnavailable servers: slow \(still listing/);
   expect(Date.now() - started).toBeLessThan(5_000);
 
   // The stalled server is reported only when a program fails for want of it.
@@ -1409,4 +1409,152 @@ it("runs against a cached server without waiting for one whose listing stalls", 
   await expect
     .poll(async () => resultText(await runProgram("await tools.slow.late({})")))
     .toBe("called late");
+});
+
+/** An MCP server whose initialize can be held open once armed, recording every tools/call. */
+function holdableServer() {
+  const calls: string[] = [];
+  const held = gate();
+  let hold = false;
+  let initializing = 0;
+
+  const handler: Handler = async (_url, _init, request) => {
+    const message = Schema.decodeUnknownSync(Schema.fromJsonString(RpcRequest))(
+      await request.text(),
+    );
+
+    if (message.id === undefined) return new Response(null, { status: 202 });
+
+    if (message.method === "initialize") {
+      if (hold) {
+        initializing += 1;
+        await held.opened;
+      }
+
+      return Response.json({ jsonrpc: "2.0", id: message.id, result: {} });
+    }
+
+    if (message.method === "tools/list")
+      return Response.json({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: { tools: [{ name: "write" }] },
+      });
+
+    calls.push(message.params?.name ?? "");
+
+    return called(message.id, message.params?.name ?? "");
+  };
+
+  return {
+    handler,
+    calls,
+    release: held.open,
+    arm: () => (hold = true),
+    initializing: () => initializing,
+  };
+}
+
+it("sends no call whose session finished opening after Disconnect or after the program ended", async () => {
+  const server = holdableServer();
+
+  network({
+    "POST https://slow-init.example/mcp": server.handler,
+    "DELETE https://slow-init.example/mcp": () => new Response(null, { status: 204 }),
+  });
+
+  await call("/connections/mcp", "POST", {
+    name: "slow",
+    url: "https://slow-init.example/mcp",
+    headers: { Authorization: "Bearer static-key-123456" },
+  });
+  // Cache the tool list, so the next program's only handshake is the call's own session.
+  expect(resultText(await runProgram('search({ namespace: "slow" }).items.length'))).toBe("1");
+  server.arm();
+
+  // Disconnect while the call's session is still initializing.
+  const program = runProgram("await tools.slow.write({})");
+  await expect.poll(() => server.initializing()).toBe(1);
+  expect((await call("/connections/mcp/slow/oauth", "DELETE")).status).toBe(200);
+  server.release();
+
+  const disconnected = await program;
+  expect(disconnected.isError).toBe(true);
+  expect(resultText(disconnected)).toContain("slow was disconnected, removed or changed");
+  expect(server.calls).toEqual([]);
+});
+
+it("sends no call once a program has timed out waiting for its session", async () => {
+  const server = holdableServer();
+
+  network({
+    "POST https://slow-init.example/mcp": server.handler,
+    "DELETE https://slow-init.example/mcp": () => new Response(null, { status: 204 }),
+  });
+
+  await call("/connections/mcp", "POST", {
+    name: "slow",
+    url: "https://slow-init.example/mcp",
+    headers: { Authorization: "Bearer static-key-123456" },
+  });
+  expect(resultText(await runProgram('search({ namespace: "slow" }).items.length'))).toBe("1");
+  server.arm();
+
+  const timedOut = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+    new McpConnections(state.storage, 15_000, 300).execute("await tools.slow.write({})"),
+  );
+
+  expect(timedOut.isError).toBe(true);
+  expect(resultText(timedOut)).toContain("TimeoutExceeded");
+  expect(resultText(timedOut)).not.toContain("Tool calls already made");
+
+  // The session opens after the program ended: the write must never go out.
+  server.release();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  expect(server.calls).toEqual([]);
+});
+
+it("charges tools.* and callTool against one call budget", async () => {
+  const calls: string[] = [];
+
+  network({
+    "POST https://budget.example/mcp": scriptedServer(
+      () => ({ tools: [{ name: "ping" }] }),
+      (id, name) => {
+        calls.push(name);
+
+        return called(id, name);
+      },
+    ),
+    "DELETE https://budget.example/mcp": () => new Response(null, { status: 204 }),
+  });
+
+  await call("/connections/mcp", "POST", { name: "budget", url: "https://budget.example/mcp" });
+
+  const result = await runProgram(
+    [
+      "for (let i = 0; i < 30; i++) await tools.budget.ping({})",
+      'for (let i = 0; i < 30; i++) await callTool("budget", "ping", {})',
+    ].join("\n"),
+  );
+
+  expect(result.isError).toBe(true);
+  expect(resultText(result)).toContain("Over the limit of 40 MCP tool calls");
+  expect(calls).toHaveLength(40);
+});
+
+it("says why a search is empty when a server's tools could not be listed", async () => {
+  network({
+    "POST https://expired.example/mcp": () => new Response("unauthorized", { status: 401 }),
+  });
+
+  await call("/connections/mcp", "POST", { name: "expired", url: "https://expired.example/mcp" });
+
+  const result = await runProgram('search({ namespace: "expired" }).items');
+
+  expect(result.isError).toBe(false);
+  expect(resultText(result)).toContain("[]");
+  expect(resultText(result)).toContain(
+    "Unavailable servers: expired (MCP server refused the credentials (HTTP 401)",
+  );
 });
