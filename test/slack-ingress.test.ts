@@ -667,7 +667,7 @@ it("never lets a Slack thread use the owner's MCP connections", async () => {
       if (sessionTurns === 1) {
         await base(url, init);
 
-        return claudeToolUse("mcp", { action: "list_tools", server: "linear" });
+        return claudeToolUse("mcp", { code: 'search({ namespace: "linear" })' });
       }
     }
 

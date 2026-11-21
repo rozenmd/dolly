@@ -27,6 +27,8 @@ catalog:
   vitest: 5.1.0
   vite-plus: 1.6.0
 overrides:
+  # One Effect runtime: code mode's tools run as Effects inside Dolly's own fibers.
+  "@opencode/codemode>effect": "4.1.4"
   vite@*: "catalog:"
   vitest@*: "catalog:"
 peerDependencyRules:

@@ -147,7 +147,6 @@ import { toolParameters } from "./tool-schema";
 import {
   AddMcpServer,
   McpConnections,
-  McpRequest,
   McpToolInput,
   MCP_TOOL_NAME,
   mcpToolDescription,
@@ -663,8 +662,8 @@ export class Agent extends DurableObject<Env> {
       parameters: toolParameters(McpToolInput),
       replay: "unsafe",
       executionMode: "sequential",
-      execute: async (input: typeof McpRequest.Type, api) => {
-        const parsed = Schema.decodeUnknownSync(McpRequest)(input);
+      execute: async (input: typeof McpToolInput.Type, api) => {
+        const { code } = Schema.decodeUnknownSync(McpToolInput)(input);
 
         // The owner's credentials, so only sessions only the owner can steer and read may use them.
         if (!(await this.mcpAllowed(api.conversationId)))
@@ -674,7 +673,7 @@ export class Agent extends DurableObject<Env> {
             details: null,
           });
 
-        return await this.mcp.run(parsed);
+        return await this.mcp.execute(code);
       },
     } satisfies ToolRegistration;
 

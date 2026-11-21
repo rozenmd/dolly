@@ -18,7 +18,7 @@ It runs on the ChatGPT or Claude subscription you already pay for. You don't nee
 
 - Let it check back on its own: agents schedule their own follow-ups and wait on CI. "Push it and tell me when checks pass" is one prompt.
 
-- Bring your tools: add remote MCP servers (Linear, Sentry, your own) in Settings > Connections, signing in with OAuth or an API key. Sessions you start from the web app can call them (Slack, GitHub and review sessions can't), servers must use HTTPS, and their credentials stay in the Worker.
+- Bring your tools: add remote MCP servers (Linear, Sentry, your own) in Settings > Connections, signing in with OAuth or an API key. Sessions you start from the web app use them in code mode, as opencode does: the model writes a short program that searches and calls the servers' tools and returns only what it needs (Slack, GitHub and review sessions can't use them). Servers must use HTTPS, and their credentials stay in the Worker.
 
 ## Ask for proof
 
