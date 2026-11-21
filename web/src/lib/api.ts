@@ -554,6 +554,9 @@ export type ApiBody = {
   members?: readonly { slackId: string; github: string | null }[];
   defaultRepository?: string;
   callbackUrl?: string;
+  name?: string;
+  transport?: "http";
+  headers?: Record<string, string>;
 };
 
 export const DefaultModel = Schema.Struct({

@@ -18,6 +18,8 @@ It runs on the ChatGPT or Claude subscription you already pay for. You don't nee
 
 - Let it check back on its own: agents schedule their own follow-ups and wait on CI. "Push it and tell me when checks pass" is one prompt.
 
+- Bring your tools: add remote MCP servers (Linear, Sentry, your own) in Settings > Connections, signing in with OAuth or an API key. Every session can call them, and their credentials stay in the Worker.
+
 ## Ask for proof
 
 Dolly can start your dev server inside its sandbox, open the page in a real browser, take a screenshot and attach it to the PR. You review what it built, not just what it says it built.

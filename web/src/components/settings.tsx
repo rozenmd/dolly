@@ -7,6 +7,7 @@ import {
   CpuChipIcon,
   FolderIcon,
   LinkIcon,
+  PuzzlePieceIcon,
   UserIcon,
 } from "@heroicons/react/24/outline";
 import {
@@ -54,6 +55,7 @@ const sections = [
   { to: "/settings/repositories", label: "Repositories", Icon: FolderIcon },
   { to: "/settings/github", label: "GitHub", Icon: LinkIcon },
   { to: "/settings/slack", label: "Slack", Icon: ChatBubbleLeftRightIcon },
+  { to: "/settings/connections", label: "Connections", Icon: PuzzlePieceIcon },
 ] as const;
 
 /** Full-page settings with its own navigation; each section has its own URL. */

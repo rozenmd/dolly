@@ -135,6 +135,14 @@ import {
   toolFailure,
 } from "./papercuts";
 import { toolParameters } from "./tool-schema";
+import {
+  AddMcpServer,
+  McpConnections,
+  McpRequest,
+  McpToolInput,
+  MCP_TOOL_NAME,
+  mcpToolDescription,
+} from "./mcp";
 import { attempt, rpc, OperationError } from "./operations";
 import type { Env } from "./env";
 import type { FileResult } from "./sandbox";
@@ -220,6 +228,7 @@ export class Agent extends DurableObject<Env> {
   private models!: ReturnType<typeof createModels>;
   private readonly credentials: Credentials;
   private readonly papercuts: Papercuts;
+  private readonly mcp: McpConnections;
   private readonly services: Layer.Layer<Account | ChatGPTProtocol | GitHub | GitHubAuth>;
   private readonly slackServices: Layer.Layer<SlackHostService>;
   private readonly githubTask = githubDelivery({
@@ -311,6 +320,7 @@ export class Agent extends DurableObject<Env> {
     super(ctx, env);
     this.credentials = new Credentials(ctx.storage);
     this.papercuts = new Papercuts(ctx.storage.sql);
+    this.mcp = new McpConnections(ctx.storage);
     this.sessionsFeed = new SessionsFeed(ctx, () => this.harness);
     this.services = Layer.mergeAll(
       Layer.succeed(Account, this.credentials),
@@ -635,6 +645,23 @@ export class Agent extends DurableObject<Env> {
       },
     } satisfies ToolRegistration;
 
+    // Remote MCP servers from Settings > Connections; calls run here with the stored credentials.
+    const mcpTool = {
+      name: MCP_TOOL_NAME,
+      description: mcpToolDescription,
+      parameters: toolParameters(McpToolInput),
+      replay: "unsafe",
+      executionMode: "sequential",
+      execute: async (input: typeof McpRequest.Type, api) => {
+        const parsed = Schema.decodeUnknownSync(McpRequest)(input);
+
+        // Read-only sessions (automatic reviews) act on untrusted pull requests: no external writes.
+        if (parsed.action === "call_tool") await this.refuseReadOnly(api.conversationId);
+
+        return await this.mcp.run(parsed);
+      },
+    } satisfies ToolRegistration;
+
     const tools = [
       shell,
       readFile,
@@ -645,6 +672,7 @@ export class Agent extends DurableObject<Env> {
       papercutsTool,
       selfQueryTool,
       retitleTool,
+      mcpTool,
       {
         name: "preview",
         description:
@@ -831,6 +859,7 @@ export class Agent extends DurableObject<Env> {
           commitAttributionPrompt(await this.commitCoauthor()),
         ),
         section("papercuts", () => papercutsPrompt),
+        section("mcp-servers", () => this.mcp.promptSection()),
       ],
     });
 
@@ -1105,6 +1134,29 @@ export class Agent extends DurableObject<Env> {
           .then(() => this.ctx.storage.put("migration:retitle-tool", true)),
       );
 
+    if (!(yield* attempt("mcp.migration.read", () => this.ctx.storage.get("migration:mcp-tool"))))
+      yield* attempt("mcp.tools.update", () =>
+        this.harness
+          .commit(async (tx) => {
+            let cursor: Cursor | undefined;
+
+            do {
+              const page = await tx.scanConversations({}, 100, cursor);
+
+              for (const conversation of page.items) {
+                const agent = await tx.doc(AgentDoc, conversation.id);
+
+                for (const names of [agent.tools, agent.modelTools])
+                  if (Array.isArray(names) && !names.includes(mcpTool.name))
+                    names.push(mcpTool.name);
+              }
+
+              cursor = page.next;
+            } while (cursor);
+          }, BACKGROUND_CONTEXT)
+          .then(() => this.ctx.storage.put("migration:mcp-tool", true)),
+      );
+
     yield* this.arm(this.harness.wake());
     this.harness.resume();
   });
@@ -1182,7 +1234,10 @@ export class Agent extends DurableObject<Env> {
   /** Recording must never replace a tool's original result or recursively report failures. */
   private async capturePapercut(source: string, message: string, conversationId?: ConversationId) {
     try {
-      const secrets = await Effect.runPromise(this.credentials.secrets);
+      const secrets = [
+        ...(await Effect.runPromise(this.credentials.secrets)),
+        ...(await this.mcp.secrets()),
+      ];
 
       const state =
         conversationId && this.harness
@@ -1544,6 +1599,63 @@ export class Agent extends DurableObject<Env> {
         ),
       ),
     );
+  }
+
+  // ── MCP connections (Settings > Connections; mcp.ts) ──
+
+  mcpConnections(force: boolean) {
+    return this.mcp.connections(force).then((mcpServers) => ({ mcpServers }));
+  }
+
+  async mcpAdd(input: typeof AddMcpServer.Type) {
+    return this.mcp.add(Schema.decodeUnknownSync(AddMcpServer)(input));
+  }
+
+  mcpRemove(name: string) {
+    return this.mcp.remove(name);
+  }
+
+  mcpOauthStatus(name: string) {
+    return this.mcp.oauthStatus(name);
+  }
+
+  private async ownerLogin() {
+    const owner = Schema.decodeUnknownOption(Schema.Struct({ login: Schema.String }))(
+      await this.ctx.storage.get("auth:owner"),
+    );
+
+    return Option.getOrUndefined(Option.map(owner, ({ login }) => login));
+  }
+
+  /** Expected failures (no OAuth, refused registration) come back as `{ error }` for the UI. */
+  async mcpOauthStart(name: string, origin: string) {
+    try {
+      return await this.mcp.startOauth(name, origin, await this.ownerLogin());
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : `Could not connect ${name}` };
+    }
+  }
+
+  async mcpOauthComplete(state: string, code: string) {
+    try {
+      return await this.mcp.completeOauth(state, code);
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : "Could not finish connecting" };
+    }
+  }
+
+  async mcpOauthDisconnect(name: string) {
+    return { ok: await this.mcp.disconnect(name) };
+  }
+
+  async mcpToken(name: string, token: string) {
+    try {
+      await this.mcp.saveToken(name, token, await this.ownerLogin());
+
+      return { ok: true as const };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : `Could not connect ${name}` };
+    }
   }
 
   slackStatus(publicBaseUrl: string) {
