@@ -31,6 +31,7 @@
     "@earendil-works/pi-ai": "1.5.2",
     "@earendil-works/pi-durable": "1.5.2",
     "@earendil-works/pi-schema": "1.5.2",
+    "@opencode/codemode": "2.3.2",
     "effect": "4.1.4",
     "hono": "4.13.18"
   },

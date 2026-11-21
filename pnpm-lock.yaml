@@ -175,6 +175,7 @@ catalogs:
       version: 5.1.0
 
 overrides:
+  '@opencode/codemode>effect': 4.1.4
   vite@*: npm:@voidzero-dev/vite-plus-core@1.6.0
   vitest@*: 5.1.0
 
@@ -197,6 +198,9 @@ importers:
       '@earendil-works/pi-schema':
         specifier: 1.5.2
         version: 1.5.2
+      '@opencode/codemode':
+        specifier: 2.3.2
+        version: 2.3.2
       effect:
         specifier: 4.1.4
         version: 4.1.4
@@ -1216,6 +1220,9 @@ packages:
   '@oozcitak/util@10.0.0':
     resolution: {integrity: sha512-hAX0pT/73190NLqBPPWSdBVGtbY6VOhWYK3qqHqtXQ1gK7kS2yz4+ivsN07hpJ6I3aeMtKP6J6npsEKOAzuTLA==}
     engines: {node: '>=20.0'}
+
+  '@opencode/codemode@2.3.2':
+    resolution: {integrity: sha512-3TrCoC/4KgZS0u6/Lek8SOT+Ez13h0lSXoYjgpEE+j/+LoO746f0HbRhOBKt4QJGEcwVJ+9scmhtVrYGKC5x7Q==}
 
   '@oxc-project/runtime@0.158.0':
     resolution: {integrity: sha512-OYWBlK/wnZHyol5jkvBJadD8KTR6DJfFDRClqrU6kBDQKHd4bXNZALg3qfXk0aFl6F5loSxMT24EZurNWE4MKQ==}
@@ -2589,6 +2596,11 @@ packages:
 
   '@yuku-toolchain/types@0.19.0':
     resolution: {integrity: sha512-tFkNbsP4WXX9UMUC5syJGdK9dPMLK0PPaIuXCcCYH75sZ8MrebfBZ2XvCILRTw8AgLivSSCfDa4R67iYBDa4Kg==}
+
+  acorn@8.15.0:
+    resolution: {integrity: sha512-NZyJarBfL7nWwIq+FDL6Zp/yHEhePMNnnJ0y3qfieCrmNvYct8uvtiV41UvlSe6apAfk0fY1FbWx+NwfmpvtTg==}
+    engines: {node: '>=0.4.0'}
+    hasBin: true
 
   agent-base@7.1.4:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
@@ -4798,6 +4810,11 @@ snapshots:
 
   '@oozcitak/util@10.0.0': {}
 
+  '@opencode/codemode@2.3.2':
+    dependencies:
+      acorn: 8.15.0
+      effect: 4.1.4
+
   '@oxc-project/runtime@0.158.0': {}
 
   '@oxc-project/types@0.153.0': {}
@@ -5801,6 +5818,8 @@ snapshots:
     optional: true
 
   '@yuku-toolchain/types@0.19.0': {}
+
+  acorn@8.15.0: {}
 
   agent-base@7.1.4: {}
 

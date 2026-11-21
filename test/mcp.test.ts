@@ -5,7 +5,8 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
 import { Live, Snapshot } from "../src/transcript";
-import { McpConnections, toolOutput, type McpToolInput } from "../src/mcp";
+import { McpConnections, type McpToolInput } from "../src/mcp";
+import { ImageSink, scriptValue } from "../src/mcp-codemode";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { ConversationWorkspace, READ_ONLY_TOOLS } from "../src/workspace";
@@ -482,20 +483,26 @@ const answer = (text: string) =>
 
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(Snapshot));
 
-it("lets a session list and call a connected server's tools with a refreshed grant", async () => {
+it("runs a session's code mode program against a connected server with a refreshed grant", async () => {
   const mcpCalls: { method: string; authorization: string | null; session: string | null }[] = [];
 
   const replies = [
-    () => toolCall({ action: "servers" }),
-    () => toolCall({ action: "list_tools", server: "linear" }),
+    // Nothing is cached yet: the program finds the tool with search().
     () =>
       toolCall({
-        action: "call_tool",
-        server: "linear",
-        tool: "create_issue",
-        arguments: { title: "Fix login" },
+        code: 'const found = search("create issue"); return found.items.map((item) => item.signature)',
       }),
-    () => toolCall({ action: "list_tools", server: "missing" }),
+    // Two calls in one program share one MCP session; only the summary goes back.
+    () =>
+      toolCall({
+        code: [
+          'const first = await tools.linear.create_issue({ title: "Fix login" })',
+          'const second = await tools.linear.create_issue({ title: "Fix logout" })',
+          "console.log(`made ${[first, second].length}`)",
+          "return [first, second]",
+        ].join("\n"),
+      }),
+    () => toolCall({ code: "await tools.missing.anything({})" }),
     () => answer("Filed it"),
   ];
 
@@ -587,7 +594,10 @@ it("lets a session list and call a connected server's tools with a refreshed gra
     .toBe(true);
 
   // The model is told which servers exist and offered the tool.
-  expect(prompts[0]).toContain("Connected MCP servers, usable through the mcp tool: linear");
+  expect(prompts[0]).toContain("Connected MCP servers, usable through the mcp tool");
+  expect(prompts[0]).toContain(
+    `- linear (Linear, ${LINEAR}/mcp): tools not loaded yet; find them with search({ namespace: \\"linear\\" })`,
+  );
   expect(prompts[0]).toContain('"name":"mcp"');
 
   const results = snapshot!.entries.flatMap((entry) =>
@@ -603,25 +613,26 @@ it("lets a session list and call a connected server's tools with a refreshed gra
     ),
   );
 
-  expect(JSON.parse(results[0].text)).toEqual({
-    servers: [{ name: "linear", target: `${LINEAR}/mcp`, status: "connected" }],
-  });
-  expect(JSON.parse(results[1].text)).toMatchObject({
-    server: "linear",
-    tools: [
-      {
-        name: "create_issue",
-        description: "Create a Linear issue",
-        inputSchema: { required: ["title"] },
-      },
-    ],
-  });
-  expect(results[2]).toEqual({
-    text: 'Created {"title":"Fix login"} via create_issue',
+  expect(results[0].isError).toBe(false);
+  expect(JSON.parse(results[0].text)).toEqual([
+    expect.stringContaining("tools.linear.create_issue({"),
+  ]);
+  expect(results[1]).toEqual({
+    text: [
+      JSON.stringify(
+        [
+          'Created {"title":"Fix login"} via create_issue',
+          'Created {"title":"Fix logout"} via create_issue',
+        ],
+        null,
+        2,
+      ),
+      "Logs:\nmade 2",
+    ].join("\n\n"),
     isError: false,
   });
-  expect(results[3].isError).toBe(true);
-  expect(results[3].text).toContain('No MCP server named "missing"');
+  expect(results[2].isError).toBe(true);
+  expect(results[2].text).toContain("UnknownTool");
 
   // One refresh, then every request carries the fresh token and the server's session id.
   expect(refreshes).toHaveLength(1);
@@ -629,12 +640,14 @@ it("lets a session list and call a connected server's tools with a refreshed gra
     grant_type: "refresh_token",
     refresh_token: "old-refresh",
   });
+  // The list is fetched once and cached; the third program needs no session at all.
   expect(mcpCalls.map((entry) => entry.method)).toEqual([
     "initialize",
     "notifications/initialized",
     "tools/list",
     "initialize",
     "notifications/initialized",
+    "tools/call",
     "tools/call",
   ]);
   expect(new Set(mcpCalls.map((entry) => entry.authorization))).toEqual(
@@ -656,6 +669,16 @@ it("lets a session list and call a connected server's tools with a refreshed gra
 
   // Tokens never reach the transcript.
   expect(JSON.stringify(snapshot)).not.toContain("fresh-access");
+
+  // Once listed, later prompts carry the signatures, so search() is only needed for the rest.
+  const prompt = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+    new McpConnections(state.storage).promptSection(),
+  );
+
+  expect(prompt).toContain(`- linear (Linear, ${LINEAR}/mcp, 1 tool, 1 shown)`);
+  expect(prompt).toContain("tools.linear.create_issue({");
+  expect(prompt).toContain("// Create a Linear issue");
+  expect(prompt).toContain("Every tool is listed above.");
 }, 30_000);
 
 it("offers and accepts token connect only on the provider's own origin", async () => {
@@ -774,77 +797,157 @@ it("never follows redirects on requests that carry credentials", async () => {
   });
 });
 
-/** Run the `mcp` tool directly in the owner Durable Object. */
-function runTool(request: Parameters<McpConnections["run"]>[0]) {
+/** Run one code mode program directly in the owner Durable Object. */
+function runProgram(code: string) {
   return runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
-    new McpConnections(state.storage).run(request),
+    new McpConnections(state.storage).execute(code),
   );
 }
 
-it("bounds what a server can make the Worker read", async () => {
+/** The text of a program's result. */
+const resultText = (result: Awaited<ReturnType<typeof runProgram>>) =>
+  result.output.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
+
+type ToolsPage = {
+  tools: { name: string; description?: string; inputSchema?: Schema.Json }[];
+  nextCursor?: string;
+};
+
+/** A JSON-RPC MCP server whose tools/list and tools/call answers come from the test. */
+function scriptedServer(
+  list: (page: number) => ToolsPage,
+  callTool: (id: number) => Response,
+): Handler {
+  let pages = 0;
+
+  return async (_url, _init, request) => {
+    const message = Schema.decodeUnknownSync(Schema.fromJsonString(RpcRequest))(
+      await request.text(),
+    );
+
+    if (message.id === undefined) return new Response(null, { status: 202 });
+
+    if (message.method === "initialize")
+      return Response.json({ jsonrpc: "2.0", id: message.id, result: {} });
+
+    if (message.method === "tools/list")
+      return Response.json({ jsonrpc: "2.0", id: message.id, result: list(pages++) });
+
+    return callTool(message.id);
+  };
+}
+
+it("stops listing at a repeating cursor and bounds what one call can make the Worker read", async () => {
   let pages = 0;
 
   network({
-    "POST https://huge.example/mcp": async (_url, _init, request) => {
-      const message = Schema.decodeUnknownSync(Schema.fromJsonString(RpcRequest))(
-        await request.text(),
-      );
+    "POST https://huge.example/mcp": scriptedServer(
+      // Never advances: the same cursor forever.
+      (page) => {
+        pages = page + 1;
 
-      if (message.id === undefined) return new Response(null, { status: 202 });
+        return { tools: [{ name: "dump", description: "Dump everything" }], nextCursor: "again" };
+      },
+      () => {
+        // An event stream that never ends one event: 64 KiB chunks without a blank line.
+        const chunk = new TextEncoder().encode(`data: ${"x".repeat(65_536)}`);
+        let sent = 0;
 
-      if (message.method === "initialize")
-        return Response.json({ jsonrpc: "2.0", id: message.id, result: {} });
+        return new Response(
+          new ReadableStream({
+            pull(controller) {
+              sent += 1;
 
-      if (message.method === "tools/list") {
-        pages += 1;
-
-        // Never advances: the same cursor forever.
-        return Response.json({
-          jsonrpc: "2.0",
-          id: message.id,
-          result: { tools: [], nextCursor: "again" },
-        });
-      }
-
-      // An event stream that never ends one event: 64 KiB chunks without a blank line.
-      const chunk = new TextEncoder().encode(`data: ${"x".repeat(65_536)}`);
-      let sent = 0;
-
-      return new Response(
-        new ReadableStream({
-          pull(controller) {
-            sent += 1;
-
-            if (sent > 200) controller.close();
-            else controller.enqueue(chunk);
-          },
-        }),
-        { headers: { "Content-Type": "text/event-stream" } },
-      );
-    },
+              if (sent > 200) controller.close();
+              else controller.enqueue(chunk);
+            },
+          }),
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      },
+    ),
     "DELETE https://huge.example/mcp": () => new Response(null, { status: 204 }),
   });
 
   await call("/connections/mcp", "POST", { name: "huge", url: "https://huge.example/mcp" });
 
-  const listed = await runTool({ action: "list_tools", server: "huge" });
+  const listed = await runProgram('search({ namespace: "huge" }).items.map((item) => item.path)');
   expect(pages).toBe(2);
-  expect(JSON.parse(listed.output[0].type === "text" ? listed.output[0].text : "")).toMatchObject({
-    note: expect.stringContaining("more tools"),
-    tools: [],
-  });
+  expect(JSON.parse(resultText(listed))).toEqual(["tools.huge.dump"]);
 
-  await expect(runTool({ action: "call_tool", server: "huge", tool: "dump" })).rejects.toThrow(
-    "exceeded 4 MiB",
-  );
+  const dumped = await runProgram("await tools.huge.dump({})");
+  expect(dumped.isError).toBe(true);
+  expect(resultText(dumped)).toContain("exceeded 4 MiB");
+  expect(resultText(dumped)).toContain("Tool calls already made");
 });
 
-it("caps image bytes kept from one tool result", () => {
-  const image = { type: "image" as const, data: "a".repeat(1_500_000), mimeType: "image/png" };
-  const { output } = toolOutput({ content: [image, image] });
+it("keeps a bounded catalog when a server lists many large tools", async () => {
+  let pages = 0;
 
-  expect(output.map((block) => block.type)).toEqual(["image", "text"]);
-  expect(output[1]).toMatchObject({ text: expect.stringContaining("image/png image omitted") });
+  const schema = {
+    type: "object",
+    properties: Object.fromEntries(
+      Array.from({ length: 40 }, (_, index) => [
+        `field${index}`,
+        { type: "string", description: "y".repeat(200) },
+      ]),
+    ),
+  };
+
+  network({
+    // Distinct pages, each near the per-response limit, that never run out.
+    "POST https://big.example/mcp": scriptedServer(
+      (page) => {
+        pages = page + 1;
+
+        return {
+          tools: Array.from({ length: 200 }, (_, index) => ({
+            name: `tool_${page}_${index}`,
+            description: "d".repeat(5_000),
+            inputSchema: schema,
+          })),
+          nextCursor: `page-${page + 1}`,
+        };
+      },
+      () => new Response(null, { status: 500 }),
+    ),
+    "DELETE https://big.example/mcp": () => new Response(null, { status: 204 }),
+  });
+
+  await call("/connections/mcp", "POST", { name: "big", url: "https://big.example/mcp" });
+  const counted = await runProgram('search({ namespace: "big", limit: 1 }).remaining + 1');
+
+  // The listing stopped inside the first page once the catalog budget was spent.
+  expect(pages).toBe(1);
+  const kept = Number(resultText(counted));
+  expect(kept).toBeGreaterThan(10);
+  expect(kept).toBeLessThan(200);
+
+  const stored = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+    JSON.stringify(await state.storage.get("mcp:tools:big")),
+  );
+
+  expect(stored.length).toBeLessThan(600 * 1024);
+  expect(JSON.parse(stored)).toMatchObject({ complete: false });
+
+  // The prompt shows the count as a lower bound and only what fits its budget.
+  const prompt = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+    new McpConnections(state.storage).promptSection(),
+  );
+
+  expect(prompt).toContain(`- big (Big, https://big.example/mcp, ${kept}+ tools,`);
+  expect(prompt.length).toBeLessThan(12_000);
+  expect(prompt).toContain("The catalog is partial");
+});
+
+it("attaches images from tool results within one budget", () => {
+  const images = new ImageSink();
+  const image = { type: "image" as const, data: "a".repeat(1_500_000), mimeType: "image/png" };
+
+  expect(scriptValue({ content: [image, image] }, images)).toEqual(
+    "[image/png image 1, attached to the mcp result]\n[image/png image omitted: over the 2097152 character budget]",
+  );
+  expect(images.images).toHaveLength(1);
 });
 
 async function newSession() {
@@ -917,7 +1020,11 @@ const readOnlyConfig = (id: string) => ({
 });
 
 it("refuses MCP in read-only sessions and keeps the tool out of upgraded reviews", async () => {
-  const replies = [() => toolCall({ action: "servers" }), () => answer("Refused")];
+  const replies = [
+    () => toolCall({ code: "await tools.linear.create_issue({})" }),
+    () => answer("Refused"),
+  ];
+
   const prompts: string[] = [];
 
   const model: Handler = async (_url, _init, request) => {
@@ -1018,9 +1125,9 @@ it("never sends credentials over plain HTTP, even to a server stored before HTTP
     });
   });
 
-  await expect(runTool({ action: "list_tools", server: "plain" })).rejects.toThrow(
-    "uses plain HTTP",
-  );
+  const refused = await runProgram("await tools.plain.anything({})");
+  expect(refused.isError).toBe(true);
+  expect(resultText(refused)).toContain("Unavailable servers: plain (plain uses plain HTTP");
   expect(seen.filter((request) => request.method !== "GET")).toEqual([]);
   expect(seen.some((request) => request.headers.has("authorization"))).toBe(false);
 });
