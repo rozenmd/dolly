@@ -280,10 +280,11 @@ const commentTag = (item: Extract<FeedbackItem, { kind: "comment" }>) => {
  * repeat text from the diff; nothing inside can close the fence early.
  */
 export function fencedFindings(findings: ReviewFindings) {
+  // The stamp goes first: escaping the fence name last means no later step can reassemble it.
   const clean = (text: string) =>
     text
-      .replaceAll(FINDINGS_TAG, "untrusted review findings")
-      .replaceAll(AUTOMATIC_REVIEW_MARKER, "");
+      .replaceAll(AUTOMATIC_REVIEW_MARKER, "")
+      .replaceAll(FINDINGS_TAG, "untrusted review findings");
 
   const lines = findings.items.map((item) =>
     item.kind === "review"

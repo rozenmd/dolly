@@ -90,9 +90,23 @@ export const REVIEW_FOOTER = "\n\n<sub>— posted by Dolly</sub>";
  */
 export const AUTOMATIC_REVIEW_MARKER = "<!-- dolly:automatic-review -->";
 
-/** Whether a review body is an automatic review the host published. */
+/**
+ * Whether a review body (of this App's, on the head) is its automatic review: stamped, or, for
+ * reviews posted before the stamp, carrying the footer every Dolly review body ends with. The
+ * bodiless records GitHub files for thread replies match neither.
+ */
 export const isAutomaticReview = (body: string | null | undefined) =>
-  body?.includes(AUTOMATIC_REVIEW_MARKER) ?? false;
+  body?.includes(AUTOMATIC_REVIEW_MARKER) === true || body?.includes(REVIEW_FOOTER.trim()) === true;
+
+/**
+ * `body` with the automatic-review stamp added, cut to fit `limit` so a body the tool accepted
+ * stays valid once stamped.
+ */
+export function stampAutomaticReview(body: string, limit: number) {
+  const stamp = `\n\n${AUTOMATIC_REVIEW_MARKER}`;
+
+  return `${body.slice(0, Math.max(0, limit - stamp.length))}${stamp}`;
+}
 
 /** Keeps the agent's output bounded: patches past the budget are dropped and flagged. */
 export function budgetPatches<F extends { readonly patch?: string }>(

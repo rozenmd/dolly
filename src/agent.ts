@@ -79,8 +79,14 @@ import {
   verifySlackSignature,
 } from "./slack-events";
 import { GitHub } from "./github";
-import { GitHubRequest, GitHubAccounts, GitHubSetup, GitHubReply } from "./github-contracts";
-import { AUTOMATIC_REVIEW_MARKER } from "./github-review";
+import {
+  GitHubRequest,
+  GitHubAccounts,
+  GitHubSetup,
+  GitHubReply,
+  MAX_REVIEW_BODY,
+} from "./github-contracts";
+import { stampAutomaticReview } from "./github-review";
 import {
   ChildRequest,
   ChildMessage,
@@ -1527,7 +1533,7 @@ export class Agent extends DurableObject<Env> {
         // Stamped so this head's review is told apart from GitHub's records of thread replies.
         return this.githubExecute({
           ...input,
-          operation: { ...op, body: `${op.body}\n\n${AUTOMATIC_REVIEW_MARKER}` },
+          operation: { ...op, body: stampAutomaticReview(op.body, MAX_REVIEW_BODY) },
         });
       });
 

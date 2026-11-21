@@ -77,6 +77,9 @@ export const GitHubSetup = Schema.Struct({
   repositories: Schema.optional(Schema.Array(Repository).check(Schema.isMinLength(1))),
 });
 
+/** The longest review body the github tool accepts. */
+export const MAX_REVIEW_BODY = 65_000;
+
 export const GitHubRequest = Schema.Struct({
   operation: Schema.Union([
     Schema.Struct({ action: Schema.Literal("repositories") }),
@@ -178,7 +181,7 @@ export const GitHubRequest = Schema.Struct({
       number: PullNumber,
       /** Must equal the pull request's current head SHA, so comments land on the reviewed diff. */
       commit_id: Sha,
-      body: Schema.String.check(Schema.isMaxLength(65_000)),
+      body: Schema.String.check(Schema.isMaxLength(MAX_REVIEW_BODY)),
       /** PENDING leaves the review unsubmitted for a human to inspect. Approvals are never allowed. */
       event: Schema.Literals(["COMMENT", "PENDING"]),
       comments: Schema.Array(ReviewComment).check(Schema.isMaxLength(50)),
