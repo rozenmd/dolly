@@ -33,6 +33,7 @@ import { attempt, OperationError } from "./operations";
 import { MAX_IMAGE_BYTES } from "./images";
 import type { Env } from "./env";
 import type { PullRequestState, PullRequestSummary } from "./session-contracts";
+import type { PullReviewContext } from "./review-prompt";
 
 import {
   GITHUB_APP_GRANT_PERMISSIONS,
@@ -331,6 +332,142 @@ const CHECK_COUNTS_QUERY = `query($owner: String!, $name: String!, $number: Int!
             }
           }
         }
+      }
+    }
+  }
+}`;
+
+/**
+ * GraphQL's BigInt, as GitHub sends `fullDatabaseId`: the REST id, which outgrew the 32-bit
+ * `databaseId`. Comment ids stay well below 2^53, so a number holds them exactly.
+ */
+const GraphId = Schema.Union([Schema.String, Schema.Number]);
+
+/** A REST id from GraphQL's `fullDatabaseId`, or undefined when GitHub sent none usable. */
+function restId(value: string | number | null) {
+  if (value === null) return undefined;
+  const id = Number(value);
+
+  return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+}
+
+const GraphActor = Schema.Struct({ login: Schema.String, __typename: Schema.String });
+
+/** One page of a pull request's review threads. */
+const ReviewThreadPage = Schema.Struct({
+  pageInfo: Schema.Struct({ hasNextPage: Schema.Boolean, endCursor: Schema.NullOr(Schema.String) }),
+  nodes: Schema.Array(
+    Schema.Struct({
+      isResolved: Schema.Boolean,
+      isOutdated: Schema.Boolean,
+      path: Schema.NullOr(Schema.String),
+      line: Schema.NullOr(Schema.Number),
+      comments: Schema.Struct({
+        nodes: Schema.Array(
+          Schema.Struct({
+            fullDatabaseId: Schema.NullOr(GraphId),
+            author: Schema.NullOr(GraphActor),
+            body: Schema.String,
+          }),
+        ),
+      }),
+    }),
+  ),
+});
+
+const ReviewThreadsResponse = Schema.Struct({
+  data: Schema.NullOr(
+    Schema.Struct({
+      repository: Schema.NullOr(
+        Schema.Struct({
+          pullRequest: Schema.NullOr(Schema.Struct({ reviewThreads: ReviewThreadPage })),
+        }),
+      ),
+    }),
+  ),
+});
+
+/** Review threads past the first page; long-running PRs collect many resolved ones. */
+const REVIEW_THREADS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $after: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          isResolved
+          isOutdated
+          path
+          line
+          comments(first: 50) { nodes { fullDatabaseId author { login __typename } body } }
+        }
+      }
+    }
+  }
+}`;
+
+/** Thread pages read at most, so a pathological PR can't stall a review. */
+const MAX_THREAD_PAGES = 20;
+
+const PullReviewResponse = Schema.Struct({
+  data: Schema.NullOr(
+    Schema.Struct({
+      repository: Schema.NullOr(
+        Schema.Struct({
+          pullRequest: Schema.NullOr(
+            Schema.Struct({
+              title: Schema.String,
+              body: Schema.String,
+              baseRefName: Schema.String,
+              author: Schema.NullOr(GraphActor),
+              comments: Schema.Struct({
+                nodes: Schema.Array(
+                  Schema.Struct({
+                    author: Schema.NullOr(GraphActor),
+                    body: Schema.String,
+                    createdAt: Schema.String,
+                  }),
+                ),
+              }),
+              reviewThreads: ReviewThreadPage,
+              reviews: Schema.Struct({
+                nodes: Schema.Array(
+                  Schema.Struct({
+                    fullDatabaseId: Schema.NullOr(GraphId),
+                    author: Schema.NullOr(GraphActor),
+                    state: Schema.String,
+                    body: Schema.String,
+                    commit: Schema.NullOr(Schema.Struct({ oid: Schema.String })),
+                  }),
+                ),
+              }),
+            }),
+          ),
+        }),
+      ),
+    }),
+  ),
+});
+
+const PULL_REVIEW_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      title
+      body
+      baseRefName
+      author { login __typename }
+      comments(last: 30) { nodes { author { login __typename } body createdAt } }
+      reviewThreads(first: 100) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          isResolved
+          isOutdated
+          path
+          line
+          comments(first: 50) { nodes { fullDatabaseId author { login __typename } body } }
+        }
+      }
+      reviews(last: 50) {
+        nodes { fullDatabaseId author { login __typename } state body commit { oid } }
       }
     }
   }
@@ -1679,6 +1816,18 @@ function makeGitHub(
       // Omitting event leaves the review PENDING (unsubmitted) on GitHub.
       if (op.event === "COMMENT") request.event = "COMMENT";
 
+      // Paging through the patches takes time; a push meanwhile makes this review stale.
+      const latest = yield* api(root, token).pipe(
+        Effect.flatMap(decode(Schema.Struct({ head: Schema.Struct({ sha: Schema.String }) }))),
+      );
+
+      if (latest.head.sha !== op.commit_id)
+        return {
+          ok: false,
+          code: "stale_commit",
+          message: `The pull request head is now ${latest.head.sha}, not ${op.commit_id}. No review was posted.`,
+        };
+
       const review = yield* api(`${root}/reviews`, token, request, "POST").pipe(
         Effect.flatMap(decode(Review)),
       );
@@ -1968,27 +2117,25 @@ function makeGitHub(
             comment.user.login === `${connected.app.slug}[bot]` && comment.body.endsWith(marker),
         )
       )
-        return;
+        return "posted" as const;
 
       if (comments.length < 100) {
         yield* api(root, token, { body: `${text.slice(0, 16_384)}\n\n${marker}` });
 
-        return;
+        return "posted" as const;
       }
     }
   });
 
-  /**
-   * The agent normally publishes its own review with create_review. If it did not leave one on
-   * this head commit, its answer becomes the review body, so every automatic review is visible.
-   */
-  const replyReview = Effect.fn("GitHub.replyReview")(function* (
+  /** Whether this App already left a review on `sha`, read fresh from GitHub. */
+  const hasOwnReview = Effect.fn("GitHub.hasOwnReview")(function* (
     connected: typeof Connected.Type,
-    event: typeof GitHubReview.Type,
-    text: string,
+    repository: string,
+    number: number,
+    sha: string,
   ) {
-    const token = yield* tokenFor(connected, event.repository, "write");
-    const root = `/repos/${event.repository}/pulls/${event.number}/reviews`;
+    const token = yield* tokenFor(connected, repository, "read");
+    const root = `/repos/${repository}/pulls/${number}/reviews`;
 
     for (let page = 1; ; page++) {
       const reviews = yield* api(`${root}?per_page=100&page=${page}`, token).pipe(
@@ -2007,13 +2154,51 @@ function makeGitHub(
       if (
         reviews.some(
           (review) =>
-            review.user?.login === `${connected.app.slug}[bot]` && review.commit_id === event.sha,
+            review.user?.login === `${connected.app.slug}[bot]` && review.commit_id === sha,
         )
       )
-        return;
+        return true;
 
-      if (reviews.length < 100) break;
+      if (reviews.length < 100) return false;
     }
+  });
+
+  /** For an automatic review session: whether its one review is already on GitHub. */
+  const reviewPublished = Effect.fn("GitHub.reviewPublished")(function* (
+    repository: string,
+    number: number,
+    sha: string,
+  ) {
+    return yield* hasOwnReview(yield* read(), repository, number, sha);
+  });
+
+  /**
+   * The agent normally publishes its own review with create_review. If it did not leave one on
+   * this head commit, its answer becomes the review body, so every automatic review is visible.
+   * A review of a head that has moved on is never posted: "superseded". A failed head read fails
+   * the reply, which is retried, rather than posting unchecked.
+   */
+  const replyReview = Effect.fn("GitHub.replyReview")(function* (
+    connected: typeof Connected.Type,
+    event: typeof GitHubReview.Type,
+    text: string,
+  ) {
+    const token = yield* tokenFor(connected, event.repository, "write");
+    const root = `/repos/${event.repository}/pulls/${event.number}/reviews`;
+
+    if (yield* hasOwnReview(connected, event.repository, event.number, event.sha))
+      return "posted" as const;
+
+    // Checked right before the post, so a push during a retry's backoff is never missed.
+    const pull = yield* api(`/repos/${event.repository}/pulls/${event.number}`, token).pipe(
+      Effect.flatMap(
+        decode(
+          Schema.Struct({ state: Schema.String, head: Schema.Struct({ sha: Schema.String }) }),
+        ),
+      ),
+    );
+
+    if (pull.state !== "open" || pull.head.sha !== event.sha) return "superseded" as const;
 
     yield* api(root, token, {
       commit_id: event.sha,
@@ -2021,6 +2206,8 @@ function makeGitHub(
       event: "COMMENT",
       comments: [],
     });
+
+    return "posted" as const;
   });
 
   /** GitHub keeps one reaction of each kind per user, so repeating this is harmless. */
@@ -2077,74 +2264,90 @@ function makeGitHub(
   });
 
   /**
-   * This App's own latest review of exactly `sha`, with its inline comments. Other authors'
-   * reviews and comments on the pull request are never included.
+   * What an automatic review reads about a pull request besides its diff, after OpenSession's
+   * review context: the description, the conversation, review threads with their resolved and
+   * outdated state, and submitted reviews. Each author is marked trusted when it is this App, an
+   * allowed sender, or another GitHub App; only trusted feedback ever reaches a fix round.
    */
-  const ownReview = Effect.fn("GitHub.ownReview")(function* (
-    repository: string,
-    number: number,
-    sha: string,
-  ) {
+  const pullReview = Effect.fn("GitHub.pullReview")(function* (repository: string, number: number) {
     const connected = yield* read();
     const token = yield* tokenFor(connected, repository, "read");
-    const bot = `${connected.app.slug}[bot]`;
-    const root = `/repos/${repository}/pulls/${number}/reviews`;
-    let found: { id: number; body: string } | undefined;
+    const { senders } = yield* webhookAccess;
+    const [owner = "", name = ""] = repository.split("/");
+    const self = `${connected.app.slug}[bot]`;
+    const allowed = new Set(senders.map((login) => login.toLowerCase()));
 
-    for (let page = 1; ; page++) {
-      const reviews = yield* api(`${root}?per_page=100&page=${page}`, token).pipe(
-        Effect.flatMap(
-          decode(
-            Schema.Array(
-              Schema.Struct({
-                id: Schema.Number,
-                body: Schema.NullOr(Schema.String),
-                commit_id: Schema.NullOr(Schema.String),
-                user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
-              }),
-            ),
-          ),
-        ),
-      );
+    const response = yield* api("/graphql", token, {
+      query: PULL_REVIEW_QUERY,
+      variables: { owner, name, number },
+    }).pipe(Effect.flatMap(decode(PullReviewResponse)));
 
-      // Reviews are listed oldest first, so the last match is the newest.
-      for (const review of reviews)
-        if (review.user?.login === bot && review.commit_id === sha)
-          found = { id: review.id, body: review.body ?? "" };
+    const pull = response.data?.repository?.pullRequest;
 
-      if (reviews.length < 100) break;
+    if (!pull)
+      return yield* new OperationError({
+        operation: "github.graphql",
+        message: `GitHub returned no pull request ${repository}#${number}`,
+        details: null,
+      });
+
+    const threads = [...pull.reviewThreads.nodes];
+    let page = pull.reviewThreads.pageInfo;
+
+    for (let pages = 1; page.hasNextPage && page.endCursor && pages < MAX_THREAD_PAGES; pages++) {
+      const more = yield* api("/graphql", token, {
+        query: REVIEW_THREADS_QUERY,
+        variables: { owner, name, number, after: page.endCursor },
+      }).pipe(Effect.flatMap(decode(ReviewThreadsResponse)));
+
+      const next = more.data?.repository?.pullRequest?.reviewThreads;
+
+      if (!next) break;
+      threads.push(...next.nodes);
+      page = next.pageInfo;
     }
 
-    if (!found) return undefined;
+    // GraphQL names an App by its slug alone; REST and the rest of Dolly use `slug[bot]`.
+    const who = (actor: typeof GraphActor.Type | null) => {
+      const bot = actor?.__typename === "Bot";
+      const login = actor?.login ?? "ghost";
+      const author = bot && !login.endsWith("[bot]") ? `${login}[bot]` : login;
 
-    const comments = yield* api(`${root}/${found.id}/comments?per_page=100`, token).pipe(
-      Effect.flatMap(
-        decode(
-          Schema.Array(
-            Schema.Struct({
-              id: Schema.Number,
-              path: Schema.String,
-              line: Schema.optional(Schema.NullOr(Schema.Number)),
-              body: Schema.String,
-              user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
-            }),
-          ),
-        ),
-      ),
-    );
+      return { author, bot, trusted: author === self || bot || allowed.has(author.toLowerCase()) };
+    };
 
-    return {
-      id: found.id,
-      body: found.body,
-      comments: comments
-        .filter((comment) => comment.user?.login === bot)
-        .map((comment) => ({
-          id: comment.id,
-          path: comment.path,
-          line: comment.line ?? null,
+    const context: PullReviewContext = {
+      title: pull.title,
+      body: pull.body,
+      baseRef: pull.baseRefName,
+      author: who(pull.author).author,
+      self,
+      discussion: pull.comments.nodes.map((comment) => {
+        const { author, bot } = who(comment.author);
+
+        return { author, bot, body: comment.body, createdAt: comment.createdAt };
+      }),
+      threads: threads.map((thread) => ({
+        resolved: thread.isResolved,
+        outdated: thread.isOutdated,
+        path: thread.path,
+        line: thread.line,
+        comments: thread.comments.nodes.map((comment) => ({
+          id: restId(comment.fullDatabaseId) ?? null,
+          ...who(comment.author),
           body: comment.body,
         })),
+      })),
+      reviews: pull.reviews.nodes.map((review) => ({
+        id: restId(review.fullDatabaseId) ?? null,
+        ...who(review.author),
+        state: review.state,
+        body: review.body,
+        commit: review.commit?.oid ?? null,
+      })),
     };
+
+    return context;
   });
 
   /** A plain comment on a pull request, as the App's bot. */
@@ -2367,7 +2570,8 @@ function makeGitHub(
     react,
     reviewsEnabled,
     pullHead,
-    ownReview,
+    pullReview,
+    reviewPublished,
     comment,
     authorize,
   };

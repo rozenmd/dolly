@@ -22,16 +22,17 @@ import { deliveryKey, type GitHubDelivery, type GitHubReview } from "./github-we
 import {
   cappedComment,
   handoffKey,
+  type LastReview,
   handoffMessage,
   nextHandoffState,
+  openFeedback,
   parseVerdict,
   planHandoff,
   ReviewHandoffs,
   stripVerdict,
-  VERDICT_INSTRUCTION,
-  type ReviewFindings,
   type ReviewVerdict,
 } from "./review-handoff";
+import { reviewPrompt, type PullReviewContext } from "./review-prompt";
 import { attempt, OperationError } from "./operations";
 import type { IntakeAgent } from "./model-defaults";
 
@@ -40,7 +41,17 @@ const GITHUB_PR_NOTE =
   "To change this PR, read it with github read_pull_request. If it is open and head.repository is this repository, commit to its head branch and push with git push origin HEAD:<head.ref> (force-push only when you rewrote history). If it is closed, merged or from a fork, push to this session's branch and open a new PR instead.";
 
 export const GitHubThreads = defineDoc<{
-  threads: Record<string, { id: ConversationId; events: Record<string, TaskId<null>> }>;
+  threads: Record<
+    string,
+    {
+      id: ConversationId;
+      events: Record<string, TaskId<null>>;
+      /** For a review: the same PR's previous review task, which this one runs after. */
+      after?: TaskId<null>;
+    }
+  >;
+  /** Each PR's newest review task, by `repository#number`. */
+  latestReview?: Record<string, TaskId<null>>;
 }>({
   kind: "app.github-threads",
   version: 1,
@@ -49,20 +60,14 @@ export const GitHubThreads = defineDoc<{
   checkpointWhen: () => false,
 });
 
-/** The prompt for an automatic review. The agent publishes the review itself, inline comments included. */
-function reviewPrompt(review: Extract<GitHubDelivery, { kind: "review" }>) {
-  return [
-    review.pushed
-      ? `GitHub PR ${review.repository}#${review.number} has new commits (pushed by @${review.sender}, head ${review.sha}). Review the new head. Any earlier reviews of this PR are above: check whether their findings were addressed and don't repeat ones that were.`
-      : `GitHub PR ${review.repository}#${review.number} is ready for review (opened by @${review.sender}, head ${review.sha}). Review it.`,
-    `Read it with github read_pull_request and list_pull_request_files, check out the code in the sandbox when the diff alone is not enough, and look for bugs, security problems, missing tests and anything that breaks the repository's own guidance (AGENTS.md, skills). Report real problems, not style nits, and say so plainly when it looks good.`,
-    `Publish exactly one review with github create_review: event COMMENT, commit_id ${review.sha}, inline comments on the lines concerned and a short overall summary as the body. This session is read-only: it cannot change files, push, edit the PR or open new PRs, so suggest fixes in the review instead. If create_review reports that the head moved, do not review the new head; say so instead.`,
-    `Finish with the same short summary. If you could not publish the review, that answer is posted as the review instead.`,
-    VERDICT_INSTRUCTION,
-  ].join("\n\n");
-}
-
 type Review = typeof GitHubReview.Type;
+
+/** Each reviewed head gets a session of its own. */
+const reviewThreadKey = (review: Pick<Review, "repository" | "number" | "sha">) =>
+  `review:${review.repository}#${review.number}@${review.sha}`;
+
+const commentPrompt = (event: Exclude<GitHubDelivery, { kind: "review" }>) =>
+  `GitHub PR ${event.repository}#${event.number}, comment by @${event.sender}:\n\n${event.content}\n\n${GITHUB_PR_NOTE}`;
 
 type PullHead = { open: boolean; sha: string; ref: string; repository: string | null };
 
@@ -80,8 +85,8 @@ export type HandoffDeps = {
   enabled: () => Effect.Effect<boolean, OperationError>;
   /** The PR's state and head, read fresh: a stale head is neither reviewed nor handed off. */
   head: (review: Review) => Effect.Effect<PullHead, OperationError>;
-  /** This App's own review of `review.sha`, and nothing any other author wrote. */
-  findings: (review: Review) => Effect.Effect<ReviewFindings | undefined, OperationError>;
+  /** The PR's description, conversation, review threads and reviews, read fresh. */
+  pull: (review: Review) => Effect.Effect<PullReviewContext, OperationError>;
   /** The live, writable session that opened the PR and owns its head `branch`, if any. */
   owner: (review: Review, branch: string) => Promise<ConversationId | undefined>;
   /** Posts a comment on the PR. */
@@ -93,7 +98,11 @@ export function githubDelivery({
   finished,
   handoff,
 }: {
-  reply: (event: GitHubDelivery, text: string) => Effect.Effect<void, OperationError>;
+  /** Posts the answer; "superseded" when a review's head moved on, so nothing was posted. */
+  reply: (
+    event: GitHubDelivery,
+    text: string,
+  ) => Effect.Effect<"posted" | "superseded", OperationError>;
   /** Marks the command's comment (or a review's PR) as done. Best effort: the answer is already posted. */
   finished: (event: GitHubDelivery) => Effect.Effect<void, OperationError>;
   handoff: HandoffDeps;
@@ -112,12 +121,30 @@ export function githubDelivery({
 
             if (!conversation) return yield* Effect.die("GitHub conversation missing");
 
-            // Pushes queue reviews behind each other. Once it is this review's turn, skip it if
-            // reviews were turned off meanwhile, or if the head has moved on (the newest head's own
-            // review covers it); otherwise pin the session's checkout to exactly this head.
+            let content = "kind" in task.input ? "" : commentPrompt(task.input);
+
+            // Each head is reviewed in a fresh session of its own, after OpenSession: the review
+            // reads the full diff at that commit, with a digest of earlier reviews for continuity.
+            // Pushes still queue reviews behind each other. Once it is this review's turn, skip it
+            // if reviews were turned off meanwhile, or if the head has moved on (the newest head's
+            // own review covers it); otherwise pin the session's checkout to exactly this head.
             if ("kind" in task.input) {
-              yield* attempt("github.idle", () => conversation.waitForIdle(context));
               const review = task.input;
+
+              let after: TaskId<null> | undefined;
+
+              yield* attempt("github.after", () =>
+                runtime.commit(async (tx) => {
+                  after = (await tx.doc(GitHubThreads)).threads[reviewThreadKey(review)]?.after;
+
+                  return undefined;
+                }, context),
+              );
+
+              if (after) {
+                const previous = after;
+                yield* attempt("github.after.wait", () => runtime.waitForTask(previous, context));
+              }
 
               const enabled = yield* handoff.enabled();
 
@@ -143,28 +170,48 @@ export function githubDelivery({
                 );
               }
 
+              // Without the PR's context the review still runs, as a first look at the diff.
+              const pull = yield* handoff.pull(review).pipe(
+                Effect.catchTag("OperationError", (error) =>
+                  Effect.logWarning({
+                    event: "github_review_context_failed",
+                    error: exceptionDetails(error),
+                    details: error.details,
+                  }).pipe(Effect.as(undefined)),
+                ),
+              );
+
+              let lastReview: LastReview | undefined;
+
               yield* attempt("github.pin", () =>
                 runtime.commit(async (tx) => {
                   pinReviewWorkspace(
                     await tx.doc(ConversationWorkspace, task.conversationId),
                     review.repository,
+                    review.number,
                     review.sha,
                     String(task.conversationId),
                   );
 
+                  const found = (await tx.doc(ReviewHandoffs)).pulls[
+                    handoffKey(review.repository, review.number)
+                  ]?.lastReview;
+
+                  // A copy: the document is only readable inside this transaction.
+                  if (found) lastReview = { ...found };
+
                   return undefined;
                 }, context),
               );
+
+              content = reviewPrompt(review, pull, lastReview);
             }
 
             const submission = yield* attempt("github.submit", () =>
               conversation.submit(
                 {
                   type: "input",
-                  content:
-                    "kind" in task.input
-                      ? reviewPrompt(task.input)
-                      : `GitHub PR ${task.input.repository}#${task.input.number}, comment by @${task.input.sender}:\n\n${task.input.content}\n\n${GITHUB_PR_NOTE}`,
+                  content,
                   requestId:
                     "kind" in task.input
                       ? `github:review:${task.input.repository}#${task.input.number}:${task.input.sha}`
@@ -218,6 +265,22 @@ export function githubDelivery({
         Effect.runPromise(
           Effect.gen(function* () {
             const result = yield* reply(task.input, task.state.checkpoint.text).pipe(Effect.result);
+
+            // A review is never published against a head that moved while it ran, after
+            // OpenSession: the newer head's own review covers the PR.
+            if (Result.isSuccess(result) && result.success === "superseded") {
+              yield* Effect.logInfo({
+                event: "github_review_superseded_during_run",
+                pull: `${task.input.repository}#${task.input.number}`,
+              });
+
+              return yield* attempt("github.superseded", () =>
+                runtime.commit(
+                  () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
+                  context,
+                ),
+              );
+            }
 
             if (Result.isSuccess(result)) {
               yield* finished(task.input).pipe(
@@ -295,6 +358,22 @@ export function githubDelivery({
             const review = task.input;
             const key = handoffKey(review.repository, review.number);
 
+            // What this review concluded is the next review's starting point, whatever the loop
+            // does with it.
+            yield* attempt("github.handoff.record", () =>
+              runtime.commit(async (tx) => {
+                const state = await tx.doc(ReviewHandoffs);
+
+                state.pulls[key] = {
+                  ...state.pulls[key],
+                  rounds: state.pulls[key]?.rounds ?? 0,
+                  lastReview: { ...verdict, sha: review.sha, at: runtime.now() },
+                };
+
+                return undefined;
+              }, context),
+            );
+
             // Turning reviews off stops the loop, also for reviews admitted before that.
             const enabled = yield* handoff.enabled();
 
@@ -302,14 +381,15 @@ export function githubDelivery({
             const head = enabled ? yield* handoff.head(review) : undefined;
             const current = head !== undefined && isCurrent(review, head);
 
-            // Only the session that owns the PR's head branch gets the findings, and only Dolly's
-            // own review of this exact head: never comments or reviews by anyone else.
+            // Only the session that owns the PR's head branch gets the findings, and only open
+            // feedback from trusted authors: never anything an untrusted account wrote.
             const owner =
               head && current
                 ? yield* attempt("github.handoff.owner", () => handoff.owner(review, head.ref))
                 : undefined;
 
-            const findings = owner ? yield* handoff.findings(review) : undefined;
+            const pull = owner ? yield* handoff.pull(review) : undefined;
+            const findings = pull ? openFeedback(pull, review.sha) : undefined;
 
             const target =
               owner && findings
@@ -322,12 +402,20 @@ export function githubDelivery({
 
             yield* attempt("github.handoff.commit", () =>
               runtime.commit(async (tx) => {
-                if (!target || !findings || !head) return done;
+                if (!target || !findings || !head || !pull) return done;
                 const state = await tx.doc(ReviewHandoffs);
                 const prior = state.pulls[key];
                 const plan = planHandoff(prior, review.sha, verdict);
-                const content = handoffMessage(review, verdict, findings, head.ref, plan);
 
+                const content = handoffMessage(
+                  review,
+                  verdict,
+                  findings,
+                  { title: pull.title, ref: head.ref },
+                  plan,
+                );
+
+                // Queued behind whatever the person is doing in that session, never steering it.
                 if (content)
                   await target.submit(tx, {
                     type: "input",
@@ -356,7 +444,7 @@ export function githubDelivery({
               owner: owner ? String(owner) : null,
               enabled,
               current,
-              findings: findings?.id ?? null,
+              findings: findings?.items.length ?? null,
               verdict,
             });
 
@@ -411,8 +499,23 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
     harness.commit(async (tx) => {
       const state = await tx.doc(GitHubThreads);
       const review = "kind" in event;
-      // Reviews get their own read-only session; /dolly commands on the same PR get a writable one.
-      const key = `${review ? "review:" : ""}${event.repository}#${event.number}`;
+      // Each reviewed head gets a fresh read-only session; /dolly commands on the same PR share a
+      // writable one.
+      const pull = `${event.repository}#${event.number}`;
+      const key = "kind" in event ? reviewThreadKey(event) : pull;
+      // Before each head had its own session, all of a PR's reviews shared `review:<pull>`. A head
+      // reviewed there is still the same review, and its last task still runs first.
+      const legacy = review ? state.threads[`review:${pull}`] : undefined;
+      const legacyReceipt = legacy?.events[deliveryKey(event)];
+
+      if (legacy && legacyReceipt)
+        return {
+          status: 202 as const,
+          id: String(legacy.id),
+          taskId: String(legacyReceipt),
+          duplicate: true,
+        };
+
       let thread = state.threads[key];
       const receipt = thread?.events[deliveryKey(event)];
 
@@ -437,6 +540,13 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
           { readOnly: review },
         );
         thread = { id: conversation.id, events: {} };
+
+        // Reviews of one PR run one after another, each after the previous head's.
+        const previous = review
+          ? (state.latestReview?.[pull] ?? Object.values(legacy?.events ?? {}).at(-1))
+          : undefined;
+
+        if (previous) thread.after = previous;
       }
 
       const taskId = await tx.createTask(delivery, event, {
@@ -446,9 +556,11 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
       });
 
       state.threads[key] = {
-        id: thread.id,
+        ...thread,
         events: { ...thread.events, [deliveryKey(event)]: taskId },
       };
+
+      if (review) state.latestReview = { ...state.latestReview, [pull]: taskId };
 
       return {
         status: 202 as const,

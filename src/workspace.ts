@@ -58,6 +58,12 @@ export type WorkspaceState = {
    * review of a new head never reads an earlier review's checkout (see pinReviewWorkspace).
    */
   pin?: string;
+  /**
+   * The one review an automatic review session may publish, set by the host when it pins the
+   * checkout. Its GitHub writes are held to exactly this pull request, head and COMMENT event,
+   * whatever the model asks for, since its prompt carries other people's PR comments.
+   */
+  reviewTarget?: { repository: string; number: number; sha: string };
 };
 
 export const ConversationWorkspace = defineDoc<WorkspaceState>({
@@ -193,6 +199,37 @@ export const READ_ONLY_TOOLS = [
   "dolly",
 ] as const;
 
+/**
+ * Why a read-only session's GitHub write is refused, or undefined when it may go ahead: only the
+ * review its host pinned, as a COMMENT on exactly that pull request and head. Thread replies and
+ * writes from a session with no pinned review are refused.
+ */
+export function reviewWriteRefusal(
+  state: WorkspaceState | null | undefined,
+  operation: {
+    action: string;
+    repository?: string;
+    number?: number;
+    commit_id?: string;
+    event?: string;
+  },
+) {
+  const target = state?.reviewTarget;
+
+  if (!target || operation.action !== "create_review")
+    return "This automatic review session can only publish its one review with create_review.";
+
+  if (
+    operation.repository?.toLowerCase() !== target.repository ||
+    operation.number !== target.number ||
+    operation.commit_id !== target.sha ||
+    operation.event !== "COMMENT"
+  )
+    return `This automatic review session can only publish one COMMENT review on ${target.repository}#${target.number} at commit ${target.sha}.`;
+
+  return undefined;
+}
+
 export const READ_ONLY_REFUSAL =
   "This session is read-only: it can read code and comment on pull requests, but cannot change files, commit, push, open or edit pull requests. Ask with /dolly in a pull request comment, or start a new session, to make changes.";
 
@@ -231,9 +268,12 @@ export function workspaceSandboxes(state: WorkspaceState | null | undefined, id:
 export function pinReviewWorkspace(
   state: WorkspaceState,
   repository: string,
+  number: number,
   sha: string,
   id: string,
 ) {
+  state.reviewTarget = { repository: repository.toLowerCase(), number, sha };
+
   if (state.pin === sha && state.config?.ref === sha) return;
   state.config = workspaceConfig({ repository, ref: sha }, id, { readOnly: true });
   state.pin = sha;
@@ -267,7 +307,7 @@ export function workspacePrompt(state: WorkspaceState | null | undefined) {
     "An empty repository discovery/enrolment list does not establish that a known selected repo is inaccessible. Try the selected repo directly with workspace checkout and report the actual authorization or checkout error. Do not treat repository selection as an authorization grant.",
     "If GitHub access is denied, explain the concrete configuration step from the tool result. Never claim that no repository access is available merely because discovery returned an empty list.",
     isReadOnly(state)
-      ? "This session is read-only. Read code, run commands and comment on pull requests (github create_review and reply_to_review_comment), but do not change the repository: write_file, edit_file, commits, pushes and opening or editing pull requests are refused, and git push from the shell is rejected."
+      ? "This session is read-only. Read code and run commands; its only GitHub write is its one review, a github create_review COMMENT on the pull request and commit it was started for. Thread replies, write_file, edit_file, commits, pushes and opening or editing pull requests are refused, and git push from the shell is rejected."
       : "workspace push and open_pull_request use the branch above. With git in the shell you may push (or force-push) any branch except the repository's default branch, such as an existing PR's head branch; deleting branches and pushing tags are refused.",
   ].join("\n");
 }
