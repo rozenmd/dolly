@@ -191,16 +191,38 @@ function fakeGitHub(url: URL, init: RequestInit | undefined) {
 
   const pull = path.match(/^\/repos\/example\/project\/pulls\/(\d+)$/);
 
+  // A full pull request, as GitHub's REST API returns it, so create_review can run end to end.
   if (pull)
     return Response.json({
+      number: Number(pull[1]),
+      html_url: `https://github.com/${repository}/pull/${pull[1]}`,
+      title: "Change",
+      body: "Body",
       state: "open",
       merged: false,
+      user: { login: "dolly-test[bot]" },
+      base: { ref: "main", sha: "f".repeat(40) },
       head: {
         sha: github.heads[pull[1]!] ?? "a".repeat(40),
         ref: github.refs[pull[1]!] ?? "someone/else",
         repo: { full_name: repository },
       },
+      labels: [],
+      requested_reviewers: [],
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
     });
+
+  if (/^\/repos\/example\/project\/pulls\/\d+\/files$/.test(path))
+    return Response.json([
+      {
+        filename: "src/parse.ts",
+        status: "modified",
+        additions: 1,
+        deletions: 0,
+        patch: "@@ -1,1 +1,2 @@\n context\n+added",
+      },
+    ]);
 
   const reviews = path.match(/^\/repos\/example\/project\/pulls\/(\d+)\/reviews$/);
 
@@ -225,11 +247,19 @@ function fakeGitHub(url: URL, init: RequestInit | undefined) {
     const id = 100 + github.reviews.length;
     github.reviews.push({ id, number: Number(reviews[1]), ...body });
 
-    return Response.json({ id });
+    return Response.json({ id, user: { login: "dolly-test[bot]" }, state: "COMMENTED" });
   }
 
   if (path === "/graphql") {
-    const { variables }: { variables: { number: number } } = JSON.parse(String(init?.body));
+    const { variables }: { variables: { number: number; after?: string } } = JSON.parse(
+      String(init?.body),
+    );
+
+    // Threads come in pages; the second page holds a current finding.
+    if (variables.after === "threads-2")
+      return Response.json({
+        data: { repository: { pullRequest: { reviewThreads: laterThreads() } } },
+      });
 
     return Response.json({ data: { repository: { pullRequest: pullReview(variables.number) } } });
   }
@@ -272,6 +302,7 @@ function pullReview(number: number) {
       ],
     },
     reviewThreads: {
+      pageInfo: { hasNextPage: true, endCursor: "threads-2" },
       nodes: [
         {
           isResolved: false,
@@ -393,6 +424,24 @@ function pullReview(number: number) {
     },
   };
 }
+
+/** The second page of review threads: a current finding past the first hundred threads. */
+const laterThreads = () => ({
+  pageInfo: { hasNextPage: false, endCursor: null },
+  nodes: [
+    {
+      isResolved: false,
+      isOutdated: false,
+      path: "src/late.ts",
+      line: 4,
+      comments: {
+        nodes: [
+          { fullDatabaseId: "4652901599", author: bot, body: "**P1** — late() never returns." },
+        ],
+      },
+    },
+  ],
+});
 
 /** Resolves the review model's next answer; tests replace it to hold a review mid-run. */
 let reviewGate: Promise<void> = Promise.resolve();
@@ -664,6 +713,12 @@ it("hands an unsatisfied review back to the session that opened the PR, until a 
     "[@dolly-test[bot] · comment 4652901592] src/parse.ts:12 — **P1** — parse() dereferences a null config.",
   );
   expect(handoffs[0]).toContain("[@trusted · comment 4652901595] src/load.ts:7");
+  // Threads past the first page still reach the session.
+  expect(handoffs[0]).toContain("[@dolly-test[bot] · comment 4652901599] src/late.ts:4");
+  // A reply is answered in its thread, whose first comment is the one GitHub takes replies to.
+  expect(handoffs[0]).toContain(
+    "[@dolly-test[bot] · reply in the thread of comment 4652901597] src/cache.ts:20 — Intentional",
+  );
   // Only each reviewer's current word: superseded and dismissed reviews are settled.
   expect(handoffs[0]).toContain("[@trusted review 6005728002 approved] Fine once the handle leak");
   expect(handoffs[0]).not.toContain("Please split the parser.");
@@ -769,16 +824,22 @@ it("holds an automatic review's GitHub writes to the pull request and head it wa
     { ...target, event: "PENDING" },
     { action: "reply_to_review_comment", repository, number: 17, comment_id: 5, body: "Ok" },
     target,
+    // Asked twice, it still publishes once.
+    target,
   ];
   github.heads["17"] = sha;
   expect(await pullRequestHook("opened", 17, sha)).toBe(202);
-  await expect.poll(() => writeResults, { timeout: 15_000 }).toHaveLength(5);
+  await expect.poll(() => writeResults, { timeout: 15_000 }).toHaveLength(6);
 
   for (const refused of writeResults.slice(0, 4)) expect(refused).toContain("read_only");
 
   expect(writeResults[0]).toContain(`can only publish one COMMENT review on ${repository}#17`);
-  // Its own review gets past the guard to GitHub.
-  expect(writeResults[4]).not.toContain("read_only");
+  // Its own review is published, once; the repeat is told it's already there.
+  expect(writeResults[4]).toContain('"ok":true');
+  expect(writeResults[5]).toContain("already_published");
+  expect(github.reviews.filter((review) => review.number === 17)).toEqual([
+    expect.objectContaining({ commit_id: sha, body: expect.stringContaining("Fine.") }),
+  ]);
   expect(github.reviews.filter((review) => review.number === 99)).toEqual([]);
 }, 60_000);
 
@@ -794,6 +855,53 @@ it("rechecks the head before retrying a failed post, so a push during the backof
   await expect.poll(() => reviewsSettled(18), { timeout: 20_000 }).toBe(true);
   expect(github.reviews).toEqual([]);
   expect(handoffs).toEqual([]);
+}, 60_000);
+
+it("keeps deduplicating and queueing reviews recorded before each head had its own session", async () => {
+  github.number = 19;
+  await opener();
+
+  const first = "a".repeat(40);
+  verdicts.push("Fine.\nVERDICT: verdict=approve blocking=0 findings=0 confidence=5");
+  expect(await pullRequestHook("opened", 19, first)).toBe(202);
+  await expect.poll(() => reviewsSettled(19), { timeout: 15_000 }).toBe(true);
+  expect(reviewPrompts).toHaveLength(1);
+
+  // Rewrite the record the way an earlier version stored it: one shared review session per PR.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    await agent["harness"].commit(async (tx) => {
+      const state = await tx.doc(GitHubThreads);
+      const entry = state.threads[`review:${repository}#19@${first}`]!;
+
+      state.threads[`review:${repository}#19`] = { id: entry.id, events: { ...entry.events } };
+      delete state.threads[`review:${repository}#19@${first}`];
+      delete state.latestReview;
+    }, BACKGROUND_CONTEXT);
+  });
+
+  // The same head again is the same review.
+  expect(await pullRequestHook("reopened", 19, first)).toBe(202);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  expect(reviewPrompts).toHaveLength(1);
+
+  // A new head queues behind the old session's last review, then runs in a session of its own.
+  const second = "b".repeat(40);
+  github.heads["19"] = second;
+  verdicts.push("Fine.\nVERDICT: verdict=approve blocking=0 findings=0 confidence=5");
+  expect(await pullRequestHook("synchronize", 19, second)).toBe(202);
+  await expect.poll(() => reviewPrompts, { timeout: 15_000 }).toHaveLength(2);
+
+  const after = await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const state = await agent["harness"].snapshot(GitHubThreads, BACKGROUND_CONTEXT);
+
+    return {
+      after: state?.threads[`review:${repository}#19@${second}`]?.after,
+      legacy: Object.values(state?.threads[`review:${repository}#19`]?.events ?? {}).at(-1),
+    };
+  });
+
+  expect(after.after).toBeDefined();
+  expect(after.after).toBe(after.legacy);
 }, 60_000);
 
 it("never publishes a review of a head that moved while it ran", async () => {

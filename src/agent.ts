@@ -25,6 +25,7 @@ import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/stora
 import { bool, int, obj, opt, str } from "@earendil-works/pi-schema";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Result from "effect/Result";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Semaphore from "effect/Semaphore";
@@ -1405,6 +1406,54 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
+  /** Automatic reviews being published, by `repository#number@sha`: one at a time per head. */
+  private readonly reviewPublishes = new Map<string, Promise<typeof GitHubReply.Type>>();
+
+  /**
+   * An automatic review's one review of its head. Attempts for the same head run one at a time,
+   * and each first asks GitHub whether this App already reviewed that commit, so a repeated call,
+   * or a retry after a POST whose response was lost, never posts a second review.
+   */
+  private publishReview(input: typeof GitHubRequest.Type) {
+    const op = input.operation;
+
+    if (op.action !== "create_review") return this.githubExecute(input);
+    const key = `${op.repository.toLowerCase()}#${op.number}@${op.commit_id}`;
+
+    const run = (this.reviewPublishes.get(key) ?? Promise.resolve(undefined))
+      .catch(() => undefined)
+      .then(async (): Promise<typeof GitHubReply.Type> => {
+        const published = await Effect.runPromise(
+          Effect.flatMap(GitHub, (github) =>
+            github.reviewPublished(op.repository, op.number, op.commit_id),
+          ).pipe(Effect.provide(this.services), Effect.result),
+        );
+
+        if (Result.isFailure(published))
+          return {
+            ok: false as const,
+            code: "provider_error",
+            message: `Could not check for an existing review, so none was posted: ${published.failure.message}`,
+          };
+
+        if (published.success)
+          return {
+            ok: false as const,
+            code: "already_published",
+            message: `This review of ${op.repository}#${op.number} at ${op.commit_id} is already on GitHub. Don't publish another; finish with your summary.`,
+          };
+
+        return this.githubExecute(input);
+      });
+
+    this.reviewPublishes.set(key, run);
+    void run.finally(() => {
+      if (this.reviewPublishes.get(key) === run) this.reviewPublishes.delete(key);
+    });
+
+    return run;
+  }
+
   private async githubForSession(id: ConversationId, input: typeof GitHubRequest.Type) {
     const workspace = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
 
@@ -1420,6 +1469,8 @@ export class Agent extends DurableObject<Env> {
         const refusal = reviewWriteRefusal(workspace, input.operation);
 
         if (refusal) return { ok: false as const, code: "read_only", message: refusal };
+
+        return this.publishReview(input);
       }
     }
 

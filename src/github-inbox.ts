@@ -503,6 +503,19 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
       // writable one.
       const pull = `${event.repository}#${event.number}`;
       const key = "kind" in event ? reviewThreadKey(event) : pull;
+      // Before each head had its own session, all of a PR's reviews shared `review:<pull>`. A head
+      // reviewed there is still the same review, and its last task still runs first.
+      const legacy = review ? state.threads[`review:${pull}`] : undefined;
+      const legacyReceipt = legacy?.events[deliveryKey(event)];
+
+      if (legacy && legacyReceipt)
+        return {
+          status: 202 as const,
+          id: String(legacy.id),
+          taskId: String(legacyReceipt),
+          duplicate: true,
+        };
+
       let thread = state.threads[key];
       const receipt = thread?.events[deliveryKey(event)];
 
@@ -529,7 +542,9 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
         thread = { id: conversation.id, events: {} };
 
         // Reviews of one PR run one after another, each after the previous head's.
-        const previous = review ? state.latestReview?.[pull] : undefined;
+        const previous = review
+          ? (state.latestReview?.[pull] ?? Object.values(legacy?.events ?? {}).at(-1))
+          : undefined;
 
         if (previous) thread.after = previous;
       }

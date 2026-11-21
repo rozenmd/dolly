@@ -661,7 +661,7 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
               baseRefName: "main",
               author: { login: "trusted", __typename: "User" },
               comments: { nodes: [] },
-              reviewThreads: { nodes: [] },
+              reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
               reviews: { nodes: [] },
             },
           },
