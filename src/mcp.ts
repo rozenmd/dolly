@@ -1191,6 +1191,10 @@ export class McpConnections {
     try {
       // Bounded by pages, total size and count: a server can keep returning pages.
       for (let page = 0; page < MAX_TOOL_PAGES; page++) {
+        // Each page carries the grant: stop as soon as the server is disconnected or changed.
+        if (page > 0 && !unchanged(entry, (await this.servers())[name]))
+          throw new Error(`${name} was disconnected, removed or changed while listing its tools`);
+
         const result = await session.request(
           "tools/list",
           cursor === undefined ? undefined : { cursor },
@@ -1340,9 +1344,12 @@ export class McpConnections {
       // Checked right before anything is sent, after every await: a Disconnect, removal or URL
       // change, or the program ending (a timeout), stops the call. Nothing goes out unrecorded.
       const mayCall = async (name: string, entry: McpServerEntry) => {
+        const current = (await this.servers())[name];
+
+        // After the storage read, which can itself outlast the program.
         if (ended) throw new Error("The program already ended; this call was not sent");
 
-        if (!unchanged(entry, (await this.servers())[name]))
+        if (!unchanged(entry, current))
           throw new Error(
             `${name} was disconnected, removed or changed while this program ran; nothing more was sent to it`,
           );

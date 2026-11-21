@@ -113,21 +113,26 @@ export type CallTool = (
 ) => Promise<typeof CallToolResult.Type>;
 
 /**
- * The key each tool is reachable under, collision-free. Dots would nest a path, so a dotted name
- * becomes underscores, but only when no other tool already has that key: names without dots keep
- * their exact key first, and a dotted name that would collide gets none (callTool reaches it).
+ * The key each tool is reachable under: always its exact MCP name, so a path means the same tool
+ * in every catalog snapshot. Dots nest (`get.item` is `tools.<server>.get.item`). A name gets no
+ * path when it can't nest cleanly (an empty segment) or when a shorter tool name is one of its
+ * prefixes (`get` and `get.item`); `callTool` reaches it by exact name. A path can disappear
+ * after a refresh, but never dispatches a different tool.
  */
 export function toolKeys(tools: CatalogTool[]) {
+  const names = new Set(tools.map((tool) => tool.name));
   const keys = new Map<string, string>();
 
-  for (const tool of tools)
-    if (!tool.name.includes(".") && !keys.has(tool.name)) keys.set(tool.name, tool.name);
+  for (const name of names) {
+    const segments = name.split(".");
 
-  for (const tool of tools) {
-    if (!tool.name.includes(".")) continue;
-    const key = tool.name.replaceAll(".", "_");
+    if (segments.some((segment) => segment === "")) continue;
 
-    if (!keys.has(key)) keys.set(key, tool.name);
+    const shadowed = segments
+      .slice(0, -1)
+      .some((_, index) => names.has(segments.slice(0, index + 1).join(".")));
+
+    if (!shadowed) keys.set(name, name);
   }
 
   return keys;
