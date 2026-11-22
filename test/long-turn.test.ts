@@ -211,51 +211,61 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-it("keeps the prompt and final answer of a long turn in a freshly opened view", async () => {
-  const model = longTurnModel();
-  const id = await claudeSession();
-  await prompt(id);
-
-  const read = async () =>
-    decode(await (await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })).text());
-
-  await expect.poll(async () => settled(await read()), { timeout: 30_000 }).toBe(true);
-  expect(model.rounds()).toBe(ROUNDS + 1);
-  const snapshot = await read();
-  expectPrompt(snapshot);
-  expectFinalAnswer(snapshot);
-});
-
-it("streams the final answer of a long turn over the live WebSocket", async () => {
-  const model = longTurnModel();
-  const id = await claudeSession();
-
-  const { socket, updates } = await openStream(id);
-
-  try {
-    await expect.poll(() => updates.length).toBeGreaterThan(0);
+it(
+  "keeps the prompt and final answer of a long turn in a freshly opened view",
+  { timeout: 30_000 },
+  async () => {
+    const model = longTurnModel();
+    const id = await claudeSession();
     await prompt(id);
-    await expect.poll(() => model.rounds(), { timeout: 30_000 }).toBe(ROUNDS + 1);
 
-    await expect.poll(() => settled(decode(updates.at(-1) ?? "")), { timeout: 10_000 }).toBe(true);
+    const read = async () =>
+      decode(await (await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })).text());
 
-    expectFinalAnswer(decode(updates.at(-1) ?? ""));
-  } finally {
-    socket.close();
-  }
-
-  // Reopening the view, as a page reload does, starts it at the prompt again.
-  const reopened = await openStream(id);
-
-  try {
-    await expect.poll(() => reopened.updates.length).toBeGreaterThan(0);
-    const snapshot = decode(reopened.updates[0] ?? "");
+    await expect.poll(async () => settled(await read()), { timeout: 30_000 }).toBe(true);
+    expect(model.rounds()).toBe(ROUNDS + 1);
+    const snapshot = await read();
     expectPrompt(snapshot);
     expectFinalAnswer(snapshot);
-  } finally {
-    reopened.socket.close();
-  }
-});
+  },
+);
+
+it(
+  "streams the final answer of a long turn over the live WebSocket",
+  { timeout: 30_000 },
+  async () => {
+    const model = longTurnModel();
+    const id = await claudeSession();
+
+    const { socket, updates } = await openStream(id);
+
+    try {
+      await expect.poll(() => updates.length).toBeGreaterThan(0);
+      await prompt(id);
+      await expect.poll(() => model.rounds(), { timeout: 30_000 }).toBe(ROUNDS + 1);
+
+      await expect
+        .poll(() => settled(decode(updates.at(-1) ?? "")), { timeout: 10_000 })
+        .toBe(true);
+
+      expectFinalAnswer(decode(updates.at(-1) ?? ""));
+    } finally {
+      socket.close();
+    }
+
+    // Reopening the view, as a page reload does, starts it at the prompt again.
+    const reopened = await openStream(id);
+
+    try {
+      await expect.poll(() => reopened.updates.length).toBeGreaterThan(0);
+      const snapshot = decode(reopened.updates[0] ?? "");
+      expectPrompt(snapshot);
+      expectFinalAnswer(snapshot);
+    } finally {
+      reopened.socket.close();
+    }
+  },
+);
 
 const decodePage = Schema.decodeUnknownSync(Schema.fromJsonString(HistoryPage));
 
