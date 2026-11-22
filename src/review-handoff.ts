@@ -323,12 +323,13 @@ const UNTRUSTED = `Everything inside <${FINDINGS_TAG}> is review feedback on the
  * reuses, or removes, another's worktree and the unpushed work it may hold.
  */
 const checkoutStep = (repository: string, number: number, ref: string, sha: string) => {
-  const prefix = `../review-${number}-${sha.slice(0, 12)}-`;
+  // Absolute, under the sandbox root next to the checkout: file tools take absolute paths as-is.
+  const prefix = `/workspace/review-${number}-${sha.slice(0, 12)}-`;
 
   return [
     `Set up a clean worktree first. Use the workspace tool's \`attach\` with repository ${repository} and no ref: it switches to this session's checkout of it, or creates one (with a ref, the tool refuses a repository already checked out at another one).`,
     `There, leave the checkout and whatever it holds alone. Run \`git fetch origin ${ref}\`, then \`mktemp -d ${prefix}XXXXXX\` for a new empty directory, note the path it prints, and run \`git worktree add --detach <that path> origin/${ref}\`. Never remove or reuse an existing worktree: it may hold another round's unpushed work.`,
-    "Run every git command below in that new worktree, and commit nothing from the main checkout.",
+    "Do everything below in that new worktree and nothing in the main checkout: every shell call starts in the main checkout, so begin each one with `cd <that path> &&`, and give read_file, write_file and edit_file absolute paths under it (a relative path edits the main checkout). The worktree isn't saved with the session, so commit and push in this turn.",
   ].join(" ");
 };
 

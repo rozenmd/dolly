@@ -1222,7 +1222,10 @@ it("hands findings to the session that opened the PR, whichever branch it pushed
   expect(handoffs[0]).toContain(
     "Use the workspace tool's `attach` with repository example/project and no ref",
   );
-  expect(handoffs[0]).toContain("`mktemp -d ../review-11-aaaaaaaaaaaa-XXXXXX`");
+  expect(handoffs[0]).toContain("`mktemp -d /workspace/review-11-aaaaaaaaaaaa-XXXXXX`");
+  // File tools resolve relative paths in the main checkout, so edits must name the worktree.
+  expect(handoffs[0]).toContain("begin each one with `cd <that path> &&`");
+  expect(handoffs[0]).toContain("give read_file, write_file and edit_file absolute paths under it");
   expect(handoffs[0]).toContain(
     "git worktree add --detach <that path> origin/allow-raw-githubusercontent",
   );
