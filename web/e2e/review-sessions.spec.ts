@@ -116,4 +116,11 @@ test("archiving the writable tab in a review's workspace does not open the revie
   ).toBeVisible();
   await page.getByRole("button", { name: "Archive session", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Ship the feature", exact: true })).toBeVisible();
+
+  // The workspace moves from Recent to Archived; its unarchived review doesn't hold it back.
+  const workspaces = page.getByRole("navigation", { name: "Workspaces", exact: true });
+
+  await expect(workspaces).not.toContainText("Fix review feedback");
+  await page.getByRole("button", { name: "Archived workspaces (1)", exact: true }).click();
+  await expect(workspaces).toContainText("Fix review feedback");
 });

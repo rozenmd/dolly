@@ -88,7 +88,8 @@ type Row = Member & {
 
 /**
  * One sidebar row per workspace, named after the session that started it. It is as recent as
- * its latest tab, busy while any of its sessions is, and archived only when all its tabs are.
+ * its latest tab, busy while any of its sessions is, and archived only when all its tabs are
+ * (automatic reviews aside, once other work was started in the workspace).
  */
 export function workspaceRows<T extends Row>(sessions: readonly T[]) {
   const ids = new Set(
@@ -101,7 +102,13 @@ export function workspaceRows<T extends Row>(sessions: readonly T[]) {
 
     if (!main) return [];
     const members = sessions.filter((session) => workspaceOf(sessions, session.id) === id);
-    const live = tabs.filter((session) => !session.archived);
+
+    // Work started in a review's workspace decides whether it is archived; the review can't.
+    const work = tabs.some((session) => !session.automation)
+      ? tabs.filter((session) => !session.automation)
+      : tabs;
+
+    const live = work.filter((session) => !session.archived);
     const newest = [...members].sort((a, b) => b.updatedAt - a.updatedAt);
     // Like the session list, only prompts to its own sessions move a workspace up.
     const updatedAt = Math.max(...tabs.map((session) => session.updatedAt));
