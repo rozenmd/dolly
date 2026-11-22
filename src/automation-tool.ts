@@ -47,7 +47,8 @@ export const OwnerInputDoc = defineDoc<{ submissions: SubmissionId[] }>({
 
 /**
  * The user messages the model is answering: from the newest entry back to the last final answer
- * (an assistant message with text, calling no tools). `undefined` if the scan stopped before finding one.
+ * (an assistant message that stopped on its own, with text and no tool calls). Compaction
+ * summaries and other Pi bookkeeping aren't inputs. `undefined` if the scan stopped before finding one.
  */
 export async function unanswered(
   page: (cursor: Cursor | undefined) => Promise<Page<EntryRecord, Cursor>>,
@@ -62,11 +63,16 @@ export async function unanswered(
 
     for (const entry of items)
       for (const message of [...(entry.model ?? [])].reverse()) {
-        if (message.role === "user") inputs.push(entry.id);
-        // An answer has text and calls no tools: a response cut short (by a steer, say) is
-        // stored empty, and leaves what it was answering unanswered.
+        // Inputs are `pi.user` entries, or an application's own kinds; Pi's other entries (a
+        // compaction summary, say) carry user-role text no one submitted.
+        if (message.role === "user" && (entry.kind === "pi.user" || !entry.kind.startsWith("pi.")))
+          inputs.push(entry.id);
+        // A finished answer: text, no tool calls, and stopped on its own. A response cut short
+        // by a steer is stored empty, and one stopped mid-stream is `aborted`; either leaves
+        // what it was answering unanswered.
         else if (
           message.role === "assistant" &&
+          message.stopReason === "stop" &&
           !message.content.some((block) => block.type === "toolCall") &&
           message.content.some((block) => block.type === "text" && block.text.trim() !== "")
         )
