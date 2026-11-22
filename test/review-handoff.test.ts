@@ -1217,18 +1217,16 @@ it("hands findings to the session that opened the PR, whichever branch it pushed
   expect(handoffs[0]).toContain("fix round 1/6");
   expect(handoffs[0]).toContain("git push origin HEAD:allow-raw-githubusercontent");
   // The session's checkout of the repository is at another ref, which the workspace tool won't
-  // move: it is told to switch to that checkout without a ref and change branch with git.
-  expect(handoffs[0]).toContain("switch to it with the workspace tool and no ref");
-  // Uncommitted or staged work never rides along, even on the PR's own branch: it gets a worktree.
+  // move, and may hold unrelated work: the fix gets a fresh worktree of the reviewed head, named
+  // for it, so neither that work nor an earlier round's leftovers can reach the PR.
   expect(handoffs[0]).toContain(
-    "Then run `git status --porcelain`, even when `allow-raw-githubusercontent` is already checked out",
+    "Use the workspace tool's `attach` with repository example/project and no ref",
   );
   expect(handoffs[0]).toContain(
-    "git worktree add ../review-fix origin/allow-raw-githubusercontent",
+    "git worktree add --detach ../review-aaaaaaaaaaaa origin/allow-raw-githubusercontent",
   );
-  expect(handoffs[0]).toContain(
-    "git switch allow-raw-githubusercontent || git switch -c allow-raw-githubusercontent origin/allow-raw-githubusercontent",
-  );
+  expect(handoffs[0]).toContain("Run every git command below in ../review-aaaaaaaaaaaa");
+  expect(handoffs[0]).toContain(`\`git rev-parse HEAD\` should be \`${"a".repeat(40)}\``);
   expect((await handoffState())?.pulls[`${repository}#11`]?.rounds).toBe(1);
 }, 60_000);
 
