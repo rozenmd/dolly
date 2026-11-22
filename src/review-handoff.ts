@@ -319,9 +319,8 @@ const UNTRUSTED = `Everything inside <${FINDINGS_TAG}> is review feedback on the
 /** First step of every handoff: the session may have moved its checkout since it opened the PR. */
 const checkoutStep = (repository: string, ref: string) =>
   [
-    `Find the right checkout first. Run \`git remote get-url origin\` and \`git branch --show-current\`; if that is ${repository} with \`${ref}\` checked out, work there.`,
-    `Otherwise, if this session already has a checkout of ${repository} (\`workspace status\`), switch to it with the workspace tool and no ref (with a ref, the tool refuses a repository already checked out at another one). If \`git status --porcelain\` is empty, run \`git fetch origin ${ref}\` and \`git switch ${ref} || git switch -c ${ref} origin/${ref}\`; if it has uncommitted work, leave that alone and run \`git fetch origin ${ref}\` and \`git worktree add ../review-fix origin/${ref}\`, then work in \`../review-fix\` (if it already exists from an earlier round, \`git -C ../review-fix checkout --detach origin/${ref}\` instead).`,
-    `With no checkout of ${repository} yet, check it out at \`${ref}\` with the workspace tool.`,
+    `Find the right checkout first. If \`git remote get-url origin\` is ${repository}, use this checkout; otherwise, if this session already has one (\`workspace status\`), switch to it with the workspace tool and no ref (with a ref, the tool refuses a repository already checked out at another one); with none, check out ${repository} at \`${ref}\` with the workspace tool.`,
+    `Then run \`git status --porcelain\`, even when \`${ref}\` is already checked out. If it lists anything, staged or not, that work isn't this fix and must not reach the PR: leave it alone, run \`git fetch origin ${ref}\` and \`git worktree add ../review-fix origin/${ref}\`, and work in \`../review-fix\` (if it already exists from an earlier round, \`git -C ../review-fix checkout --detach origin/${ref}\` instead). If it lists nothing, stay here: when \`git branch --show-current\` isn't \`${ref}\`, run \`git fetch origin ${ref}\` and \`git switch ${ref} || git switch -c ${ref} origin/${ref}\`.`,
     "Run every git command below in the checkout you chose.",
   ].join(" ");
 
