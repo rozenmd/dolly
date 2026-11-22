@@ -183,7 +183,10 @@ function makeSlackHost(
     );
   });
 
-  return { prepare, reply, working, announce };
+  const enabled = () =>
+    readSlackProfile(deps.storage).pipe(Effect.map((value) => value?.enabled === true));
+
+  return { prepare, reply, working, announce, enabled };
 }
 
 /** Slack routing, attachments and thread replies for the durable delivery task. */

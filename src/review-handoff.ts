@@ -318,7 +318,12 @@ const UNTRUSTED = `Everything inside <${FINDINGS_TAG}> is review feedback on the
 
 /** First step of every handoff: the session may have moved its checkout since it opened the PR. */
 const checkoutStep = (repository: string, ref: string) =>
-  `Find the right checkout first. Run \`git remote get-url origin\` and \`git branch --show-current\`. Work there only if it is ${repository} with \`${ref}\` checked out and no unrelated uncommitted work; otherwise check out ${repository} at \`${ref}\` with the workspace tool and work there. Run every git command below in that checkout.`;
+  [
+    `Find the right checkout first. Run \`git remote get-url origin\` and \`git branch --show-current\`; if that is ${repository} with \`${ref}\` checked out, work there.`,
+    `Otherwise, if this session already has a checkout of ${repository} (\`workspace status\`), switch to it with the workspace tool and no ref (with a ref, the tool refuses a repository already checked out at another one). If \`git status --porcelain\` is empty, run \`git fetch origin ${ref}\` and \`git switch ${ref} || git switch -c ${ref} origin/${ref}\`; if it has uncommitted work, leave that alone and run \`git fetch origin ${ref}\` and \`git worktree add ../review-fix origin/${ref}\`, then work in \`../review-fix\` (if it already exists from an earlier round, \`git -C ../review-fix checkout --detach origin/${ref}\` instead).`,
+    `With no checkout of ${repository} yet, check it out at \`${ref}\` with the workspace tool.`,
+    "Run every git command below in the checkout you chose.",
+  ].join(" ");
 
 const NEVER_MERGE = "Never merge the PR and never force-push.";
 
@@ -410,10 +415,13 @@ export function cappedComment(number: number) {
   return `Still not merge-ready after ${MAX_HANDOFF_ROUNDS} handed-off fix rounds on #${number}, so Dolly stopped handing review findings back to the session that opened it. Over to a human.`;
 }
 
+/** Marks the unavailable-session comment, so a post whose response was lost isn't repeated. */
+export const UNAVAILABLE_MARKER = "<!-- dolly:handoff-unavailable -->";
+
 /**
  * The comment posted, once per PR, when the session that opened it can't take review findings
  * (archived, read-only or deleted), after OpenSession's no-owner note: a stopped loop says so.
  */
 export function unavailableComment() {
-  return "Not merge-ready, and the Dolly session that opened this PR can no longer take review findings (it was archived, made read-only or deleted), so nobody is fixing them automatically. Over to a human, or ask Dolly to pick it up from a session.";
+  return `${UNAVAILABLE_MARKER}\n\nNot merge-ready, and the Dolly session that opened this PR can no longer take review findings (it was archived, made read-only or deleted), so nobody is fixing them automatically. Over to a human, or ask Dolly to pick it up from a session.`;
 }

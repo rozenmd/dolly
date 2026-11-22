@@ -247,6 +247,10 @@ export class Agent extends DurableObject<Env> {
       Effect.flatMap(SlackHostService, (host) => host.reply(thread, text)).pipe(
         Effect.provide(this.slackServices),
       ),
+    enabled: () =>
+      Effect.flatMap(SlackHostService, (host) => host.enabled()).pipe(
+        Effect.provide(this.slackServices),
+      ),
   });
   private readonly githubTask = githubDelivery({
     reply: (event, text) =>

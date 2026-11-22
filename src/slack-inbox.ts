@@ -47,6 +47,8 @@ export interface SlackHost {
   prepare(input: SlackDelivery, isNew: boolean): Effect.Effect<SlackPrepared, OperationError>;
   /** Post `text` in the thread. */
   reply(thread: SlackThread, text: string): Effect.Effect<void, OperationError>;
+  /** Whether Slack is configured and enabled now; Settings can turn it off with the token kept. */
+  enabled(): Effect.Effect<boolean, OperationError>;
   /** Add or remove the :eyes: reaction that shows a message has been picked up. */
   working(input: SlackDelivery, on: boolean): Effect.Effect<void, OperationError>;
   /** Tell the thread which Dolly session now owns it. */
@@ -84,7 +86,7 @@ async function answerText(tx: Tx, settled: SettledSubmissionRecord) {
   return failure ? `Run failed: ${failure}` : text;
 }
 
-export function slackDelivery(host: SlackHost) {
+export function slackDelivery(host: Omit<SlackHost, "enabled">) {
   return defineTask<TaskInput, Checkpoint, null>({
     name: "app.slack-delivery",
     version: 1,
@@ -273,7 +275,7 @@ type NoticeCheckpoint = { phase: "deliver" } | { phase: "reply"; text: string; a
  * work the session does unasked (a review handoff) is seen where the person talks to it. No
  * reactions: there is no Slack message to react to.
  */
-export function slackNotice(host: Pick<SlackHost, "reply">) {
+export function slackNotice(host: Pick<SlackHost, "reply" | "enabled">) {
   return defineTask<SlackNoticeInput, NoticeCheckpoint, null>({
     name: "app.slack-notice",
     version: 1,
@@ -319,9 +321,25 @@ export function slackNotice(host: Pick<SlackHost, "reply">) {
           Effect.gen(function* () {
             const { text, attempts } = task.state.checkpoint;
 
-            const result = text
-              ? yield* host.reply(task.input, text).pipe(Effect.result)
-              : Result.succeed(undefined);
+            // Nobody asked for this message, so it is never sent once Slack is turned off.
+            const enabled = yield* host.enabled().pipe(Effect.result);
+
+            if (Result.isSuccess(enabled) && !enabled.success) {
+              yield* Effect.logInfo({ event: "slack_notice_skipped_disabled" });
+
+              return yield* attempt("slack.notice.disabled", () =>
+                runtime.commit(
+                  () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
+                  context,
+                ),
+              );
+            }
+
+            const result = Result.isFailure(enabled)
+              ? Result.fail(enabled.failure)
+              : text
+                ? yield* host.reply(task.input, text).pipe(Effect.result)
+                : Result.succeed(undefined);
 
             if (Result.isSuccess(result) || attempts >= 4) {
               if (Result.isFailure(result))

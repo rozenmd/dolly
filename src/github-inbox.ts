@@ -23,6 +23,8 @@ import {
   cappedComment,
   handoffKey,
   unavailableComment,
+  UNAVAILABLE_MARKER,
+  type HandoffState,
   type LastReview,
   handoffMessage,
   nextHandoffState,
@@ -368,11 +370,17 @@ export function githubDelivery({
             const review = task.input;
             const key = handoffKey(review.repository, review.number);
 
+            let recorded: HandoffState | undefined;
+
             // What this review concluded is the next review's starting point, whatever the loop
             // does with it.
             yield* attempt("github.handoff.record", () =>
               runtime.commit(async (tx) => {
                 const state = await tx.doc(ReviewHandoffs);
+                const current = state.pulls[key];
+
+                // A copy: the document is only readable inside this transaction.
+                if (current) recorded = { ...current };
 
                 state.pulls[key] = {
                   ...state.pulls[key],
@@ -410,30 +418,59 @@ export function githubDelivery({
                   )
                 : undefined;
 
+            // A session opened this PR but can't take its findings: say so on the PR once, so a
+            // stopped loop isn't silent. Recorded only once GitHub has the comment, so a failed
+            // post is retried by the next review; the marker catches one whose response was lost.
+            if (
+              found === "unavailable" &&
+              !recorded?.unavailableAnnounced &&
+              planHandoff(recorded, review.sha, verdict).kind === "fix"
+            ) {
+              const seen = yield* handoff.pull(review).pipe(
+                Effect.map((context) =>
+                  context.discussion.some(
+                    (comment) =>
+                      comment.author === context.self && comment.body.includes(UNAVAILABLE_MARKER),
+                  ),
+                ),
+                Effect.catchTag("OperationError", () => Effect.succeed(false)),
+              );
+
+              const posted =
+                seen ||
+                (yield* handoff.comment(review, unavailableComment()).pipe(
+                  Effect.as(true),
+                  Effect.catchTag("OperationError", (error) =>
+                    Effect.logError({
+                      event: "github_review_handoff_unavailable_comment_failed",
+                      error: exceptionDetails(error),
+                      details: error.details,
+                    }).pipe(Effect.as(false)),
+                  ),
+                ));
+
+              if (posted)
+                yield* attempt("github.handoff.unavailable", () =>
+                  runtime.commit(async (tx) => {
+                    const state = await tx.doc(ReviewHandoffs);
+
+                    state.pulls[key] = {
+                      ...state.pulls[key],
+                      rounds: state.pulls[key]?.rounds ?? 0,
+                      unavailableAnnounced: true,
+                    };
+
+                    return undefined;
+                  }, context),
+                );
+            }
+
             let announce = false;
-            let unavailable = false;
 
             yield* attempt("github.handoff.commit", () =>
               runtime.commit(async (tx) => {
                 const state = await tx.doc(ReviewHandoffs);
                 const prior = state.pulls[key];
-
-                // A session opened this PR but can't take its findings: say so on the PR once, so
-                // a stopped loop isn't silent.
-                if (found === "unavailable" && head && current) {
-                  const plan = planHandoff(prior, review.sha, verdict);
-
-                  if (plan.kind === "fix" && !prior?.unavailableAnnounced) {
-                    unavailable = true;
-                    state.pulls[key] = {
-                      ...prior,
-                      rounds: prior?.rounds ?? 0,
-                      unavailableAnnounced: true,
-                    };
-                  }
-
-                  return done;
-                }
 
                 if (!owner || !target || !findings || !head || !pull) return done;
                 const plan = planHandoff(prior, review.sha, verdict);
@@ -492,18 +529,6 @@ export function githubDelivery({
               findings: findings?.items.length ?? null,
               verdict,
             });
-
-            // Best effort, once: recorded already, and the review itself is posted.
-            if (unavailable)
-              yield* handoff.comment(review, unavailableComment()).pipe(
-                Effect.catchTag("OperationError", (error) =>
-                  Effect.logError({
-                    event: "github_review_handoff_unavailable_comment_failed",
-                    error: exceptionDetails(error),
-                    details: error.details,
-                  }),
-                ),
-              );
 
             // Best effort, once: the cap is already recorded and the task already finished.
             if (announce)

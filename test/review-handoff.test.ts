@@ -19,6 +19,7 @@ import { ReviewHandoffs } from "../src/review-handoff";
 import type { GitHubRequest } from "../src/github-contracts";
 import { GitHubThreads } from "../src/github-inbox";
 import { SlackThreads } from "../src/slack-inbox";
+import type { SlackProfile } from "../src/slack";
 import { ConversationWorkspace } from "../src/workspace";
 
 type GitHubOperation = typeof GitHubRequest.Type.operation;
@@ -277,6 +278,12 @@ function fakeGitHub(url: URL, init: RequestInit | undefined) {
 
   const comments = path.match(/^\/repos\/example\/project\/issues\/(\d+)\/comments$/);
 
+  if (comments && method === "POST" && failCommentPosts > 0) {
+    failCommentPosts--;
+
+    return Response.json({ message: "Service Unavailable" }, { status: 503 });
+  }
+
   if (comments && method === "POST") {
     const body: { body: string } = JSON.parse(String(init?.body));
     github.comments.push({ number: Number(comments[1]), body: body.body });
@@ -307,6 +314,14 @@ function pullReview(number: number) {
           body: "The null config is intentional for now.",
           createdAt: "2026-01-01T00:00:00Z",
         },
+        // What Dolly commented on the PR, as GitHub lists it back.
+        ...github.comments
+          .filter((comment) => comment.number === number)
+          .map((comment) => ({
+            author: bot,
+            body: comment.body,
+            createdAt: "2026-01-02T00:00:00Z",
+          })),
       ],
     },
     reviewThreads: {
@@ -508,6 +523,9 @@ let reviewGate: Promise<void> = Promise.resolve();
 let failReviewPosts = 0;
 let pushDuringRetry = "";
 
+/** PR comment posts GitHub fails before accepting one. */
+let failCommentPosts = 0;
+
 /** GitHub writes the review model attempts instead of reviewing, in order; empty for a normal review. */
 let reviewWrites: GitHubOperation[] = [];
 
@@ -642,6 +660,7 @@ beforeEach(async () => {
   writeResults = [];
   failReviewPosts = 0;
   pushDuringRetry = "";
+  failCommentPosts = 0;
   bulkyPulls = [];
   handoffs = [];
   reviewPrompts = [];
@@ -1144,22 +1163,44 @@ it("doesn't hand findings to an archived session, or when the review gave no ver
 
   expect(archived.status).toBe(200);
 
+  // GitHub is down when the PR should hear that nobody takes its findings: nothing is recorded.
+  failCommentPosts = 1;
   github.heads["10"] = "b".repeat(40);
   verdicts.push("Broken.\nVERDICT: blocking=1 findings=1 confidence=1");
   expect(await pullRequestHook("synchronize", 10, "b".repeat(40))).toBe(202);
   await expect.poll(() => github.reviews, { timeout: 15_000 }).toHaveLength(2);
+  await expect.poll(() => reviewsSettled(10), { timeout: 15_000 }).toBe(true);
+  expect(failCommentPosts).toBe(0);
+  expect(github.comments).toEqual([]);
+  expect((await handoffState())?.pulls[`${repository}#10`]?.unavailableAnnounced).toBeUndefined();
 
-  // The PR says once that the session that opened it can't take its findings.
-  await expect
-    .poll(() => github.comments, { timeout: 15_000 })
-    .toEqual([{ number: 10, body: expect.stringContaining("can no longer take review findings") }]);
-  expect(handoffs).toEqual([]);
-
+  // The next unsatisfied review says it, once.
   github.heads["10"] = "c".repeat(40);
   verdicts.push("Still broken.\nVERDICT: blocking=1 findings=1 confidence=1");
   expect(await pullRequestHook("synchronize", 10, "c".repeat(40))).toBe(202);
-  await expect.poll(() => github.reviews, { timeout: 15_000 }).toHaveLength(3);
+  await expect
+    .poll(() => github.comments, { timeout: 15_000 })
+    .toEqual([{ number: 10, body: expect.stringContaining("can no longer take review findings") }]);
   await expect.poll(() => reviewsSettled(10), { timeout: 15_000 }).toBe(true);
+  expect(handoffs).toEqual([]);
+
+  // Even when the record of it was lost (GitHub took the post but its answer never came back),
+  // the comment on the PR is enough: it isn't posted twice.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    await agent["harness"].commit(async (tx) => {
+      delete (await tx.doc(ReviewHandoffs)).pulls[`${repository}#10`]?.unavailableAnnounced;
+    }, BACKGROUND_CONTEXT);
+  });
+
+  github.heads["10"] = "d".repeat(40);
+  verdicts.push("Still broken.\nVERDICT: blocking=1 findings=1 confidence=1");
+  expect(await pullRequestHook("synchronize", 10, "d".repeat(40))).toBe(202);
+  await expect.poll(() => github.reviews, { timeout: 15_000 }).toHaveLength(4);
+  await expect
+    .poll(async () => (await handoffState())?.pulls[`${repository}#10`]?.unavailableAnnounced, {
+      timeout: 15_000,
+    })
+    .toBe(true);
   expect(github.comments).toHaveLength(1);
   expect(handoffs).toEqual([]);
 }, 60_000);
@@ -1175,6 +1216,12 @@ it("hands findings to the session that opened the PR, whichever branch it pushed
   await expect.poll(() => handoffs, { timeout: 15_000 }).toHaveLength(1);
   expect(handoffs[0]).toContain("fix round 1/6");
   expect(handoffs[0]).toContain("git push origin HEAD:allow-raw-githubusercontent");
+  // The session's checkout of the repository is at another ref, which the workspace tool won't
+  // move: it is told to switch to that checkout without a ref and change branch with git.
+  expect(handoffs[0]).toContain("switch to it with the workspace tool and no ref");
+  expect(handoffs[0]).toContain(
+    "git switch allow-raw-githubusercontent || git switch -c allow-raw-githubusercontent origin/allow-raw-githubusercontent",
+  );
   expect((await handoffState())?.pulls[`${repository}#11`]?.rounds).toBe(1);
 }, 60_000);
 
@@ -1226,6 +1273,21 @@ it("hands findings to a session a Slack thread owns, and posts its answer in tha
       },
     ]);
   await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Handled 1");
+
+  // Slack is turned off in Settings, with its token kept: the next round still runs in the
+  // session, but nothing is posted to Slack.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const saved = await state.storage.get<SlackProfile>("slack:profile");
+    await state.storage.put("slack:profile", { ...saved, enabled: false });
+  });
+
+  github.heads["21"] = "b".repeat(40);
+  verdicts.push("Still broken.\nVERDICT: blocking=1 findings=1 confidence=1");
+  expect(await pullRequestHook("synchronize", 21, "b".repeat(40))).toBe(202);
+  await expect.poll(() => handoffs, { timeout: 15_000 }).toHaveLength(2);
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Handled 2");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  expect(slackPosts.filter((post) => post.method === "chat.postMessage")).toHaveLength(1);
 }, 60_000);
 
 /** Turn automatic reviews on or off, as Settings > GitHub does. */
