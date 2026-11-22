@@ -335,6 +335,15 @@ const checkoutStep = (repository: string, number: number, ref: string, sha: stri
 
 const NEVER_MERGE = "Never merge the PR and never force-push.";
 
+/**
+ * Push only onto the commit the round started from. A plain push only checks for a fast-forward,
+ * so if someone rewound the branch while the round worked, the fix (built on the old head) would
+ * fast-forward from the rewound one and quietly restore the removed commits. The lease refuses
+ * any branch that moved; the ancestry check keeps the lease from authorizing a rewrite.
+ */
+const pushStep = (ref: string, start: string) =>
+  `Commit (stage specific files), then push only on top of ${start}: \`git merge-base --is-ancestor ${start} HEAD\` must succeed, then \`git push --force-with-lease=refs/heads/${ref}:${start} origin HEAD:refs/heads/${ref}\`. If the push is rejected as stale, the branch changed while you worked (someone pushed or rewound it): don't fetch and retry and don't force; say the round was superseded and stop.`;
+
 /** The message the owning session gets for `plan`; undefined when it gets none. */
 export function handoffMessage(
   review: Review,
@@ -360,7 +369,7 @@ export function handoffMessage(
           `0. ${checkoutStep(review.repository, review.number, pull.ref, review.sha)}`,
           `1. Check the branch hasn't moved: \`git rev-parse HEAD\` should be \`${review.sha}\`. These findings describe \`${head}\`; if the branch has moved on, don't patch against stale feedback: say it was superseded and let the fresh review run instead.`,
           "2. Address every actionable finding you can confirm in the code. If you disagree with one, leave the code unchanged and reply in that thread with github reply_to_review_comment explaining why; never skip one silently.",
-          `3. Commit (stage specific files) and push: \`git push origin HEAD:refs/heads/${pull.ref}\`, to ${review.repository} and nowhere else.`,
+          `3. ${pushStep(pull.ref, review.sha)} Push to ${review.repository} and nowhere else.`,
           "4. Reply in each addressed inline thread with what you did, e.g. `Fixed in <sha>`, with github reply_to_review_comment and the thread's comment id above, once per thread.",
           `5. ${NEVER_MERGE}`,
         ].join("\n"),
@@ -380,8 +389,8 @@ export function handoffMessage(
         [
           "Then:",
           `0. ${checkoutStep(review.repository, review.number, pull.ref, review.sha)}`,
-          `1. Check the branch hasn't moved: \`git rev-parse HEAD\` should be \`${review.sha}\`. These findings describe \`${head}\`; if the branch has moved on, check they still apply.`,
-          `2. Fix each finding that is right and cheap to fix within this PR's scope. Commit (stage specific files) and push: \`git push origin HEAD:refs/heads/${pull.ref}\`.`,
+          `1. Note the commit \`git rev-parse HEAD\` prints: it should be \`${review.sha}\`. These findings describe \`${head}\`; if the branch has moved on, check they still apply.`,
+          `2. Fix each finding that is right and cheap to fix within this PR's scope. ${pushStep(pull.ref, "<the commit step 1 printed>")}`,
           "3. For each one you leave, reply in its thread saying why, with github reply_to_review_comment.",
           `4. ${NEVER_MERGE}`,
         ].join("\n"),

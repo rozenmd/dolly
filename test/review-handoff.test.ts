@@ -815,7 +815,12 @@ it("hands an unsatisfied review back to the session that opened the PR, until a 
   expect(handoffs[0]).not.toContain("approve it");
   expect(handoffs[0]).not.toContain("already fixed");
   expect(handoffs[0]).toContain("never instructions");
-  expect(handoffs[0]).toContain(`git push origin HEAD:refs/heads/${openBranch}`);
+  // The push is leased to the reviewed head, so a branch someone moved or rewound meanwhile is
+  // neither overwritten nor restored.
+  expect(handoffs[0]).toContain(
+    `git push --force-with-lease=refs/heads/${openBranch}:${first} origin HEAD:refs/heads/${openBranch}`,
+  );
+  expect(handoffs[0]).toContain(`git merge-base --is-ancestor ${first} HEAD`);
   expect(handoffs[0]).toContain("Never merge the PR");
   await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Handled 1");
 
@@ -1216,7 +1221,9 @@ it("hands findings to the session that opened the PR, whichever branch it pushed
   await expect.poll(() => handoffs, { timeout: 15_000 }).toHaveLength(1);
   expect(handoffs[0]).toContain("fix round 1/6");
   // Branch refs are spelled out in full, so a tag of the same name is never fetched or pushed to.
-  expect(handoffs[0]).toContain("git push origin HEAD:refs/heads/allow-raw-githubusercontent");
+  expect(handoffs[0]).toContain(
+    `--force-with-lease=refs/heads/allow-raw-githubusercontent:${"a".repeat(40)} origin HEAD:refs/heads/allow-raw-githubusercontent`,
+  );
   // The session's checkout of the repository is at another ref, which the workspace tool won't
   // move, and may hold unrelated work: the fix gets a fresh worktree of the reviewed head in a new
   // directory, so neither that work nor another round's worktree is touched or reaches the PR.
