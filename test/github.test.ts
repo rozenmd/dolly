@@ -1854,11 +1854,11 @@ it("posts inline reviews only against the current head and diff, and never appro
   expect(writes[0].body).not.toHaveProperty("event");
   expect(writes[0].body).toMatchObject({
     commit_id: head,
-    comments: [
-      { path: "a.ts", line: 2, side: "RIGHT", body: expect.stringContaining("posted by Dolly") },
-    ],
+    body: "Looks close",
+    comments: [{ path: "a.ts", line: 2, side: "RIGHT", body: "Use a constant" }],
   });
   expect(writes[1].body).toMatchObject({ event: "COMMENT" });
+  expect(writes[2].body).toEqual({ body: "Done" });
 
   for (const event of ["APPROVE", "REQUEST_CHANGES"])
     expect(

@@ -82,8 +82,6 @@ export function invalidAnchors(
   return problems;
 }
 
-export const REVIEW_FOOTER = "\n\n<sub>— posted by Dolly</sub>";
-
 /**
  * Stamped by the host on every automatic review's body. GitHub also files each thread reply as a
  * bodiless review on the head it was made at, so only this marks Dolly's actual review of a head.
@@ -91,12 +89,18 @@ export const REVIEW_FOOTER = "\n\n<sub>— posted by Dolly</sub>";
 export const AUTOMATIC_REVIEW_MARKER = "<!-- dolly:automatic-review -->";
 
 /**
+ * Footer earlier versions appended to every review body and comment. Nothing posts it any more; it
+ * is only recognized on reviews posted before the stamp.
+ */
+const LEGACY_REVIEW_FOOTER = "<sub>— posted by Dolly</sub>";
+
+/**
  * Whether a review body (of this App's, on the head) is its automatic review: stamped, or, for
- * reviews posted before the stamp, carrying the footer every Dolly review body ends with. The
+ * reviews posted before the stamp, carrying the footer earlier versions ended every body with. The
  * bodiless records GitHub files for thread replies match neither.
  */
 export const isAutomaticReview = (body: string | null | undefined) =>
-  body?.includes(AUTOMATIC_REVIEW_MARKER) === true || body?.includes(REVIEW_FOOTER.trim()) === true;
+  body?.includes(AUTOMATIC_REVIEW_MARKER) === true || body?.includes(LEGACY_REVIEW_FOOTER) === true;
 
 /**
  * `body` with the automatic-review stamp added, cut to fit `limit` so a body the tool accepted
