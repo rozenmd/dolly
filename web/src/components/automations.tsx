@@ -162,7 +162,8 @@ export function AutomationsSettings() {
 
       {editing && (
         <AutomationForm
-          key={editing === "new" ? "new" : editing.id}
+          // A row saved since the form opened opens afresh: Edit again must show what is saved now.
+          key={editing === "new" ? "new" : `${editing.id}:${editing.updatedAt}`}
           automation={editing === "new" ? undefined : editing}
           onClose={() => setEditing(null)}
           onSaved={() => {
@@ -433,7 +434,9 @@ function AutomationForm({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [initial] = useState(() => initialValues(automation));
+  /** The automation as the form opened it: its values and the access an edit is made against. */
+  const [opened] = useState(automation);
+  const [initial] = useState(() => initialValues(opened));
   const [name, setName] = useState(initial.name);
   const [prompt, setPrompt] = useState(initial.prompt);
   const [when, setWhen] = useState<When>(initial.when);
@@ -498,14 +501,16 @@ function AutomationForm({
     // An access change is made against the access shown: the server refuses it if another
     // tab or the API changed that since, rather than undo (say) a switch to read-only.
     const body =
-      automation && patch.readOnly !== undefined
+      opened && patch.readOnly !== undefined
         ? {
             ...patch,
+            // From the same snapshot as the form's values, never a fresher prop: stale values
+            // paired with current access would pass the server's check.
             accessWas: {
-              readOnly: automation.readOnly,
-              mcpServers: automation.mcpServers,
-              repository: automation.workspace?.repository ?? null,
-              ref: automation.workspace?.ref ?? null,
+              readOnly: opened.readOnly,
+              mcpServers: opened.mcpServers,
+              repository: opened.workspace?.repository ?? null,
+              ref: opened.workspace?.ref ?? null,
             },
           }
         : patch;

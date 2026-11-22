@@ -266,7 +266,7 @@ test("creates, runs, pauses and deletes an automation, and marks its sessions in
   await page.getByLabel("Time zone").fill("UTC");
   await page.getByRole("button", { name: "Repository" }).click();
   await page.getByRole("option", { name: /project/ }).click();
-  await page.getByLabel("Linear").click();
+  await page.getByLabel("Linear", { exact: true }).click();
   await page.getByRole("button", { name: "Create automation" }).click();
 
   await expect(page.getByText("Nightly dependency check")).toBeVisible();
@@ -557,4 +557,124 @@ test("edits send only what changed, so they never undo a pause or move a schedul
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByText("Deploy reminder")).toBeVisible();
   expect(updated.at(-1)).toEqual({ id: "a2", body: { name: "Deploy reminder" } });
+});
+
+test("reopening Edit after a refused access edit shows the saved access, never the stale form", async ({
+  page,
+}) => {
+  const now = Date.now();
+
+  let automation: Automation = {
+    id: "a1",
+    name: "Linear triage",
+    prompt: "Triage new issues.",
+    enabled: true,
+    readOnly: false,
+    workspace: { repository: "octocat/project" },
+    mcpServers: [],
+    createdAt: now,
+    updatedAt: now,
+    runs: [],
+  };
+
+  const saved: (typeof Body.Type)[] = [];
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+
+    if (path === "/api/auth") return route.fulfill({ json: auth });
+
+    if (path === "/api/automations" && method === "GET")
+      return route.fulfill({ json: { automations: [automation] } });
+
+    if (path === "/api/connections")
+      return route.fulfill({
+        json: {
+          mcpServers: [
+            {
+              name: "linear",
+              transport: "http",
+              target: "https://mcp.linear.app/mcp",
+              headerKeys: [],
+              status: "connected",
+            },
+          ],
+        },
+      });
+
+    if (path === "/api/integrations/github/repositories")
+      return route.fulfill({
+        json: {
+          repositories: [
+            {
+              fullName: "octocat/project",
+              defaultBranch: "main",
+              private: true,
+              description: null,
+              registered: true,
+            },
+          ],
+        },
+      });
+
+    if (path === "/api/automations/a1" && method === "PUT") {
+      const body = Schema.decodeUnknownSync(Body)(route.request().postDataJSON());
+      const seen = body.accessWas;
+
+      // The server's check: an access edit made against other access than it holds is refused.
+      if (
+        seen &&
+        (seen.readOnly !== automation.readOnly ||
+          seen.mcpServers.join() !== automation.mcpServers.join())
+      )
+        return route.fulfill({
+          status: 400,
+          json: { error: "Its repository, read-only or MCP servers changed since you opened it." },
+        });
+
+      saved.push(body);
+      automation = {
+        ...automation,
+        name: body.name ?? automation.name,
+        readOnly: body.readOnly ?? automation.readOnly,
+        mcpServers: body.mcpServers ? [...body.mcpServers] : automation.mcpServers,
+        updatedAt: automation.updatedAt + 1,
+      };
+
+      return route.fulfill({ json: automation });
+    }
+
+    return route.fulfill({ json: [] });
+  });
+
+  await page.goto("/settings/automations", { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Manage Linear triage" }).click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+
+  // Another tab makes it read-only while this form is open.
+  automation = { ...automation, readOnly: true, updatedAt: now + 10 };
+  await page.getByRole("button", { name: "Refresh automations" }).click();
+
+  await page.getByLabel("Linear", { exact: true }).click();
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("alert")).toHaveText(/changed since you opened it/);
+
+  // Edit again, without Cancel: the form shows read-only as saved, not this form's values.
+  await page.getByRole("button", { name: "Manage Linear triage" }).click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  expect(
+    await page
+      .getByLabel(/Read-only/)
+      .evaluate((element) => element instanceof HTMLInputElement && element.checked),
+  ).toBe(true);
+
+  await page.getByLabel("Name").fill("Linear triage (read-only)");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("Linear triage (read-only)")).toBeVisible();
+
+  // Only the rename was saved: nothing ever turned read-only off.
+  expect(saved).toEqual([{ name: "Linear triage (read-only)" }]);
+  expect(automation.readOnly).toBe(true);
 });
