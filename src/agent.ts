@@ -321,6 +321,8 @@ export class Agent extends DurableObject<Env> {
   private automations!: Automations;
   /** The earliest pending automation fire, folded into the alarm (automations.ts). */
   private automationWake: number | undefined;
+  /** Fires of automation saves still committing, kept in every alarm until each save re-arms. */
+  private readonly automationSaves = new Map<object, number>();
   private readonly scheduler = new Scheduler(
     () => this.harness,
     (conversationId) => this.startedFromWeb(conversationId),
@@ -1260,8 +1262,12 @@ export class Agent extends DurableObject<Env> {
       harness: () => this.harness,
       agent: (automation) => this.automationAgent(automation),
       started: (conversationId, automation) => this.automationStarted(conversationId, automation),
-      prearm: (at) =>
-        Effect.runPromise(
+      prearm: async (at) => {
+        const token = {};
+
+        // Registered first, so any arm() from here on keeps this fire in the alarm.
+        this.automationSaves.set(token, at);
+        await Effect.runPromise(
           this.alarmPermit.withPermit(
             attempt("alarm.prearm", async () => {
               const current = await this.ctx.storage.getAlarm();
@@ -1269,7 +1275,10 @@ export class Agent extends DurableObject<Env> {
               if (current === null || current > at) await this.ctx.storage.setAlarm(at);
             }),
           ),
-        ),
+        );
+
+        return () => this.automationSaves.delete(token);
+      },
       rearm: async () => {
         this.automationWake = await this.automations.nextWake();
         await Effect.runPromise(this.arm(this.harness.wake()));
@@ -1389,10 +1398,13 @@ export class Agent extends DurableObject<Env> {
         const now = yield* Clock.currentTimeMillis;
         const harnessAt = wake.active ? Math.min(now + 60_000, wake.at ?? Infinity) : wake.at;
 
+        const automationAt = Math.min(
+          this.automationWake ?? Infinity,
+          ...this.automationSaves.values(),
+        );
+
         const at =
-          this.automationWake === undefined
-            ? harnessAt
-            : Math.min(harnessAt ?? Infinity, this.automationWake);
+          automationAt === Infinity ? harnessAt : Math.min(harnessAt ?? Infinity, automationAt);
 
         yield* at === undefined
           ? attempt("alarm.delete", () => this.ctx.storage.deleteAlarm())

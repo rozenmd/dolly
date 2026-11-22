@@ -619,8 +619,9 @@ export type AutomationHost = {
   /**
    * Have the alarm go off by `at`, before the change that needs it commits: a restart right
    * after the commit then still finds the alarm. An early alarm finds nothing due and re-arms.
+   * Every alarm change keeps `at` until the returned release is called, after the save re-arms.
    */
-  prearm: (at: number) => Promise<void>;
+  prearm: (at: number) => Promise<() => void>;
   /** The earliest pending fire changed; re-arm the alarm to it. */
   rearm: () => Promise<void>;
   now: () => number;
@@ -630,9 +631,6 @@ export type AutomationHost = {
 const ATTEMPTS = 5;
 
 export class Automations {
-  /** Pending fires of saves still committing; nextWake counts them so a rearm can't drop one. */
-  private readonly committing = new Map<object, number>();
-
   constructor(private readonly host: AutomationHost) {}
 
   private async index() {
@@ -670,13 +668,8 @@ export class Automations {
       const pending = pendingAfterSave(automation, previous, now);
       const revision = previous?.revision ?? 0;
 
-      const token = {};
-
       // Armed before the commit: a restart right after it still finds the alarm.
-      if (pending !== undefined) {
-        this.committing.set(token, pending);
-        await this.host.prearm(pending);
-      }
+      const release = pending === undefined ? undefined : await this.host.prearm(pending);
 
       try {
         const outcome = await this.host.harness().commit(async (tx) => {
@@ -710,8 +703,12 @@ export class Automations {
 
         if (outcome !== "changed") return outcome.saved;
       } finally {
-        this.committing.delete(token);
-        await this.host.rearm();
+        // Re-armed from the index before the fire is released, so no alarm change drops it.
+        try {
+          await this.host.rearm();
+        } finally {
+          release?.();
+        }
       }
     }
 
@@ -821,14 +818,11 @@ export class Automations {
     return { error: "Run not started; try again" };
   }
 
-  /** The earliest pending fire of any automation, including saves still committing. */
+  /** The earliest pending fire of any automation. */
   async nextWake() {
-    const times = [
-      ...Object.values(await this.index()).flatMap((entry) =>
-        entry.nextRunAt === undefined ? [] : [entry.nextRunAt],
-      ),
-      ...this.committing.values(),
-    ];
+    const times = Object.values(await this.index()).flatMap((entry) =>
+      entry.nextRunAt === undefined ? [] : [entry.nextRunAt],
+    );
 
     return times.length ? Math.min(...times) : undefined;
   }

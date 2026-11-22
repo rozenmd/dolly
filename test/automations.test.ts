@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
 import { ConversationWorkspace, READ_ONLY_TOOLS } from "../src/workspace";
@@ -695,12 +696,17 @@ it("keeps the alarm of a save interrupted right after it committed", async () =>
   model(() => answer("Reminded"));
   const at = realNow() + 3_600_000;
 
-  // As if the object restarted after the save committed but before it re-armed the alarm.
+  // As if the object restarted after the save committed but before it re-armed the alarm, while
+  // another session going idle re-armed for the harness alone in the meantime.
   await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
     await state.storage.deleteAlarm();
     const automations = agent["automations"];
 
-    automations["host"].rearm = () => Promise.reject(new Error("Restarted"));
+    automations["host"].rearm = async () => {
+      await Effect.runPromise(agent["arm"]({ active: false }));
+      throw new Error("Restarted");
+    };
+
     await expect(
       automations.create({
         name: "Reminder",
