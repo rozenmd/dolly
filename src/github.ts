@@ -33,7 +33,6 @@ import {
   budgetPatches,
   invalidAnchors,
   isAutomaticReview,
-  REVIEW_FOOTER,
 } from "./github-review";
 import { attempt, OperationError } from "./operations";
 import { MAX_IMAGE_BYTES } from "./images";
@@ -1778,7 +1777,7 @@ function makeGitHub(
 
       if (op.action === "reply_to_review_comment") {
         const reply = yield* api(`${root}/comments/${op.comment_id}/replies`, token, {
-          body: `${op.body}${REVIEW_FOOTER}`,
+          body: op.body,
         }).pipe(Effect.flatMap(decode(InlineComment)));
 
         return {
@@ -1819,11 +1818,8 @@ function makeGitHub(
 
       const request: Extract<GitHubBody, { commit_id: string }> = {
         commit_id: op.commit_id,
-        body: op.body ? `${op.body}${REVIEW_FOOTER}` : "",
-        comments: op.comments.map((comment) => ({
-          ...comment,
-          body: `${comment.body}${REVIEW_FOOTER}`,
-        })),
+        body: op.body ?? "",
+        comments: op.comments,
       };
 
       // Omitting event leaves the review PENDING (unsubmitted) on GitHub.
@@ -2221,7 +2217,7 @@ function makeGitHub(
 
     yield* api(root, token, {
       commit_id: event.sha,
-      body: `${text.slice(0, 16_384)}${REVIEW_FOOTER}\n\n${AUTOMATIC_REVIEW_MARKER}`,
+      body: `${text.slice(0, 16_384)}\n\n${AUTOMATIC_REVIEW_MARKER}`,
       event: "COMMENT",
       comments: [],
     });
