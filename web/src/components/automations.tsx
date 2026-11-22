@@ -23,6 +23,7 @@ import {
   type Automation,
   type AutomationRun,
 } from "../lib/automations";
+import { AUTOMATION_RECIPES } from "../lib/automation-recipes";
 import { ago } from "../lib/time";
 import { untilLabel } from "../lib/scheduled";
 import { RowMenu, displayName } from "./connections";
@@ -422,7 +423,7 @@ function patchOf(body: ApiBody, initial: ApiBody): ApiBody {
 }
 
 const McpNames = Schema.Struct({
-  mcpServers: Schema.Array(Schema.Struct({ name: Schema.String })),
+  mcpServers: Schema.Array(Schema.Struct({ name: Schema.String, status: Schema.String })),
 });
 
 function AutomationForm({
@@ -449,22 +450,34 @@ function AutomationForm({
   const [model, setModel] = useState(initial.model);
   const [mcpServers, setMcpServers] = useState(initial.mcpServers);
   const [available, setAvailable] = useState<readonly string[]>([]);
+  /** Whether `available` is known, so recipes don't tick servers before they are listed. */
+  const [loaded, setLoaded] = useState(false);
+  /** Servers whose live status is connected: a recipe needs all of its own. */
+  const [connected, setConnected] = useState<readonly string[]>([]);
+  const [connectionsFailed, setConnectionsFailed] = useState(false);
   const [enabled, setEnabled] = useState(initial.enabled);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [picked, setPicked] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
 
     request("/connections", undefined, controller.signal)
-      .then((text) =>
-        setAvailable(
-          Schema.decodeUnknownSync(Schema.fromJsonString(McpNames))(text).mcpServers.map(
-            (server) => server.name,
-          ),
-        ),
-      )
-      .catch(() => {});
+      .then((text) => {
+        const servers = Schema.decodeUnknownSync(Schema.fromJsonString(McpNames))(text).mcpServers;
+
+        setAvailable(servers.map((server) => server.name));
+        setConnected(
+          servers.filter((server) => server.status === "connected").map((server) => server.name),
+        );
+        setLoaded(true);
+      })
+      // Unknown isn't "none connected": recipes needing servers stay off rather than save
+      // without them.
+      .catch(() => {
+        if (!controller.signal.aborted) setConnectionsFailed(true);
+      });
 
     return () => controller.abort();
   }, []);
@@ -473,6 +486,17 @@ function AutomationForm({
 
   async function save(event: FormEvent) {
     event.preventDefault();
+
+    // A recipe's prompt is about "this repository", and read-only runs only read one.
+    if (!repository && (picked || readOnly)) {
+      setError(
+        picked
+          ? "Pick the repository this recipe works on."
+          : "Pick the repository a read-only automation reads.",
+      );
+
+      return;
+    }
 
     const built = bodyOf({
       name,
@@ -537,6 +561,65 @@ function AutomationForm({
   return (
     <form className="settings-card automation-form" onSubmit={(event) => void save(event)}>
       <h2 className="settings-step">{automation ? `Edit ${automation.name}` : "New automation"}</h2>
+      {!automation && (
+        <div className="automation-recipes" role="group" aria-label="Start from a recipe">
+          <span className="field-help">Start from a recipe</span>
+          <div className="automation-recipe-list">
+            {AUTOMATION_RECIPES.map((recipe) => {
+              // Every MCP server the recipe works through, connected: without one, its runs
+              // couldn't do the job it describes.
+              const missing = recipe.mcpServers.filter((server) => !connected.includes(server));
+
+              return (
+                <button
+                  key={recipe.id}
+                  type="button"
+                  className={`automation-recipe${recipe.id === picked ? " active" : ""}`}
+                  aria-pressed={recipe.id === picked}
+                  title={
+                    loaded && missing.length > 0
+                      ? `Connect ${missing.join(", ")} in Settings > Connections to use this recipe.`
+                      : recipe.description
+                  }
+                  disabled={missing.length > 0}
+                  onClick={() => {
+                    setPicked(recipe.id);
+                    setName(recipe.name);
+                    setPrompt(recipe.prompt);
+                    setWhen("schedule");
+                    setSchedule(recipe.schedule);
+                    setReadOnly(recipe.readOnly);
+                    setMcpServers([...recipe.mcpServers]);
+                  }}
+                >
+                  {recipe.name}
+                </button>
+              );
+            })}
+          </div>
+          {picked && (
+            <p className="field-help">
+              {AUTOMATION_RECIPES.find((recipe) => recipe.id === picked)?.description} Pick the
+              repository it should work on below.
+            </p>
+          )}
+          {loaded &&
+            AUTOMATION_RECIPES.some((recipe) =>
+              recipe.mcpServers.some((server) => !connected.includes(server)),
+            ) && (
+              <p className="field-help">
+                Recipes that need an MCP server you haven&apos;t connected are unavailable; hover
+                one to see which.
+              </p>
+            )}
+          {connectionsFailed && (
+            <p className="field-help">
+              Couldn't load your connections, so recipes that use MCP servers are unavailable.
+              Reopen the form to try again.
+            </p>
+          )}
+        </div>
+      )}
       <label htmlFor="automation-name">Name</label>
       <Input
         id="automation-name"

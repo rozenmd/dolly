@@ -3376,3 +3376,31 @@ label.connection-row {
     flex-basis: 100%;
   }
 }
+.automation-recipes {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.automation-recipe-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.automation-recipe {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.automation-recipe:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.automation-recipe.active {
+  border-color: var(--text);
+  color: var(--text);
+}

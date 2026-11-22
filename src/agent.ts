@@ -160,6 +160,16 @@ import {
 } from "./papercuts";
 import { toolParameters } from "./tool-schema";
 import {
+  AUTOMATION_TOOL_NAME,
+  AUTOMATION_TOOL_REFUSAL,
+  AutomationToolInput,
+  automationPatch,
+  automationToolDescription,
+  listOutput,
+  readOutput,
+  newAutomation,
+} from "./automation-tool";
+import {
   AddMcpServer,
   McpConnections,
   McpToolInput,
@@ -739,6 +749,29 @@ export class Agent extends DurableObject<Env> {
       },
     } satisfies ToolRegistration;
 
+    // Settings > Automations from a session; only owner web sessions may use it (automation-tool.ts).
+    const automationTool = {
+      name: AUTOMATION_TOOL_NAME,
+      description: automationToolDescription,
+      parameters: toolParameters(AutomationToolInput),
+      replay: "unsafe",
+      executionMode: "sequential",
+      execute: async (input: AutomationToolInput, api) => {
+        const parsed = Schema.decodeUnknownSync(AutomationToolInput)(input);
+
+        if (!(await this.automationsAllowed(api.conversationId)))
+          throw new OperationError({
+            operation: "automations.refused",
+            message: AUTOMATION_TOOL_REFUSAL,
+            details: null,
+          });
+
+        return {
+          output: [{ type: "text", text: JSON.stringify(await this.automationAction(parsed)) }],
+        };
+      },
+    } satisfies ToolRegistration;
+
     const tools = [
       shell,
       readFile,
@@ -750,6 +783,7 @@ export class Agent extends DurableObject<Env> {
       selfQueryTool,
       retitleTool,
       mcpTool,
+      automationTool,
       {
         name: "preview",
         description:
@@ -1256,6 +1290,36 @@ export class Agent extends DurableObject<Env> {
             } while (cursor);
           }, BACKGROUND_CONTEXT)
           .then(() => this.ctx.storage.put("migration:mcp-tool", true)),
+      );
+
+    if (
+      !(yield* attempt("automations.migration.read", () =>
+        this.ctx.storage.get("migration:automations-tool"),
+      ))
+    )
+      yield* attempt("automations.tools.update", () =>
+        this.harness
+          .commit(async (tx) => {
+            let cursor: Cursor | undefined;
+
+            do {
+              const page = await tx.scanConversations({}, 100, cursor);
+
+              for (const conversation of page.items) {
+                const agent = await tx.doc(AgentDoc, conversation.id);
+
+                // Read-only sessions keep their allowlist, which has no write_file.
+                if (!Array.isArray(agent.tools) || !agent.tools.includes(writeFile.name)) continue;
+
+                for (const names of [agent.tools, agent.modelTools])
+                  if (Array.isArray(names) && !names.includes(automationTool.name))
+                    names.push(automationTool.name);
+              }
+
+              cursor = page.next;
+            } while (cursor);
+          }, BACKGROUND_CONTEXT)
+          .then(() => this.ctx.storage.put("migration:automations-tool", true)),
       );
 
     this.automations = new Automations({
@@ -2802,6 +2866,68 @@ export class Agent extends DurableObject<Env> {
     await Effect.runPromise(this.arm({ active: true }));
 
     return this.automations.run(id, requestId);
+  }
+
+  /**
+   * Automations run unwatched with the owner's subscription, so only sessions the owner alone
+   * steers may manage them, and a run may not rewrite automations, its own included.
+   */
+  private async automationsAllowed(id: ConversationId) {
+    if ((await this.isReadOnly(id)) || !(await this.startedFromWeb(id))) return false;
+
+    return !(await this.harness.snapshot(AutomationRunDoc, id, BACKGROUND_CONTEXT))?.run;
+  }
+
+  private async automationAction(input: AutomationToolInput) {
+    const missing = { error: `${input.action} needs the automation's id; list shows them` };
+
+    switch (input.action) {
+      case "list":
+        // Bounded, so every ID fits the tool's output limit whatever the automations hold.
+        return listOutput(await this.automationsList());
+      case "read": {
+        if (!input.id) return missing;
+        const found = await this.automationRead(input.id);
+
+        // Paged, so a long prompt and run history never pass the tool's output limit.
+        return found ? readOutput(found, input.offset) : { error: "No automation with that id" };
+      }
+
+      case "create": {
+        const body = newAutomation(input);
+
+        return "error" in body ? body : await this.automationCreate(body.value);
+      }
+
+      case "update": {
+        if (!input.id) return missing;
+        const patch = automationPatch(input);
+
+        if ("error" in patch) return patch;
+
+        // The tool never sends network hosts: the server keeps the ones it holds, at the
+        // revision it saves against, when the repository stays the same.
+
+        return (
+          (await this.automationUpdate(input.id, patch.value)) ?? {
+            error: "No automation with that id",
+          }
+        );
+      }
+
+      case "delete":
+        if (!input.id) return missing;
+
+        return (await this.automationDelete(input.id)) ?? { error: "No automation with that id" };
+      case "run":
+        if (!input.id) return missing;
+
+        return (
+          (await this.automationRun(input.id, crypto.randomUUID())) ?? {
+            error: "No automation with that id",
+          }
+        );
+    }
   }
 
   /**

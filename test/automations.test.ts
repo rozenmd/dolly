@@ -696,6 +696,193 @@ it("refuses an access edit made against access that has changed since, so a stal
   ).toBe(400);
 });
 
+/** The output of the latest tool call in a model request body. */
+function lastToolOutput(body: string) {
+  const request = Schema.decodeUnknownSync(
+    Schema.fromJsonString(
+      Schema.Struct({
+        input: Schema.Array(
+          Schema.Struct({
+            type: Schema.optional(Schema.String),
+            output: Schema.optional(Schema.String),
+          }),
+        ),
+      }),
+    ),
+  )(body);
+
+  return request.input.filter((item) => item.type === "function_call_output").at(-1)?.output ?? "";
+}
+
+it("lets an owner web session manage automations with the tool, but not the runs it starts", async () => {
+  const prompts: string[] = [];
+  const runPrompts: string[] = [];
+  const replies: ((body: string) => Response)[] = [];
+  const runReplies: (() => Response)[] = [];
+  let id = "";
+
+  // The owner's session and the run it starts ask the model concurrently; route by session.
+  model((body) => {
+    const run = body.includes('[Automation \\"Daily report\\"');
+
+    (run ? runPrompts : prompts).push(body);
+    const next = run ? runReplies.shift() : replies.shift();
+
+    if (!next) throw new Error("Unexpected model request");
+
+    return next(body);
+  });
+
+  replies.push(
+    // Too frequent: the reason comes back so the model can fix it.
+    () =>
+      toolCall("automations", {
+        action: "create",
+        name: "Daily report",
+        prompt: "Summarise yesterday's merged pull requests",
+        schedule: "* * * * *",
+      }),
+    () => toolCall("automations", { action: "create", name: "Daily report" }),
+    () =>
+      toolCall("automations", {
+        action: "create",
+        name: "Daily report",
+        prompt: "Summarise yesterday's merged pull requests",
+        schedule: "0 9 * * 1-5",
+        timeZone: "Europe/Paris",
+        mcpServers: [],
+      }),
+    (body) => {
+      id = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({ id: Schema.String })))(
+        lastToolOutput(body),
+      ).id;
+
+      return toolCall("automations", { action: "update", id, timeZone: null });
+    },
+    // A branch without its repository is refused whole, not half applied.
+    () => toolCall("automations", { action: "update", id, ref: "release/2.x", enabled: false }),
+    () => toolCall("automations", { action: "run", id }),
+    () => answer("Created and started Daily report"),
+  );
+
+  // The run itself tries to rewrite automations.
+  runReplies.push(
+    () => toolCall("automations", { action: "update", id, prompt: "Do something else" }),
+    () => answer("Report sent"),
+  );
+
+  const session = await (await api("/sessions", "POST")).json<{ id: string }>();
+  sessionIds.push(session.id);
+
+  expect(
+    (
+      await api(`/sessions/${session.id}/messages`, "POST", {
+        content: "Every weekday at 9 summarise yesterday's merged pull requests",
+        requestId: crypto.randomUUID(),
+      })
+    ).status,
+  ).toBe(202);
+
+  await expect.poll(() => prompts.length + runPrompts.length, { timeout: 10_000 }).toBe(9);
+  expect(lastToolOutput(prompts[1])).toContain("Schedules may fire at most every 10 minutes");
+  expect(lastToolOutput(prompts[2])).toContain("create needs a name and a prompt");
+  expect(lastToolOutput(prompts[4])).toContain('"schedule":"0 9 * * 1-5"');
+  expect(lastToolOutput(prompts[4])).not.toContain("Europe/Paris");
+  expect(lastToolOutput(prompts[5])).toContain("ref needs the repository");
+
+  const run = Schema.decodeUnknownSync(
+    Schema.fromJsonString(Schema.Struct({ sessionId: Schema.String })),
+  )(lastToolOutput(prompts[6]));
+
+  sessionIds.push(run.sessionId);
+  expect(lastToolOutput(runPrompts[1])).toContain("only available in sessions the owner starts");
+
+  await expect.poll(async () => (await read(id)).runs[0]?.status).toBe("succeeded");
+
+  const saved = await read(id);
+
+  expect(saved).toMatchObject({
+    name: "Daily report",
+    prompt: "Summarise yesterday's merged pull requests",
+    schedule: "0 9 * * 1-5",
+    enabled: true,
+  });
+  expect(saved.timeZone).toBeUndefined();
+  expect(saved.runs.map((item) => [item.trigger, item.sessionId])).toEqual([
+    ["manual", run.sessionId],
+  ]);
+}, 30_000);
+
+it("lists every automation and pages a long prompt within the tool's output limit, and keeps network hosts on a branch change", async () => {
+  const prompt = "p".repeat(32_768);
+
+  // Twelve long registry hosts each, which the list once carried in full.
+  const networkHosts = Array.from(
+    { length: 12 },
+    (_, index) => `registry-${index}.${"r".repeat(40)}.example`,
+  );
+
+  for (let index = 0; index < 50; index++)
+    await create({
+      name: `${String(index).padStart(2, "0")} ${"n".repeat(96)}`,
+      prompt,
+      workspace: { repository: "example/project", networkHosts },
+    });
+
+  const listed = await runInDurableObject(env.AGENT.getByName("owner"), (agent) =>
+    agent["automationAction"]({ action: "list" }),
+  );
+
+  const text = JSON.stringify(listed);
+
+  // Pi keeps the first 50 KiB of a tool's output: every automation's id must be inside it.
+  expect(new TextEncoder().encode(text).length).toBeLessThan(50 * 1024);
+  expect(text.match(/"id":/g)).toHaveLength(50);
+
+  // The tool sets repository and branch only; the same repository keeps its network hosts.
+  const [first] = decodeList(await (await api("/automations")).json()).automations;
+  const id = first?.id ?? "";
+
+  await runInDurableObject(env.AGENT.getByName("owner"), (agent) =>
+    agent["automationAction"]({
+      action: "update",
+      id,
+      repository: "example/project",
+      ref: "release/2.x",
+    }),
+  );
+
+  expect(await (await api(`/automations/${id}`)).json()).toMatchObject({
+    workspace: { repository: "example/project", ref: "release/2.x", networkHosts },
+  });
+
+  // A prompt of three-byte characters is 96 KiB of JSON: read pages it, each page whole JSON
+  // under the limit, until promptNext is gone.
+  const wide = "漢".repeat(18_000);
+
+  await api(`/automations/${id}`, "PUT", { prompt: wide });
+  const pages: string[] = [];
+  let offset: number | undefined = 0;
+
+  while (offset !== undefined) {
+    const page = await runInDurableObject(env.AGENT.getByName("owner"), (agent) =>
+      agent["automationAction"]({ action: "read", id, offset }),
+    );
+
+    expect(new TextEncoder().encode(JSON.stringify(page)).length).toBeLessThan(50 * 1024);
+
+    const { prompt: part, promptNext } = Schema.decodeUnknownSync(
+      Schema.Struct({ prompt: Schema.String, promptNext: Schema.optional(Schema.Number) }),
+    )(page);
+
+    pages.push(part);
+    offset = promptNext;
+  }
+
+  expect(pages.length).toBeGreaterThan(1);
+  expect(pages.join("")).toBe(wide);
+}, 60_000);
+
 it("keeps a repository's network hosts unless an update names them, so a stale edit can't restore them", async () => {
   const { id } = await create({
     name: "Staging check",
