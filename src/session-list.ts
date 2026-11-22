@@ -12,6 +12,7 @@ import { redact } from "./diagnostics";
 import type { SavedSession } from "./session-contracts";
 import { SessionIndex } from "./coordination";
 import { sessionMetadataKey, type SessionMetadata } from "./model-defaults";
+import { AutomationRunDoc } from "./automations";
 
 type PullRequestRef = { repository: string; number: number; url: string };
 
@@ -226,13 +227,17 @@ export async function listSessions(
 
           if (!conversation) return;
 
-          const [agent, workspace, metadata, transcript, createdPull] = await Promise.all([
-            conversation.agent(BACKGROUND_CONTEXT),
-            harness.snapshot(ConversationWorkspace, record.id, BACKGROUND_CONTEXT),
-            storage.get<SessionMetadata>(sessionMetadataKey(record.id)),
-            summarizeTranscript(conversation, storage, tip, secrets, redaction),
-            storage.get<PullRequestRef>(`session-created-pr:${record.id}`),
-          ]);
+          const [agent, workspace, metadata, transcript, createdPull, automation] =
+            await Promise.all([
+              conversation.agent(BACKGROUND_CONTEXT),
+              harness.snapshot(ConversationWorkspace, record.id, BACKGROUND_CONTEXT),
+              storage.get<SessionMetadata>(sessionMetadataKey(record.id)),
+              summarizeTranscript(conversation, storage, tip, secrets, redaction),
+              storage.get<PullRequestRef>(`session-created-pr:${record.id}`),
+              harness.snapshot(AutomationRunDoc, record.id, BACKGROUND_CONTEXT),
+            ]);
+
+          const run = automation?.run;
 
           const parent = record.owner?.conversationId;
 
@@ -254,8 +259,10 @@ export async function listSessions(
             archived: metadata?.archived ?? false,
             ...(parent && { parentId: aliases.get(parent) ?? String(parent) }),
             ...(parent && metadata?.kept && { kept: true }),
-            // Only automatic reviews are read-only (github-inbox.ts admitGitHub).
-            ...(isReadOnly(workspace) && { automation: "review" as const }),
+            ...(run && !parent && { automationRun: { id: run.automationId, name: run.name } }),
+            // Automatic reviews (github-inbox.ts admitGitHub) are the read-only sessions that no
+            // automation run started; read-only automation runs stay in the sidebar.
+            ...(isReadOnly(workspace) && !run && { automation: "review" as const }),
             running: running.has(record.id),
             pullRequest: createdPull ?? transcript?.pullRequest,
           } satisfies SavedSession;

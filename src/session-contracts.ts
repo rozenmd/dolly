@@ -31,6 +31,11 @@ export const SavedSession = Schema.Struct({
    */
   automation: Schema.optional(Schema.Literal("review")),
   ref: Schema.optional(Schema.String),
+  /**
+   * The automation whose run started this session (automations.ts); absent otherwise. Unlike
+   * reviews, automation runs stay in the sidebar.
+   */
+  automationRun: Schema.optional(Schema.Struct({ id: Schema.String, name: Schema.String })),
   /** The agent has live, non-background work in progress. */
   running: Schema.optional(Schema.Boolean),
   /**
