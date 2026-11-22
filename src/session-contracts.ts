@@ -24,6 +24,12 @@ export const SavedSession = Schema.Struct({
   parentId: Schema.optional(Schema.String),
   /** A spawned session the owner chose to keep in the sidebar. */
   kept: Schema.optional(Schema.Boolean),
+  /**
+   * What started the session when it wasn't the owner: "review" for an automatic pull request
+   * review (a read-only session). The sidebar leaves these out, after OpenSession; they are
+   * still reachable by URL, from the review's GitHub links and through the `dolly` tool.
+   */
+  automation: Schema.optional(Schema.Literal("review")),
   ref: Schema.optional(Schema.String),
   /** The agent has live, non-background work in progress. */
   running: Schema.optional(Schema.Boolean),

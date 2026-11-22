@@ -10,6 +10,7 @@ type Related = {
   id: string;
   parentId?: string;
   kept?: boolean;
+  automation?: "review";
 };
 
 type Thread = Related & {
@@ -35,7 +36,17 @@ export const THREAD_STATE_LABEL: Record<ThreadState, string> = {
  * They are reached from their parent instead.
  */
 export function belongsInSidebar(session: Related) {
-  return !session.parentId || Boolean(session.kept);
+  return !automated(session) && (!session.parentId || Boolean(session.kept));
+}
+
+/**
+ * Sessions an automation started, such as automatic pull request reviews, stay out of the
+ * sidebar, after OpenSession: they are opened from their GitHub links or by URL instead. The
+ * open one keeps its row while it is open, and a workspace keeps its row once writable work is
+ * started in it.
+ */
+export function automated(session: Pick<Related, "automation">) {
+  return session.automation !== undefined;
 }
 
 /** The highest known ancestor of `id`, following parent edges; `id` itself for a root. */

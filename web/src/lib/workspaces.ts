@@ -8,6 +8,8 @@ type Member = {
   parentId?: string;
   workspaceId?: string;
   kept?: boolean;
+  /** Set for automatic reviews (lib/session-threads); they never represent a workspace with work in it. */
+  automation?: "review";
   createdAt?: number;
   updatedAt: number;
 };
@@ -53,7 +55,10 @@ function workspaceIndex(sessions: readonly Member[]) {
 /** Spawned sessions stay with their parent unless the owner kept one as a tab. */
 const tabbed = (session: Member) => !session.parentId || Boolean(session.kept);
 
-/** The sessions a workspace shows as tabs: its own oldest first, then the spawned ones kept. */
+/**
+ * The sessions a workspace shows as tabs: its own oldest first, then the spawned ones kept, and
+ * automatic reviews last, so work started in a review's workspace names and opens its row.
+ */
 export function workspaceTabs<T extends Member>(sessions: readonly T[], workspaceId: string) {
   const age = (session: Member) => session.createdAt ?? session.updatedAt;
 
@@ -61,6 +66,7 @@ export function workspaceTabs<T extends Member>(sessions: readonly T[], workspac
     .filter((session) => tabbed(session) && workspaceOf(sessions, session.id) === workspaceId)
     .sort(
       (a, b) =>
+        Number(Boolean(a.automation)) - Number(Boolean(b.automation)) ||
         Number(Boolean(a.parentId)) - Number(Boolean(b.parentId)) ||
         age(a) - age(b) ||
         a.id.localeCompare(b.id),
@@ -82,7 +88,8 @@ type Row = Member & {
 
 /**
  * One sidebar row per workspace, named after the session that started it. It is as recent as
- * its latest tab, busy while any of its sessions is, and archived only when all its tabs are.
+ * its latest tab, busy while any of its sessions is, and archived only when all its tabs are
+ * (automatic reviews aside, once other work was started in the workspace).
  */
 export function workspaceRows<T extends Row>(sessions: readonly T[]) {
   const ids = new Set(
@@ -95,7 +102,13 @@ export function workspaceRows<T extends Row>(sessions: readonly T[]) {
 
     if (!main) return [];
     const members = sessions.filter((session) => workspaceOf(sessions, session.id) === id);
-    const live = tabs.filter((session) => !session.archived);
+
+    // Work started in a review's workspace decides whether it is archived; the review can't.
+    const work = tabs.some((session) => !session.automation)
+      ? tabs.filter((session) => !session.automation)
+      : tabs;
+
+    const live = work.filter((session) => !session.archived);
     const newest = [...members].sort((a, b) => b.updatedAt - a.updatedAt);
     // Like the session list, only prompts to its own sessions move a workspace up.
     const updatedAt = Math.max(...tabs.map((session) => session.updatedAt));
