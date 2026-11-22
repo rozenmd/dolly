@@ -329,6 +329,33 @@ function withContainer(
   });
 }
 
+it("waits for an in-progress container snapshot before checkpointing", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance, state) => {
+    const container = fakeContainer();
+    withContainer(instance, state, container);
+    await instance.prepare(config);
+    let attempts = 0;
+    container.snapshotContainer = async () => {
+      attempts += 1;
+
+      if (attempts === 1)
+        throw new DOMException(
+          "A snapshot is already in progress for this container. Wait for it to complete.",
+          "OperationError",
+        );
+
+      return { id: "snapshot-after-conflict", size: 1 };
+    };
+
+    await expect(instance.checkpoint("turn-after-conflict")).resolves.toMatchObject({
+      id: "snapshot-after-conflict",
+      turnId: "turn-after-conflict",
+    });
+    expect(attempts).toBe(2);
+  });
+});
+
 it("tells the next repository tool, once, that a restart discarded unsaved changes", async () => {
   const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
   await runInDurableObject(sandbox, async (instance, state) => {

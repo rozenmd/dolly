@@ -729,9 +729,26 @@ export class Sandbox extends DurableObject<Env> {
           });
 
           return yield* Effect.gen({ self: this }, function* () {
-            const snapshot = yield* attempt("workspace.checkpoint", () =>
-              container.snapshotContainer({ name: `workspace-${crypto.randomUUID()}` }),
-            ).pipe(Effect.timeout("120 seconds"));
+            const snapshotName = `workspace-${crypto.randomUUID()}`;
+
+            const snapshot = yield* attempt("workspace.checkpoint", async (signal) => {
+              while (true) {
+                try {
+                  return await container.snapshotContainer({ name: snapshotName });
+                } catch (error) {
+                  if (
+                    !exceptionDetails(error).message.includes(
+                      "A snapshot is already in progress for this container",
+                    )
+                  )
+                    throw error;
+
+                  await scheduler.wait(1_000);
+
+                  if (signal.aborted) throw signal.reason;
+                }
+              }
+            }).pipe(Effect.timeout("120 seconds"));
 
             const saved: WorkspaceSnapshot = { id: snapshot.id, turnId, savedAt: Date.now() };
             yield* this.publishSnapshot(saved);
