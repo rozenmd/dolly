@@ -12,6 +12,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { GitHubThreads } from "../src/github-inbox";
 import { GitHubIngress } from "../src/github-ingress";
 import { ingress } from "../src/ingress";
+import type { SavedSession } from "../src/session-contracts";
 import { headers, signIn } from "./session";
 
 const pair = await crypto.subtle.generateKey(
@@ -795,6 +796,21 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   });
 
   expect(sessions).toEqual({ review: true, commands: undefined });
+
+  // The session list marks the automatic review, so the sidebar can leave it out.
+  const listed = await (
+    await SELF.fetch("https://worker/api/sessions", { headers })
+  ).json<SavedSession[]>();
+
+  const reviewId = await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const state = await agent["harness"].snapshot(GitHubThreads, BACKGROUND_CONTEXT);
+
+    return String(state?.threads[`review:example/project#8@${sha}`]?.id);
+  });
+
+  expect(listed.filter((session) => session.automation).map((session) => session.id)).toEqual([
+    reviewId,
+  ]);
 
   // A draft made ready is reviewed; the agent already published its review, so nothing is added.
   expect(

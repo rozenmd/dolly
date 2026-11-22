@@ -46,7 +46,7 @@ import { extendTranscript, prependHistory } from "./lib/transcript-history";
 import { indexedMarks, type RailMark } from "./lib/turn-rail";
 import { imagesBody, type Attachment } from "./lib/images";
 import { sessionList } from "./lib/session-list";
-import { belongsInSidebar, rootSession, sessionThreads } from "./lib/session-threads";
+import { automated, belongsInSidebar, rootSession, sessionThreads } from "./lib/session-threads";
 import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-summary";
 import { useSessionSummary } from "./lib/session-summary";
 import { workspaceMain, workspaceOf, workspaceRows, workspaceTabs } from "./lib/workspaces";
@@ -126,14 +126,16 @@ export function WorkspaceApp() {
         pullRequest: item.pullRequest,
         parentId: item.parentId,
         kept: item.kept,
+        automation: item.automation,
         workspaceId: item.workspaceId,
         createdAt: item.createdAt,
       }))
     : [];
 
-  // One row per workspace; spawned sessions live with their parent (see lib/session-threads).
-  const sidebarRows = workspaceRows(rows);
   const workspace = session ? workspaceOf(sessions, session.id) : "";
+  // One row per workspace; spawned sessions live with their parent and automatic reviews are
+  // left out unless open (see lib/session-threads).
+  const sidebarRows = workspaceRows(rows).filter((row) => !automated(row) || row.id === workspace);
   const tabs = workspace ? workspaceTabs(rows, workspace) : [];
 
   const parent = session?.parentId

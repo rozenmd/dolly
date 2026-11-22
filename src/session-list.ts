@@ -7,7 +7,7 @@ import type {
   EntryRecord,
   Harness,
 } from "@earendil-works/pi-durable";
-import { ConversationWorkspace } from "./workspace";
+import { ConversationWorkspace, isReadOnly } from "./workspace";
 import { redact } from "./diagnostics";
 import type { SavedSession } from "./session-contracts";
 import { SessionIndex } from "./coordination";
@@ -254,6 +254,8 @@ export async function listSessions(
             archived: metadata?.archived ?? false,
             ...(parent && { parentId: aliases.get(parent) ?? String(parent) }),
             ...(parent && metadata?.kept && { kept: true }),
+            // Only automatic reviews are read-only (github-inbox.ts admitGitHub).
+            ...(isReadOnly(workspace) && { automation: "review" as const }),
             running: running.has(record.id),
             pullRequest: createdPull ?? transcript?.pullRequest,
           } satisfies SavedSession;
