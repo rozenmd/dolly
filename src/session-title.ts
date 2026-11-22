@@ -118,24 +118,3 @@ export async function promptBounds(conversation: Conversation) {
 
   return first ? { first, latest: await find("descending") } : undefined;
 }
-
-/** The newest entry holding a user message (a prompt, typed or submitted), if any. */
-export async function latestInputEntry(conversation: Conversation) {
-  let cursor: Cursor | undefined;
-  let scanned = 0;
-
-  do {
-    const page = await conversation.entries(
-      { order: "descending" },
-      50,
-      cursor,
-      BACKGROUND_CONTEXT,
-    );
-
-    for (const entry of page.items)
-      if (entry.model?.some((message) => message.role === "user")) return entry.id;
-
-    scanned += page.items.length;
-    cursor = page.next;
-  } while (cursor && scanned < PROMPT_SCAN_LIMIT);
-}

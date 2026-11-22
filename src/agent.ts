@@ -120,7 +120,6 @@ import {
   RETITLE_TOOL_NAME,
   RetitleToolInput,
   completionText,
-  latestInputEntry,
   promptBounds,
   retitleDescription,
   sanitizeTitle,
@@ -163,7 +162,9 @@ import { toolParameters } from "./tool-schema";
 import {
   AUTOMATION_TOOL_NAME,
   AUTOMATION_TOOL_TURN_REFUSAL,
+  OWNER_INPUTS_KEPT,
   OwnerInputDoc,
+  unanswered,
   AUTOMATION_TOOL_REFUSAL,
   AutomationToolInput,
   automationPatch,
@@ -2900,20 +2901,27 @@ export class Agent extends DurableObject<Env> {
   }
 
   /**
-   * Whether the newest input in `id` is a message the owner typed in the web app (recorded by
-   * `prompt`). Review handoffs, scheduled prompts, CI wakes and delivered tasks are inputs too,
-   * but their text isn't the owner's, so a turn they start never counts.
+   * Whether every message the model is answering in `id` is one the owner typed in the web app
+   * (recorded by `prompt`). Review handoffs, scheduled prompts, CI wakes and delivered tasks are
+   * inputs too; while one is unanswered, the turn isn't the owner's, even after the owner steers.
    */
   private async ownerTurn(id: ConversationId) {
     const conversation = await this.harness.conversation(id, BACKGROUND_CONTEXT);
-    const latest = conversation && (await latestInputEntry(conversation));
 
-    if (!conversation || latest === undefined) return false;
+    if (!conversation) return false;
+
+    const inputs = await unanswered((cursor) =>
+      conversation.entries({ order: "descending" }, 50, cursor, BACKGROUND_CONTEXT),
+    );
+
+    if (!inputs?.length) return false;
 
     return conversation.commit(async (tx) => {
-      const { submission } = await tx.doc(OwnerInputDoc, id);
+      const { submissions } = await tx.doc(OwnerInputDoc, id);
+      const records = await Promise.all(submissions.map((submission) => tx.submission(submission)));
+      const owner = new Set(records.flatMap((record) => (record?.entry ? [record.entry] : [])));
 
-      return submission !== null && (await tx.submission(submission))?.entry === latest;
+      return inputs.every((entry) => owner.has(entry));
     }, BACKGROUND_CONTEXT);
   }
 
@@ -3365,7 +3373,12 @@ export class Agent extends DurableObject<Env> {
               whenBusy: "followUp",
             });
 
-            (await tx.doc(OwnerInputDoc, target.id)).submission = id;
+            // Every queued message stays the owner's until its run: a follow-up queued behind a
+            // run never revokes that run's own messages.
+            const owner = await tx.doc(OwnerInputDoc, target.id);
+
+            if (!owner.submissions.includes(id)) owner.submissions.push(id);
+            owner.submissions.splice(0, Math.max(0, owner.submissions.length - OWNER_INPUTS_KEPT));
 
             return { id };
           }, BACKGROUND_CONTEXT),

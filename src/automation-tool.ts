@@ -1,4 +1,11 @@
-import { defineDoc, type SubmissionId } from "@earendil-works/pi-durable";
+import {
+  defineDoc,
+  type Cursor,
+  type EntryId,
+  type EntryRecord,
+  type Page,
+  type SubmissionId,
+} from "@earendil-works/pi-durable";
 import * as Schema from "effect/Schema";
 import {
   AutomationPatch,
@@ -19,20 +26,60 @@ export const AUTOMATION_TOOL_NAME = "automations";
 export const AUTOMATION_TOOL_TURN_REFUSAL =
   "The automations tool acts only on a message the owner typed in the web app, and this turn was started by something else (a review handoff, a scheduled prompt, a CI result or another session's message). Ask the owner to request the change in a message of their own, or in Settings > Automations.";
 
+/** How many of the owner's latest messages a conversation remembers as theirs. */
+export const OWNER_INPUTS_KEPT = 50;
+
 /**
- * The owner's newest message typed in the web app, as its submission. The tool runs only while
- * that is the newest input: anything submitted since (a review handoff from GitHub, a scheduled
- * prompt, a CI wake) is text the owner didn't write, and may not set up unattended work.
+ * The submissions of the owner's latest messages typed in the web app. The tool runs only while
+ * every message the model is answering is one of them: a review handoff, scheduled prompt or CI
+ * wake not yet answered carries text the owner didn't write, and may not set up unattended work,
+ * even once the owner steers after it.
  */
-export const OwnerInputDoc = defineDoc<{ submission: SubmissionId | null }>({
-  kind: "app.owner-input",
+export const OwnerInputDoc = defineDoc<{ submissions: SubmissionId[] }>({
+  kind: "app.owner-inputs",
   version: 1,
   scope: "conversation",
   history: "latest",
   fork: "initial",
-  initial: () => ({ submission: null }),
+  initial: () => ({ submissions: [] }),
   checkpointWhen: () => false,
 });
+
+/**
+ * The user messages the model is answering: from the newest entry back to the last final answer
+ * (an assistant message with text, calling no tools). `undefined` if the scan stopped before finding one.
+ */
+export async function unanswered(
+  page: (cursor: Cursor | undefined) => Promise<Page<EntryRecord, Cursor>>,
+  limit = 500,
+) {
+  const inputs: EntryId[] = [];
+  let cursor: Cursor | undefined;
+  let scanned = 0;
+
+  do {
+    const { items, next } = await page(cursor);
+
+    for (const entry of items)
+      for (const message of [...(entry.model ?? [])].reverse()) {
+        if (message.role === "user") inputs.push(entry.id);
+        // An answer has text and calls no tools: a response cut short (by a steer, say) is
+        // stored empty, and leaves what it was answering unanswered.
+        else if (
+          message.role === "assistant" &&
+          !message.content.some((block) => block.type === "toolCall") &&
+          message.content.some((block) => block.type === "text" && block.text.trim() !== "")
+        )
+          return inputs;
+      }
+
+    scanned += items.length;
+    cursor = next;
+  } while (cursor && scanned < limit);
+
+  // The whole transcript is unanswered input; past the limit, unknown (refused).
+  return cursor ? undefined : inputs;
+}
 
 export const AUTOMATION_TOOL_REFUSAL =
   "The automations tool is only available in sessions the owner starts from the web app. Automation runs, sessions spawned by another session, read-only sessions, and Slack or GitHub threads can't list or change automations.";
