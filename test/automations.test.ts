@@ -725,6 +725,36 @@ it("keeps the alarm of a save interrupted right after it committed", async () =>
   await expect.poll(async () => (await read(saved?.id ?? "")).runs[0]?.status).toBe("succeeded");
 });
 
+it("lets go of a save's fire when setting its alarm fails", async () => {
+  const at = realNow() + 3_600_000;
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    await state.storage.deleteAlarm();
+    const getAlarm = state.storage.getAlarm.bind(state.storage);
+
+    // Storage refuses once, before the save commits anything.
+    state.storage.getAlarm = async () => {
+      state.storage.getAlarm = getAlarm;
+      throw new Error("Storage unavailable");
+    };
+
+    await expect(
+      agent["automations"].create({
+        name: "Reminder",
+        prompt: "Remind me",
+        runAt: new Date(at).toISOString(),
+      }),
+    ).rejects.toThrow("Storage unavailable");
+
+    // Nothing was saved, so no later arm() may bring its fire back.
+    expect(agent["automationSaves"].size).toBe(0);
+    await Effect.runPromise(agent["arm"]({ active: false }));
+    expect(await state.storage.getAlarm()).toBeNull();
+  });
+
+  expect(decodeList(await (await api("/automations")).json()).automations).toEqual([]);
+});
+
 it("never fires closer than the minimum interval, even across a daylight-saving jump", () => {
   // Lord Howe Island moves its clocks forward half an hour at 02:00 on 5 October 2031, so
   // 01:55 and 02:30 local are five minutes apart.

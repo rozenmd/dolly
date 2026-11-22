@@ -1267,15 +1267,23 @@ export class Agent extends DurableObject<Env> {
 
         // Registered first, so any arm() from here on keeps this fire in the alarm.
         this.automationSaves.set(token, at);
-        await Effect.runPromise(
-          this.alarmPermit.withPermit(
-            attempt("alarm.prearm", async () => {
-              const current = await this.ctx.storage.getAlarm();
 
-              if (current === null || current > at) await this.ctx.storage.setAlarm(at);
-            }),
-          ),
-        );
+        try {
+          await Effect.runPromise(
+            this.alarmPermit.withPermit(
+              attempt("alarm.prearm", async () => {
+                const current = await this.ctx.storage.getAlarm();
+
+                if (current === null || current > at) await this.ctx.storage.setAlarm(at);
+              }),
+            ),
+          );
+        } catch (cause) {
+          // The save fails without committing: its fire must not keep holding the alarm.
+          this.automationSaves.delete(token);
+
+          throw cause;
+        }
 
         return () => this.automationSaves.delete(token);
       },
