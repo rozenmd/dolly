@@ -257,14 +257,21 @@ function validate(
   assign("thinkingLevel", input.thinkingLevel);
 
   if (input.workspace === null) delete next.workspace;
-  else if (input.workspace !== undefined)
+  else if (input.workspace !== undefined) {
+    // Network hosts belong to a repository: a workspace that leaves them out keeps the ones held
+    // now for the same repository (`[]` clears them), and a new repository starts with none.
+    const hosts =
+      input.workspace.networkHosts ??
+      (base.workspace?.repository === input.workspace.repository
+        ? base.workspace.networkHosts
+        : undefined);
+
     next.workspace = {
       repository: input.workspace.repository,
       ...(input.workspace.ref !== undefined && { ref: input.workspace.ref }),
-      ...(input.workspace.networkHosts !== undefined && {
-        networkHosts: [...input.workspace.networkHosts],
-      }),
+      ...(hosts !== undefined && { networkHosts: [...hosts] }),
     };
+  }
 
   if (input.runAt === null) delete next.runAt;
   else if (input.runAt !== undefined) {

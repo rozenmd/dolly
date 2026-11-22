@@ -369,12 +369,6 @@ function bodyOf(
 
   if (at && Number.isNaN(at.getTime())) return { error: "Choose a date and time to run it at." };
 
-  // Hosts the API set stay with the repository they were set for.
-  const hosts =
-    values.repository === automation?.workspace?.repository
-      ? automation.workspace.networkHosts
-      : undefined;
-
   return {
     body: {
       name: values.name.trim(),
@@ -390,7 +384,8 @@ function bodyOf(
         ? {
             repository: values.repository,
             ...(values.ref && { ref: values.ref }),
-            ...(hosts && { networkHosts: hosts }),
+            // Never sent: the form doesn't edit network hosts, and the server keeps the ones
+            // it holds for the same repository, so a stale form can't restore revoked hosts.
           }
         : null,
     },

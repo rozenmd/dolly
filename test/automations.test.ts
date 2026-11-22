@@ -644,6 +644,49 @@ it("finishes a run that was in flight when the Durable Object was evicted", asyn
   expect(await transcript(sessionId)).toContain("Finished after restart");
 });
 
+it("keeps a repository's network hosts unless an update names them, so a stale edit can't restore them", async () => {
+  const { id } = await create({
+    name: "Staging check",
+    prompt: "Check staging",
+    workspace: { repository: "example/project", networkHosts: ["staging.example.com"] },
+  });
+
+  const workspace = async () =>
+    (await (await api(`/automations/${id}`)).json<{ workspace?: unknown }>()).workspace;
+
+  // A workspace without hosts keeps those held for the same repository.
+  await api(`/automations/${id}`, "PUT", {
+    workspace: { repository: "example/project", ref: "release/2.x" },
+  });
+  expect(await workspace()).toEqual({
+    repository: "example/project",
+    ref: "release/2.x",
+    networkHosts: ["staging.example.com"],
+  });
+
+  // Revoked through the API; a form opened before then saves an access edit without hosts.
+  await api(`/automations/${id}`, "PUT", {
+    workspace: { repository: "example/project", networkHosts: [] },
+  });
+  await api(`/automations/${id}`, "PUT", {
+    readOnly: false,
+    mcpServers: [],
+    workspace: { repository: "example/project", ref: "release/2.x" },
+  });
+  expect(await workspace()).toEqual({
+    repository: "example/project",
+    ref: "release/2.x",
+    networkHosts: [],
+  });
+
+  // Another repository starts without the old one's hosts.
+  await api(`/automations/${id}`, "PUT", {
+    workspace: { repository: "example/project", networkHosts: ["staging.example.com"] },
+  });
+  await api(`/automations/${id}`, "PUT", { workspace: { repository: "example/other" } });
+  expect(await workspace()).toEqual({ repository: "example/other" });
+});
+
 it("keeps a live run and its request through any number of later skips", async () => {
   let release: () => void = () => {};
   const held = new Promise<void>((resolve) => (release = resolve));

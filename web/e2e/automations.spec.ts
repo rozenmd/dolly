@@ -34,7 +34,7 @@ type Automation = {
   runAt?: number;
   enabled: boolean;
   readOnly: boolean;
-  workspace?: { repository: string; ref?: string };
+  workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] };
   model?: string;
   mcpServers: string[];
   createdAt: number;
@@ -55,7 +55,12 @@ const Body = Schema.Struct({
   mcpServers: Schema.optional(Schema.Array(Schema.String)),
   workspace: Schema.optional(
     Schema.NullOr(
-      Schema.Struct({ repository: Schema.String, ref: Schema.optional(Schema.String) }),
+      Schema.Struct({
+        repository: Schema.String,
+        ref: Schema.optional(Schema.String),
+        // Decoded so a request that sent hosts would show them, not have them stripped.
+        networkHosts: Schema.optional(Schema.Array(Schema.String)),
+      }),
     ),
   ),
 });
@@ -354,7 +359,11 @@ test("edits send only what changed, so they never undo a pause or move a schedul
       schedule: "0 9 * * *",
       enabled: true,
       readOnly: false,
-      workspace: { repository: "octocat/project", ref: "develop" },
+      workspace: {
+        repository: "octocat/project",
+        ref: "develop",
+        networkHosts: ["staging.example.com"],
+      },
       mcpServers: [],
       createdAt: now,
       updatedAt: now,
@@ -484,6 +493,22 @@ test("edits send only what changed, so they never undo a pause or move a schedul
     },
   });
 
+  // An access edit on the same repository never sends network hosts: the form doesn't edit
+  // them, and resending its copy could restore hosts revoked since it opened.
+  await page.getByRole("button", { name: "Manage Deploy check" }).click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  await page.getByLabel(/Read-only/).click();
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect.poll(() => updated.length).toBe(4);
+  expect(updated[3]).toEqual({
+    id: "a1",
+    body: {
+      readOnly: true,
+      mcpServers: [],
+      workspace: { repository: "octocat/project", ref: "develop" },
+    },
+  });
+
   // A one-off that already ran can be renamed without picking a new time.
   await page.getByRole("button", { name: "Manage Reminder" }).click();
   await page.getByRole("menuitem", { name: "Edit" }).click();
@@ -502,7 +527,7 @@ test("edits send only what changed, so they never undo a pause or move a schedul
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByRole("alert")).toHaveText("Choose a date and time to run it at.");
   await expect(page.getByRole("button", { name: "Cancel" })).not.toBeDisabled();
-  expect(updated).toHaveLength(3);
+  expect(updated).toHaveLength(4);
 
   await page.getByRole("button", { name: "Cancel" }).click();
   await page.getByRole("button", { name: "Manage Reminder" }).click();
