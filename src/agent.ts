@@ -57,6 +57,11 @@ import { gitRoute, checkedPush } from "./git-transport";
 import { BROWSER_SESSION_MS, MAX_BROWSER_SESSIONS } from "./browser-workspace";
 import { pullRequestChange, WebhookSetup } from "./github-webhook";
 import { STEER_TOOL_SKIP, SteerInterrupts, steerInterrupts, steerQueued } from "./steer-interrupt";
+import {
+  runCancellable,
+  SHELL_TIMEOUT_DEFAULT_SECONDS,
+  SHELL_TIMEOUT_MAX_SECONDS,
+} from "./shell-output";
 import { admitGitHub, githubDelivery, GitHubThreads, type HandoffOwner } from "./github-inbox";
 import { admitSlack, slackDelivery, slackNotice } from "./slack-inbox";
 import { SlackHostService } from "./slack-host";
@@ -379,18 +384,42 @@ export class Agent extends DurableObject<Env> {
     const shell = {
       name: "shell",
       description:
-        "Run a shell command in the active repository's isolated Linux checkout. Commands start in /workspace/repo (or /workspace when no repo is selected), so no cd is needed. Dependency setup runs in the background: use workspace action wait_for_dependencies before builds, tests, starting a dev server, or changing dependency inputs; file reads and ordinary shell commands do not wait. Use workspace checkout to switch repositories in this same conversation; other live checkouts are preserved. Git credentials stay outside the container. Repository sandboxes can reach only package registries, raw.githubusercontent.com and configured network hosts; a sandbox with no repository has no network access. For browser automation or browser tests, use the Chrome DevTools endpoint at http://browser.workspace (Cloudflare Browser Run; /json/version names its WebSocket) instead of installing a browser. Output is capped at 32 KiB per stream and time at 60 seconds. Repository files are snapshotted once after the agent turn answers, not after each command. Changes since the last successful turn-end save can be lost on container shutdown or restart; if that happens, the next repository tool result starts with a WORKSPACE RESTORED notice (workspaceRestored) naming the snapshot, so re-check git status before continuing. Push important work to GitHub for long-term storage.",
-      parameters: obj({ command: str() }),
+        "Run a shell command in the active repository's isolated Linux checkout. Commands start in /workspace/repo (or /workspace when no repo is selected), so no cd is needed. Dependency setup runs in the background: use workspace action wait_for_dependencies before builds, tests, starting a dev server, or changing dependency inputs; file reads and ordinary shell commands do not wait. Use workspace checkout to switch repositories in this same conversation; other live checkouts are preserved. Git credentials stay outside the container. Repository sandboxes can reach only package registries, raw.githubusercontent.com and configured network hosts; a sandbox with no repository has no network access. For browser automation or browser tests, use the Chrome DevTools endpoint at http://browser.workspace (Cloudflare Browser Run; /json/version names its WebSocket) instead of installing a browser. Output streams live while a command runs; the result keeps the last 32 KiB of stdout and of stderr. Commands are stopped after 10 minutes unless you pass timeout (seconds, up to 3600): run slow builds and test suites in the foreground with a long enough timeout rather than backgrounding them and polling with sleep. A command stopped at its timeout returns its output so far with timedOut: true and exit code 124. Repository files are snapshotted once after the agent turn answers, not after each command. Changes since the last successful turn-end save can be lost on container shutdown or restart; if that happens, the next repository tool result starts with a WORKSPACE RESTORED notice (workspaceRestored) naming the snapshot, so re-check git status before continuing. Push important work to GitHub for long-term storage.",
+      parameters: obj({
+        command: str(),
+        timeout: opt(
+          int({
+            minimum: 1,
+            maximum: SHELL_TIMEOUT_MAX_SECONDS,
+            description: `Seconds before the command is stopped (default ${SHELL_TIMEOUT_DEFAULT_SECONDS})`,
+          }),
+        ),
+      }),
       replay: "unsafe",
       executionMode: "sequential",
-      execute: ({ command }: { command: string }, api) =>
+      execute: ({ command, timeout }: { command: string; timeout?: number }, api, context) =>
         Effect.runPromise(
           rpc("sandbox.shell", async () => {
             const workspace = await this.prepareWorkspace(api.conversationId);
 
-            const result = await this.env.SANDBOX.getByName(
+            const sandbox = this.env.SANDBOX.getByName(
               workspace?.sandboxId ?? String(api.conversationId),
-            ).run(command, await this.agentGitEnv());
+            );
+
+            const env = await this.agentGitEnv();
+
+            const result = await runCancellable(sandbox, context.abortSignal, (executionId) =>
+              sandbox.run(command, env, {
+                timeout: timeout ?? SHELL_TIMEOUT_DEFAULT_SECONDS,
+                executionId,
+                onOutput: (text: string) => {
+                  // Output after the call has settled has nowhere to go.
+                  try {
+                    api.output(text);
+                  } catch {}
+                },
+              }),
+            );
 
             const output = { ...result, workspaceSetup: workspace?.setup };
 
