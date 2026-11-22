@@ -78,7 +78,12 @@ test("leaves automatic reviews out of the sidebar and never opens on one", async
   // A review's workspace stays listed once writable work was started in it.
   await expect(workspaces.locator(".workspace-row")).toHaveCount(3);
   await expect(workspaces).not.toContainText("Review example/project#8");
-  await expect(workspaces).toContainText("Review example/project#9");
+  // It is named after, and opens, that work rather than the review.
+  await expect(workspaces).not.toContainText("Review example/project#9");
+  await workspaces.locator(".workspace-row").filter({ hasText: "Fix review feedback" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Fix review feedback", exact: true }),
+  ).toBeVisible();
 });
 
 test("shows an open review's row until another session is opened", async ({ page }) => {
