@@ -92,29 +92,30 @@ const PROMPT_SCAN_LIMIT = 500;
 
 /** The first and newest non-empty user prompts in a conversation, inherited history included. */
 export async function promptBounds(conversation: Conversation) {
-  const find = async (order: "ascending" | "descending") => {
-    let cursor: Cursor | undefined;
-    let scanned = 0;
+  const first = await findPrompt(conversation, "ascending");
 
-    do {
-      const page = await conversation.entries({ order }, 50, cursor, BACKGROUND_CONTEXT);
+  return first ? { first, latest: await findPrompt(conversation, "descending") } : undefined;
+}
 
-      for (const entry of page.items) {
-        const messages = order === "ascending" ? entry.model : [...(entry.model ?? [])].reverse();
+/** The first or newest non-empty user prompt in a conversation, inherited history included. */
+export async function findPrompt(conversation: Conversation, order: "ascending" | "descending") {
+  let cursor: Cursor | undefined;
+  let scanned = 0;
 
-        for (const message of messages ?? []) {
-          const text = messageText(message).trim();
+  do {
+    const page = await conversation.entries({ order }, 50, cursor, BACKGROUND_CONTEXT);
 
-          if (text) return text;
-        }
+    for (const entry of page.items) {
+      const messages = order === "ascending" ? entry.model : [...(entry.model ?? [])].reverse();
+
+      for (const message of messages ?? []) {
+        const text = messageText(message).trim();
+
+        if (text) return text;
       }
+    }
 
-      scanned += page.items.length;
-      cursor = page.next;
-    } while (cursor && scanned < PROMPT_SCAN_LIMIT);
-  };
-
-  const first = await find("ascending");
-
-  return first ? { first, latest: await find("descending") } : undefined;
+    scanned += page.items.length;
+    cursor = page.next;
+  } while (cursor && scanned < PROMPT_SCAN_LIMIT);
 }

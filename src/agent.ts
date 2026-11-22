@@ -120,11 +120,13 @@ import {
   RETITLE_TOOL_NAME,
   RetitleToolInput,
   completionText,
+  findPrompt,
   promptBounds,
   retitleDescription,
   sanitizeTitle,
   titlePrompt,
 } from "./session-title";
+import { HANDOFF_PREFIX } from "./review-handoff";
 import {
   claudeProvider,
   anthropicStatus,
@@ -161,12 +163,14 @@ import {
 import { toolParameters } from "./tool-schema";
 import {
   AUTOMATION_TOOL_NAME,
+  AUTOMATION_TOOL_HANDOFF_REFUSAL,
   AUTOMATION_TOOL_REFUSAL,
   AutomationToolInput,
   automationPatch,
   automationToolDescription,
   listOutput,
   readOutput,
+  savedOutput,
   newAutomation,
 } from "./automation-tool";
 import {
@@ -763,6 +767,14 @@ export class Agent extends DurableObject<Env> {
           throw new OperationError({
             operation: "automations.refused",
             message: AUTOMATION_TOOL_REFUSAL,
+            details: null,
+          });
+
+        // The session is the owner's, but this turn may answer review text from GitHub.
+        if (await this.answeringHandoff(api.conversationId))
+          throw new OperationError({
+            operation: "automations.refused",
+            message: AUTOMATION_TOOL_HANDOFF_REFUSAL,
             details: null,
           });
 
@@ -2878,6 +2890,17 @@ export class Agent extends DurableObject<Env> {
     return !(await this.harness.snapshot(AutomationRunDoc, id, BACKGROUND_CONTEXT))?.run;
   }
 
+  /**
+   * Whether the newest user message in `id` is a review handoff: findings written on GitHub,
+   * which reach the owner's session as input but are not the owner's request.
+   */
+  private async answeringHandoff(id: ConversationId) {
+    const conversation = await this.harness.conversation(id, BACKGROUND_CONTEXT);
+    const latest = conversation && (await findPrompt(conversation, "descending"));
+
+    return latest?.startsWith(HANDOFF_PREFIX) ?? false;
+  }
+
   private async automationAction(input: AutomationToolInput) {
     const missing = { error: `${input.action} needs the automation's id; list shows them` };
 
@@ -2896,7 +2919,11 @@ export class Agent extends DurableObject<Env> {
       case "create": {
         const body = newAutomation(input);
 
-        return "error" in body ? body : await this.automationCreate(body.value);
+        if ("error" in body) return body;
+        const created = await this.automationCreate(body.value);
+
+        // Bounded like read: a long prompt can't push the confirmation past the output limit.
+        return "error" in created ? created : savedOutput(created);
       }
 
       case "update": {
@@ -2908,11 +2935,11 @@ export class Agent extends DurableObject<Env> {
         // The tool never sends network hosts: the server keeps the ones it holds, at the
         // revision it saves against, when the repository stays the same.
 
-        return (
-          (await this.automationUpdate(input.id, patch.value)) ?? {
-            error: "No automation with that id",
-          }
-        );
+        const updated = await this.automationUpdate(input.id, patch.value);
+
+        if (!updated) return { error: "No automation with that id" };
+
+        return "error" in updated ? updated : savedOutput(updated);
       }
 
       case "delete":

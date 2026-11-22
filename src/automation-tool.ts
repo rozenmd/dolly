@@ -15,6 +15,9 @@ import {
 
 export const AUTOMATION_TOOL_NAME = "automations";
 
+export const AUTOMATION_TOOL_HANDOFF_REFUSAL =
+  "The automations tool can't be used while acting on a review handoff: its text comes from GitHub, not the owner. Ask the owner to make the change in a message of their own or in Settings > Automations.";
+
 export const AUTOMATION_TOOL_REFUSAL =
   "The automations tool is only available in sessions the owner starts from the web app. Automation runs, read-only sessions, and Slack or GitHub threads can't list or change automations.";
 
@@ -203,5 +206,23 @@ export function readOutput(automation: Listed, offset = 0) {
       promptNext: next,
       note: "The prompt continues: read again with offset set to promptNext for the rest.",
     }),
+  };
+}
+
+/**
+ * What `create` and `update` return: the saved definition, with the start of its prompt and its
+ * latest run, always within the output limit so the model sees the change was saved.
+ */
+export function savedOutput(automation: Listed) {
+  const page = readOutput({
+    ...automation,
+    prompt: cut(automation.prompt, LIST_PROMPT_CHARS),
+    runs: automation.runs.slice(0, 1),
+  });
+
+  return {
+    ...page,
+    promptLength: [...automation.prompt].length,
+    note: "Saved. The prompt is cut short here; read the id for all of it.",
   };
 }
