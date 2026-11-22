@@ -7,7 +7,9 @@ import {
   defineTask,
   type ConversationId,
   type Harness,
+  type SettledSubmissionRecord,
   type TaskId,
+  type Tx,
 } from "@earendil-works/pi-durable";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
@@ -43,7 +45,8 @@ type Checkpoint =
 export interface SlackHost {
   /** Route, download attachments and build the prompt. Runs once per message; its result is checkpointed. */
   prepare(input: SlackDelivery, isNew: boolean): Effect.Effect<SlackPrepared, OperationError>;
-  reply(input: SlackDelivery, text: string): Effect.Effect<void, OperationError>;
+  /** Post `text` in the thread. */
+  reply(thread: SlackThread, text: string): Effect.Effect<void, OperationError>;
   /** Add or remove the :eyes: reaction that shows a message has been picked up. */
   working(input: SlackDelivery, on: boolean): Effect.Effect<void, OperationError>;
   /** Tell the thread which Dolly session now owns it. */
@@ -59,6 +62,27 @@ const bestEffort = (event: string, effect: Effect.Effect<void, OperationError>) 
   );
 
 type TaskInput = SlackDelivery & { isNew: boolean };
+
+/** A Slack thread a session answers in. */
+export type SlackThread = { channel: string; threadTs: string };
+
+/** What a settled turn posts back to Slack: only the text after the last tool call. */
+async function answerText(tx: Tx, settled: SettledSubmissionRecord) {
+  if (settled.status === "unanswered" || settled.type !== "input")
+    return "Run failed: the request ended without an answer.";
+  const entry = await tx.entry(AssistantEntry, settled.answer);
+  const messages = (entry?.model ?? []).filter((message) => message.role === "assistant");
+  const last = messages.at(-1);
+
+  const text = (last?.content ?? [])
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
+    .join("\n")
+    .trim();
+
+  const failure = last?.stopReason === "error" ? last.errorMessage : undefined;
+
+  return failure ? `Run failed: ${failure}` : text;
+}
 
 export function slackDelivery(host: SlackHost) {
   return defineTask<TaskInput, Checkpoint, null>({
@@ -162,41 +186,13 @@ export function slackDelivery(host: SlackHost) {
 
             const settled = yield* attempt("slack.wait", () => submission.wait(context));
             yield* attempt("slack.checkpoint", () =>
-              runtime.commit(async (tx) => {
-                if (settled.status === "unanswered" || settled.type !== "input")
-                  return {
-                    status: "running",
-                    checkpoint: {
-                      phase: "reply",
-                      text: "Run failed: the request ended without an answer.",
-                      attempts: 0,
-                    },
-                  };
-                const entry = await tx.entry(AssistantEntry, settled.answer);
-
-                // Only the text after the last tool call is posted.
-                const messages = (entry?.model ?? []).filter(
-                  (message) => message.role === "assistant",
-                );
-
-                const last = messages.at(-1);
-
-                const text = (last?.content ?? [])
-                  .flatMap((part) => (part.type === "text" ? [part.text] : []))
-                  .join("\n")
-                  .trim();
-
-                const failure = last?.stopReason === "error" ? last.errorMessage : undefined;
-
-                return {
+              runtime.commit(
+                async (tx) => ({
                   status: "running",
-                  checkpoint: {
-                    phase: "reply",
-                    text: failure ? `Run failed: ${failure}` : text,
-                    attempts: 0,
-                  },
-                };
-              }, context),
+                  checkpoint: { phase: "reply", text: await answerText(tx, settled), attempts: 0 },
+                }),
+                context,
+              ),
             );
           }),
           { signal: context.abortSignal },
@@ -251,6 +247,108 @@ export function slackDelivery(host: SlackHost) {
               runtime.sleepUntil(
                 Date.now() + 2 ** task.state.checkpoint.attempts * 5000,
                 { ...task.state.checkpoint, attempts: task.state.checkpoint.attempts + 1 },
+                context,
+              ),
+            );
+          }),
+          { signal: context.abortSignal },
+        ),
+    },
+    abort: (_, runtime, context) =>
+      runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
+  });
+}
+
+/** Where a notice's answer goes, for the model writing it. */
+const SLACK_NOTICE_NOTE =
+  "This session's Slack thread gets your final reply automatically; do not post it yourself. Only the text after your last tool call is posted, so write a short, complete update there for someone who wasn't watching.";
+
+/** A turn nobody typed in Slack, such as a review handoff: what to run and where to answer. */
+export type SlackNoticeInput = SlackThread & { content: string; requestId: string };
+
+type NoticeCheckpoint = { phase: "deliver" } | { phase: "reply"; text: string; attempts: number };
+
+/**
+ * Runs one system turn in a session a Slack thread owns and posts its answer in that thread, so
+ * work the session does unasked (a review handoff) is seen where the person talks to it. No
+ * reactions: there is no Slack message to react to.
+ */
+export function slackNotice(host: Pick<SlackHost, "reply">) {
+  return defineTask<SlackNoticeInput, NoticeCheckpoint, null>({
+    name: "app.slack-notice",
+    version: 1,
+    initial: () => ({ phase: "deliver" }),
+    phases: {
+      deliver: (task, runtime, context) =>
+        Effect.runPromise(
+          Effect.gen(function* () {
+            const conversation = yield* attempt("slack.notice.conversation", () =>
+              runtime.conversation(task.conversationId, context),
+            );
+
+            if (!conversation) return yield* Effect.die("Slack conversation missing");
+
+            const submission = yield* attempt("slack.notice.submit", () =>
+              conversation.submit(
+                {
+                  type: "input",
+                  content: `${task.input.content}\n\n${SLACK_NOTICE_NOTE}`,
+                  requestId: task.input.requestId,
+                  // Queued behind whatever the person is doing in that thread, never steering it.
+                  whenBusy: "followUp",
+                },
+                context,
+              ),
+            );
+
+            const settled = yield* attempt("slack.notice.wait", () => submission.wait(context));
+            yield* attempt("slack.notice.checkpoint", () =>
+              runtime.commit(
+                async (tx) => ({
+                  status: "running",
+                  checkpoint: { phase: "reply", text: await answerText(tx, settled), attempts: 0 },
+                }),
+                context,
+              ),
+            );
+          }),
+          { signal: context.abortSignal },
+        ),
+      reply: (task, runtime, context) =>
+        Effect.runPromise(
+          Effect.gen(function* () {
+            const { text, attempts } = task.state.checkpoint;
+
+            const result = text
+              ? yield* host.reply(task.input, text).pipe(Effect.result)
+              : Result.succeed(undefined);
+
+            if (Result.isSuccess(result) || attempts >= 4) {
+              if (Result.isFailure(result))
+                yield* Effect.logError({
+                  event: "slack_notice_reply_failed",
+                  error: exceptionDetails(result.failure),
+                  details: result.failure.details,
+                });
+
+              return yield* attempt("slack.notice.replied", () =>
+                runtime.commit(
+                  () =>
+                    Result.isSuccess(result)
+                      ? { status: "terminal", outcome: { status: "completed", result: null } }
+                      : {
+                          status: "terminal",
+                          outcome: { status: "failed", error: { message: result.failure.message } },
+                        },
+                  context,
+                ),
+              );
+            }
+
+            yield* attempt("slack.notice.retry", () =>
+              runtime.sleepUntil(
+                Date.now() + 2 ** attempts * 5000,
+                { phase: "reply", text, attempts: attempts + 1 },
                 context,
               ),
             );

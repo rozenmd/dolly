@@ -1,6 +1,7 @@
 import { createPrivateKey } from "node:crypto";
 import { env } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { ConversationId } from "@earendil-works/pi-durable";
 import {
   SELF,
   createExecutionContext,
@@ -17,6 +18,7 @@ import { ingress } from "../src/ingress";
 import { ReviewHandoffs } from "../src/review-handoff";
 import type { GitHubRequest } from "../src/github-contracts";
 import { GitHubThreads } from "../src/github-inbox";
+import { SlackThreads } from "../src/slack-inbox";
 import { ConversationWorkspace } from "../src/workspace";
 
 type GitHubOperation = typeof GitHubRequest.Type.operation;
@@ -164,6 +166,12 @@ let verdicts: string[] = [];
 /** Messages the review loop delivered to the session that opened the PR. */
 let handoffs: string[] = [];
 let reviewPrompts: string[] = [];
+
+/** What Dolly posted to Slack's Web API. */
+let slackPosts: {
+  method: string;
+  body: { channel?: string; thread_ts?: string; text?: string };
+}[] = [];
 
 function fakeGitHub(url: URL, init: RequestInit | undefined) {
   const path = url.pathname;
@@ -637,6 +645,7 @@ beforeEach(async () => {
   bulkyPulls = [];
   handoffs = [];
   reviewPrompts = [];
+  slackPosts = [];
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("credential:openai", {
       type: "oauth",
@@ -662,6 +671,15 @@ beforeEach(async () => {
     const url = new URL(input instanceof Request ? input.url : String(input));
 
     if (url.hostname === "api.github.com") return fakeGitHub(url, init);
+
+    if (url.hostname === "slack.com") {
+      slackPosts.push({
+        method: url.pathname.slice(5),
+        body: JSON.parse(String(init?.body ?? "{}")),
+      });
+
+      return Response.json({ ok: true, ts: "1.1" });
+    }
 
     return model(await modelRequest(init));
   });
@@ -1130,21 +1148,84 @@ it("doesn't hand findings to an archived session, or when the review gave no ver
   verdicts.push("Broken.\nVERDICT: blocking=1 findings=1 confidence=1");
   expect(await pullRequestHook("synchronize", 10, "b".repeat(40))).toBe(202);
   await expect.poll(() => github.reviews, { timeout: 15_000 }).toHaveLength(2);
-  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  // The PR says once that the session that opened it can't take its findings.
+  await expect
+    .poll(() => github.comments, { timeout: 15_000 })
+    .toEqual([{ number: 10, body: expect.stringContaining("can no longer take review findings") }]);
+  expect(handoffs).toEqual([]);
+
+  github.heads["10"] = "c".repeat(40);
+  verdicts.push("Still broken.\nVERDICT: blocking=1 findings=1 confidence=1");
+  expect(await pullRequestHook("synchronize", 10, "c".repeat(40))).toBe(202);
+  await expect.poll(() => github.reviews, { timeout: 15_000 }).toHaveLength(3);
+  await expect.poll(() => reviewsSettled(10), { timeout: 15_000 }).toBe(true);
+  expect(github.comments).toHaveLength(1);
   expect(handoffs).toEqual([]);
 }, 60_000);
 
-it("only hands findings to the session whose own branch is the PR's head", async () => {
-  // The session opened the PR from a branch it doesn't own (the github tool takes any branch).
+it("hands findings to the session that opened the PR, whichever branch it pushed", async () => {
+  // The session opened the PR from a branch name of its choosing, not its workspace branch (the
+  // github tool and git push take any branch), as a session that attached a second repository does.
   github.number = 11;
-  await opener("someone-elses-branch");
+  await opener("allow-raw-githubusercontent");
 
   verdicts.push("Broken.\nVERDICT: blocking=1 findings=1 confidence=1");
   expect(await pullRequestHook("opened", 11, "a".repeat(40))).toBe(202);
-  await expect.poll(() => github.reviews, { timeout: 15_000 }).toHaveLength(1);
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  expect(handoffs).toEqual([]);
-  expect((await handoffState())?.pulls[`${repository}#11`]?.lastSha).toBeUndefined();
+  await expect.poll(() => handoffs, { timeout: 15_000 }).toHaveLength(1);
+  expect(handoffs[0]).toContain("fix round 1/6");
+  expect(handoffs[0]).toContain("git push origin HEAD:allow-raw-githubusercontent");
+  expect((await handoffState())?.pulls[`${repository}#11`]?.rounds).toBe(1);
+}, 60_000);
+
+it("hands findings to a session a Slack thread owns, and posts its answer in that thread", async () => {
+  github.number = 21;
+  const id = await opener();
+
+  // The session belongs to a Slack thread, as a session started by a Slack mention does.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    await state.storage.put("slack:profile", {
+      enabled: true,
+      botToken: "xoxb-1111-2222-abcdefghijkl",
+      signingSecret: "0123456789abcdef0123456789abcdef",
+      defaultRepository: repository,
+      teamId: "THOME",
+      teamName: "Home",
+      botUserId: "UBOT",
+    });
+    const conversation = await state.storage.get<ConversationId>(`session:${id}`);
+
+    if (conversation === undefined) throw new Error("Expected the session's conversation");
+    await agent["harness"].commit(async (tx) => {
+      (await tx.doc(SlackThreads)).threads["C123:1700000000.000100"] = {
+        id: conversation,
+        events: {},
+      };
+    }, BACKGROUND_CONTEXT);
+  });
+
+  verdicts.push("Broken.\nVERDICT: blocking=1 findings=1 confidence=1");
+  expect(await pullRequestHook("opened", 21, "a".repeat(40))).toBe(202);
+  await expect.poll(() => handoffs, { timeout: 15_000 }).toHaveLength(1);
+  expect(handoffs[0]).toContain("fix round 1/6");
+  expect(handoffs[0]).toContain("Slack thread gets your final reply");
+
+  // The session's answer goes to the thread, where the person who asked for the PR will see it.
+  await expect
+    .poll(() => slackPosts.filter((post) => post.method === "chat.postMessage"), {
+      timeout: 15_000,
+    })
+    .toEqual([
+      {
+        method: "chat.postMessage",
+        body: expect.objectContaining({
+          channel: "C123",
+          thread_ts: "1700000000.000100",
+          text: "Handled 1",
+        }),
+      },
+    ]);
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Handled 1");
 }, 60_000);
 
 /** Turn automatic reviews on or off, as Settings > GitHub does. */

@@ -85,6 +85,8 @@ export type HandoffState = {
   deliveredAt?: number;
   /** The round-cap comment was posted on the PR. */
   cappedAnnounced?: boolean;
+  /** The PR was told the session that opened it can't take its findings. */
+  unavailableAnnounced?: boolean;
   /** No longer read: notices are once per reviewed commit, after OpenSession. */
   noticed?: boolean;
   /** The last review with a verdict, whatever the loop did with it. */
@@ -406,4 +408,12 @@ export function handoffMessage(
 /** The comment posted on a PR once its fix rounds run out. */
 export function cappedComment(number: number) {
   return `Still not merge-ready after ${MAX_HANDOFF_ROUNDS} handed-off fix rounds on #${number}, so Dolly stopped handing review findings back to the session that opened it. Over to a human.`;
+}
+
+/**
+ * The comment posted, once per PR, when the session that opened it can't take review findings
+ * (archived, read-only or deleted), after OpenSession's no-owner note: a stopped loop says so.
+ */
+export function unavailableComment() {
+  return "Not merge-ready, and the Dolly session that opened this PR can no longer take review findings (it was archived, made read-only or deleted), so nobody is fixing them automatically. Over to a human, or ask Dolly to pick it up from a session.";
 }
