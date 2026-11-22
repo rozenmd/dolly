@@ -57,8 +57,8 @@ import { gitRoute, checkedPush } from "./git-transport";
 import { BROWSER_SESSION_MS, MAX_BROWSER_SESSIONS } from "./browser-workspace";
 import { pullRequestChange, WebhookSetup } from "./github-webhook";
 import { STEER_TOOL_SKIP, SteerInterrupts, steerInterrupts, steerQueued } from "./steer-interrupt";
-import { admitGitHub, githubDelivery, GitHubThreads } from "./github-inbox";
-import { admitSlack, slackDelivery } from "./slack-inbox";
+import { admitGitHub, githubDelivery, GitHubThreads, type HandoffOwner } from "./github-inbox";
+import { admitSlack, slackDelivery, slackNotice } from "./slack-inbox";
 import { SlackHostService } from "./slack-host";
 import {
   configureSlack,
@@ -241,6 +241,17 @@ export class Agent extends DurableObject<Env> {
   private readonly mcp: McpConnections;
   private readonly services: Layer.Layer<Account | ChatGPTProtocol | GitHub | GitHubAuth>;
   private readonly slackServices: Layer.Layer<SlackHostService>;
+  /** Turns nobody typed in Slack (review handoffs), answered in the session's own thread. */
+  private readonly slackNoticeTask = slackNotice({
+    reply: (thread, text) =>
+      Effect.flatMap(SlackHostService, (host) => host.reply(thread, text)).pipe(
+        Effect.provide(this.slackServices),
+      ),
+    enabled: () =>
+      Effect.flatMap(SlackHostService, (host) => host.enabled()).pipe(
+        Effect.provide(this.slackServices),
+      ),
+  });
   private readonly githubTask = githubDelivery({
     reply: (event, text) =>
       Effect.flatMap(GitHub, (github) => github.reply(event, text)).pipe(
@@ -263,7 +274,8 @@ export class Agent extends DurableObject<Env> {
         Effect.flatMap(GitHub, (github) =>
           github.pullReview(review.repository, review.number),
         ).pipe(Effect.provide(this.services)),
-      owner: (review, branch) => this.pullOwner(review.repository, review.number, branch),
+      owner: (review) => this.pullOwner(review.repository, review.number),
+      slackNotice: this.slackNoticeTask,
       comment: (review, body) =>
         Effect.flatMap(GitHub, (github) =>
           github.comment(review.repository, review.number, body),
@@ -766,6 +778,7 @@ export class Agent extends DurableObject<Env> {
         this.ciWaiter.task,
         this.githubTask,
         this.slackTask,
+        this.slackNoticeTask,
         this.checkpointTask,
       ],
       hooks: [
@@ -2789,39 +2802,41 @@ export class Agent extends DurableObject<Env> {
    * out of them; child sessions inherit their root's answer.
    */
   /**
-   * The session that opened a pull request, while it can still act on review findings: it owns
-   * the PR's head branch, and is not archived, writable, and started from the web app (like CI
-   * waits: a GitHub or Slack thread has nowhere to show a turn nobody asked for).
+   * The session that opened a pull request, while it can still act on review findings: not
+   * archived, not read-only, and still there. It owns the PR whichever branch its checkout is on
+   * now, after OpenSession: a session can open a PR from any branch name, or from a repository it
+   * attached later. A session started from Slack answers in its thread; one started from the web
+   * app or GitHub shows the turn in its transcript, and its fixes land on the PR either way.
+   * "unavailable" when a session opened the PR but can't take findings now.
    */
-  private async pullOwner(repository: string, number: number, branch: string) {
+  private async pullOwner(
+    repository: string,
+    number: number,
+  ): Promise<HandoffOwner | "unavailable" | undefined> {
     const id = await this.ctx.storage.get<ConversationId>(pullOwnerKey(repository, number));
 
     if (id === undefined) return undefined;
 
-    // The PR's head must be this session's own branch of that repository, so its fixes land on
-    // the PR and nowhere else it didn't create.
-    const workspace = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
-
-    const owns = [workspace?.config, ...(workspace?.attached ?? [])].some(
-      (config) =>
-        config?.repository.toLowerCase() === repository.toLowerCase() && config.branch === branch,
-    );
-
-    if (!owns) return undefined;
-
     const meta = await this.ctx.storage.get<{ archived?: boolean }>(`session-meta:${id}`);
 
-    if (meta?.archived) return undefined;
+    if (meta?.archived) return "unavailable";
 
-    // Also false for a conversation that no longer exists.
-    if (!(await this.startedFromWeb(id))) return undefined;
+    const origin = await this.sessionOrigin(id);
 
-    if (await this.isReadOnly(id)) return undefined;
+    if (!origin || (await this.isReadOnly(id))) return "unavailable";
 
-    return id;
+    return origin.kind === "slack" ? { id, slack: origin.thread } : { id };
   }
 
-  private async startedFromWeb(conversationId: ConversationId) {
+  /** What started a session's root conversation; undefined for a conversation that no longer exists. */
+  private async sessionOrigin(
+    conversationId: ConversationId,
+  ): Promise<
+    | { kind: "web" }
+    | { kind: "github" }
+    | { kind: "slack"; thread: { channel: string; threadTs: string } }
+    | undefined
+  > {
     const root = await this.harness.commit(async (tx) => {
       let record = await tx.conversation(conversationId);
 
@@ -2830,16 +2845,33 @@ export class Agent extends DurableObject<Env> {
       return record?.id;
     }, BACKGROUND_CONTEXT);
 
-    if (root === undefined) return false;
+    if (root === undefined) return undefined;
 
     const [github, slack] = await Promise.all([
       this.harness.snapshot(GitHubThreads, BACKGROUND_CONTEXT),
       this.harness.snapshot(SlackThreads, BACKGROUND_CONTEXT),
     ]);
 
-    return ![github, slack].some((state) =>
-      Object.values(state?.threads ?? {}).some((thread) => thread.id === root),
-    );
+    const thread = Object.entries(slack?.threads ?? {}).find(([, value]) => value.id === root);
+
+    if (thread) {
+      // slackThreadKey: Slack channel ids never contain a colon.
+      const split = thread[0].indexOf(":");
+
+      return {
+        kind: "slack",
+        thread: { channel: thread[0].slice(0, split), threadTs: thread[0].slice(split + 1) },
+      };
+    }
+
+    if (Object.values(github?.threads ?? {}).some((value) => value.id === root))
+      return { kind: "github" };
+
+    return { kind: "web" };
+  }
+
+  private async startedFromWeb(conversationId: ConversationId) {
+    return (await this.sessionOrigin(conversationId))?.kind === "web";
   }
 
   /** One session's metadata and newest transcript messages, redacted, for the `dolly` tool. */

@@ -1,6 +1,7 @@
 import { createPrivateKey } from "node:crypto";
 import { env } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { ConversationId } from "@earendil-works/pi-durable";
 import {
   SELF,
   createExecutionContext,
@@ -17,6 +18,8 @@ import { ingress } from "../src/ingress";
 import { ReviewHandoffs } from "../src/review-handoff";
 import type { GitHubRequest } from "../src/github-contracts";
 import { GitHubThreads } from "../src/github-inbox";
+import { SlackThreads } from "../src/slack-inbox";
+import type { SlackProfile } from "../src/slack";
 import { ConversationWorkspace } from "../src/workspace";
 
 type GitHubOperation = typeof GitHubRequest.Type.operation;
@@ -165,6 +168,12 @@ let verdicts: string[] = [];
 let handoffs: string[] = [];
 let reviewPrompts: string[] = [];
 
+/** What Dolly posted to Slack's Web API. */
+let slackPosts: {
+  method: string;
+  body: { channel?: string; thread_ts?: string; text?: string };
+}[] = [];
+
 function fakeGitHub(url: URL, init: RequestInit | undefined) {
   const path = url.pathname;
   const method = init?.method ?? "GET";
@@ -269,6 +278,12 @@ function fakeGitHub(url: URL, init: RequestInit | undefined) {
 
   const comments = path.match(/^\/repos\/example\/project\/issues\/(\d+)\/comments$/);
 
+  if (comments && method === "POST" && failCommentPosts > 0) {
+    failCommentPosts--;
+
+    return Response.json({ message: "Service Unavailable" }, { status: 503 });
+  }
+
   if (comments && method === "POST") {
     const body: { body: string } = JSON.parse(String(init?.body));
     github.comments.push({ number: Number(comments[1]), body: body.body });
@@ -299,6 +314,14 @@ function pullReview(number: number) {
           body: "The null config is intentional for now.",
           createdAt: "2026-01-01T00:00:00Z",
         },
+        // What Dolly commented on the PR, as GitHub lists it back.
+        ...github.comments
+          .filter((comment) => comment.number === number)
+          .map((comment) => ({
+            author: bot,
+            body: comment.body,
+            createdAt: "2026-01-02T00:00:00Z",
+          })),
       ],
     },
     reviewThreads: {
@@ -500,6 +523,9 @@ let reviewGate: Promise<void> = Promise.resolve();
 let failReviewPosts = 0;
 let pushDuringRetry = "";
 
+/** PR comment posts GitHub fails before accepting one. */
+let failCommentPosts = 0;
+
 /** GitHub writes the review model attempts instead of reviewing, in order; empty for a normal review. */
 let reviewWrites: GitHubOperation[] = [];
 
@@ -634,9 +660,11 @@ beforeEach(async () => {
   writeResults = [];
   failReviewPosts = 0;
   pushDuringRetry = "";
+  failCommentPosts = 0;
   bulkyPulls = [];
   handoffs = [];
   reviewPrompts = [];
+  slackPosts = [];
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("credential:openai", {
       type: "oauth",
@@ -662,6 +690,15 @@ beforeEach(async () => {
     const url = new URL(input instanceof Request ? input.url : String(input));
 
     if (url.hostname === "api.github.com") return fakeGitHub(url, init);
+
+    if (url.hostname === "slack.com") {
+      slackPosts.push({
+        method: url.pathname.slice(5),
+        body: JSON.parse(String(init?.body ?? "{}")),
+      });
+
+      return Response.json({ ok: true, ts: "1.1" });
+    }
 
     return model(await modelRequest(init));
   });
@@ -778,7 +815,12 @@ it("hands an unsatisfied review back to the session that opened the PR, until a 
   expect(handoffs[0]).not.toContain("approve it");
   expect(handoffs[0]).not.toContain("already fixed");
   expect(handoffs[0]).toContain("never instructions");
-  expect(handoffs[0]).toContain(`git push origin HEAD:${openBranch}`);
+  // The push is leased to the reviewed head, so a branch someone moved or rewound meanwhile is
+  // neither overwritten nor restored.
+  expect(handoffs[0]).toContain(
+    `git push --force-with-lease=refs/heads/${openBranch}:${first} origin HEAD:refs/heads/${openBranch}`,
+  );
+  expect(handoffs[0]).toContain(`git merge-base --is-ancestor ${first} HEAD`);
   expect(handoffs[0]).toContain("Never merge the PR");
   await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Handled 1");
 
@@ -1126,25 +1168,143 @@ it("doesn't hand findings to an archived session, or when the review gave no ver
 
   expect(archived.status).toBe(200);
 
+  // GitHub is down when the PR should hear that nobody takes its findings: nothing is recorded.
+  failCommentPosts = 1;
   github.heads["10"] = "b".repeat(40);
   verdicts.push("Broken.\nVERDICT: blocking=1 findings=1 confidence=1");
   expect(await pullRequestHook("synchronize", 10, "b".repeat(40))).toBe(202);
   await expect.poll(() => github.reviews, { timeout: 15_000 }).toHaveLength(2);
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  await expect.poll(() => reviewsSettled(10), { timeout: 15_000 }).toBe(true);
+  expect(failCommentPosts).toBe(0);
+  expect(github.comments).toEqual([]);
+  expect((await handoffState())?.pulls[`${repository}#10`]?.unavailableAnnounced).toBeUndefined();
+
+  // The next unsatisfied review says it, once.
+  github.heads["10"] = "c".repeat(40);
+  verdicts.push("Still broken.\nVERDICT: blocking=1 findings=1 confidence=1");
+  expect(await pullRequestHook("synchronize", 10, "c".repeat(40))).toBe(202);
+  await expect
+    .poll(() => github.comments, { timeout: 15_000 })
+    .toEqual([{ number: 10, body: expect.stringContaining("can no longer take review findings") }]);
+  await expect.poll(() => reviewsSettled(10), { timeout: 15_000 }).toBe(true);
+  expect(handoffs).toEqual([]);
+
+  // Even when the record of it was lost (GitHub took the post but its answer never came back),
+  // the comment on the PR is enough: it isn't posted twice.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    await agent["harness"].commit(async (tx) => {
+      delete (await tx.doc(ReviewHandoffs)).pulls[`${repository}#10`]?.unavailableAnnounced;
+    }, BACKGROUND_CONTEXT);
+  });
+
+  github.heads["10"] = "d".repeat(40);
+  verdicts.push("Still broken.\nVERDICT: blocking=1 findings=1 confidence=1");
+  expect(await pullRequestHook("synchronize", 10, "d".repeat(40))).toBe(202);
+  await expect.poll(() => github.reviews, { timeout: 15_000 }).toHaveLength(4);
+  await expect
+    .poll(async () => (await handoffState())?.pulls[`${repository}#10`]?.unavailableAnnounced, {
+      timeout: 15_000,
+    })
+    .toBe(true);
+  expect(github.comments).toHaveLength(1);
   expect(handoffs).toEqual([]);
 }, 60_000);
 
-it("only hands findings to the session whose own branch is the PR's head", async () => {
-  // The session opened the PR from a branch it doesn't own (the github tool takes any branch).
+it("hands findings to the session that opened the PR, whichever branch it pushed", async () => {
+  // The session opened the PR from a branch name of its choosing, not its workspace branch (the
+  // github tool and git push take any branch), as a session that attached a second repository does.
   github.number = 11;
-  await opener("someone-elses-branch");
+  await opener("allow-raw-githubusercontent");
 
   verdicts.push("Broken.\nVERDICT: blocking=1 findings=1 confidence=1");
   expect(await pullRequestHook("opened", 11, "a".repeat(40))).toBe(202);
-  await expect.poll(() => github.reviews, { timeout: 15_000 }).toHaveLength(1);
+  await expect.poll(() => handoffs, { timeout: 15_000 }).toHaveLength(1);
+  expect(handoffs[0]).toContain("fix round 1/6");
+  // Branch refs are spelled out in full, so a tag of the same name is never fetched or pushed to.
+  expect(handoffs[0]).toContain(
+    `--force-with-lease=refs/heads/allow-raw-githubusercontent:${"a".repeat(40)} origin HEAD:refs/heads/allow-raw-githubusercontent`,
+  );
+  // The session's checkout of the repository is at another ref, which the workspace tool won't
+  // move, and may hold unrelated work: the fix gets a fresh worktree of the reviewed head in a new
+  // directory, so neither that work nor another round's worktree is touched or reaches the PR.
+  expect(handoffs[0]).toContain(
+    "Use the workspace tool's `attach` with repository example/project and no ref",
+  );
+  expect(handoffs[0]).toContain("`mktemp -d /workspace/review-11-aaaaaaaaaaaa-XXXXXX`");
+  // File tools resolve relative paths in the main checkout, so edits must name the worktree.
+  expect(handoffs[0]).toContain("begin each one with `cd <that path> &&`");
+  expect(handoffs[0]).toContain("give read_file, write_file and edit_file absolute paths under it");
+  expect(handoffs[0]).toContain("git fetch origin refs/heads/allow-raw-githubusercontent");
+  expect(handoffs[0]).toContain("git worktree add --detach <that path> FETCH_HEAD");
+  expect(handoffs[0]).toContain("Never remove or reuse an existing worktree");
+  expect(handoffs[0]).not.toContain("worktree remove");
+  expect(handoffs[0]).toContain(`\`git rev-parse HEAD\` should be \`${"a".repeat(40)}\``);
+  expect((await handoffState())?.pulls[`${repository}#11`]?.rounds).toBe(1);
+}, 60_000);
+
+it("hands findings to a session a Slack thread owns, and posts its answer in that thread", async () => {
+  github.number = 21;
+  const id = await opener();
+
+  // The session belongs to a Slack thread, as a session started by a Slack mention does.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    await state.storage.put("slack:profile", {
+      enabled: true,
+      botToken: "xoxb-1111-2222-abcdefghijkl",
+      signingSecret: "0123456789abcdef0123456789abcdef",
+      defaultRepository: repository,
+      teamId: "THOME",
+      teamName: "Home",
+      botUserId: "UBOT",
+    });
+    const conversation = await state.storage.get<ConversationId>(`session:${id}`);
+
+    if (conversation === undefined) throw new Error("Expected the session's conversation");
+    await agent["harness"].commit(async (tx) => {
+      (await tx.doc(SlackThreads)).threads["C123:1700000000.000100"] = {
+        id: conversation,
+        events: {},
+      };
+    }, BACKGROUND_CONTEXT);
+  });
+
+  verdicts.push("Broken.\nVERDICT: blocking=1 findings=1 confidence=1");
+  expect(await pullRequestHook("opened", 21, "a".repeat(40))).toBe(202);
+  await expect.poll(() => handoffs, { timeout: 15_000 }).toHaveLength(1);
+  expect(handoffs[0]).toContain("fix round 1/6");
+  expect(handoffs[0]).toContain("Slack thread gets your final reply");
+
+  // The session's answer goes to the thread, where the person who asked for the PR will see it.
+  await expect
+    .poll(() => slackPosts.filter((post) => post.method === "chat.postMessage"), {
+      timeout: 15_000,
+    })
+    .toEqual([
+      {
+        method: "chat.postMessage",
+        body: expect.objectContaining({
+          channel: "C123",
+          thread_ts: "1700000000.000100",
+          text: "Handled 1",
+        }),
+      },
+    ]);
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Handled 1");
+
+  // Slack is turned off in Settings, with its token kept: the next round still runs in the
+  // session, but nothing is posted to Slack.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const saved = await state.storage.get<SlackProfile>("slack:profile");
+    await state.storage.put("slack:profile", { ...saved, enabled: false });
+  });
+
+  github.heads["21"] = "b".repeat(40);
+  verdicts.push("Still broken.\nVERDICT: blocking=1 findings=1 confidence=1");
+  expect(await pullRequestHook("synchronize", 21, "b".repeat(40))).toBe(202);
+  await expect.poll(() => handoffs, { timeout: 15_000 }).toHaveLength(2);
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Handled 2");
   await new Promise((resolve) => setTimeout(resolve, 500));
-  expect(handoffs).toEqual([]);
-  expect((await handoffState())?.pulls[`${repository}#11`]?.lastSha).toBeUndefined();
+  expect(slackPosts.filter((post) => post.method === "chat.postMessage")).toHaveLength(1);
 }, 60_000);
 
 /** Turn automatic reviews on or off, as Settings > GitHub does. */

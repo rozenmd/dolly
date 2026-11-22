@@ -22,6 +22,9 @@ import { deliveryKey, type GitHubDelivery, type GitHubReview } from "./github-we
 import {
   cappedComment,
   handoffKey,
+  unavailableComment,
+  UNAVAILABLE_MARKER,
+  type HandoffState,
   type LastReview,
   handoffMessage,
   nextHandoffState,
@@ -35,6 +38,7 @@ import {
 import { reviewPrompt, type PullReviewContext } from "./review-prompt";
 import { attempt, OperationError } from "./operations";
 import type { IntakeAgent } from "./model-defaults";
+import type { slackNotice, SlackThread } from "./slack-inbox";
 
 /** Code changes land on the PR itself, the way a person fixing it would push them. */
 const GITHUB_PR_NOTE =
@@ -80,6 +84,9 @@ type Checkpoint =
   | { phase: "reply"; text: string; attempts: number; verdict?: ReviewVerdict }
   | { phase: "handoff"; text: string; verdict: ReviewVerdict };
 
+/** Where review findings go: a session, and the Slack thread it answers in when Slack owns it. */
+export type HandoffOwner = { id: ConversationId; slack?: SlackThread };
+
 export type HandoffDeps = {
   /** Whether automatic reviews are still turned on; checked again before each review and handoff. */
   enabled: () => Effect.Effect<boolean, OperationError>;
@@ -87,8 +94,13 @@ export type HandoffDeps = {
   head: (review: Review) => Effect.Effect<PullHead, OperationError>;
   /** The PR's description, conversation, review threads and reviews, read fresh. */
   pull: (review: Review) => Effect.Effect<PullReviewContext, OperationError>;
-  /** The live, writable session that opened the PR and owns its head `branch`, if any. */
-  owner: (review: Review, branch: string) => Promise<ConversationId | undefined>;
+  /**
+   * The session that opened the PR, if it can still act on findings; "unavailable" when a session
+   * opened it but can't (archived, read-only or gone); undefined when no session opened it.
+   */
+  owner: (review: Review) => Promise<HandoffOwner | "unavailable" | undefined>;
+  /** Runs a handoff turn in a Slack-owned session and posts its answer in the thread. */
+  slackNotice: ReturnType<typeof slackNotice>;
   /** Posts a comment on the PR. */
   comment: (review: Review, body: string) => Effect.Effect<void, OperationError>;
 };
@@ -358,11 +370,17 @@ export function githubDelivery({
             const review = task.input;
             const key = handoffKey(review.repository, review.number);
 
+            let recorded: HandoffState | undefined;
+
             // What this review concluded is the next review's starting point, whatever the loop
             // does with it.
             yield* attempt("github.handoff.record", () =>
               runtime.commit(async (tx) => {
                 const state = await tx.doc(ReviewHandoffs);
+                const current = state.pulls[key];
+
+                // A copy: the document is only readable inside this transaction.
+                if (current) recorded = { ...current };
 
                 state.pulls[key] = {
                   ...state.pulls[key],
@@ -381,30 +399,80 @@ export function githubDelivery({
             const head = enabled ? yield* handoff.head(review) : undefined;
             const current = head !== undefined && isCurrent(review, head);
 
-            // Only the session that owns the PR's head branch gets the findings, and only open
+            // Only the session that opened the PR gets the findings, whichever branch its checkout
+            // is on now (the head is this repository's, never a fork's: isCurrent), and only open
             // feedback from trusted authors: never anything an untrusted account wrote.
-            const owner =
+            const found =
               head && current
-                ? yield* attempt("github.handoff.owner", () => handoff.owner(review, head.ref))
+                ? yield* attempt("github.handoff.owner", () => handoff.owner(review))
                 : undefined;
 
+            const owner = found === "unavailable" ? undefined : found;
             const pull = owner ? yield* handoff.pull(review) : undefined;
             const findings = pull ? openFeedback(pull, review.sha) : undefined;
 
             const target =
               owner && findings
                 ? yield* attempt("github.handoff.target", () =>
-                    runtime.conversation(owner, context),
+                    runtime.conversation(owner.id, context),
                   )
                 : undefined;
+
+            // A session opened this PR but can't take its findings: say so on the PR once, so a
+            // stopped loop isn't silent. Recorded only once GitHub has the comment, so a failed
+            // post is retried by the next review; the marker catches one whose response was lost.
+            if (
+              found === "unavailable" &&
+              !recorded?.unavailableAnnounced &&
+              planHandoff(recorded, review.sha, verdict).kind === "fix"
+            ) {
+              const seen = yield* handoff.pull(review).pipe(
+                Effect.map((context) =>
+                  context.discussion.some(
+                    (comment) =>
+                      comment.author === context.self && comment.body.includes(UNAVAILABLE_MARKER),
+                  ),
+                ),
+                Effect.catchTag("OperationError", () => Effect.succeed(false)),
+              );
+
+              const posted =
+                seen ||
+                (yield* handoff.comment(review, unavailableComment()).pipe(
+                  Effect.as(true),
+                  Effect.catchTag("OperationError", (error) =>
+                    Effect.logError({
+                      event: "github_review_handoff_unavailable_comment_failed",
+                      error: exceptionDetails(error),
+                      details: error.details,
+                    }).pipe(Effect.as(false)),
+                  ),
+                ));
+
+              if (posted)
+                yield* attempt("github.handoff.unavailable", () =>
+                  runtime.commit(async (tx) => {
+                    const state = await tx.doc(ReviewHandoffs);
+
+                    state.pulls[key] = {
+                      ...state.pulls[key],
+                      rounds: state.pulls[key]?.rounds ?? 0,
+                      unavailableAnnounced: true,
+                    };
+
+                    return undefined;
+                  }, context),
+                );
+            }
 
             let announce = false;
 
             yield* attempt("github.handoff.commit", () =>
               runtime.commit(async (tx) => {
-                if (!target || !findings || !head || !pull) return done;
                 const state = await tx.doc(ReviewHandoffs);
                 const prior = state.pulls[key];
+
+                if (!owner || !target || !findings || !head || !pull) return done;
                 const plan = planHandoff(prior, review.sha, verdict);
 
                 const content = handoffMessage(
@@ -415,12 +483,25 @@ export function githubDelivery({
                   plan,
                 );
 
-                // Queued behind whatever the person is doing in that session, never steering it.
-                if (content)
+                const requestId = `review-handoff:${key}:${review.sha}`;
+
+                // Queued behind whatever the person is doing in that session, never steering it. A
+                // Slack thread's session answers in the thread, where the person will see it.
+                if (content && owner.slack)
+                  await tx.createTask(
+                    handoff.slackNotice,
+                    { ...owner.slack, content, requestId },
+                    {
+                      conversationId: target.id,
+                      ownership: { kind: "conversation" },
+                      background: true,
+                    },
+                  );
+                else if (content)
                   await target.submit(tx, {
                     type: "input",
                     content,
-                    requestId: `review-handoff:${key}:${review.sha}`,
+                    requestId,
                     whenBusy: "followUp",
                   });
 
@@ -441,7 +522,8 @@ export function githubDelivery({
               event: "github_review_handoff",
               pull: key,
               sha: review.sha,
-              owner: owner ? String(owner) : null,
+              owner: owner ? String(owner.id) : (found ?? null),
+              slack: owner?.slack !== undefined,
               enabled,
               current,
               findings: findings?.items.length ?? null,

@@ -22,7 +22,7 @@ import {
   slackUserName,
 } from "./slack";
 import { markdownToSlack, type SlackDelivery } from "./slack-events";
-import type { SlackHost, SlackPrepared } from "./slack-inbox";
+import type { SlackHost, SlackPrepared, SlackThread } from "./slack-inbox";
 import { ASK_MODE_NOTE, classifyMention, prActionPrompt, SLACK_SESSION_NOTE } from "./slack-intent";
 
 const ImageType = PromptImage.fields.mimeType;
@@ -157,9 +157,9 @@ function makeSlackHost(
     } satisfies SlackPrepared;
   });
 
-  const reply = Effect.fn("Slack.replyThread")(function* (input: SlackDelivery, text: string) {
+  const reply = Effect.fn("Slack.replyThread")(function* (thread: SlackThread, text: string) {
     const slack = yield* profile;
-    yield* postSlackReply(slack.botToken, input.channel, input.threadTs, markdownToSlack(text));
+    yield* postSlackReply(slack.botToken, thread.channel, thread.threadTs, markdownToSlack(text));
   });
 
   const working = Effect.fn("Slack.working")(function* (input: SlackDelivery, on: boolean) {
@@ -183,7 +183,10 @@ function makeSlackHost(
     );
   });
 
-  return { prepare, reply, working, announce };
+  const enabled = () =>
+    readSlackProfile(deps.storage).pipe(Effect.map((value) => value?.enabled === true));
+
+  return { prepare, reply, working, announce, enabled };
 }
 
 /** Slack routing, attachments and thread replies for the durable delivery task. */
