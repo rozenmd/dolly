@@ -15,6 +15,7 @@ import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppFeedRouteImport } from './routes/_app/feed'
 import { Route as SettingsIndexRouteImport } from './routes/settings/index'
 import { Route as SettingsAccountRouteImport } from './routes/settings/account'
+import { Route as SettingsAutomationsRouteImport } from './routes/settings/automations'
 import { Route as SettingsConnectionsRouteImport } from './routes/settings/connections'
 import { Route as SettingsGithubRouteImport } from './routes/settings/github'
 import { Route as SettingsModelsRouteImport } from './routes/settings/models'
@@ -51,6 +52,11 @@ const SettingsIndexRoute = SettingsIndexRouteImport.update({
 const SettingsAccountRoute = SettingsAccountRouteImport.update({
   id: '/account',
   path: '/account',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsAutomationsRoute = SettingsAutomationsRouteImport.update({
+  id: '/automations',
+  path: '/automations',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsConnectionsRoute = SettingsConnectionsRouteImport.update({
@@ -101,6 +107,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRouteWithChildren
   '/feed': typeof AppFeedRoute
   '/settings/account': typeof SettingsAccountRoute
+  '/settings/automations': typeof SettingsAutomationsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/github': typeof SettingsGithubRoute
   '/settings/models': typeof SettingsModelsRoute
@@ -114,6 +121,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/feed': typeof AppFeedRoute
   '/settings/account': typeof SettingsAccountRoute
+  '/settings/automations': typeof SettingsAutomationsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/github': typeof SettingsGithubRoute
   '/settings/models': typeof SettingsModelsRoute
@@ -131,6 +139,7 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRouteWithChildren
   '/_app/feed': typeof AppFeedRoute
   '/settings/account': typeof SettingsAccountRoute
+  '/settings/automations': typeof SettingsAutomationsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/github': typeof SettingsGithubRoute
   '/settings/models': typeof SettingsModelsRoute
@@ -149,6 +158,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/feed'
     | '/settings/account'
+    | '/settings/automations'
     | '/settings/connections'
     | '/settings/github'
     | '/settings/models'
@@ -162,6 +172,7 @@ export interface FileRouteTypes {
   to:
     | '/feed'
     | '/settings/account'
+    | '/settings/automations'
     | '/settings/connections'
     | '/settings/github'
     | '/settings/models'
@@ -178,6 +189,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/_app/feed'
     | '/settings/account'
+    | '/settings/automations'
     | '/settings/connections'
     | '/settings/github'
     | '/settings/models'
@@ -237,6 +249,13 @@ declare module '@tanstack/react-router' {
       path: '/account'
       fullPath: '/settings/account'
       preLoaderRoute: typeof SettingsAccountRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/automations': {
+      id: '/settings/automations'
+      path: '/automations'
+      fullPath: '/settings/automations'
+      preLoaderRoute: typeof SettingsAutomationsRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/connections': {
@@ -319,6 +338,7 @@ const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 
 interface SettingsRouteChildren {
   SettingsAccountRoute: typeof SettingsAccountRoute
+  SettingsAutomationsRoute: typeof SettingsAutomationsRoute
   SettingsConnectionsRoute: typeof SettingsConnectionsRoute
   SettingsGithubRoute: typeof SettingsGithubRoute
   SettingsModelsRoute: typeof SettingsModelsRoute
@@ -329,6 +349,7 @@ interface SettingsRouteChildren {
 
 const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsAccountRoute: SettingsAccountRoute,
+  SettingsAutomationsRoute: SettingsAutomationsRoute,
   SettingsConnectionsRoute: SettingsConnectionsRoute,
   SettingsGithubRoute: SettingsGithubRoute,
   SettingsModelsRoute: SettingsModelsRoute,
