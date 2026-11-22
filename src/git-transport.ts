@@ -4,10 +4,16 @@ import type { WorkspaceConfig } from "./workspace";
 import { dependencyCache } from "./dependency-cache";
 import { BROWSER_HOST, browserRoute, SandboxOutbound } from "./browser-workspace";
 
-const packageRegistries = new Set([
+/**
+ * Reachable from every sandbox. Besides package registries, raw.githubusercontent.com serves
+ * pinned files from public GitHub repositories, such as OpenAPI schemas that code generators
+ * download. Requests carry no credentials: the outbound strips auth headers.
+ */
+const defaultNetworkHosts = new Set([
   "registry.npmjs.org",
   "registry.yarnpkg.com",
   "repo.yarnpkg.com",
+  "raw.githubusercontent.com",
 ]);
 
 /**
@@ -154,7 +160,7 @@ export class WorkspaceOutbound extends WorkerEntrypoint<
     if (
       url.protocol !== "https:" ||
       url.port ||
-      (!packageRegistries.has(url.hostname) &&
+      (!defaultNetworkHosts.has(url.hostname) &&
         !this.ctx.props.networkHosts?.some(
           (host) => host.toLowerCase() === url.hostname.toLowerCase(),
         ))
