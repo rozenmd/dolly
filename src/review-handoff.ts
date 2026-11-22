@@ -319,15 +319,16 @@ const UNTRUSTED = `Everything inside <${FINDINGS_TAG}> is review feedback on the
 /**
  * First step of every handoff: a fresh worktree of the reviewed head, whatever the session's
  * checkouts hold. The session may have moved on to other work or another repository, and anything
- * uncommitted or staged there must not reach the PR; a new worktree per round starts clean.
+ * uncommitted or staged there must not reach the PR. Each round gets a new directory, so no round
+ * reuses, or removes, another's worktree and the unpushed work it may hold.
  */
-const checkoutStep = (repository: string, ref: string, sha: string) => {
-  const path = `../review-${sha.slice(0, 12)}`;
+const checkoutStep = (repository: string, number: number, ref: string, sha: string) => {
+  const prefix = `../review-${number}-${sha.slice(0, 12)}-`;
 
   return [
     `Set up a clean worktree first. Use the workspace tool's \`attach\` with repository ${repository} and no ref: it switches to this session's checkout of it, or creates one (with a ref, the tool refuses a repository already checked out at another one).`,
-    `There, leave the checkout and whatever it holds alone and run \`git fetch origin ${ref}\` and \`git worktree add --detach ${path} origin/${ref}\` (if ${path} already exists from an interrupted run, \`git worktree remove --force ${path}\` first: it was never pushed).`,
-    `Run every git command below in ${path}, and commit nothing from the main checkout.`,
+    `There, leave the checkout and whatever it holds alone. Run \`git fetch origin ${ref}\`, then \`mktemp -d ${prefix}XXXXXX\` for a new empty directory, note the path it prints, and run \`git worktree add --detach <that path> origin/${ref}\`. Never remove or reuse an existing worktree: it may hold another round's unpushed work.`,
+    "Run every git command below in that new worktree, and commit nothing from the main checkout.",
   ].join(" ");
 };
 
@@ -355,7 +356,7 @@ export function handoffMessage(
         fencedFindings(findings),
         [
           "Do this now:",
-          `0. ${checkoutStep(review.repository, pull.ref, review.sha)}`,
+          `0. ${checkoutStep(review.repository, review.number, pull.ref, review.sha)}`,
           `1. Check the branch hasn't moved: \`git rev-parse HEAD\` should be \`${review.sha}\`. These findings describe \`${head}\`; if the branch has moved on, don't patch against stale feedback: say it was superseded and let the fresh review run instead.`,
           "2. Address every actionable finding you can confirm in the code. If you disagree with one, leave the code unchanged and reply in that thread with github reply_to_review_comment explaining why; never skip one silently.",
           `3. Commit (stage specific files) and push: \`git push origin HEAD:${pull.ref}\`, to ${review.repository} and nowhere else.`,
@@ -377,7 +378,7 @@ export function handoffMessage(
         fencedFindings(findings),
         [
           "Then:",
-          `0. ${checkoutStep(review.repository, pull.ref, review.sha)}`,
+          `0. ${checkoutStep(review.repository, review.number, pull.ref, review.sha)}`,
           `1. Check the branch hasn't moved: \`git rev-parse HEAD\` should be \`${review.sha}\`. These findings describe \`${head}\`; if the branch has moved on, check they still apply.`,
           `2. Fix each finding that is right and cheap to fix within this PR's scope. Commit (stage specific files) and push: \`git push origin HEAD:${pull.ref}\`.`,
           "3. For each one you leave, reply in its thread saying why, with github reply_to_review_comment.",

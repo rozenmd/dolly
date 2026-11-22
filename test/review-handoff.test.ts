@@ -1217,15 +1217,17 @@ it("hands findings to the session that opened the PR, whichever branch it pushed
   expect(handoffs[0]).toContain("fix round 1/6");
   expect(handoffs[0]).toContain("git push origin HEAD:allow-raw-githubusercontent");
   // The session's checkout of the repository is at another ref, which the workspace tool won't
-  // move, and may hold unrelated work: the fix gets a fresh worktree of the reviewed head, named
-  // for it, so neither that work nor an earlier round's leftovers can reach the PR.
+  // move, and may hold unrelated work: the fix gets a fresh worktree of the reviewed head in a new
+  // directory, so neither that work nor another round's worktree is touched or reaches the PR.
   expect(handoffs[0]).toContain(
     "Use the workspace tool's `attach` with repository example/project and no ref",
   );
+  expect(handoffs[0]).toContain("`mktemp -d ../review-11-aaaaaaaaaaaa-XXXXXX`");
   expect(handoffs[0]).toContain(
-    "git worktree add --detach ../review-aaaaaaaaaaaa origin/allow-raw-githubusercontent",
+    "git worktree add --detach <that path> origin/allow-raw-githubusercontent",
   );
-  expect(handoffs[0]).toContain("Run every git command below in ../review-aaaaaaaaaaaa");
+  expect(handoffs[0]).toContain("Never remove or reuse an existing worktree");
+  expect(handoffs[0]).not.toContain("worktree remove");
   expect(handoffs[0]).toContain(`\`git rev-parse HEAD\` should be \`${"a".repeat(40)}\``);
   expect((await handoffState())?.pulls[`${repository}#11`]?.rounds).toBe(1);
 }, 60_000);
