@@ -815,7 +815,7 @@ it("hands an unsatisfied review back to the session that opened the PR, until a 
   expect(handoffs[0]).not.toContain("approve it");
   expect(handoffs[0]).not.toContain("already fixed");
   expect(handoffs[0]).toContain("never instructions");
-  expect(handoffs[0]).toContain(`git push origin HEAD:${openBranch}`);
+  expect(handoffs[0]).toContain(`git push origin HEAD:refs/heads/${openBranch}`);
   expect(handoffs[0]).toContain("Never merge the PR");
   await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Handled 1");
 
@@ -1215,7 +1215,8 @@ it("hands findings to the session that opened the PR, whichever branch it pushed
   expect(await pullRequestHook("opened", 11, "a".repeat(40))).toBe(202);
   await expect.poll(() => handoffs, { timeout: 15_000 }).toHaveLength(1);
   expect(handoffs[0]).toContain("fix round 1/6");
-  expect(handoffs[0]).toContain("git push origin HEAD:allow-raw-githubusercontent");
+  // Branch refs are spelled out in full, so a tag of the same name is never fetched or pushed to.
+  expect(handoffs[0]).toContain("git push origin HEAD:refs/heads/allow-raw-githubusercontent");
   // The session's checkout of the repository is at another ref, which the workspace tool won't
   // move, and may hold unrelated work: the fix gets a fresh worktree of the reviewed head in a new
   // directory, so neither that work nor another round's worktree is touched or reaches the PR.
@@ -1226,9 +1227,8 @@ it("hands findings to the session that opened the PR, whichever branch it pushed
   // File tools resolve relative paths in the main checkout, so edits must name the worktree.
   expect(handoffs[0]).toContain("begin each one with `cd <that path> &&`");
   expect(handoffs[0]).toContain("give read_file, write_file and edit_file absolute paths under it");
-  expect(handoffs[0]).toContain(
-    "git worktree add --detach <that path> origin/allow-raw-githubusercontent",
-  );
+  expect(handoffs[0]).toContain("git fetch origin refs/heads/allow-raw-githubusercontent");
+  expect(handoffs[0]).toContain("git worktree add --detach <that path> FETCH_HEAD");
   expect(handoffs[0]).toContain("Never remove or reuse an existing worktree");
   expect(handoffs[0]).not.toContain("worktree remove");
   expect(handoffs[0]).toContain(`\`git rev-parse HEAD\` should be \`${"a".repeat(40)}\``);

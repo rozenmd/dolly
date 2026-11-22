@@ -328,7 +328,7 @@ const checkoutStep = (repository: string, number: number, ref: string, sha: stri
 
   return [
     `Set up a clean worktree first. Use the workspace tool's \`attach\` with repository ${repository} and no ref: it switches to this session's checkout of it, or creates one (with a ref, the tool refuses a repository already checked out at another one).`,
-    `There, leave the checkout and whatever it holds alone. Run \`git fetch origin ${ref}\`, then \`mktemp -d ${prefix}XXXXXX\` for a new empty directory, note the path it prints, and run \`git worktree add --detach <that path> origin/${ref}\`. Never remove or reuse an existing worktree: it may hold another round's unpushed work.`,
+    `There, leave the checkout and whatever it holds alone. Run \`mktemp -d ${prefix}XXXXXX\` for a new empty directory and note the path it prints, then \`git fetch origin refs/heads/${ref}\` and straight after it \`git worktree add --detach <that path> FETCH_HEAD\` (the full ref name, so a tag of the same name is never picked). Never remove or reuse an existing worktree: it may hold another round's unpushed work.`,
     "Do everything below in that new worktree and nothing in the main checkout: every shell call starts in the main checkout, so begin each one with `cd <that path> &&`, and give read_file, write_file and edit_file absolute paths under it (a relative path edits the main checkout). The worktree isn't saved with the session, so commit and push in this turn.",
   ].join(" ");
 };
@@ -360,7 +360,7 @@ export function handoffMessage(
           `0. ${checkoutStep(review.repository, review.number, pull.ref, review.sha)}`,
           `1. Check the branch hasn't moved: \`git rev-parse HEAD\` should be \`${review.sha}\`. These findings describe \`${head}\`; if the branch has moved on, don't patch against stale feedback: say it was superseded and let the fresh review run instead.`,
           "2. Address every actionable finding you can confirm in the code. If you disagree with one, leave the code unchanged and reply in that thread with github reply_to_review_comment explaining why; never skip one silently.",
-          `3. Commit (stage specific files) and push: \`git push origin HEAD:${pull.ref}\`, to ${review.repository} and nowhere else.`,
+          `3. Commit (stage specific files) and push: \`git push origin HEAD:refs/heads/${pull.ref}\`, to ${review.repository} and nowhere else.`,
           "4. Reply in each addressed inline thread with what you did, e.g. `Fixed in <sha>`, with github reply_to_review_comment and the thread's comment id above, once per thread.",
           `5. ${NEVER_MERGE}`,
         ].join("\n"),
@@ -381,7 +381,7 @@ export function handoffMessage(
           "Then:",
           `0. ${checkoutStep(review.repository, review.number, pull.ref, review.sha)}`,
           `1. Check the branch hasn't moved: \`git rev-parse HEAD\` should be \`${review.sha}\`. These findings describe \`${head}\`; if the branch has moved on, check they still apply.`,
-          `2. Fix each finding that is right and cheap to fix within this PR's scope. Commit (stage specific files) and push: \`git push origin HEAD:${pull.ref}\`.`,
+          `2. Fix each finding that is right and cheap to fix within this PR's scope. Commit (stage specific files) and push: \`git push origin HEAD:refs/heads/${pull.ref}\`.`,
           "3. For each one you leave, reply in its thread saying why, with github reply_to_review_comment.",
           `4. ${NEVER_MERGE}`,
         ].join("\n"),
