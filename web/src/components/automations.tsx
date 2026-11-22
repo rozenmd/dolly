@@ -361,10 +361,7 @@ function initialValues(automation: Automation | undefined): FormValues {
 }
 
 /** The full API body for `values`, or why it can't be saved. */
-function bodyOf(
-  values: FormValues,
-  automation: Automation | undefined,
-): { error: string } | { body: ApiBody } {
+function bodyOf(values: FormValues): { error: string } | { body: ApiBody } {
   const at = values.when === "once" ? new Date(values.runAt) : undefined;
 
   if (at && Number.isNaN(at.getTime())) return { error: "Choose a date and time to run it at." };
@@ -474,23 +471,20 @@ function AutomationForm({
   async function save(event: FormEvent) {
     event.preventDefault();
 
-    const built = bodyOf(
-      {
-        name,
-        prompt,
-        when,
-        schedule,
-        timeZone,
-        runAt,
-        repository,
-        ref,
-        readOnly,
-        model,
-        mcpServers,
-        enabled,
-      },
-      automation,
-    );
+    const built = bodyOf({
+      name,
+      prompt,
+      when,
+      schedule,
+      timeZone,
+      runAt,
+      repository,
+      ref,
+      readOnly,
+      model,
+      mcpServers,
+      enabled,
+    });
 
     if ("error" in built) {
       setError(built.error);
@@ -498,7 +492,7 @@ function AutomationForm({
       return;
     }
 
-    const before = automation && bodyOf(initial, automation);
+    const before = automation && bodyOf(initial);
     const body = before && !("error" in before) ? patchOf(built.body, before.body) : built.body;
 
     // Nothing changed: an empty patch is not a request the API accepts.
