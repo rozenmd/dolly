@@ -187,7 +187,8 @@ export function AutomationsSettings() {
         <ul className="settings-card mcp-list" aria-label="Automations">
           {automations.map((automation) => {
             const last = automation.runs[0];
-            const running = last?.status === "running";
+            // A skipped fire can be newer than the run still going: look past it.
+            const running = automation.runs.some((run) => run.status === "running");
 
             return (
               <li key={automation.id} className="automation-row">
@@ -316,6 +317,107 @@ export function AutomationsSettings() {
 
 type When = "schedule" | "once" | "manual";
 
+/** Everything the form edits, as it stands. */
+type FormValues = {
+  name: string;
+  prompt: string;
+  when: When;
+  schedule: string;
+  timeZone: string;
+  /** A `datetime-local` value; empty when cleared. */
+  runAt: string;
+  repository: string;
+  ref: string;
+  readOnly: boolean;
+  model: string;
+  mcpServers: readonly string[];
+  enabled: boolean;
+};
+
+/** The values a form opens with: an automation's, or a new one's defaults. */
+function initialValues(automation: Automation | undefined): FormValues {
+  return {
+    name: automation?.name ?? "",
+    prompt: automation?.prompt ?? "",
+    when:
+      !automation || automation.schedule
+        ? "schedule"
+        : automation.runAt !== undefined
+          ? "once"
+          : "manual",
+    schedule: automation?.schedule ?? SCHEDULE_PRESETS[1].schedule,
+    // The API reads a schedule without a zone as UTC; only a new schedule starts in the browser's.
+    timeZone: automation?.schedule ? (automation.timeZone ?? "UTC") : localTimeZone(),
+    runAt: dateTimeInput(
+      new Date(automation?.runAt ?? Math.ceil((Date.now() + 3_600_000) / 3_600_000) * 3_600_000),
+    ),
+    repository: automation?.workspace?.repository ?? "",
+    ref: automation?.workspace?.ref ?? "",
+    readOnly: automation?.readOnly ?? false,
+    model: automation?.model ?? "",
+    mcpServers: automation?.mcpServers ?? [],
+    enabled: automation?.enabled ?? true,
+  };
+}
+
+/** The full API body for `values`, or why it can't be saved. */
+function bodyOf(
+  values: FormValues,
+  automation: Automation | undefined,
+): { error: string } | { body: ApiBody } {
+  const at = values.when === "once" ? new Date(values.runAt) : undefined;
+
+  if (at && Number.isNaN(at.getTime())) return { error: "Choose a date and time to run it at." };
+
+  // Hosts the API set stay with the repository they were set for.
+  const hosts =
+    values.repository === automation?.workspace?.repository
+      ? automation.workspace.networkHosts
+      : undefined;
+
+  return {
+    body: {
+      name: values.name.trim(),
+      prompt: values.prompt.trim(),
+      enabled: values.enabled,
+      readOnly: Boolean(values.repository) && values.readOnly,
+      model: values.model || null,
+      mcpServers: values.readOnly ? [] : values.mcpServers,
+      schedule: values.when === "schedule" ? values.schedule.trim() : null,
+      timeZone: values.when === "schedule" ? values.timeZone.trim() || null : null,
+      runAt: at ? at.toISOString() : null,
+      workspace: values.repository
+        ? {
+            repository: values.repository,
+            ...(values.ref && { ref: values.ref }),
+            ...(hosts && { networkHosts: hosts }),
+          }
+        : null,
+    },
+  };
+}
+
+const differs = <T,>(a: T, b: T) => JSON.stringify(a) !== JSON.stringify(b);
+
+/**
+ * What an edit sends: only the fields the owner changed. Resending the rest would re-validate an
+ * old one-off time, or undo a pause made from the list while the form was open.
+ */
+function patchOf(body: ApiBody, initial: ApiBody): ApiBody {
+  return {
+    ...(differs(body.name, initial.name) && { name: body.name }),
+    ...(differs(body.prompt, initial.prompt) && { prompt: body.prompt }),
+    ...(differs(body.enabled, initial.enabled) && { enabled: body.enabled }),
+    ...(differs(body.readOnly, initial.readOnly) && { readOnly: body.readOnly }),
+    ...(differs(body.model, initial.model) && { model: body.model }),
+    ...(differs(body.mcpServers, initial.mcpServers) && { mcpServers: body.mcpServers }),
+    ...(differs(body.schedule, initial.schedule) && { schedule: body.schedule }),
+    ...(differs(body.timeZone, initial.timeZone) && { timeZone: body.timeZone }),
+    ...(differs(body.runAt, initial.runAt) && { runAt: body.runAt }),
+    ...(differs(body.workspace, initial.workspace) && { workspace: body.workspace }),
+  };
+}
+
 const McpNames = Schema.Struct({
   mcpServers: Schema.Array(Schema.Struct({ name: Schema.String })),
 });
@@ -329,33 +431,20 @@ function AutomationForm({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [name, setName] = useState(automation?.name ?? "");
-  const [prompt, setPrompt] = useState(automation?.prompt ?? "");
-
-  const [when, setWhen] = useState<When>(
-    !automation || automation.schedule
-      ? "schedule"
-      : automation.runAt !== undefined
-        ? "once"
-        : "manual",
-  );
-
-  const [schedule, setSchedule] = useState(automation?.schedule ?? SCHEDULE_PRESETS[1].schedule);
-  const [timeZone, setTimeZone] = useState(automation?.timeZone ?? localTimeZone());
-
-  const [runAt, setRunAt] = useState(() =>
-    dateTimeInput(
-      new Date(automation?.runAt ?? Math.ceil((Date.now() + 3_600_000) / 3_600_000) * 3_600_000),
-    ),
-  );
-
-  const [repository, setRepository] = useState(automation?.workspace?.repository ?? "");
-  const [ref, setRef] = useState(automation?.workspace?.ref ?? "");
-  const [readOnly, setReadOnly] = useState(automation?.readOnly ?? false);
-  const [model, setModel] = useState(automation?.model ?? "");
-  const [mcpServers, setMcpServers] = useState<readonly string[]>(automation?.mcpServers ?? []);
+  const [initial] = useState(() => initialValues(automation));
+  const [name, setName] = useState(initial.name);
+  const [prompt, setPrompt] = useState(initial.prompt);
+  const [when, setWhen] = useState<When>(initial.when);
+  const [schedule, setSchedule] = useState(initial.schedule);
+  const [timeZone, setTimeZone] = useState(initial.timeZone);
+  const [runAt, setRunAt] = useState(initial.runAt);
+  const [repository, setRepository] = useState(initial.repository);
+  const [ref, setRef] = useState(initial.ref);
+  const [readOnly, setReadOnly] = useState(initial.readOnly);
+  const [model, setModel] = useState(initial.model);
+  const [mcpServers, setMcpServers] = useState(initial.mcpServers);
   const [available, setAvailable] = useState<readonly string[]>([]);
-  const [enabled, setEnabled] = useState(automation?.enabled ?? true);
+  const [enabled, setEnabled] = useState(initial.enabled);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -379,21 +468,43 @@ function AutomationForm({
 
   async function save(event: FormEvent) {
     event.preventDefault();
+
+    const built = bodyOf(
+      {
+        name,
+        prompt,
+        when,
+        schedule,
+        timeZone,
+        runAt,
+        repository,
+        ref,
+        readOnly,
+        model,
+        mcpServers,
+        enabled,
+      },
+      automation,
+    );
+
+    if ("error" in built) {
+      setError(built.error);
+
+      return;
+    }
+
+    const before = automation && bodyOf(initial, automation);
+    const body = before && !("error" in before) ? patchOf(built.body, before.body) : built.body;
+
+    // Nothing changed: an empty patch is not a request the API accepts.
+    if (automation && Object.keys(body).length === 0) {
+      onClose();
+
+      return;
+    }
+
     setSaving(true);
     setError("");
-
-    const body: ApiBody = {
-      name: name.trim(),
-      prompt: prompt.trim(),
-      enabled,
-      readOnly: Boolean(repository) && readOnly,
-      model: model || null,
-      mcpServers: readOnly ? [] : mcpServers,
-      schedule: when === "schedule" ? schedule.trim() : null,
-      timeZone: when === "schedule" ? timeZone.trim() || null : null,
-      runAt: when === "once" ? new Date(runAt).toISOString() : null,
-      workspace: repository ? { repository, ...(ref && { ref }) } : null,
-    };
 
     try {
       await saveAutomation(automation?.id, body);
@@ -507,7 +618,14 @@ function AutomationForm({
         value={repository}
         onChange={(next, defaultRef) => {
           setRepository(next);
-          setRef(next && next !== automation?.workspace?.repository ? defaultRef : ref);
+          // Back on the automation's own repository: its own branch, not the last one picked.
+          setRef(
+            next === automation?.workspace?.repository
+              ? (automation.workspace.ref ?? "")
+              : next
+                ? defaultRef
+                : "",
+          );
         }}
       />
       {repository && (

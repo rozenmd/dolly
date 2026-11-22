@@ -339,3 +339,159 @@ test("refuses to save while required fields are empty and shows server errors", 
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByLabel("Name")).toHaveCount(0);
 });
+
+test("edits send only what changed, so they never undo a pause or move a schedule", async ({
+  page,
+}) => {
+  const now = Date.now();
+
+  let automations: Automation[] = [
+    {
+      id: "a1",
+      name: "Morning check",
+      prompt: "Check the deploys.",
+      // Created through the API without a zone: it runs in UTC.
+      schedule: "0 9 * * *",
+      enabled: true,
+      readOnly: false,
+      workspace: { repository: "octocat/project", ref: "develop" },
+      mcpServers: [],
+      createdAt: now,
+      updatedAt: now,
+      nextRunAt: now + 3_600_000,
+      runs: [],
+    },
+    {
+      id: "a2",
+      name: "Reminder",
+      prompt: "Look at the deploy.",
+      runAt: now - 3_600_000,
+      enabled: true,
+      readOnly: false,
+      mcpServers: [],
+      createdAt: now,
+      updatedAt: now,
+      runs: [{ trigger: "schedule", at: now - 3_600_000, status: "succeeded", sessionId: "43" }],
+    },
+    {
+      id: "a3",
+      name: "Long audit",
+      prompt: "Audit everything.",
+      schedule: "*/10 * * * *",
+      timeZone: "UTC",
+      enabled: true,
+      readOnly: false,
+      mcpServers: [],
+      createdAt: now,
+      updatedAt: now,
+      runs: [
+        { trigger: "schedule", at: now - 60_000, status: "skipped", error: "Still running" },
+        { trigger: "manual", at: now - 900_000, status: "running", sessionId: "44" },
+      ],
+    },
+  ];
+
+  const updated: { id: string; body: typeof Body.Type }[] = [];
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+
+    if (path === "/api/auth") return route.fulfill({ json: auth });
+
+    if (path === "/api/automations" && method === "GET")
+      return route.fulfill({ json: { automations } });
+
+    if (path === "/api/connections") return route.fulfill({ json: { mcpServers: [] } });
+
+    if (path === "/api/integrations/github/repositories")
+      return route.fulfill({
+        json: {
+          repositories: ["project", "other"].map((name) => ({
+            fullName: `octocat/${name}`,
+            defaultBranch: "main",
+            private: true,
+            description: null,
+            registered: true,
+          })),
+        },
+      });
+
+    const one = /^\/api\/automations\/([^/]+)$/.exec(path);
+
+    if (one && method === "PUT") {
+      const body = Schema.decodeUnknownSync(Body)(route.request().postDataJSON());
+
+      updated.push({ id: one[1], body });
+      automations = automations.map((item) =>
+        item.id === one[1]
+          ? { ...item, name: body.name ?? item.name, enabled: body.enabled ?? item.enabled }
+          : item,
+      );
+
+      return route.fulfill({ json: automations.find((item) => item.id === one[1]) });
+    }
+
+    return route.fulfill({ json: [] });
+  });
+
+  await page.goto("/settings/automations", { waitUntil: "networkidle" });
+
+  // A skipped fire newer than the live run doesn't offer another run.
+  await expect(page.getByRole("button", { name: "Running" })).toBeDisabled();
+
+  // The form shows the UTC the schedule runs in, not the browser's zone.
+  await page.getByRole("button", { name: "Manage Morning check" }).click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  await expect(page.getByLabel("Time zone")).toHaveValue("UTC");
+
+  // Paused from the list while the form is open: saving a rename keeps it paused.
+  await page.getByRole("button", { name: "Manage Morning check" }).click();
+  await page.getByRole("menuitem", { name: "Pause" }).click();
+  await expect(page.getByText("Paused")).toBeVisible();
+
+  // Another repository and back again: its own branch, so the workspace isn't sent.
+  await page.getByRole("button", { name: "Repository" }).click();
+  await page.getByRole("option", { name: /other/ }).click();
+  await page.getByRole("button", { name: "Repository" }).click();
+  await page.getByRole("option", { name: /project/ }).click();
+
+  await page.getByLabel("Name").fill("Deploy check");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("Deploy check")).toBeVisible();
+  await expect(page.getByText("Paused")).toBeVisible();
+
+  expect(updated).toEqual([
+    { id: "a1", body: { enabled: false } },
+    { id: "a1", body: { name: "Deploy check" } },
+  ]);
+
+  // A one-off that already ran can be renamed without picking a new time.
+  await page.getByRole("button", { name: "Manage Reminder" }).click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  await page.getByLabel("Name").fill("Deploy reminder");
+
+  // Clearing its time asks for one, and leaves the form usable.
+  // Typing can't empty a date field; set it as the browser does when it is cleared.
+  await page.evaluate(() => {
+    const field = document.querySelector<HTMLInputElement>("#automation-at");
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+
+    if (!field || !setter) throw new Error("Run at field missing");
+    setter.call(field, "");
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("alert")).toHaveText("Choose a date and time to run it at.");
+  await expect(page.getByRole("button", { name: "Cancel" })).not.toBeDisabled();
+  expect(updated).toHaveLength(2);
+
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Manage Reminder" }).click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  await page.getByLabel("Name").fill("Deploy reminder");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("Deploy reminder")).toBeVisible();
+  expect(updated.at(-1)).toEqual({ id: "a2", body: { name: "Deploy reminder" } });
+});
