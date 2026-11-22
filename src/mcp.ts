@@ -157,10 +157,10 @@ export const McpToolInput = Schema.Struct({
 });
 
 export const MCP_REFUSAL =
-  "MCP servers use the owner's credentials, so they are only available in writable sessions the owner starts from the web app. Slack and GitHub sessions can be steered by other people, and automatic reviews are read-only.";
+  "MCP servers use the owner's credentials, so they are only available in writable sessions the owner starts from the web app. Slack and GitHub sessions can be steered by other people, automatic reviews are read-only, and automation runs may use only the servers their automation lists.";
 
 export const MCP_UNAVAILABLE_PROMPT =
-  "MCP servers are not available in this session: they use the owner's credentials and work only in writable sessions started from the web app. Don't call the mcp tool here.";
+  "MCP servers are not available in this session: they use the owner's credentials and work only in writable sessions started from the web app, and in automation runs only for the servers their automation lists. Don't call the mcp tool here.";
 
 export const mcpToolDescription = MCP_CODE_DESCRIPTION;
 
@@ -1280,9 +1280,21 @@ export class McpConnections {
     }
   }
 
-  /** The system prompt's server list and tool catalog. Reads storage only, never the network. */
-  async promptSection(): Promise<string> {
+  /** Connected servers, limited to `allow` when given (an automation's MCP allowlist). */
+  private async allowed(allow?: readonly string[]) {
     const servers = await this.servers();
+
+    return allow
+      ? Object.fromEntries(Object.entries(servers).filter(([name]) => allow.includes(name)))
+      : servers;
+  }
+
+  /**
+   * The system prompt's server list and tool catalog, limited to `allow` when given. Reads
+   * storage only, never the network.
+   */
+  async promptSection(allow?: readonly string[]): Promise<string> {
+    const servers = await this.allowed(allow);
 
     if (!Object.keys(servers).length)
       return "No MCP servers are connected. The owner can add them in Settings > Connections.";
@@ -1303,9 +1315,9 @@ export class McpConnections {
     return catalogPrompt(catalog);
   }
 
-  /** Run one model-written program over every usable server's tools. */
-  async execute(code: string) {
-    const servers = await this.servers();
+  /** Run one model-written program over every usable server's tools, or those `allow` names. */
+  async execute(code: string, allow?: readonly string[]) {
+    const servers = await this.allowed(allow);
     const sessions = new Map<string, Promise<McpSession>>();
     const unavailable = new Map<string, string>();
     const usable = new Map<string, CatalogTool[]>();

@@ -37,6 +37,15 @@ import { Coordination, coordinationTasks, indexSession } from "./coordination";
 import { Scheduler, SCHEDULE_TOOL_NAMES, scheduleTasks } from "./schedule";
 import { CI_WAIT_TOOL_NAMES, CiWaiter } from "./ci-wait";
 import {
+  AutomationPatch,
+  AutomationRunDoc,
+  AutomationRunTask,
+  Automations,
+  inheritAutomationRun,
+  NewAutomation,
+  type Automation,
+} from "./automations";
+import {
   ConversationWorkspace,
   workspaceConfig,
   activeWorkspace,
@@ -309,6 +318,9 @@ export class Agent extends DurableObject<Env> {
   private readonly steerInterrupts = new SteerInterrupts();
   private readonly sessionsFeed: SessionsFeed;
   private readonly alarmPermit = Semaphore.makeUnsafe(1);
+  private automations!: Automations;
+  /** The earliest pending automation fire, folded into the alarm (automations.ts). */
+  private automationWake: number | undefined;
   private readonly scheduler = new Scheduler(
     () => this.harness,
     (conversationId) => this.startedFromWeb(conversationId),
@@ -712,14 +724,16 @@ export class Agent extends DurableObject<Env> {
         const { code } = Schema.decodeUnknownSync(McpToolInput)(input);
 
         // The owner's credentials, so only sessions only the owner can steer and read may use them.
-        if (!(await this.mcpAllowed(api.conversationId)))
+        const scope = await this.mcpScope(api.conversationId);
+
+        if (!scope)
           throw new OperationError({
             operation: "mcp.refused",
             message: MCP_REFUSAL,
             details: null,
           });
 
-        return await this.mcp.execute(code);
+        return await this.mcp.execute(code, scope.allow);
       },
     } satisfies ToolRegistration;
 
@@ -809,6 +823,7 @@ export class Agent extends DurableObject<Env> {
       tasks: [
         ...coordinationTasks,
         ...scheduleTasks,
+        AutomationRunTask,
         this.ciWaiter.task,
         this.githubTask,
         this.slackTask,
@@ -923,19 +938,22 @@ export class Agent extends DurableObject<Env> {
         section("papercuts", () => papercutsPrompt),
         section("mcp-servers", async ({ read, conversationId }, context) => {
           // Snapshots only: a section cannot commit. The tool itself runs the full check.
-          const [workspace, github, slack] = await Promise.all([
+          const [workspace, github, slack, automation] = await Promise.all([
             read.snapshot(ConversationWorkspace, conversationId, context),
             read.snapshot(GitHubThreads, context),
             read.snapshot(SlackThreads, context),
+            read.snapshot(AutomationRunDoc, conversationId, context),
           ]);
 
           const external = [github, slack].some((state) =>
             Object.values(state?.threads ?? {}).some((thread) => thread.id === conversationId),
           );
 
-          return external || isReadOnly(workspace)
+          const allow = automation?.run?.mcpServers;
+
+          return external || isReadOnly(workspace) || allow?.length === 0
             ? MCP_UNAVAILABLE_PROMPT
-            : await this.mcp.promptSection();
+            : await this.mcp.promptSection(allow);
         }),
       ],
     });
@@ -962,6 +980,7 @@ export class Agent extends DurableObject<Env> {
           },
           conversationCreated: async (tx, conversation) => {
             await indexSession(tx, conversation.id);
+            await inheritAutomationRun(tx, conversation);
             const defaults = await readDefaults(this.ctx.storage);
             const modelId = placeholderModel(defaults.model);
             await configure(tx, conversation.id, {
@@ -1237,6 +1256,28 @@ export class Agent extends DurableObject<Env> {
           .then(() => this.ctx.storage.put("migration:mcp-tool", true)),
       );
 
+    this.automations = new Automations({
+      harness: () => this.harness,
+      agent: (automation) => this.automationAgent(automation),
+      started: (conversationId, automation) => this.automationStarted(conversationId, automation),
+      prearm: (at) =>
+        Effect.runPromise(
+          this.alarmPermit.withPermit(
+            attempt("alarm.prearm", async () => {
+              const current = await this.ctx.storage.getAlarm();
+
+              if (current === null || current > at) await this.ctx.storage.setAlarm(at);
+            }),
+          ),
+        ),
+      rearm: async () => {
+        this.automationWake = await this.automations.nextWake();
+        await Effect.runPromise(this.arm(this.harness.wake()));
+      },
+      now: () => Date.now(),
+    });
+    this.automationWake = yield* attempt("automations.wake", () => this.automations.nextWake());
+
     yield* this.arm(this.harness.wake());
     this.harness.resume();
   });
@@ -1346,7 +1387,13 @@ export class Agent extends DurableObject<Env> {
     yield* this.alarmPermit.withPermit(
       Effect.gen({ self: this }, function* () {
         const now = yield* Clock.currentTimeMillis;
-        const at = wake.active ? Math.min(now + 60_000, wake.at ?? Infinity) : wake.at;
+        const harnessAt = wake.active ? Math.min(now + 60_000, wake.at ?? Infinity) : wake.at;
+
+        const at =
+          this.automationWake === undefined
+            ? harnessAt
+            : Math.min(harnessAt ?? Infinity, this.automationWake);
+
         yield* at === undefined
           ? attempt("alarm.delete", () => this.ctx.storage.deleteAlarm())
           : attempt("alarm.write", () => this.ctx.storage.setAlarm(at));
@@ -1359,6 +1406,7 @@ export class Agent extends DurableObject<Env> {
       Effect.gen({ self: this }, function* () {
         yield* this.arm({ ...this.harness.wake(), active: true });
         this.harness.resume();
+        yield* this.fireAutomations();
         yield* this.arm(this.harness.wake());
       }),
     );
@@ -1994,9 +2042,17 @@ export class Agent extends DurableObject<Env> {
     return isReadOnly(await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT));
   }
 
-  /** MCP servers carry the owner's credentials: only writable sessions started from the web app. */
-  private async mcpAllowed(id: ConversationId) {
-    return !(await this.isReadOnly(id)) && (await this.startedFromWeb(id));
+  /**
+   * MCP servers carry the owner's credentials: only writable sessions started from the web app,
+   * and an automation's runs only with the servers it lists. False, or the allowlist to apply.
+   */
+  private async mcpScope(id: ConversationId): Promise<false | { allow?: readonly string[] }> {
+    if ((await this.isReadOnly(id)) || !(await this.startedFromWeb(id))) return false;
+    const run = (await this.harness.snapshot(AutomationRunDoc, id, BACKGROUND_CONTEXT))?.run;
+
+    if (!run) return {};
+
+    return run.mcpServers.length ? { allow: run.mcpServers } : false;
   }
 
   private async refuseReadOnly(id: ConversationId) {
@@ -2632,6 +2688,100 @@ export class Agent extends DurableObject<Env> {
         return { id, workspaceId, model: modelId, thinkingLevel, speed, autoFallback };
       }),
     );
+  }
+
+  // ── Automations (automations.ts) ──
+
+  /** The model a run starts on: the automation's own while its subscription is connected. */
+  private async automationAgent(automation: Automation): Promise<IntakeAgent | { error: string }> {
+    const { chatgpt, claude, stored } = await Effect.runPromise(
+      Effect.all({
+        chatgpt: this.credentials.get("openai"),
+        claude: this.credentials.get("anthropic"),
+        stored: this.storedDefaults(),
+      }),
+    );
+
+    const openai = Option.isSome(chatgpt);
+    const anthropic = Option.isSome(claude);
+
+    if (!openai && !anthropic)
+      return { error: "Connect ChatGPT or your Claude subscription to run automations" };
+
+    const own = automation.model;
+
+    const modelId =
+      own && (modelProvider(own) === "anthropic" ? anthropic : openai)
+        ? own
+        : effectiveDefaultModel(stored.model, openai, anthropic);
+
+    return {
+      model: { provider: modelProvider(modelId), modelId },
+      thinkingLevel: normalizeEffort(
+        modelId,
+        automation.thinkingLevel ?? stored.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
+      ),
+    };
+  }
+
+  /** A run's session is named after its automation and shows up in sidebars at once. */
+  private async automationStarted(conversationId: ConversationId, automation: Automation) {
+    const key = sessionMetadataKey(conversationId);
+    const metadata = await this.ctx.storage.get<SessionMetadata>(key);
+
+    await this.ctx.storage.put(key, {
+      createdAt: Date.now(),
+      archived: false,
+      ...metadata,
+      title: automation.name,
+    } satisfies SessionMetadata);
+    this.sessionsFeed.changed();
+  }
+
+  private fireAutomations = Effect.fn("Agent.fireAutomations")(function* (this: Agent) {
+    yield* attempt("automations.fire", () => this.automations.fireDue()).pipe(
+      Effect.andThen(
+        attempt("automations.wake", async () => {
+          this.automationWake = await this.automations.nextWake();
+        }),
+      ),
+      Effect.catchTag("OperationError", (error) => {
+        // Retry later rather than re-firing a failing alarm at once.
+        this.automationWake = Date.now() + 60_000;
+
+        return Effect.logError({
+          event: "automations_fire_failed",
+          error: exceptionDetails(error),
+          details: error.details,
+        });
+      }),
+    );
+  });
+
+  automationsList() {
+    return this.automations.list();
+  }
+
+  automationRead(id: string) {
+    return this.automations.read(id);
+  }
+
+  automationCreate(input: typeof NewAutomation.Type) {
+    return this.automations.create(input);
+  }
+
+  automationUpdate(id: string, patch: typeof AutomationPatch.Type) {
+    return this.automations.update(id, patch);
+  }
+
+  automationDelete(id: string) {
+    return this.automations.remove(id);
+  }
+
+  async automationRun(id: string, requestId: string) {
+    await Effect.runPromise(this.arm({ active: true }));
+
+    return this.automations.run(id, requestId);
   }
 
   /**
