@@ -493,7 +493,22 @@ function AutomationForm({
     }
 
     const before = automation && bodyOf(initial);
-    const body = before && !("error" in before) ? patchOf(built.body, before.body) : built.body;
+    const patch = before && !("error" in before) ? patchOf(built.body, before.body) : built.body;
+
+    // An access change is made against the access shown: the server refuses it if another
+    // tab or the API changed that since, rather than undo (say) a switch to read-only.
+    const body =
+      automation && patch.readOnly !== undefined
+        ? {
+            ...patch,
+            accessWas: {
+              readOnly: automation.readOnly,
+              mcpServers: automation.mcpServers,
+              repository: automation.workspace?.repository ?? null,
+              ref: automation.workspace?.ref ?? null,
+            },
+          }
+        : patch;
 
     // Nothing changed: an empty patch is not a request the API accepts.
     if (automation && Object.keys(body).length === 0) {

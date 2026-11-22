@@ -63,6 +63,14 @@ const Body = Schema.Struct({
       }),
     ),
   ),
+  accessWas: Schema.optional(
+    Schema.Struct({
+      readOnly: Schema.Boolean,
+      mcpServers: Schema.Array(Schema.String),
+      repository: Schema.NullOr(Schema.String),
+      ref: Schema.NullOr(Schema.String),
+    }),
+  ),
 });
 
 test("creates, runs, pauses and deletes an automation, and marks its sessions in the sidebar", async ({
@@ -490,6 +498,13 @@ test("edits send only what changed, so they never undo a pause or move a schedul
       readOnly: false,
       mcpServers: [],
       workspace: { repository: "octocat/other", ref: "main" },
+      // The access it was opened with: the server refuses the edit if that changed since.
+      accessWas: {
+        readOnly: false,
+        mcpServers: [],
+        repository: "octocat/project",
+        ref: "develop",
+      },
     },
   });
 
@@ -506,6 +521,12 @@ test("edits send only what changed, so they never undo a pause or move a schedul
       readOnly: true,
       mcpServers: [],
       workspace: { repository: "octocat/project", ref: "develop" },
+      accessWas: {
+        readOnly: false,
+        mcpServers: [],
+        repository: "octocat/project",
+        ref: "develop",
+      },
     },
   });
 

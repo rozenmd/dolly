@@ -565,6 +565,13 @@ export type ApiBody = {
   runAt?: string | null;
   readOnly?: boolean;
   mcpServers?: readonly string[];
+  /** An automation's access as the editor saw it; the save is refused if it has changed. */
+  accessWas?: {
+    readOnly: boolean;
+    mcpServers: readonly string[];
+    repository: string | null;
+    ref: string | null;
+  };
 };
 
 export const DefaultModel = Schema.Struct({

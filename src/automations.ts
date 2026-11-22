@@ -72,17 +72,42 @@ const optionalFields = {
 
 export const NewAutomation = Schema.Struct({ name: Name, prompt: Prompt, ...optionalFields });
 
+/**
+ * What runs may do, as an editor last saw it: a save that carries it is refused if that has
+ * changed since, so a stale form can't undo a restriction made elsewhere.
+ */
+const Access = Schema.Struct({
+  readOnly: Schema.Boolean,
+  mcpServers: McpServers,
+  repository: Schema.NullOr(Schema.String),
+  ref: Schema.NullOr(Schema.String),
+});
+
 export const AutomationPatch = Schema.Struct({
   name: Schema.optional(Name),
   prompt: Schema.optional(Prompt),
   ...optionalFields,
+  /** The access this edit was made against; the save is refused if it has changed since. */
+  accessWas: Schema.optional(Access),
 }).check(
   Schema.makeFilter((patch) =>
-    Object.values(patch).some((value) => value !== undefined)
+    Object.entries(patch).some(([key, value]) => key !== "accessWas" && value !== undefined)
       ? undefined
       : "Expected at least one field to change",
   ),
 );
+
+/** Whether `automation`'s access still matches what an editor saw. */
+function sameAccess(automation: Automation, seen: typeof Access.Type) {
+  const servers = (list: readonly string[]) => [...new Set(list)].sort().join("\n");
+
+  return (
+    automation.readOnly === seen.readOnly &&
+    servers(automation.mcpServers) === servers(seen.mcpServers) &&
+    (automation.workspace?.repository ?? null) === seen.repository &&
+    (automation.workspace?.ref ?? null) === seen.ref
+  );
+}
 
 export type Automation = {
   id: string;
@@ -760,9 +785,18 @@ export class Automations {
   }
 
   update(id: string, patch: typeof AutomationPatch.Type) {
-    return this.save(id, false, (current, now) =>
-      current ? validate(current, patch, now) : { error: "Automation not found" },
-    );
+    // Checked against the definition at the revision the save commits on, so it can't race.
+    return this.save(id, false, (current, now) => {
+      if (!current) return { error: "Automation not found" };
+
+      if (patch.accessWas && !sameAccess(current, patch.accessWas))
+        return {
+          error:
+            "Its repository, read-only or MCP servers changed since you opened it. Reopen it to see the change before editing them.",
+        };
+
+      return validate(current, patch, now);
+    });
   }
 
   async remove(id: string) {
