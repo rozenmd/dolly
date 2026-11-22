@@ -59,6 +59,7 @@ import { pullRequestChange, WebhookSetup } from "./github-webhook";
 import { STEER_TOOL_SKIP, SteerInterrupts, steerInterrupts, steerQueued } from "./steer-interrupt";
 import {
   runCancellable,
+  serializeShellResult,
   SHELL_TIMEOUT_DEFAULT_SECONDS,
   SHELL_TIMEOUT_MAX_SECONDS,
 } from "./shell-output";
@@ -397,6 +398,8 @@ export class Agent extends DurableObject<Env> {
       }),
       replay: "unsafe",
       executionMode: "sequential",
+      // Live output keeps its newest lines; the result itself fits Pi's limit (serializeShellResult).
+      outputLimits: { retain: "tail" },
       execute: ({ command, timeout }: { command: string; timeout?: number }, api, context) =>
         Effect.runPromise(
           rpc("sandbox.shell", async () => {
@@ -428,7 +431,9 @@ export class Agent extends DurableObject<Env> {
               ? { workspaceRestored: workspace.restored, ...output }
               : output;
           }).pipe(
-            Effect.map((result) => ({ output: [{ type: "text", text: JSON.stringify(result) }] })),
+            Effect.map((result) => ({
+              output: [{ type: "text", text: serializeShellResult(result) }],
+            })),
           ),
         ),
     } satisfies ToolRegistration;

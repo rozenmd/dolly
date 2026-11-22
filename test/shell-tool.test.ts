@@ -13,9 +13,25 @@ import { headers, signIn } from "./session";
  * simulated; test/container/sandbox.test.ts runs real commands.
  */
 
-type Script = (write: (text: string) => void, stopped: Promise<number>) => Promise<number>;
+type Script = (
+  write: (text: string, stream?: "stdout" | "stderr") => void,
+  stopped: Promise<number>,
+) => Promise<number>;
 
-/** A container whose commands are scripts: each gets a writer for stdout and a promise of the signal that stops it. */
+/** A stream the test writes to through its controller. */
+function writableStream() {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(started) {
+      controller = started;
+    },
+  });
+
+  return { stream, controller };
+}
+
+/** A container whose commands are scripts: each gets a writer for stdout and stderr and a promise of the signal that stops it. */
 function fakeContainer(scripts: Record<string, Script>) {
   const kills: { command: string; signal: number }[] = [];
 
@@ -28,31 +44,27 @@ function fakeContainer(scripts: Record<string, Script>) {
 
       if (!script) throw new Error(`Unexpected command: ${command}`);
 
-      let stdout!: ReadableStreamDefaultController<Uint8Array>;
-
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          stdout = controller;
-        },
-      });
+      const streams = { stdout: writableStream(), stderr: writableStream() };
 
       const stop = Promise.withResolvers<number>();
 
       const exitCode = script(
-        (text) => stdout.enqueue(new TextEncoder().encode(text)),
+        (text, stream = "stdout") =>
+          streams[stream].controller.enqueue(new TextEncoder().encode(text)),
         stop.promise,
       ).then((code) => {
         // The reader may already have been cancelled, as a stopped command's is.
-        try {
-          stdout.close();
-        } catch {}
+        for (const { controller } of Object.values(streams))
+          try {
+            controller.close();
+          } catch {}
 
         return code;
       });
 
       return {
-        stdout: stream,
-        stderr: null,
+        stdout: streams.stdout.stream,
+        stderr: streams.stderr.stream,
         exitCode,
         kill: (signal: number) => {
           kills.push({ command, signal });
@@ -186,24 +198,31 @@ it(
   { timeout: 45_000 },
   async () => {
     const release = Promise.withResolvers<void>();
+    const linked = Promise.withResolvers<void>();
 
     const { id } = await start([{ arguments: { command: "build" } }], {
       build: async (write) => {
         write("compiling\n");
         await release.promise;
-        write(`${"x".repeat(40_000)}\nbuild finished\n`);
+        // More than Pi keeps of a tool's output, then a new line while still running.
+        write(`${"x".repeat(99)}\n`.repeat(600));
+        write("linking\n");
+        await linked.promise;
+        write("build finished\n");
 
         return 0;
       },
     });
 
+    const live = async () =>
+      (await liveTools(id)).find((tool) => tool.name === "shell")?.output ?? "";
+
     // The first line shows while the command is still running.
-    await expect
-      .poll(async () => (await liveTools(id)).find((tool) => tool.name === "shell")?.output ?? "", {
-        timeout: 15_000,
-      })
-      .toContain("compiling");
+    await expect.poll(live, { timeout: 15_000 }).toContain("compiling");
     release.resolve();
+    // So does the newest line once the output outgrows what Pi keeps.
+    await expect.poll(live, { timeout: 15_000 }).toContain("linking");
+    linked.resolve();
 
     await expect.poll(async () => (await toolResults(id)).length, { timeout: 15_000 }).toBe(1);
 
@@ -225,7 +244,9 @@ it(
   async () => {
     const { id, container } = await start([{ arguments: { command: "hang", timeout: 1 } }], {
       hang: async (write, stopped) => {
-        write("waiting forever\n");
+        // Both streams' tails, JSON-escaped, are far beyond Pi's 50 KiB result limit.
+        write(`${'"'.repeat(40_000)}\nwaiting forever\n`);
+        write(`${"\\".repeat(40_000)}\nstill waiting\n`, "stderr");
 
         return 128 + (await stopped);
       },
@@ -235,8 +256,11 @@ it(
 
     const [result] = await toolResults(id);
 
+    // The result fits whole, so it still parses and keeps the timeout and both streams' ends.
+    expect(new TextEncoder().encode(result!.text).length).toBeLessThanOrEqual(48 * 1024);
     expect(JSON.parse(result!.text)).toMatchObject({
-      stdout: "waiting forever\n",
+      stdout: expect.stringMatching(/^\[\d+ earlier bytes omitted\]\n"+\nwaiting forever\n$/),
+      stderr: expect.stringMatching(/^\[\d+ earlier bytes omitted\]\n\\+\nstill waiting\n$/),
       exitCode: 124,
       timedOut: true,
     });

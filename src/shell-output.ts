@@ -180,3 +180,71 @@ export async function runCancellable<A>(
     signal?.removeEventListener("abort", cancel);
   }
 }
+
+/**
+ * Bytes of the serialized shell result, safely below the 50 KiB Pi keeps of a tool result: past
+ * that Pi cuts the text, which would split the JSON and lose `exitCode` and `timedOut`.
+ */
+export const SHELL_RESULT_MAX_BYTES = 48 * 1024;
+
+const OMITTED = /^\[(\d+) earlier bytes omitted\]\n/;
+
+const byteLength = (text: string) => new TextEncoder().encode(text).length;
+
+/** Bytes a string takes inside serialized JSON, without its quotes. */
+const escapedLength = (text: string) => byteLength(JSON.stringify(text)) - 2;
+
+/** Drop at least `bytes` bytes from the start of a stream's text, keeping an accurate omission note. */
+function dropStart(text: string, bytes: number) {
+  const marker = OMITTED.exec(text);
+  const earlier = marker ? Number(marker[1]) : 0;
+  const body = new TextEncoder().encode(marker ? text.slice(marker[0].length) : text);
+  const cut = Math.min(body.length, bytes);
+  const rest = new TextDecoder().decode(body.subarray(cut)).replace(/^\uFFFD{1,3}/, "");
+
+  return `[${earlier + cut} earlier bytes omitted]\n${rest}`;
+}
+
+/** Trim the start of `text` until it takes at most `budget` bytes inside JSON. */
+function fitStream(text: string, budget: number) {
+  let fitted = text;
+
+  for (let size = escapedLength(fitted); size > budget; size = escapedLength(fitted)) {
+    // Escaping can make a byte take up to six; cut in proportion so each step frees enough.
+    const raw = byteLength(fitted);
+    fitted = dropStart(fitted, Math.ceil(((size - budget) * raw) / size) + 8);
+
+    if (byteLength(fitted) >= raw) break;
+  }
+
+  return fitted;
+}
+
+/**
+ * Serialize a shell result within {@link SHELL_RESULT_MAX_BYTES}, trimming the start of stdout and
+ * stderr as needed. Each stream may use half the room; one that needs less leaves the rest to the
+ * other. Sizes are measured as serialized, since JSON escaping can make text grow up to six times.
+ */
+export function serializeShellResult<
+  R extends { readonly stdout: string; readonly stderr: string },
+>(result: R, maxBytes = SHELL_RESULT_MAX_BYTES) {
+  const whole = JSON.stringify(result);
+
+  if (byteLength(whole) <= maxBytes) return whole;
+
+  const room = Math.max(
+    0,
+    maxBytes - byteLength(JSON.stringify({ ...result, stdout: "", stderr: "" })),
+  );
+
+  const stdout = escapedLength(result.stdout);
+  const stderr = escapedLength(result.stderr);
+  const half = Math.floor(room / 2);
+  const stdoutBudget = stdout <= half ? stdout : stderr <= half ? room - stderr : half;
+
+  return JSON.stringify({
+    ...result,
+    stdout: fitStream(result.stdout, stdoutBudget),
+    stderr: fitStream(result.stderr, room - stdoutBudget),
+  });
+}
