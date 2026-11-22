@@ -338,6 +338,7 @@ it("waits for an in-progress container snapshot before checkpointing", async () 
     let attempts = 0;
     container.snapshotContainer = async () => {
       attempts += 1;
+
       if (attempts === 1)
         throw new DOMException(
           "A snapshot is already in progress for this container. Wait for it to complete.",

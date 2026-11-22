@@ -730,6 +730,7 @@ export class Sandbox extends DurableObject<Env> {
 
           return yield* Effect.gen({ self: this }, function* () {
             const snapshotName = `workspace-${crypto.randomUUID()}`;
+
             const snapshot = yield* attempt("workspace.checkpoint", async (signal) => {
               while (true) {
                 try {
@@ -743,6 +744,7 @@ export class Sandbox extends DurableObject<Env> {
                     throw error;
 
                   await scheduler.wait(1_000);
+
                   if (signal.aborted) throw signal.reason;
                 }
               }
