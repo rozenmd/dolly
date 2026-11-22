@@ -41,8 +41,9 @@ export function belongsInSidebar(session: Related) {
 
 /**
  * Sessions an automation started, such as automatic pull request reviews, stay out of the
- * sidebar, after OpenSession: they are opened from their GitHub links or by URL instead, and
- * the open one keeps its row while it is open.
+ * sidebar, after OpenSession: they are opened from their GitHub links or by URL instead. The
+ * open one keeps its row while it is open, and a workspace keeps its row once writable work is
+ * started in it.
  */
 export function automated(session: Pick<Related, "automation">) {
   return session.automation !== undefined;

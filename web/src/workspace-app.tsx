@@ -133,9 +133,13 @@ export function WorkspaceApp() {
     : [];
 
   const workspace = session ? workspaceOf(sessions, session.id) : "";
-  // One row per workspace; spawned sessions live with their parent and automatic reviews are
-  // left out unless open (see lib/session-threads).
-  const sidebarRows = workspaceRows(rows).filter((row) => !automated(row) || row.id === workspace);
+
+  // One row per workspace; spawned sessions live with their parent. A workspace of only automatic
+  // reviews is left out unless open; writable work started in one keeps it (lib/session-threads).
+  const sidebarRows = workspaceRows(rows).filter(
+    (row) => row.id === workspace || !row.sessions.every(automated),
+  );
+
   const tabs = workspace ? workspaceTabs(rows, workspace) : [];
 
   const parent = session?.parentId
@@ -501,8 +505,9 @@ export function WorkspaceApp() {
   function selectAfterArchive(archived: readonly string[]) {
     const left = sessions.filter((item) => !archived.includes(item.id));
 
+    // Like the global fallback, never land on an automatic review.
     const sibling = workspaceTabs(left, workspaceOf(sessions, selected)).find(
-      (item) => !item.archived,
+      (item) => !item.archived && !automated(item),
     );
 
     select(
