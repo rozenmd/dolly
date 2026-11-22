@@ -644,6 +644,101 @@ it("finishes a run that was in flight when the Durable Object was evicted", asyn
   expect(await transcript(sessionId)).toContain("Finished after restart");
 });
 
+it("refuses an access edit made against access that has changed since, so a stale tab can't undo read-only", async () => {
+  const { id } = await create({
+    name: "Linear triage",
+    prompt: "Triage new issues",
+    workspace: { repository: "example/project" },
+  });
+
+  const seen = { readOnly: false, mcpServers: [], repository: "example/project", ref: null };
+
+  // The first tab turns read-only on.
+  const first = await api(`/automations/${id}`, "PUT", {
+    readOnly: true,
+    mcpServers: [],
+    workspace: { repository: "example/project" },
+    accessWas: seen,
+  });
+
+  expect(first.status).toBe(200);
+
+  // The second, opened before then, ticks Linear: its read-only is stale, so nothing is saved.
+  const second = await api(`/automations/${id}`, "PUT", {
+    readOnly: false,
+    mcpServers: ["linear"],
+    workspace: { repository: "example/project" },
+    accessWas: seen,
+  });
+
+  expect(second.status).toBe(400);
+  expect(await second.json()).toEqual({
+    error:
+      "Its repository, read-only or MCP servers changed since you opened it. Reopen it to see the change before editing them.",
+  });
+  expect(await (await api(`/automations/${id}`)).json()).toMatchObject({
+    readOnly: true,
+    mcpServers: [],
+  });
+
+  // Against the access as it is now, the edit goes through; access alone is not a change.
+  const fresh = await api(`/automations/${id}`, "PUT", {
+    readOnly: false,
+    mcpServers: ["linear"],
+    workspace: { repository: "example/project" },
+    accessWas: { ...seen, readOnly: true },
+  });
+
+  expect(fresh.status).toBe(200);
+  expect(
+    (await api(`/automations/${id}`, "PUT", { accessWas: { ...seen, mcpServers: ["linear"] } }))
+      .status,
+  ).toBe(400);
+});
+
+it("keeps a repository's network hosts unless an update names them, so a stale edit can't restore them", async () => {
+  const { id } = await create({
+    name: "Staging check",
+    prompt: "Check staging",
+    workspace: { repository: "example/project", networkHosts: ["staging.example.com"] },
+  });
+
+  const workspace = async () =>
+    (await (await api(`/automations/${id}`)).json<{ workspace?: unknown }>()).workspace;
+
+  // A workspace without hosts keeps those held for the same repository.
+  await api(`/automations/${id}`, "PUT", {
+    workspace: { repository: "example/project", ref: "release/2.x" },
+  });
+  expect(await workspace()).toEqual({
+    repository: "example/project",
+    ref: "release/2.x",
+    networkHosts: ["staging.example.com"],
+  });
+
+  // Revoked through the API; a form opened before then saves an access edit without hosts.
+  await api(`/automations/${id}`, "PUT", {
+    workspace: { repository: "example/project", networkHosts: [] },
+  });
+  await api(`/automations/${id}`, "PUT", {
+    readOnly: false,
+    mcpServers: [],
+    workspace: { repository: "example/project", ref: "release/2.x" },
+  });
+  expect(await workspace()).toEqual({
+    repository: "example/project",
+    ref: "release/2.x",
+    networkHosts: [],
+  });
+
+  // Another repository starts without the old one's hosts.
+  await api(`/automations/${id}`, "PUT", {
+    workspace: { repository: "example/project", networkHosts: ["staging.example.com"] },
+  });
+  await api(`/automations/${id}`, "PUT", { workspace: { repository: "example/other" } });
+  expect(await workspace()).toEqual({ repository: "example/other" });
+});
+
 it("keeps a live run and its request through any number of later skips", async () => {
   let release: () => void = () => {};
   const held = new Promise<void>((resolve) => (release = resolve));

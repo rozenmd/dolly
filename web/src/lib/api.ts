@@ -538,7 +538,8 @@ export type ApiBody = {
   thinkingLevel?: string | null;
   speed?: Speed | null;
   autoFallback?: boolean | null;
-  workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] };
+  /** A session's repository; `null` clears an automation's. */
+  workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] } | null;
   repository?: string;
   owner?: string;
   ownerType?: "personal" | "organization";
@@ -557,6 +558,20 @@ export type ApiBody = {
   name?: string;
   transport?: "http";
   headers?: Record<string, string>;
+  /** Automations (lib/automations.ts); `null` clears a field. */
+  prompt?: string;
+  schedule?: string | null;
+  timeZone?: string | null;
+  runAt?: string | null;
+  readOnly?: boolean;
+  mcpServers?: readonly string[];
+  /** An automation's access as the editor saw it; the save is refused if it has changed. */
+  accessWas?: {
+    readOnly: boolean;
+    mcpServers: readonly string[];
+    repository: string | null;
+    ref: string | null;
+  };
 };
 
 export const DefaultModel = Schema.Struct({

@@ -3,6 +3,7 @@ import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import {
   ArrowLeftIcon,
+  BoltIcon,
   ChatBubbleLeftRightIcon,
   CpuChipIcon,
   FolderIcon,
@@ -56,6 +57,7 @@ const sections = [
   { to: "/settings/github", label: "GitHub", Icon: LinkIcon },
   { to: "/settings/slack", label: "Slack", Icon: ChatBubbleLeftRightIcon },
   { to: "/settings/connections", label: "Connections", Icon: PuzzlePieceIcon },
+  { to: "/settings/automations", label: "Automations", Icon: BoltIcon },
 ] as const;
 
 /** Full-page settings with its own navigation; each section has its own URL. */

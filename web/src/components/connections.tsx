@@ -403,7 +403,7 @@ export function ConnectionsSettings() {
   );
 }
 
-type MenuItem = {
+export type MenuItem = {
   label: string;
   icon: ReactNode;
   onSelect: () => void;
@@ -412,7 +412,7 @@ type MenuItem = {
   separated?: boolean;
 };
 
-function RowMenu({ label, items }: { label: string; items: MenuItem[] }) {
+export function RowMenu({ label, items }: { label: string; items: MenuItem[] }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const visible = items.filter((item) => !item.hidden);

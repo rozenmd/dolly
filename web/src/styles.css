@@ -3255,3 +3255,124 @@ label.connection-row {
     gap: 0;
   }
 }
+
+/* Settings > Automations */
+.workspace-automation {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--faint);
+}
+.workspace-automation svg {
+  width: 14px;
+  height: 14px;
+}
+.automation-row {
+  border-top: 1px solid var(--line);
+}
+.automation-row:first-child {
+  border-top: 0;
+}
+.automation-row .automation-head {
+  align-items: center;
+  border-top: 0;
+}
+.automation-head > .status-dot {
+  margin-top: 0;
+}
+.automation-run-button {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 6px;
+}
+.mcp-pill.paused {
+  background: rgb(245 158 11 / 14%);
+  color: var(--amber);
+}
+.mcp-pill.muted-pill {
+  background: var(--surface-hover);
+  color: var(--muted);
+}
+.automation-runs {
+  margin: 0 0 12px 20px;
+  font-size: 13px;
+}
+.automation-runs summary {
+  color: var(--muted);
+  cursor: pointer;
+}
+.automation-runs ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.automation-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.automation-run-status {
+  flex-shrink: 0;
+}
+.automation-run .muted {
+  flex-shrink: 0;
+}
+.automation-run-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.automation-run-link {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.automation-form fieldset {
+  display: grid;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0;
+  border: 0;
+}
+.automation-form legend {
+  padding: 6px 0 4px;
+  color: #cfcfcf;
+  font-size: 13px;
+}
+.automation-form .checkbox-row {
+  padding-top: 0;
+}
+.automation-form .mcp-form-row {
+  align-items: start;
+}
+.automation-form .mcp-form-row > div {
+  align-content: start;
+}
+.automation-row .mcp-meta {
+  flex-wrap: wrap;
+}
+.automation-next {
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .automation-row .automation-head {
+    flex-wrap: wrap;
+  }
+  .automation-row .mcp-body {
+    flex-basis: calc(100% - 60px);
+  }
+  .automation-runs {
+    margin-left: 0;
+  }
+  .automation-run {
+    flex-wrap: wrap;
+  }
+  .automation-run-detail {
+    flex-basis: 100%;
+  }
+}

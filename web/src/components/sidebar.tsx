@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { ChevronDownIcon, XMarkIcon } from "@heroicons/react/16/solid";
 import {
   ArchiveBoxIcon,
+  BoltIcon,
   CodeBracketIcon,
   MagnifyingGlassIcon,
   PlusIcon,
@@ -21,6 +22,8 @@ export type WorkspaceRow = {
   running: boolean;
   archived?: boolean;
   pullRequest?: SavedSession["pullRequest"];
+  /** The automation whose run started this workspace. */
+  automationRun?: string;
 };
 
 const PULL_LABELS = {
@@ -154,6 +157,10 @@ export function Sidebar({
           <SignalIcon />
           <span>Feed</span>
         </Link>
+        <Link to="/settings/automations" className="nav-row">
+          <BoltIcon />
+          <span>Automations</span>
+        </Link>
         <div className="sidebar-heading">
           <h2>Workspaces</h2>
           <IconButton
@@ -208,6 +215,16 @@ export function Sidebar({
                   <RowStatus row={row} />
                   <RepoBadge repository={row.repository} />
                   <span className="workspace-title">{row.title}</span>
+                  {row.automationRun && (
+                    <span
+                      className="workspace-automation"
+                      role="img"
+                      aria-label={`Started by automation ${row.automationRun}`}
+                      title={`Started by automation ${row.automationRun}`}
+                    >
+                      <BoltIcon />
+                    </span>
+                  )}
                   <span className="workspace-time">{ago(row.updatedAt, now)}</span>
                 </button>
                 {!row.archived && (
