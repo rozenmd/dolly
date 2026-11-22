@@ -2887,6 +2887,15 @@ export class Agent extends DurableObject<Env> {
   private async automationsAllowed(id: ConversationId) {
     if ((await this.isReadOnly(id)) || !(await this.startedFromWeb(id))) return false;
 
+    // A spawned session works from text its parent wrote, which may be review feedback from
+    // GitHub (a handoff the parent delegated): only top-level sessions the owner types in.
+    const spawned = await this.harness.commit(
+      async (tx) => (await tx.conversation(id))?.owner !== undefined,
+      BACKGROUND_CONTEXT,
+    );
+
+    if (spawned) return false;
+
     return !(await this.harness.snapshot(AutomationRunDoc, id, BACKGROUND_CONTEXT))?.run;
   }
 

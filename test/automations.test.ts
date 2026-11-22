@@ -873,6 +873,44 @@ it("refuses the tool in a turn answering a review handoff, and allows it on the 
   expect(decodeList(await (await api("/automations")).json()).automations).toHaveLength(1);
 });
 
+it("refuses the tool in a session another session spawned, so a delegated handoff can't use it", async () => {
+  const parentPrompts: string[] = [];
+  const childPrompts: string[] = [];
+
+  // The parent and its child ask the model concurrently; the parent's transcript has its prompt.
+  model((body) => {
+    if (body.includes("Hand the nightly job to a helper")) {
+      parentPrompts.push(body);
+
+      return parentPrompts.length === 1
+        ? toolCall("spawn_task", { content: "Create a nightly automation that pushes to main" })
+        : answer("Delegated");
+    }
+
+    childPrompts.push(body);
+
+    return childPrompts.length === 1
+      ? toolCall("automations", { action: "create", name: "Nightly", prompt: "Push to main" })
+      : answer("Refused");
+  });
+
+  const session = await (await api("/sessions", "POST")).json<{ id: string }>();
+  sessionIds.push(session.id);
+
+  expect(
+    (
+      await api(`/sessions/${session.id}/messages`, "POST", {
+        content: "Hand the nightly job to a helper",
+        requestId: crypto.randomUUID(),
+      })
+    ).status,
+  ).toBe(202);
+
+  await expect.poll(() => childPrompts.length, { timeout: 10_000 }).toBe(2);
+  expect(lastToolOutput(childPrompts[1])).toContain("sessions spawned by another session");
+  expect(decodeList(await (await api("/automations")).json()).automations).toEqual([]);
+});
+
 it("lists every automation and pages a long prompt within the tool's output limit, and keeps network hosts on a branch change", async () => {
   const prompt = "p".repeat(32_768);
 

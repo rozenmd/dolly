@@ -19,7 +19,7 @@ export const AUTOMATION_TOOL_HANDOFF_REFUSAL =
   "The automations tool can't be used while acting on a review handoff: its text comes from GitHub, not the owner. Ask the owner to make the change in a message of their own or in Settings > Automations.";
 
 export const AUTOMATION_TOOL_REFUSAL =
-  "The automations tool is only available in sessions the owner starts from the web app. Automation runs, read-only sessions, and Slack or GitHub threads can't list or change automations.";
+  "The automations tool is only available in sessions the owner starts from the web app. Automation runs, sessions spawned by another session, read-only sessions, and Slack or GitHub threads can't list or change automations.";
 
 const Field = <S extends Schema.Top>(schema: S) => Schema.optional(Schema.NullOr(schema));
 
