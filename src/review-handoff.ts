@@ -344,12 +344,6 @@ const NEVER_MERGE = "Never merge the PR and never force-push.";
 const pushStep = (ref: string, start: string) =>
   `Commit (stage specific files), then push only on top of ${start}: \`git merge-base --is-ancestor ${start} HEAD\` must succeed, then \`git push --force-with-lease=refs/heads/${ref}:${start} origin HEAD:refs/heads/${ref}\`. If the push is rejected as stale, the branch changed while you worked (someone pushed or rewound it): don't fetch and retry and don't force; say the round was superseded and stop.`;
 
-/**
- * How every handoff message starts. Review text comes from GitHub, not the owner, so tools that
- * act for the owner alone refuse a turn this started (see `Agent.automationsAllowed`).
- */
-export const HANDOFF_PREFIX = "[Review handoff]";
-
 /** The message the owning session gets for `plan`; undefined when it gets none. */
 export function handoffMessage(
   review: Review,
@@ -367,7 +361,7 @@ export function handoffMessage(
       const remaining = MAX_HANDOFF_ROUNDS - plan.round;
 
       return [
-        `${HANDOFF_PREFIX} This session's PR ${name} was just reviewed at \`${head}\` and is not merge-ready yet (${describe(verdict)}). You wrote this code, so the follow-through is yours: this is fix round ${plan.round}/${MAX_HANDOFF_ROUNDS}. This is system context, not a message from the user.`,
+        `[Review handoff] This session's PR ${name} was just reviewed at \`${head}\` and is not merge-ready yet (${describe(verdict)}). You wrote this code, so the follow-through is yours: this is fix round ${plan.round}/${MAX_HANDOFF_ROUNDS}. This is system context, not a message from the user.`,
         UNTRUSTED,
         fencedFindings(findings),
         [
@@ -389,7 +383,7 @@ export function handoffMessage(
 
     case "notice":
       return [
-        `${HANDOFF_PREFIX} This session's PR ${name} passed review at \`${head}\` (${describe(verdict)}), with ${verdict.findings} non-blocking finding${verdict.findings === 1 ? "" : "s"} left open. Nothing blocks a merge, but you wrote this code, so decide on each one. This is system context, not a message from the user.`,
+        `[Review handoff] This session's PR ${name} passed review at \`${head}\` (${describe(verdict)}), with ${verdict.findings} non-blocking finding${verdict.findings === 1 ? "" : "s"} left open. Nothing blocks a merge, but you wrote this code, so decide on each one. This is system context, not a message from the user.`,
         UNTRUSTED,
         fencedFindings(findings),
         [
@@ -408,8 +402,8 @@ export function handoffMessage(
       const passed = plan.kind === "settled";
 
       const lead = passed
-        ? `${HANDOFF_PREFIX} This session's PR ${name} passed review at \`${head}\` after ${rounds} (${describe(verdict)}). The review loop is closed; no more findings are coming your way.`
-        : `${HANDOFF_PREFIX} This session's PR ${name} is still not merge-ready at \`${head}\` after ${rounds} (${describe(verdict)}). The automatic loop has stopped and what remains is over to humans.`;
+        ? `[Review handoff] This session's PR ${name} passed review at \`${head}\` after ${rounds} (${describe(verdict)}). The review loop is closed; no more findings are coming your way.`
+        : `[Review handoff] This session's PR ${name} is still not merge-ready at \`${head}\` after ${rounds} (${describe(verdict)}). The automatic loop has stopped and what remains is over to humans.`;
 
       const standing = passed
         ? "review passed, CI (github read_pull_request_checks), and whether anything still blocks a merge"

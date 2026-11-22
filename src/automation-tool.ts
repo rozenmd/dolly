@@ -1,3 +1,4 @@
+import { defineDoc, type SubmissionId } from "@earendil-works/pi-durable";
 import * as Schema from "effect/Schema";
 import {
   AutomationPatch,
@@ -15,8 +16,23 @@ import {
 
 export const AUTOMATION_TOOL_NAME = "automations";
 
-export const AUTOMATION_TOOL_HANDOFF_REFUSAL =
-  "The automations tool can't be used while acting on a review handoff: its text comes from GitHub, not the owner. Ask the owner to make the change in a message of their own or in Settings > Automations.";
+export const AUTOMATION_TOOL_TURN_REFUSAL =
+  "The automations tool acts only on a message the owner typed in the web app, and this turn was started by something else (a review handoff, a scheduled prompt, a CI result or another session's message). Ask the owner to request the change in a message of their own, or in Settings > Automations.";
+
+/**
+ * The owner's newest message typed in the web app, as its submission. The tool runs only while
+ * that is the newest input: anything submitted since (a review handoff from GitHub, a scheduled
+ * prompt, a CI wake) is text the owner didn't write, and may not set up unattended work.
+ */
+export const OwnerInputDoc = defineDoc<{ submission: SubmissionId | null }>({
+  kind: "app.owner-input",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ submission: null }),
+  checkpointWhen: () => false,
+});
 
 export const AUTOMATION_TOOL_REFUSAL =
   "The automations tool is only available in sessions the owner starts from the web app. Automation runs, sessions spawned by another session, read-only sessions, and Slack or GitHub threads can't list or change automations.";

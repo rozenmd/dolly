@@ -120,13 +120,12 @@ import {
   RETITLE_TOOL_NAME,
   RetitleToolInput,
   completionText,
-  findPrompt,
+  latestInputEntry,
   promptBounds,
   retitleDescription,
   sanitizeTitle,
   titlePrompt,
 } from "./session-title";
-import { HANDOFF_PREFIX } from "./review-handoff";
 import {
   claudeProvider,
   anthropicStatus,
@@ -163,7 +162,8 @@ import {
 import { toolParameters } from "./tool-schema";
 import {
   AUTOMATION_TOOL_NAME,
-  AUTOMATION_TOOL_HANDOFF_REFUSAL,
+  AUTOMATION_TOOL_TURN_REFUSAL,
+  OwnerInputDoc,
   AUTOMATION_TOOL_REFUSAL,
   AutomationToolInput,
   automationPatch,
@@ -770,11 +770,11 @@ export class Agent extends DurableObject<Env> {
             details: null,
           });
 
-        // The session is the owner's, but this turn may answer review text from GitHub.
-        if (await this.answeringHandoff(api.conversationId))
+        // The session is the owner's, but this turn may answer text the owner didn't write.
+        if (!(await this.ownerTurn(api.conversationId)))
           throw new OperationError({
             operation: "automations.refused",
-            message: AUTOMATION_TOOL_HANDOFF_REFUSAL,
+            message: AUTOMATION_TOOL_TURN_REFUSAL,
             details: null,
           });
 
@@ -2900,14 +2900,21 @@ export class Agent extends DurableObject<Env> {
   }
 
   /**
-   * Whether the newest user message in `id` is a review handoff: findings written on GitHub,
-   * which reach the owner's session as input but are not the owner's request.
+   * Whether the newest input in `id` is a message the owner typed in the web app (recorded by
+   * `prompt`). Review handoffs, scheduled prompts, CI wakes and delivered tasks are inputs too,
+   * but their text isn't the owner's, so a turn they start never counts.
    */
-  private async answeringHandoff(id: ConversationId) {
+  private async ownerTurn(id: ConversationId) {
     const conversation = await this.harness.conversation(id, BACKGROUND_CONTEXT);
-    const latest = conversation && (await findPrompt(conversation, "descending"));
+    const latest = conversation && (await latestInputEntry(conversation));
 
-    return latest?.startsWith(HANDOFF_PREFIX) ?? false;
+    if (!conversation || latest === undefined) return false;
+
+    return conversation.commit(async (tx) => {
+      const { submission } = await tx.doc(OwnerInputDoc, id);
+
+      return submission !== null && (await tx.submission(submission))?.entry === latest;
+    }, BACKGROUND_CONTEXT);
   }
 
   private async automationAction(input: AutomationToolInput) {
@@ -3341,9 +3348,13 @@ export class Agent extends DurableObject<Env> {
           storeImages(this.env.SCREENSHOTS, images),
         );
 
+        const target = conversation.value;
+
+        // Recorded with the input as the owner's own, in one commit: only a turn this input
+        // starts may use tools that act for the owner alone (see ownerTurn).
         const submission = yield* attempt("pi.submit", () =>
-          conversation.value.submit(
-            {
+          target.commit(async (tx) => {
+            const id = await target.submit(tx, {
               type: "input",
               // Persist only R2 references; beforeRequest hydrates image bytes transiently.
               // Screenshot-only prompts carry no text block: providers reject empty text.
@@ -3352,9 +3363,12 @@ export class Agent extends DurableObject<Env> {
                 : content,
               requestId,
               whenBusy: "followUp",
-            },
-            BACKGROUND_CONTEXT,
-          ),
+            });
+
+            (await tx.doc(OwnerInputDoc, target.id)).submission = id;
+
+            return { id };
+          }, BACKGROUND_CONTEXT),
         );
 
         // Restoring pings the sidebar, which also picks up this prompt's new time.
