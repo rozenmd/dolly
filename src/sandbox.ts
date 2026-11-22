@@ -19,6 +19,13 @@ import { attempt, OperationError } from "./operations";
 import { LineWindow, describeWindow, type FileRange } from "./file-window";
 import { applyEdit, diffStats, MAX_EDIT_BYTES, type DiffStats, type Edit } from "./file-edit";
 import { exceptionDetails, redact } from "./diagnostics";
+import {
+  OutputRelay,
+  OutputTail,
+  SHELL_OUTPUT_LIMIT,
+  SHELL_TIMEOUT_EXIT_CODE,
+  SHELL_TIMEOUT_MAX_SECONDS,
+} from "./shell-output";
 import type { Env } from "./env";
 import { PREVIEW_TTL_MS, PreviewPort } from "./preview";
 import * as Schema from "effect/Schema";
@@ -84,6 +91,68 @@ export const readBounded = Effect.fn("Sandbox.readBounded")(function* (
       ),
   );
 });
+
+/** Drain output into a bounded tail, relaying it as text as it arrives. */
+export const drainStream = Effect.fn("Sandbox.drainStream")(function* (
+  stream: ReadableStream<Uint8Array> | null,
+  tail: OutputTail,
+  relay?: OutputRelay,
+) {
+  if (!stream) return;
+
+  yield* Effect.acquireUseRelease(
+    Effect.sync(() => stream.getReader()),
+    (reader) =>
+      Effect.gen(function* () {
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const chunk = yield* attempt("sandbox.stream.read", () => reader.read());
+
+          if (chunk.done) {
+            relay?.push(decoder.decode());
+
+            return;
+          }
+
+          tail.push(chunk.value);
+          relay?.push(decoder.decode(chunk.value, { stream: true }));
+        }
+      }),
+    (reader) =>
+      attempt("sandbox.stream.cancel", () => reader.cancel()).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning({ event: "stream_cleanup_failed", error: exceptionDetails(cause) }),
+        ),
+        Effect.ensuring(Effect.sync(() => reader.releaseLock())),
+      ),
+  );
+});
+
+/** Where a streamed command's output goes: bounded tails for the result, and an optional live relay. */
+type StreamedOutput = {
+  readonly stdout: OutputTail;
+  readonly stderr: OutputTail;
+  readonly relay?: OutputRelay;
+};
+
+/** Options of {@link Sandbox.run}. */
+export type RunOptions = {
+  /** Seconds before the command is stopped; default 60, at most `SHELL_TIMEOUT_MAX_SECONDS`. */
+  readonly timeout?: number;
+  /** Names the run for {@link Sandbox.cancel}. */
+  readonly executionId?: string;
+  /** Receives stdout and stderr as text as they arrive, in batches. */
+  readonly onOutput?: (text: string) => void | Promise<void>;
+};
+
+/** A command's result. `timedOut` commands were stopped, and carry their output so far. */
+export type RunResult = {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number;
+  readonly timedOut?: true;
+};
 
 /** Stream a file through a line window, cancelling the read once the window is full. */
 export const readWindow = Effect.fn("Sandbox.readWindow")(function* (
@@ -263,6 +332,10 @@ export class Sandbox extends DurableObject<Env> {
   private prepared = false;
   private setupAbort: AbortController | undefined;
   private setupOperations = 0;
+  /** In-progress `run` calls by execution ID, for `cancel`. */
+  private readonly executions = new Map<string, AbortController>();
+  /** Cancelled execution IDs whose run had not arrived yet, with when they were cancelled. */
+  private readonly earlyCancels = new Map<string, number>();
   private dependencySetup: Promise<void> | undefined;
   private dependencyAbort: AbortController | undefined;
   private readonly loopback: SandboxState["exports"];
@@ -522,6 +595,7 @@ export class Sandbox extends DurableObject<Env> {
     timeout = 60,
     initializingContainer?: Container,
     env: Readonly<Record<string, string>> = {},
+    streamed?: StreamedOutput,
   ) {
     // Initialization probes must not recursively re-enter container() when a
     // lazy container startup fails.
@@ -567,8 +641,16 @@ export class Sandbox extends DurableObject<Env> {
       (process) =>
         Effect.all(
           {
-            stdout: readBounded(process.stdout, { limit: 32_768 }),
-            stderr: readBounded(process.stderr, { limit: 32_768 }),
+            stdout: streamed
+              ? drainStream(process.stdout, streamed.stdout, streamed.relay).pipe(
+                  Effect.map(() => streamed.stdout.text()),
+                )
+              : readBounded(process.stdout, { limit: 32_768 }),
+            stderr: streamed
+              ? drainStream(process.stderr, streamed.stderr, streamed.relay).pipe(
+                  Effect.map(() => streamed.stderr.text()),
+                )
+              : readBounded(process.stderr, { limit: 32_768 }),
             exitCode: attempt("sandbox.exit", () => process.exitCode).pipe(
               Effect.tap(() =>
                 Effect.sync(() => {
@@ -1011,11 +1093,14 @@ export class Sandbox extends DurableObject<Env> {
     };
   });
 
-  private runWorkspaceOperation<A, E>(operation: Effect.Effect<A, E>) {
+  /** `signal` can interrupt this operation alone; a restart interrupts every one. */
+  private runWorkspaceOperation<A, E>(operation: Effect.Effect<A, E>, signal?: AbortSignal) {
     const controller = (this.setupAbort ??= new AbortController());
     this.setupOperations++;
 
-    return Effect.runPromise(operation, { signal: controller.signal }).finally(() => {
+    return Effect.runPromise(operation, {
+      signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+    }).finally(() => {
       this.setupOperations--;
 
       if (!this.setupOperations && this.setupAbort === controller) this.setupAbort = undefined;
@@ -1077,30 +1162,106 @@ export class Sandbox extends DurableObject<Env> {
     return setup;
   }
 
-  /** `env` adds variables such as the agent's git identity; it cannot override the fixed git and TLS settings. */
-  run(command: string, env: Readonly<Record<string, string>> = {}) {
-    return this.runWorkspaceOperation(
-      this.permit.withPermit(
-        Effect.gen({ self: this }, function* () {
-          const workspace = yield* attempt("workspace.read", () =>
-            this.ctx.storage.get<WorkspaceConfig>("workspace"),
-          );
-
-          if (workspace) {
-            yield* this.prepareWorkspace(workspace);
-            yield* this.markUnsaved();
-          }
-
-          return yield* this.execute(
-            command,
-            workspace ? "/workspace/repo" : "/workspace",
-            60,
-            undefined,
-            env,
-          );
-        }),
-      ),
+  /**
+   * Run a command in the workspace. `env` adds variables such as the agent's git identity; it cannot
+   * override the fixed git and TLS settings. Each stream's result is its last 32 KiB. A command that
+   * reaches its timeout is stopped and returns its output so far with `timedOut`; one cancelled
+   * through {@link cancel} is stopped and rejects.
+   */
+  run(
+    command: string,
+    env: Readonly<Record<string, string>> = {},
+    options: RunOptions = {},
+  ): Promise<RunResult> {
+    const timeout = Math.min(
+      Math.max(Math.ceil(options.timeout ?? 60), 1),
+      SHELL_TIMEOUT_MAX_SECONDS,
     );
+
+    const streamed: StreamedOutput = {
+      stdout: new OutputTail(SHELL_OUTPUT_LIMIT),
+      stderr: new OutputTail(SHELL_OUTPUT_LIMIT),
+      relay: options.onOutput ? new OutputRelay(options.onOutput) : undefined,
+    };
+
+    const cancel = new AbortController();
+    const { executionId } = options;
+
+    if (executionId && this.earlyCancels.delete(executionId)) cancel.abort();
+    else if (executionId) this.executions.set(executionId, cancel);
+
+    const operation = this.permit.withPermit(
+      Effect.gen({ self: this }, function* () {
+        const workspace = yield* attempt("workspace.read", () =>
+          this.ctx.storage.get<WorkspaceConfig>("workspace"),
+        );
+
+        if (workspace) {
+          yield* this.prepareWorkspace(workspace);
+          yield* this.markUnsaved();
+        }
+
+        return yield* this.execute(
+          command,
+          workspace ? "/workspace/repo" : "/workspace",
+          timeout,
+          undefined,
+          env,
+          streamed,
+        ).pipe(
+          Effect.catchTag("TimeoutError", () =>
+            Effect.succeed<RunResult>({
+              stdout: streamed.stdout.text(),
+              stderr: streamed.stderr.text(),
+              exitCode: SHELL_TIMEOUT_EXIT_CODE,
+              timedOut: true,
+            }),
+          ),
+        );
+      }),
+    );
+
+    const result = this.runWorkspaceOperation(operation, cancel.signal);
+
+    return result
+      .catch(() => {
+        if (!cancel.signal.aborted) return result;
+
+        throw new OperationError({
+          operation: "sandbox.run",
+          message: "The command was cancelled",
+          details: null,
+        });
+      })
+      .finally(async () => {
+        if (executionId && this.executions.get(executionId) === cancel)
+          this.executions.delete(executionId);
+
+        // Live output must reach the caller before the result does.
+        await streamed.relay?.close();
+      });
+  }
+
+  /**
+   * Stop a {@link run} started with this `executionId`: its process group gets TERM, then KILL, and
+   * the run rejects. Returns whether such a run was still in progress.
+   */
+  cancel(executionId: string) {
+    const execution = this.executions.get(executionId);
+
+    if (execution) {
+      execution.abort();
+
+      return true;
+    }
+
+    // The cancel can overtake its run's own RPC: remember it briefly so that run never starts.
+    const now = Date.now();
+
+    for (const [id, at] of this.earlyCancels) if (now - at > 60_000) this.earlyCancels.delete(id);
+    this.earlyCancels.set(executionId, now);
+
+    return false;
   }
 
   /** The running container's filesystem, with native Linux semantics. */
