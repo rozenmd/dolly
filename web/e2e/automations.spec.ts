@@ -467,6 +467,23 @@ test("edits send only what changed, so they never undo a pause or move a schedul
     { id: "a1", body: { name: "Deploy check" } },
   ]);
 
+  // Moving it to another repository sends its access whole, as shown: the read-only setting and
+  // MCP servers go with the repository, so an edit made elsewhere can't change what runs may do.
+  await page.getByRole("button", { name: "Manage Deploy check" }).click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  await page.getByRole("button", { name: "Repository" }).click();
+  await page.getByRole("option", { name: /other/ }).click();
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect.poll(() => updated.length).toBe(3);
+  expect(updated[2]).toEqual({
+    id: "a1",
+    body: {
+      readOnly: false,
+      mcpServers: [],
+      workspace: { repository: "octocat/other", ref: "main" },
+    },
+  });
+
   // A one-off that already ran can be renamed without picking a new time.
   await page.getByRole("button", { name: "Manage Reminder" }).click();
   await page.getByRole("menuitem", { name: "Edit" }).click();
@@ -485,7 +502,7 @@ test("edits send only what changed, so they never undo a pause or move a schedul
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByRole("alert")).toHaveText("Choose a date and time to run it at.");
   await expect(page.getByRole("button", { name: "Cancel" })).not.toBeDisabled();
-  expect(updated).toHaveLength(2);
+  expect(updated).toHaveLength(3);
 
   await page.getByRole("button", { name: "Cancel" }).click();
   await page.getByRole("button", { name: "Manage Reminder" }).click();

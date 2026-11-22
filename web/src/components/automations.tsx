@@ -404,17 +404,27 @@ const differs = <T,>(a: T, b: T) => JSON.stringify(a) !== JSON.stringify(b);
  * old one-off time, or undo a pause made from the list while the form was open.
  */
 function patchOf(body: ApiBody, initial: ApiBody): ApiBody {
+  // What a run may do is the repository, read-only and MCP servers together: a change to any one
+  // sends all three as shown, so a concurrent edit to another can't combine into access nobody
+  // chose (another tab turning read-only off while this one moves the repository).
+  const access =
+    differs(body.workspace, initial.workspace) ||
+    differs(body.readOnly, initial.readOnly) ||
+    differs(body.mcpServers, initial.mcpServers);
+
   return {
     ...(differs(body.name, initial.name) && { name: body.name }),
     ...(differs(body.prompt, initial.prompt) && { prompt: body.prompt }),
     ...(differs(body.enabled, initial.enabled) && { enabled: body.enabled }),
-    ...(differs(body.readOnly, initial.readOnly) && { readOnly: body.readOnly }),
+    ...(access && {
+      readOnly: body.readOnly,
+      mcpServers: body.mcpServers,
+      workspace: body.workspace,
+    }),
     ...(differs(body.model, initial.model) && { model: body.model }),
-    ...(differs(body.mcpServers, initial.mcpServers) && { mcpServers: body.mcpServers }),
     ...(differs(body.schedule, initial.schedule) && { schedule: body.schedule }),
     ...(differs(body.timeZone, initial.timeZone) && { timeZone: body.timeZone }),
     ...(differs(body.runAt, initial.runAt) && { runAt: body.runAt }),
-    ...(differs(body.workspace, initial.workspace) && { workspace: body.workspace }),
   };
 }
 
