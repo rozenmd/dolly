@@ -348,6 +348,20 @@ test("refuses to save while required fields are empty and shows server errors", 
   await page.getByRole("button", { name: "Create automation" }).click();
   await expect(page.getByRole("alert")).toHaveText("Schedules can run at most every 10 minutes");
 
+  // A recipe fills the form; every field stays editable.
+  await page.getByRole("button", { name: "Weekly changelog draft" }).click();
+  await expect(page.getByLabel("Name")).toHaveValue("Weekly changelog draft");
+  await expect(page.getByLabel("Cron expression")).toHaveValue("0 14 * * 5");
+  await expect(page.getByLabel("Prompt")).toHaveValue(/git log/);
+  await expect(page.getByRole("button", { name: "Weekly changelog draft" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  // Its prompt is about a repository: it isn't saved without one, or turned writable.
+  await page.getByRole("button", { name: "Create automation" }).click();
+  await expect(page.getByRole("alert")).toHaveText("Pick the repository this recipe works on.");
+
   // Cancel closes the form without saving.
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByLabel("Name")).toHaveCount(0);
@@ -677,4 +691,137 @@ test("reopening Edit after a refused access edit shows the saved access, never t
   // Only the rename was saved: nothing ever turned read-only off.
   expect(saved).toEqual([{ name: "Linear triage (read-only)" }]);
   expect(automation.readOnly).toBe(true);
+});
+
+test("waits for connections before a recipe ticks its MCP servers", async ({ page }) => {
+  let release: () => void = () => {};
+  const connections = new Promise<void>((resolve) => (release = resolve));
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+
+    if (path === "/api/auth") return route.fulfill({ json: auth });
+
+    if (path === "/api/automations") return route.fulfill({ json: { automations: [] } });
+
+    if (path === "/api/connections") {
+      await connections;
+
+      return route.fulfill({
+        json: {
+          mcpServers: [
+            {
+              name: "sentry",
+              transport: "http",
+              target: "https://mcp.sentry.dev/mcp",
+              headerKeys: [],
+              status: "connected",
+            },
+          ],
+        },
+      });
+    }
+
+    if (path === "/api/integrations/github/repositories")
+      return route.fulfill({ json: { repositories: [] } });
+
+    return route.fulfill({ json: [] });
+  });
+
+  await page.goto("/settings/automations");
+  await page.getByRole("button", { name: "New automation" }).click();
+
+  // Still loading: picking it now would save a Sentry sweep without Sentry.
+  await expect(page.getByRole("button", { name: "Production error sweep" })).toBeDisabled();
+
+  release();
+  await page.getByRole("button", { name: "Production error sweep" }).click();
+  await expect(page.getByLabel("Name")).toHaveValue("Production error sweep");
+  expect(
+    await page
+      .getByLabel("Sentry")
+      .evaluate((element) => element instanceof HTMLInputElement && element.checked),
+  ).toBe(true);
+});
+
+test("keeps recipes that need MCP servers off when connections can't be loaded", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+
+    if (path === "/api/auth") return route.fulfill({ json: auth });
+
+    if (path === "/api/automations") return route.fulfill({ json: { automations: [] } });
+
+    if (path === "/api/connections") return route.fulfill({ status: 503, json: { error: "Down" } });
+
+    if (path === "/api/integrations/github/repositories")
+      return route.fulfill({ json: { repositories: [] } });
+
+    return route.fulfill({ json: [] });
+  });
+
+  await page.goto("/settings/automations", { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "New automation" }).click();
+
+  // Unknown isn't "none connected": the Sentry recipe can't be saved without Sentry.
+  await expect(page.getByText(/Couldn't load your connections/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Production error sweep" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Weekly changelog draft" })).not.toBeDisabled();
+});
+
+test("keeps a recipe off while an MCP server it needs is missing or not connected", async ({
+  page,
+}) => {
+  const lists = [
+    [],
+    [
+      {
+        name: "sentry",
+        transport: "http",
+        target: "https://mcp.sentry.dev/mcp",
+        headerKeys: [],
+        status: "needs-auth",
+      },
+    ],
+  ];
+
+  let served = 0;
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+
+    if (path === "/api/auth") return route.fulfill({ json: auth });
+
+    if (path === "/api/automations") return route.fulfill({ json: { automations: [] } });
+
+    if (path === "/api/connections")
+      return route.fulfill({ json: { mcpServers: lists[Math.min(served++, lists.length - 1)] } });
+
+    if (path === "/api/integrations/github/repositories")
+      return route.fulfill({ json: { repositories: [] } });
+
+    return route.fulfill({ json: [] });
+  });
+
+  await page.goto("/settings/automations", { waitUntil: "networkidle" });
+
+  // Neither listed nor connected: a sweep saved without Sentry could never run it.
+  for (const _ of lists) {
+    await page.getByRole("button", { name: "New automation" }).click();
+    await expect(page.getByText(/need an MCP server you haven't connected/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Production error sweep" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Production error sweep" })).toHaveAttribute(
+      "title",
+      "Connect sentry in Settings > Connections to use this recipe.",
+    );
+    await expect(page.getByRole("button", { name: "Weekly changelog draft" })).not.toBeDisabled();
+    await page.getByRole("button", { name: "Cancel" }).click();
+  }
+
+  expect(served).toBeGreaterThanOrEqual(2);
 });

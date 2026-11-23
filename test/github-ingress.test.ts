@@ -768,7 +768,15 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
 
   expect(offered).toEqual(expect.arrayContaining(["shell", "read_file", "github", "workspace"]));
 
-  for (const name of ["write_file", "edit_file", "preview", "spawn_task", "schedule_prompt", "mcp"])
+  for (const name of [
+    "write_file",
+    "edit_file",
+    "preview",
+    "spawn_task",
+    "schedule_prompt",
+    "mcp",
+    "automations",
+  ])
     expect(offered).not.toContain(name);
 
   expect(JSON.parse(prompts[0]!).model).toBe("gpt-6-sol");

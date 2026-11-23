@@ -160,6 +160,21 @@ import {
 } from "./papercuts";
 import { toolParameters } from "./tool-schema";
 import {
+  AUTOMATION_TOOL_NAME,
+  AUTOMATION_TOOL_TURN_REFUSAL,
+  OWNER_INPUTS_KEPT,
+  OwnerInputDoc,
+  unanswered,
+  AUTOMATION_TOOL_REFUSAL,
+  AutomationToolInput,
+  automationPatch,
+  automationToolDescription,
+  listOutput,
+  readOutput,
+  savedOutput,
+  newAutomation,
+} from "./automation-tool";
+import {
   AddMcpServer,
   McpConnections,
   McpToolInput,
@@ -739,6 +754,37 @@ export class Agent extends DurableObject<Env> {
       },
     } satisfies ToolRegistration;
 
+    // Settings > Automations from a session; only owner web sessions may use it (automation-tool.ts).
+    const automationTool = {
+      name: AUTOMATION_TOOL_NAME,
+      description: automationToolDescription,
+      parameters: toolParameters(AutomationToolInput),
+      replay: "unsafe",
+      executionMode: "sequential",
+      execute: async (input: AutomationToolInput, api) => {
+        const parsed = Schema.decodeUnknownSync(AutomationToolInput)(input);
+
+        if (!(await this.automationsAllowed(api.conversationId)))
+          throw new OperationError({
+            operation: "automations.refused",
+            message: AUTOMATION_TOOL_REFUSAL,
+            details: null,
+          });
+
+        // The session is the owner's, but this turn may answer text the owner didn't write.
+        if (!(await this.ownerTurn(api.conversationId)))
+          throw new OperationError({
+            operation: "automations.refused",
+            message: AUTOMATION_TOOL_TURN_REFUSAL,
+            details: null,
+          });
+
+        return {
+          output: [{ type: "text", text: JSON.stringify(await this.automationAction(parsed)) }],
+        };
+      },
+    } satisfies ToolRegistration;
+
     const tools = [
       shell,
       readFile,
@@ -750,6 +796,7 @@ export class Agent extends DurableObject<Env> {
       selfQueryTool,
       retitleTool,
       mcpTool,
+      automationTool,
       {
         name: "preview",
         description:
@@ -1256,6 +1303,36 @@ export class Agent extends DurableObject<Env> {
             } while (cursor);
           }, BACKGROUND_CONTEXT)
           .then(() => this.ctx.storage.put("migration:mcp-tool", true)),
+      );
+
+    if (
+      !(yield* attempt("automations.migration.read", () =>
+        this.ctx.storage.get("migration:automations-tool"),
+      ))
+    )
+      yield* attempt("automations.tools.update", () =>
+        this.harness
+          .commit(async (tx) => {
+            let cursor: Cursor | undefined;
+
+            do {
+              const page = await tx.scanConversations({}, 100, cursor);
+
+              for (const conversation of page.items) {
+                const agent = await tx.doc(AgentDoc, conversation.id);
+
+                // Read-only sessions keep their allowlist, which has no write_file.
+                if (!Array.isArray(agent.tools) || !agent.tools.includes(writeFile.name)) continue;
+
+                for (const names of [agent.tools, agent.modelTools])
+                  if (Array.isArray(names) && !names.includes(automationTool.name))
+                    names.push(automationTool.name);
+              }
+
+              cursor = page.next;
+            } while (cursor);
+          }, BACKGROUND_CONTEXT)
+          .then(() => this.ctx.storage.put("migration:automations-tool", true)),
       );
 
     this.automations = new Automations({
@@ -2805,6 +2882,106 @@ export class Agent extends DurableObject<Env> {
   }
 
   /**
+   * Automations run unwatched with the owner's subscription, so only sessions the owner alone
+   * steers may manage them, and a run may not rewrite automations, its own included.
+   */
+  private async automationsAllowed(id: ConversationId) {
+    if ((await this.isReadOnly(id)) || !(await this.startedFromWeb(id))) return false;
+
+    // A spawned session works from text its parent wrote, which may be review feedback from
+    // GitHub (a handoff the parent delegated): only top-level sessions the owner types in.
+    const spawned = await this.harness.commit(
+      async (tx) => (await tx.conversation(id))?.owner !== undefined,
+      BACKGROUND_CONTEXT,
+    );
+
+    if (spawned) return false;
+
+    return !(await this.harness.snapshot(AutomationRunDoc, id, BACKGROUND_CONTEXT))?.run;
+  }
+
+  /**
+   * Whether every message the model is answering in `id` is one the owner typed in the web app
+   * (recorded by `prompt`). Review handoffs, scheduled prompts, CI wakes and delivered tasks are
+   * inputs too; while one is unanswered, the turn isn't the owner's, even after the owner steers.
+   */
+  private async ownerTurn(id: ConversationId) {
+    const conversation = await this.harness.conversation(id, BACKGROUND_CONTEXT);
+
+    if (!conversation) return false;
+
+    const inputs = await unanswered((cursor) =>
+      conversation.entries({ order: "descending" }, 50, cursor, BACKGROUND_CONTEXT),
+    );
+
+    if (!inputs?.length) return false;
+
+    return conversation.commit(async (tx) => {
+      const { submissions } = await tx.doc(OwnerInputDoc, id);
+      const records = await Promise.all(submissions.map((submission) => tx.submission(submission)));
+      const owner = new Set(records.flatMap((record) => (record?.entry ? [record.entry] : [])));
+
+      return inputs.every((entry) => owner.has(entry));
+    }, BACKGROUND_CONTEXT);
+  }
+
+  private async automationAction(input: AutomationToolInput) {
+    const missing = { error: `${input.action} needs the automation's id; list shows them` };
+
+    switch (input.action) {
+      case "list":
+        // Bounded, so every ID fits the tool's output limit whatever the automations hold.
+        return listOutput(await this.automationsList());
+      case "read": {
+        if (!input.id) return missing;
+        const found = await this.automationRead(input.id);
+
+        // Paged, so a long prompt and run history never pass the tool's output limit.
+        return found ? readOutput(found, input.offset) : { error: "No automation with that id" };
+      }
+
+      case "create": {
+        const body = newAutomation(input);
+
+        if ("error" in body) return body;
+        const created = await this.automationCreate(body.value);
+
+        // Bounded like read: a long prompt can't push the confirmation past the output limit.
+        return "error" in created ? created : savedOutput(created);
+      }
+
+      case "update": {
+        if (!input.id) return missing;
+        const patch = automationPatch(input);
+
+        if ("error" in patch) return patch;
+
+        // The tool never sends network hosts: the server keeps the ones it holds, at the
+        // revision it saves against, when the repository stays the same.
+
+        const updated = await this.automationUpdate(input.id, patch.value);
+
+        if (!updated) return { error: "No automation with that id" };
+
+        return "error" in updated ? updated : savedOutput(updated);
+      }
+
+      case "delete":
+        if (!input.id) return missing;
+
+        return (await this.automationDelete(input.id)) ?? { error: "No automation with that id" };
+      case "run":
+        if (!input.id) return missing;
+
+        return (
+          (await this.automationRun(input.id, crypto.randomUUID())) ?? {
+            error: "No automation with that id",
+          }
+        );
+    }
+  }
+
+  /**
    * The repository a new session in workspace `id` inherits, read from one of its top-level
    * sessions; undefined when no such workspace exists. Sessions from before workspaces were
    * recorded are workspaces keyed by their own session ID.
@@ -3179,9 +3356,13 @@ export class Agent extends DurableObject<Env> {
           storeImages(this.env.SCREENSHOTS, images),
         );
 
+        const target = conversation.value;
+
+        // Recorded with the input as the owner's own, in one commit: only a turn this input
+        // starts may use tools that act for the owner alone (see ownerTurn).
         const submission = yield* attempt("pi.submit", () =>
-          conversation.value.submit(
-            {
+          target.commit(async (tx) => {
+            const id = await target.submit(tx, {
               type: "input",
               // Persist only R2 references; beforeRequest hydrates image bytes transiently.
               // Screenshot-only prompts carry no text block: providers reject empty text.
@@ -3190,9 +3371,17 @@ export class Agent extends DurableObject<Env> {
                 : content,
               requestId,
               whenBusy: "followUp",
-            },
-            BACKGROUND_CONTEXT,
-          ),
+            });
+
+            // Every queued message stays the owner's until its run: a follow-up queued behind a
+            // run never revokes that run's own messages.
+            const owner = await tx.doc(OwnerInputDoc, target.id);
+
+            if (!owner.submissions.includes(id)) owner.submissions.push(id);
+            owner.submissions.splice(0, Math.max(0, owner.submissions.length - OWNER_INPUTS_KEPT));
+
+            return { id };
+          }, BACKGROUND_CONTEXT),
         );
 
         // Restoring pings the sidebar, which also picks up this prompt's new time.
