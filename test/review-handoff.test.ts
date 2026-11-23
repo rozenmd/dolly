@@ -843,6 +843,9 @@ it("hands an unsatisfied review back to the session that opened the PR, until a 
   );
   expect(handoffs[0]).toContain(`git merge-base --is-ancestor ${first} HEAD`);
   expect(handoffs[0]).toContain("Never merge the PR");
+  // Fixes stay minimal and in scope: new machinery is pushed back on, not built.
+  expect(handoffs[0]).toContain("with the smallest change that fixes it inside this PR's goal");
+  expect(handoffs[0]).toContain("new mechanism the PR never set out to build");
   await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Handled 1");
 
   // A redelivery of the same head neither reviews nor hands off again.
@@ -862,13 +865,20 @@ it("hands an unsatisfied review back to the session that opened the PR, until a 
   expect(reviewPrompts[1]).toContain("You previously reviewed PR example/project#8");
   expect(reviewPrompts[1]).toContain("You reviewed `aaaaaaa`");
   expect(reviewPrompts[1]).toContain("request changes, confidence 2/5, 2 findings (1 blocking)");
-  // Someone else's reply never settles a finding; only the PR's author can push back.
+  // Someone else's reply never settles a finding; only the PR's author answers one.
   expect(reviewPrompts[1]).toContain(
     "[still open] `src/parse.ts` — **P1** — parse() dereferences a null config.",
   );
   expect(reviewPrompts[1]).toContain(
-    "[author pushback] `src/cache.ts` — **P2** — The cache never expires.",
+    "[author replied] `src/cache.ts` — **P2** — The cache never expires.",
   );
+  // It knows how many heads it has reviewed, and that it is checking fixes, not auditing a new PR:
+  // fixes for its own findings aren't fresh scope to escalate on.
+  expect(reviewPrompts[1]).toContain("This is review round 2 of this PR");
+  expect(reviewPrompts[1]).toContain("This is not a new PR");
+  expect(reviewPrompts[1]).toContain("Converge, don't escalate");
+  expect(reviewPrompts[1]).toContain("Code written to fix your own findings is not new scope");
+  expect(reviewPrompts[1]).not.toContain("freshest scrutiny");
   expect(reviewPrompts[1]).toContain("Intentional: entries are immutable.");
   expect(reviewPrompts[1]).toContain("[addressed] `src/old.ts`");
   expect(reviewPrompts[1]).toContain("@mallory on `src/parse.ts:3`");

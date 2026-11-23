@@ -368,7 +368,7 @@ export function handoffMessage(
           "Do this now:",
           `0. ${checkoutStep(review.repository, review.number, pull.ref, review.sha)}`,
           `1. Check the branch hasn't moved: \`git rev-parse HEAD\` should be \`${review.sha}\`. These findings describe \`${head}\`; if the branch has moved on, don't patch against stale feedback: say it was superseded and let the fresh review run instead.`,
-          "2. Address every actionable finding you can confirm in the code. If you disagree with one, leave the code unchanged and reply in that thread with github reply_to_review_comment explaining why; never skip one silently.",
+          "2. Address every actionable finding you can confirm in the code, with the smallest change that fixes it inside this PR's goal. If you disagree with one, or fixing it would take new mechanism the PR never set out to build (new tables, locking or reconciliation schemes, retry machinery, ever more edge cases of a problem an earlier round fixed), leave the code unchanged and reply in that thread with github reply_to_review_comment explaining why, proposing a follow-up where it's real; the next review won't re-raise it without new evidence. Never skip one silently.",
           `3. ${pushStep(pull.ref, review.sha)} Push to ${review.repository} and nowhere else.`,
           "4. Reply in each addressed inline thread with what you did, e.g. `Fixed in <sha>`, with github reply_to_review_comment and the thread's comment id above, once per thread.",
           `5. ${NEVER_MERGE}`,
