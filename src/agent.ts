@@ -162,6 +162,16 @@ import {
 } from "./papercuts";
 import { toolParameters } from "./tool-schema";
 import {
+  formatPage,
+  formatSlice,
+  GITHUB_REPOSITORY_HINT,
+  githubTarget,
+  WebFetchError,
+  WebFetchToolInput,
+  webFetchDescription,
+  WebPages,
+} from "./web-fetch";
+import {
   AUTOMATION_TOOL_NAME,
   AUTOMATION_TOOL_TURN_REFUSAL,
   OWNER_INPUTS_KEPT,
@@ -271,6 +281,7 @@ export class Agent extends DurableObject<Env> {
   private models!: ReturnType<typeof createModels>;
   private readonly credentials: Credentials;
   private readonly papercuts: Papercuts;
+  private readonly webPages: WebPages;
   private readonly mcp: McpConnections;
   private readonly services: Layer.Layer<Account | ChatGPTProtocol | GitHub | GitHubAuth>;
   private readonly slackServices: Layer.Layer<SlackHostService>;
@@ -386,6 +397,7 @@ export class Agent extends DurableObject<Env> {
     super(ctx, env);
     this.credentials = new Credentials(ctx.storage);
     this.papercuts = new Papercuts(ctx.storage.sql);
+    this.webPages = new WebPages(ctx.storage.sql);
     this.mcp = new McpConnections(ctx.storage);
     this.sessionsFeed = new SessionsFeed(ctx, () => this.harness);
     this.services = Layer.mergeAll(
@@ -423,7 +435,7 @@ export class Agent extends DurableObject<Env> {
     const shell = {
       name: "shell",
       description:
-        "Run a shell command in the active repository's isolated Linux checkout. Commands start in /workspace/repo (or /workspace when no repo is selected), so no cd is needed. Dependency setup runs in the background: use workspace action wait_for_dependencies before builds, tests, starting a dev server, or changing dependency inputs; file reads and ordinary shell commands do not wait. Use workspace checkout to switch repositories in this same conversation; other live checkouts are preserved. Git credentials stay outside the container. Repository sandboxes can reach only package registries, raw.githubusercontent.com and configured network hosts; a sandbox with no repository has no network access. For browser automation or browser tests, use the Chrome DevTools endpoint at http://browser.workspace (Cloudflare Browser Run; /json/version names its WebSocket) instead of installing a browser. Output streams live while a command runs; the result keeps the last 32 KiB of stdout and of stderr. Commands are stopped after 10 minutes unless you pass timeout (seconds, up to 3600): run slow builds and test suites in the foreground with a long enough timeout rather than backgrounding them and polling with sleep. A command stopped at its timeout returns its output so far with timedOut: true and exit code 124. Repository files are snapshotted once after the agent turn answers, not after each command. Changes since the last successful turn-end save can be lost on container shutdown or restart; if that happens, the next repository tool result starts with a WORKSPACE RESTORED notice (workspaceRestored) naming the snapshot, so re-check git status before continuing. Push important work to GitHub for long-term storage.",
+        "Run a shell command in the active repository's isolated Linux checkout. Commands start in /workspace/repo (or /workspace when no repo is selected), so no cd is needed. Dependency setup runs in the background: use workspace action wait_for_dependencies before builds, tests, starting a dev server, or changing dependency inputs; file reads and ordinary shell commands do not wait. Use workspace checkout to switch repositories in this same conversation; other live checkouts are preserved. Git credentials stay outside the container. Repository sandboxes can reach only package registries, raw.githubusercontent.com and configured network hosts; a sandbox with no repository has no network access. To read a web page, use web_fetch rather than curl. For browser automation or browser tests, use the Chrome DevTools endpoint at http://browser.workspace (Cloudflare Browser Run; /json/version names its WebSocket) instead of installing a browser. Output streams live while a command runs; the result keeps the last 32 KiB of stdout and of stderr. Commands are stopped after 10 minutes unless you pass timeout (seconds, up to 3600): run slow builds and test suites in the foreground with a long enough timeout rather than backgrounding them and polling with sleep. A command stopped at its timeout returns its output so far with timedOut: true and exit code 124. Repository files are snapshotted once after the agent turn answers, not after each command. Changes since the last successful turn-end save can be lost on container shutdown or restart; if that happens, the next repository tool result starts with a WORKSPACE RESTORED notice (workspaceRestored) naming the snapshot, so re-check git status before continuing. Push important work to GitHub for long-term storage.",
       parameters: obj({
         command: str(),
         timeout: opt(
@@ -710,6 +722,54 @@ export class Agent extends DurableObject<Env> {
       },
     } satisfies ToolRegistration;
 
+    // Runs in the Worker, so reading the web does not widen the sandbox's network policy.
+    const webFetchTool = {
+      name: "web_fetch",
+      description: webFetchDescription,
+      parameters: toolParameters(WebFetchToolInput),
+      // A GET with no credentials; a repeat serves this conversation's stored copy.
+      replay: "safe",
+      execute: async (input: WebFetchToolInput, api) => {
+        const parsed = Schema.decodeUnknownSync(WebFetchToolInput)(input);
+        const conversationId = String(api.conversationId);
+        const url = parsed.url?.trim();
+        const handle = parsed.handle?.trim();
+        const result = (text: string) => ({ output: [{ type: "text" as const, text }] });
+
+        try {
+          if (url && handle) throw new WebFetchError("Pass either url or handle, not both.");
+
+          if (handle)
+            return result(formatSlice(this.webPages.read(conversationId, handle, parsed)));
+
+          if (!url)
+            throw new WebFetchError("Pass url to fetch a page, or handle to read more of one.");
+          const target = githubTarget(url);
+
+          if ("repository" in target) return result(GITHUB_REPOSITORY_HINT(target.repository));
+          const secrets = await Effect.runPromise(this.credentials.secrets);
+
+          const page = await this.webPages.fetch(
+            conversationId,
+            target.url,
+            { ...parsed, mode: target.raw ? "raw" : parsed.mode },
+            secrets,
+          );
+
+          return result(formatPage(page, target.raw ? target.url : undefined));
+        } catch (cause) {
+          throw new OperationError({
+            operation: "web_fetch",
+            message:
+              cause instanceof WebFetchError
+                ? cause.message
+                : `Could not fetch ${url ?? handle}: ${exceptionDetails(cause).message}`,
+            details: null,
+          });
+        }
+      },
+    } satisfies ToolRegistration;
+
     const selfQuerySchema = toolParameters(SelfQueryToolInput);
 
     // Native Pi tool for now; self-query.ts documents how it upgrades to an MCP server later.
@@ -802,6 +862,7 @@ export class Agent extends DurableObject<Env> {
       githubTool,
       workspaceTool,
       papercutsTool,
+      webFetchTool,
       selfQueryTool,
       retitleTool,
       mcpTool,
@@ -1342,6 +1403,36 @@ export class Agent extends DurableObject<Env> {
             } while (cursor);
           }, BACKGROUND_CONTEXT)
           .then(() => this.ctx.storage.put("migration:automations-tool", true)),
+      );
+
+    if (
+      !(yield* attempt("web-fetch.migration.read", () =>
+        this.ctx.storage.get("migration:web-fetch-tool"),
+      ))
+    )
+      yield* attempt("web-fetch.tools.update", () =>
+        this.harness
+          .commit(async (tx) => {
+            let cursor: Cursor | undefined;
+
+            do {
+              const page = await tx.scanConversations({}, 100, cursor);
+
+              for (const conversation of page.items) {
+                const agent = await tx.doc(AgentDoc, conversation.id);
+
+                // Read-only sessions keep their allowlist, which has no write_file.
+                if (!Array.isArray(agent.tools) || !agent.tools.includes(writeFile.name)) continue;
+
+                for (const names of [agent.tools, agent.modelTools])
+                  if (Array.isArray(names) && !names.includes(webFetchTool.name))
+                    names.push(webFetchTool.name);
+              }
+
+              cursor = page.next;
+            } while (cursor);
+          }, BACKGROUND_CONTEXT)
+          .then(() => this.ctx.storage.put("migration:web-fetch-tool", true)),
       );
 
     this.automations = new Automations({
