@@ -818,6 +818,7 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
     "schedule_prompt",
     "mcp",
     "automations",
+    "connections",
   ])
     expect(offered).not.toContain(name);
 

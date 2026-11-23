@@ -188,6 +188,14 @@ import {
   newAutomation,
 } from "./automation-tool";
 import {
+  CONNECTIONS_TOOL_NAME,
+  CONNECTIONS_TOOL_REFUSAL,
+  CONNECTIONS_TOOL_TURN_REFUSAL,
+  ConnectionsToolInput,
+  connectionsToolDescription,
+  nextStep,
+} from "./connections-tool";
+import {
   AddMcpServer,
   McpConnections,
   McpToolInput,
@@ -854,6 +862,37 @@ export class Agent extends DurableObject<Env> {
       },
     } satisfies ToolRegistration;
 
+    // Settings > Connections from a session: saves servers; the owner signs in (connections-tool.ts).
+    const connectionsTool = {
+      name: CONNECTIONS_TOOL_NAME,
+      description: connectionsToolDescription,
+      parameters: toolParameters(ConnectionsToolInput),
+      replay: "unsafe",
+      executionMode: "sequential",
+      execute: async (input: ConnectionsToolInput, api) => {
+        const parsed = Schema.decodeUnknownSync(ConnectionsToolInput)(input);
+
+        if (!(await this.automationsAllowed(api.conversationId)))
+          throw new OperationError({
+            operation: "connections.refused",
+            message: CONNECTIONS_TOOL_REFUSAL,
+            details: null,
+          });
+
+        // The server it adds decides where the mcp tool sends data: only on the owner's word.
+        if (!(await this.ownerTurn(api.conversationId)))
+          throw new OperationError({
+            operation: "connections.refused",
+            message: CONNECTIONS_TOOL_TURN_REFUSAL,
+            details: null,
+          });
+
+        return {
+          output: [{ type: "text", text: JSON.stringify(await this.connectionsAction(parsed)) }],
+        };
+      },
+    } satisfies ToolRegistration;
+
     const tools = [
       shell,
       readFile,
@@ -867,6 +906,7 @@ export class Agent extends DurableObject<Env> {
       retitleTool,
       mcpTool,
       automationTool,
+      connectionsTool,
       {
         name: "preview",
         description:
@@ -1433,6 +1473,36 @@ export class Agent extends DurableObject<Env> {
             } while (cursor);
           }, BACKGROUND_CONTEXT)
           .then(() => this.ctx.storage.put("migration:web-fetch-tool", true)),
+      );
+
+    if (
+      !(yield* attempt("connections.migration.read", () =>
+        this.ctx.storage.get("migration:connections-tool"),
+      ))
+    )
+      yield* attempt("connections.tools.update", () =>
+        this.harness
+          .commit(async (tx) => {
+            let cursor: Cursor | undefined;
+
+            do {
+              const page = await tx.scanConversations({}, 100, cursor);
+
+              for (const conversation of page.items) {
+                const agent = await tx.doc(AgentDoc, conversation.id);
+
+                // Read-only sessions keep their allowlist, which has no write_file.
+                if (!Array.isArray(agent.tools) || !agent.tools.includes(writeFile.name)) continue;
+
+                for (const names of [agent.tools, agent.modelTools])
+                  if (Array.isArray(names) && !names.includes(connectionsTool.name))
+                    names.push(connectionsTool.name);
+              }
+
+              cursor = page.next;
+            } while (cursor);
+          }, BACKGROUND_CONTEXT)
+          .then(() => this.ctx.storage.put("migration:connections-tool", true)),
       );
 
     this.automations = new Automations({
@@ -3172,6 +3242,32 @@ export class Agent extends DurableObject<Env> {
 
       return inputs.every((entry) => owner.has(entry));
     }, BACKGROUND_CONTEXT);
+  }
+
+  /** The connections tool: saves or removes servers and says what the owner does next. */
+  private async connectionsAction(input: ConnectionsToolInput) {
+    const server = async (name: string) =>
+      (await this.mcp.connections(true)).find((item) => item.name === name);
+
+    switch (input.action) {
+      case "list":
+        return { mcpServers: await this.mcp.connections(true) };
+      case "add": {
+        if (!input.name || !input.url) return { error: "add needs a name and an https url" };
+        const name = input.name.trim();
+        const added = await this.mcp.add({ name, url: input.url });
+
+        if ("error" in added) return added;
+        const saved = await server(name);
+
+        return { ok: true, server: saved, next: nextStep(saved) };
+      }
+
+      case "remove":
+        if (!input.name) return { error: "remove needs the server's name; list shows them" };
+
+        return this.mcp.remove(input.name.trim());
+    }
   }
 
   private async automationAction(input: AutomationToolInput) {
