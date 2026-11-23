@@ -823,6 +823,8 @@ export { GitHubIngress } from "./github-ingress";
 
 export { SlackIngress } from "./slack-ingress";
 
+export { AutomationIngress } from "./automation-ingress";
+
 export { WorkspaceOutbound } from "./git-transport";
 
 export { SandboxOutbound } from "./browser-workspace";

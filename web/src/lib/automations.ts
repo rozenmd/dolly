@@ -4,7 +4,7 @@ import { request, type ApiBody } from "./api";
 /** Settings > Automations: the API in src/automation-routes.ts, behaviour in src/automations.ts. */
 
 export const AutomationRun = Schema.Struct({
-  trigger: Schema.Literals(["schedule", "manual"]),
+  trigger: Schema.Literals(["schedule", "manual", "webhook"]),
   at: Schema.Number,
   status: Schema.Literals(["running", "succeeded", "failed", "skipped"]),
   sessionId: Schema.optional(Schema.String),
@@ -37,6 +37,8 @@ export const Automation = Schema.Struct({
   createdAt: Schema.Number,
   updatedAt: Schema.Number,
   nextRunAt: Schema.optional(Schema.Number),
+  /** The secret webhook path on the ingress Worker, when the automation has one. */
+  webhookPath: Schema.optional(Schema.String),
   runs: Schema.Array(AutomationRun),
 });
 
@@ -135,4 +137,21 @@ export function shortDateTime(at: number) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/** Replaces an automation's webhook URL with a new secret; the old URL stops working. */
+export async function rotateWebhook(id: string) {
+  // One save: revoking and re-adding could leave no URL if the second request were lost.
+  return saveAutomation(id, { webhook: "rotate" });
+}
+
+/** The ingress Worker's origin from its GitHub hook URL, or the workers.dev guess. */
+export function ingressOrigin(ingress: string | null | undefined, guess: string) {
+  if (!ingress) return guess;
+
+  try {
+    return new URL(ingress).origin;
+  } catch {
+    return guess;
+  }
 }

@@ -172,6 +172,7 @@ import {
   listOutput,
   readOutput,
   savedOutput,
+  forModel,
   newAutomation,
 } from "./automation-tool";
 import {
@@ -2881,6 +2882,13 @@ export class Agent extends DurableObject<Env> {
     return this.automations.run(id, requestId);
   }
 
+  /** A request to an automation's webhook URL, from the ingress Worker (automation-ingress.ts). */
+  async automationWebhook(id: string, secret: string, payload: string, delivery: string) {
+    await Effect.runPromise(this.arm({ active: true }));
+
+    return this.automations.webhook(id, secret, payload, delivery);
+  }
+
   /**
    * Automations run unwatched with the owner's subscription, so only sessions the owner alone
    * steers may manage them, and a run may not rewrite automations, its own included.
@@ -2927,17 +2935,19 @@ export class Agent extends DurableObject<Env> {
 
   private async automationAction(input: AutomationToolInput) {
     const missing = { error: `${input.action} needs the automation's id; list shows them` };
+    const unknown = { error: "No automation with that id" };
 
     switch (input.action) {
       case "list":
         // Bounded, so every ID fits the tool's output limit whatever the automations hold.
-        return listOutput(await this.automationsList());
+        // forModel drops the secret webhook URL first.
+        return listOutput((await this.automationsList()).map(forModel));
       case "read": {
         if (!input.id) return missing;
         const found = await this.automationRead(input.id);
 
         // Paged, so a long prompt and run history never pass the tool's output limit.
-        return found ? readOutput(found, input.offset) : { error: "No automation with that id" };
+        return found ? readOutput(forModel(found), input.offset) : unknown;
       }
 
       case "create": {
@@ -2947,7 +2957,7 @@ export class Agent extends DurableObject<Env> {
         const created = await this.automationCreate(body.value);
 
         // Bounded like read: a long prompt can't push the confirmation past the output limit.
-        return "error" in created ? created : savedOutput(created);
+        return "error" in created ? created : savedOutput(forModel(created));
       }
 
       case "update": {
@@ -2955,29 +2965,23 @@ export class Agent extends DurableObject<Env> {
         const patch = automationPatch(input);
 
         if ("error" in patch) return patch;
+        const result = await this.automationUpdate(input.id, patch.value);
+
+        if (!result) return unknown;
 
         // The tool never sends network hosts: the server keeps the ones it holds, at the
         // revision it saves against, when the repository stays the same.
-
-        const updated = await this.automationUpdate(input.id, patch.value);
-
-        if (!updated) return { error: "No automation with that id" };
-
-        return "error" in updated ? updated : savedOutput(updated);
+        return "error" in result ? result : savedOutput(forModel(result));
       }
 
       case "delete":
         if (!input.id) return missing;
 
-        return (await this.automationDelete(input.id)) ?? { error: "No automation with that id" };
+        return (await this.automationDelete(input.id)) ?? unknown;
       case "run":
         if (!input.id) return missing;
 
-        return (
-          (await this.automationRun(input.id, crypto.randomUUID())) ?? {
-            error: "No automation with that id",
-          }
-        );
+        return (await this.automationRun(input.id, crypto.randomUUID())) ?? unknown;
     }
   }
 

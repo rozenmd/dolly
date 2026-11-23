@@ -572,6 +572,8 @@ export type ApiBody = {
     repository: string | null;
     ref: string | null;
   };
+  /** An automation's webhook URL: give one, revoke it, or replace its secret. */
+  webhook?: boolean | "rotate";
 };
 
 export const DefaultModel = Schema.Struct({
