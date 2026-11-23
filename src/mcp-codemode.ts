@@ -13,7 +13,7 @@ import { CodeMode, Extension, Namespace, Tool, toolError } from "@opencode/codem
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import type { CallToolResult } from "./mcp";
+import type { CallToolResult } from "./mcp-client";
 
 /** One tool as cached from tools/list, already compacted. */
 export type CatalogTool = { name: string; description?: string; inputSchema?: JsonObject };

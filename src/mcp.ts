@@ -7,7 +7,8 @@
  * lazy token refresh and paste-a-token connect for providers that gate OAuth registration
  * work as they do in Opensession. Owner web sessions reach the servers through the `mcp` tool,
  * a code mode program (src/mcp-codemode.ts, after opencode) whose every tool call comes back here
- * to the Worker: tokens and static headers never enter the program or a sandbox.
+ * to the Worker: tokens and static headers never enter the program or a sandbox. The protocol
+ * itself is the official MCP SDK (src/mcp-client.ts), which also speaks the 2026-07-28 revision.
  *
  * Differences from Opensession, because Dolly runs on Workers with a single owner:
  *  - Only remote (streamable HTTP) servers. A Worker cannot spawn stdio processes, and running
@@ -23,11 +24,16 @@ import {
   catalogPrompt,
   CODE_LIMITS,
   decodeJsonObject,
-  type JsonObject,
   MCP_CODE_DESCRIPTION,
   resultOutput,
   runCode,
 } from "./mcp-codemode";
+import {
+  type ListedTool,
+  type McpSession,
+  openMcpSession,
+  type PriorDiscovery,
+} from "./mcp-client";
 import { discoverMcpOauth, OauthDiscoveryError } from "./mcp-oauth-discovery";
 
 const SERVERS_KEY = "mcp:servers";
@@ -117,9 +123,6 @@ const STATUS_TTL_MS = 60_000;
 const CAPABLE_TTL_MS = 60 * 60_000;
 const CAPABLE_ERROR_TTL_MS = 60_000;
 const REFRESH_AHEAD_MS = 5 * 60_000;
-
-/** Bytes read from one MCP response before giving up, so a server cannot exhaust the DO. */
-const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 /** tools/list pages read before stopping. */
 const MAX_TOOL_PAGES = 20;
@@ -314,52 +317,27 @@ export function supportsManualToken(name: string, url: string) {
   return tokenProvider(name, url) !== undefined;
 }
 
-// ── MCP streamable HTTP client ────────────────────────────────────────────
+// ── MCP sessions: the official SDK, in src/mcp-client.ts ──────────────────
 
-const PROTOCOL_VERSION = "2025-06-18";
-
+/**
+ * A bare 2025-era initialize, sent only to check a pasted token: any server answers it, and
+ * only the HTTP status matters. Sessions themselves negotiate in src/mcp-client.ts.
+ */
 function initializeMessage(id: number) {
   return {
     jsonrpc: "2.0",
     id,
     method: "initialize",
     params: {
-      protocolVersion: PROTOCOL_VERSION,
+      protocolVersion: "2025-06-18",
       capabilities: {},
       clientInfo: { name: "Dolly", version: "1" },
     },
   };
 }
 
-const RpcMessage = Schema.Struct({
-  id: Schema.optional(Schema.NullOr(Schema.Union([Schema.Number, Schema.String]))),
-  result: Schema.optional(Schema.Unknown),
-  error: Schema.optional(Schema.Struct({ message: Schema.optional(Schema.String) })),
-});
-
-type RpcMessage = typeof RpcMessage.Type;
-
-const decodeRpc = Schema.decodeUnknownOption(
-  Schema.fromJsonString(Schema.Union([RpcMessage, Schema.Array(RpcMessage)])),
-);
-
-const InitializeResult = Schema.Struct({ protocolVersion: Schema.optional(Schema.String) });
-
-const ToolsPage = Schema.Struct({
-  tools: Schema.optional(
-    Schema.Array(
-      Schema.Struct({
-        name: Schema.String,
-        description: Schema.optional(Schema.String),
-        inputSchema: Schema.optional(Schema.Unknown),
-      }),
-    ),
-  ),
-  nextCursor: Schema.optional(Schema.String),
-});
-
 /** A listed tool, cut to what the catalog and search need. */
-function compactTool(tool: NonNullable<typeof ToolsPage.Type.tools>[number]): CatalogTool {
+function compactTool(tool: ListedTool): CatalogTool {
   const compact: CatalogTool = { name: tool.name };
 
   if (tool.description) compact.description = tool.description.slice(0, MAX_TOOL_DESCRIPTION);
@@ -368,223 +346,6 @@ function compactTool(tool: NonNullable<typeof ToolsPage.Type.tools>[number]): Ca
   if (schema && JSON.stringify(schema).length <= MAX_SCHEMA_CHARS) compact.inputSchema = schema;
 
   return compact;
-}
-
-const ContentBlock = Schema.Union([
-  Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
-  Schema.Struct({ type: Schema.Literal("image"), data: Schema.String, mimeType: Schema.String }),
-  Schema.Struct({
-    type: Schema.Literal("resource"),
-    resource: Schema.Struct({
-      uri: Schema.optional(Schema.String),
-      mimeType: Schema.optional(Schema.String),
-      text: Schema.optional(Schema.String),
-    }),
-  }),
-  Schema.Struct({
-    type: Schema.Literal("resource_link"),
-    uri: Schema.String,
-    name: Schema.optional(Schema.String),
-  }),
-  // Audio, and block types newer than this client.
-  Schema.Struct({ type: Schema.String }),
-]);
-
-export const CallToolResult = Schema.Struct({
-  content: Schema.optional(Schema.Array(ContentBlock)),
-  structuredContent: Schema.optional(Schema.Unknown),
-  isError: Schema.optional(Schema.Boolean),
-});
-
-type RpcParams =
-  | ReturnType<typeof initializeMessage>["params"]
-  | { cursor: string }
-  | { name: string; arguments: JsonObject };
-
-export class McpHttpError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-  }
-}
-
-/** The JSON-RPC message with this id in one JSON text (a message or a batch). */
-function matching(text: string, id: number): RpcMessage | undefined {
-  const decoded = decodeRpc(text);
-
-  if (Option.isNone(decoded)) return undefined;
-  const messages = Array.isArray(decoded.value) ? decoded.value : [decoded.value];
-
-  return messages.find((message) => message.id === id);
-}
-
-const TOO_LARGE = `MCP server response exceeded ${MAX_RESPONSE_BYTES / 1024 / 1024} MiB`;
-
-/** A whole response body as text, refusing to buffer more than MAX_RESPONSE_BYTES. */
-async function boundedText(response: Response) {
-  if (!response.body) return "";
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let size = 0;
-  let text = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-
-      if (done) break;
-      size += value.length;
-
-      if (size > MAX_RESPONSE_BYTES) throw new Error(TOO_LARGE);
-      text += decoder.decode(value, { stream: true });
-    }
-  } finally {
-    void reader.cancel().catch(() => {});
-  }
-
-  return text + decoder.decode();
-}
-
-/** The JSON-RPC response with this id, from a JSON body or an SSE stream. */
-async function readResponse(response: Response, id: number): Promise<RpcMessage> {
-  const type = response.headers.get("content-type") ?? "";
-
-  if (type.includes("text/event-stream")) {
-    if (!response.body) throw new Error("MCP server sent an empty event stream");
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let size = 0;
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-
-        if (value) {
-          // Counts the whole stream, so neither one huge event nor endless small ones get through.
-          size += value.length;
-
-          if (size > MAX_RESPONSE_BYTES) throw new Error(TOO_LARGE);
-          buffer += decoder.decode(value, { stream: true });
-        }
-
-        const events = buffer.split(/\r?\n\r?\n/);
-        buffer = done ? "" : (events.pop() ?? "");
-
-        for (const event of events) {
-          const data = event
-            .split(/\r?\n/)
-            .filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice(5).replace(/^ /, ""))
-            .join("\n");
-
-          const message = data ? matching(data, id) : undefined;
-
-          if (message) return message;
-        }
-
-        if (done) break;
-      }
-    } finally {
-      void reader.cancel().catch(() => {});
-    }
-
-    throw new Error("MCP server closed the stream without a response");
-  }
-
-  const message = matching(await boundedText(response), id);
-
-  if (!message) throw new Error("MCP server returned no matching response");
-
-  return message;
-}
-
-type McpRequester = <A, I>(
-  method: string,
-  params: RpcParams | undefined,
-  schema: Schema.Codec<A, I>,
-) => Promise<A>;
-
-/** An open MCP session: requests share its id until close. */
-export type McpSession = { request: McpRequester; close: () => void };
-
-/** Initialize an MCP session. Every request it sends refuses redirects and is size-bounded. */
-async function openSession(url: string, headers: Record<string, string>): Promise<McpSession> {
-  let sessionId: string | undefined;
-  let nextId = 1;
-  let negotiated: string | undefined;
-
-  const post = (body: string) => {
-    const outgoing = new Headers(headers);
-    outgoing.set("Content-Type", "application/json");
-    outgoing.set("Accept", "application/json, text/event-stream");
-
-    if (sessionId) outgoing.set("Mcp-Session-Id", sessionId);
-
-    if (negotiated) outgoing.set("MCP-Protocol-Version", negotiated);
-
-    return fetch(url, {
-      method: "POST",
-      headers: outgoing,
-      body,
-      redirect: "manual",
-      signal: AbortSignal.timeout(60_000),
-    });
-  };
-
-  const request: McpRequester = async (method, params, schema) => {
-    const id = nextId++;
-    const response = await post(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
-
-    if (!response.ok) {
-      void response.body?.cancel().catch(() => {});
-
-      throw new McpHttpError(
-        response.status === 401 || response.status === 403
-          ? `MCP server refused the credentials (HTTP ${response.status}); reconnect it in Settings > Connections`
-          : `MCP server answered HTTP ${response.status}`,
-        response.status,
-      );
-    }
-
-    sessionId ??= response.headers.get("mcp-session-id") ?? undefined;
-    const message = await readResponse(response, id);
-
-    if (message.error) throw new Error(`MCP error: ${message.error.message ?? "unknown error"}`);
-    const result = Schema.decodeUnknownOption(schema)(message.result);
-
-    if (Option.isNone(result)) throw new Error(`MCP server returned an invalid ${method} result`);
-
-    return result.value;
-  };
-
-  const initialized = await request("initialize", initializeMessage(0).params, InitializeResult);
-  negotiated = initialized.protocolVersion ?? PROTOCOL_VERSION;
-
-  const notified = await post(
-    JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
-  );
-
-  void notified.body?.cancel().catch(() => {});
-
-  const close = () => {
-    if (!sessionId) return;
-    const headersOut = new Headers(headers);
-    headersOut.set("Mcp-Session-Id", sessionId);
-    sessionId = undefined;
-    void fetch(url, {
-      method: "DELETE",
-      headers: headersOut,
-      redirect: "manual",
-      signal: AbortSignal.timeout(5_000),
-    })
-      .then((response) => response.body?.cancel())
-      .catch(() => {});
-  };
-
-  return { request, close };
 }
 
 const epochOf = (entry: McpServerEntry) => entry.epoch ?? 0;
@@ -609,6 +370,12 @@ export class McpConnections {
   private readonly refreshing = new Map<string, Promise<void>>();
   /** Tool listings in flight, shared by every program that needs the same server. */
   private readonly listing = new Map<string, Promise<ToolList>>();
+  /**
+   * Each server's negotiated protocol era (src/mcp-client.ts), by server id, URL and epoch, so
+   * only the first session after a start, add or Disconnect probes it. Memory only: a verdict
+   * is re-learned after the Durable Object restarts, and dropped if the server stops taking it.
+   */
+  private readonly eras = new Map<string, PriorDiscovery>();
 
   constructor(
     private readonly storage: DurableObjectStorage,
@@ -1149,6 +916,24 @@ export class McpConnections {
 
   // ── Agent tool: code mode (src/mcp-codemode.ts) ──
 
+  /** An MCP session with a server, reusing (and then updating) its negotiated era. */
+  private async open(name: string, entry: McpServerEntry, headers: Record<string, string>) {
+    const key = `${entry.id}:${epochOf(entry)}:${entry.url}`;
+
+    try {
+      const session: McpSession = await openMcpSession(entry.url, headers, this.eras.get(key), () =>
+        this.eras.delete(key),
+      );
+
+      this.eras.set(key, session.prior);
+
+      return session;
+    } catch (error) {
+      this.eras.delete(key);
+      throw error;
+    }
+  }
+
   /** A cached tool list, only while it still belongs to this server, URL and epoch. */
   private async cachedTools(name: string, entry: McpServerEntry) {
     const cached = await this.storage.get<ToolList>(toolsKey(name));
@@ -1181,7 +966,7 @@ export class McpConnections {
    * server is still the one it was read from.
    */
   private async fetchTools(name: string, entry: McpServerEntry): Promise<ToolList> {
-    const session = await openSession(entry.url, await this.requestHeaders(name, entry));
+    const session = await this.open(name, entry, await this.requestHeaders(name, entry));
     const tools: CatalogTool[] = [];
     const cursors = new Set<string>();
     let chars = 0;
@@ -1195,11 +980,7 @@ export class McpConnections {
         if (page > 0 && !unchanged(entry, (await this.servers())[name]))
           throw new Error(`${name} was disconnected, removed or changed while listing its tools`);
 
-        const result = await session.request(
-          "tools/list",
-          cursor === undefined ? undefined : { cursor },
-          ToolsPage,
-        );
+        const result = await session.listTools(cursor);
 
         for (const tool of result.tools ?? []) {
           const compact = compactTool(tool);
@@ -1331,7 +1112,7 @@ export class McpConnections {
       if (open) return open;
 
       const opened = this.requestHeaders(name, entry).then((headers) =>
-        openSession(entry.url, headers),
+        this.open(name, entry, headers),
       );
 
       sessions.set(name, opened);
@@ -1375,13 +1156,17 @@ export class McpConnections {
 
           if (!entry) throw new Error(`No MCP server named "${name}"`);
           await mayCall(name, entry);
-          const { request } = await session(name, entry);
+          const open = await session(name, entry);
 
           // Opening the session awaited the network: check again before the call goes out.
           await mayCall(name, entry);
           sent.push(`${name}.${tool}`);
 
-          return request("tools/call", { name: tool, arguments: args }, CallToolResult);
+          return open.callTool(
+            tool,
+            args,
+            usable.get(name)?.find((listed) => listed.name === tool),
+          );
         },
         this.programTimeoutMs,
       );

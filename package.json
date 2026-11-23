@@ -31,6 +31,7 @@
     "@earendil-works/pi-ai": "1.5.2",
     "@earendil-works/pi-durable": "1.5.2",
     "@earendil-works/pi-schema": "1.5.2",
+    "@modelcontextprotocol/client": "2.4.0",
     "@opencode/codemode": "2.3.2",
     "effect": "4.1.4",
     "hono": "4.13.18"
@@ -40,6 +41,7 @@
     "@cloudflare/vite-plugin": "2.0.0-rc.2",
     "@cloudflare/vitest-plugin": "1.7.0",
     "@cloudflare/workers-types": "5.20261110.1",
+    "@modelcontextprotocol/server": "2.4.0",
     "cf": "1.0.0-rc.2",
     "tsrs": "0.25.0-ts7.1.0-beta",
     "typescript": "7.0.2",
