@@ -512,6 +512,19 @@ function record(state: State, run: AutomationRun) {
     if (state.runs[index]?.status !== "running") state.runs.splice(index, 1);
 }
 
+/**
+ * The run a request key already started, if any. A webhook delivery refused before it started
+ * (503, no subscription) left only a failed row: that isn't a run, so the sender's retry must
+ * start one, not be told it already did.
+ */
+function admitted(state: State, key: string, trigger: Trigger) {
+  return (
+    state.runs.find(
+      (run) => run.key === key && (trigger !== "webhook" || run.conversationId !== undefined),
+    ) ?? (Object.hasOwn(state.requests, key) ? state.requests[key] : undefined)
+  );
+}
+
 /** Remember a request key and its session; keys older than the retention window are dropped. */
 function remember(state: State, key: string, at: number, conversationId?: ConversationId) {
   for (const [old, seen] of Object.entries(state.requests))
@@ -616,12 +629,7 @@ async function admit(
 
     if (!state) return { status: "stale" };
 
-    // A webhook delivery refused before it started (503, no subscription) left only a failed row:
-    // that isn't a run, so the sender's retry must start one, not be told it already did.
-    const duplicate =
-      state.runs.find(
-        (run) => run.key === key && (trigger !== "webhook" || run.conversationId !== undefined),
-      ) ?? (Object.hasOwn(state.requests, key) ? state.requests[key] : undefined);
+    const duplicate = admitted(state, key, trigger);
 
     if (duplicate) return { status: "duplicate", conversationId: duplicate.conversationId };
 
@@ -969,6 +977,18 @@ export class Automations {
 
       if (!state || !stored || !sameSecret(secret, stored))
         return { status: 404, error: "Not found" };
+
+      // A retry of a delivery that already started gets its session, whatever changed since (a
+      // pause, a disconnected subscription): the sender must not report or resend it as failed.
+      // admit() checks again in its commit, for deliveries racing each other.
+      const seen = admitted(state, key, "webhook");
+
+      if (seen)
+        return {
+          status: 200,
+          ...(seen.conversationId !== undefined && { sessionId: String(seen.conversationId) }),
+        };
+
       const { automation } = state;
 
       if (!automation.enabled) return { status: 409, error: "This automation is paused" };

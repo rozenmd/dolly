@@ -1598,7 +1598,8 @@ it("runs a delivery refused for want of a subscription once retried, and never b
   await connect();
   const retried = await hook(path, "{}", { "X-GitHub-Delivery": "delivery-1" });
   expect(retried.status).toBe(202);
-  sessionIds.push((await retried.json<{ sessionId: string }>()).sessionId);
+  const firstSession = (await retried.json<{ sessionId: string }>()).sessionId;
+  sessionIds.push(firstSession);
   // The run replaces the refusal in the history.
   expect((await read(created.id)).runs.map((run) => [run.trigger, run.status])).toEqual([
     ["webhook", "running"],
@@ -1645,4 +1646,22 @@ it("runs a delivery refused for want of a subscription once retried, and never b
 
   hold();
   await expect.poll(async () => (await read(created.id)).runs[0]?.status).toBe("succeeded");
+
+  // A retry of a delivery that already started gets its session, even once the subscription is
+  // gone or the automation is paused: the sender must not report or resend it as failed.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.delete("credential:openai");
+  });
+  const afterSignOut = await hook(path, "{}", { "X-GitHub-Delivery": "delivery-1" });
+  expect(afterSignOut.status).toBe(200);
+  expect(await afterSignOut.json()).toEqual({ sessionId: firstSession });
+
+  await api(`/automations/${created.id}`, "PUT", { enabled: false });
+  const afterPause = await hook(path, "{}", { "X-GitHub-Delivery": "delivery-1" });
+  expect(afterPause.status).toBe(200);
+  expect(await afterPause.json()).toEqual({ sessionId: firstSession });
+
+  // A new delivery still gets the pause.
+  expect((await hook(path, "{}", { "X-GitHub-Delivery": "delivery-9" })).status).toBe(409);
+  await connect();
 }, 30_000);
