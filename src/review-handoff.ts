@@ -64,11 +64,15 @@ export function stripVerdict(text: string) {
 }
 
 /**
- * The same bar OpenSession's loops stop at: nothing blocking, and either nothing open or a
- * reviewer who rates the change 4/5 or better.
+ * Nearly the bar OpenSession's loops stop at: nothing blocking, and either nothing open, a
+ * reviewer who rates the change 4/5 or better, or an explicit approval.
  */
 export function reviewSatisfied(verdict: ReviewVerdict) {
-  return verdict.blocking === 0 && (verdict.findings === 0 || verdict.confidence >= 4);
+  return (
+    verdict.blocking === 0 &&
+    // An explicit approval leaves only advisory findings, such as follow-ups: never a fix round.
+    (verdict.verdict === "approve" || verdict.findings === 0 || verdict.confidence >= 4)
+  );
 }
 
 /** What the last automatic review of a pull request concluded, for the next review's digest. */
@@ -373,7 +377,7 @@ export function handoffMessage(
           "4. Reply in each addressed inline thread with what you did, e.g. `Fixed in <sha>`, with github reply_to_review_comment and the thread's comment id above, once per thread.",
           `5. ${NEVER_MERGE}`,
         ].join("\n"),
-        `The review re-runs automatically after your push and its result comes back here, so don't wait for it: end your turn after pushing. ${
+        `The review re-runs automatically after your push and its result comes back here, so don't wait for it: end your turn after pushing. Only a push starts a review: if you changed no code and only replied, don't push an empty commit to trigger one; say in your answer that the remaining findings are left for a human to decide. ${
           remaining > 0
             ? `If it still finds problems you'll get at most ${remaining} more round${remaining === 1 ? "" : "s"} here before it's handed to humans.`
             : "This is the last automatic round: anything still open after it goes to humans."
