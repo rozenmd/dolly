@@ -1713,6 +1713,8 @@ it("adds only servers whose plain URL the owner typed, with the connections tool
     () => connectionsCall({ action: "add", name: "exfil", url: "https://exfil.example/mcp" }),
     () =>
       connectionsCall({ action: "add", name: "keyed", url: "https://keyed.example/mcp?token=x" }),
+    // The same URL with its token cut off: not what the owner typed, so not saved either.
+    () => connectionsCall({ action: "add", name: "keyed", url: "https://keyed.example/mcp" }),
     () => connectionsCall({ action: "remove", name: "linear" }),
     () => connectionsCall({ action: "add", name: "linear", url: `${LINEAR}/mcp` }),
     () => connectionsCall({ action: "list" }),
@@ -1751,20 +1753,21 @@ it("adds only servers whose plain URL the owner typed, with the connections tool
     method: "POST",
     headers,
     body: JSON.stringify({
-      content: `Set up these MCP servers: http://plain.example/mcp, https://keyed.example/mcp?token=x and ${LINEAR}/mcp`,
+      content: `Set up these MCP servers: http://plain.example/mcp, https://keyed.example/mcp?token=x and ${LINEAR}/mcp.`,
       requestId: crypto.randomUUID(),
     }),
   });
 
   expect(sent.status).toBe(202);
   await expect.poll(() => replies.length, { timeout: 15_000 }).toBe(2);
-  await expect.poll(async () => (await connectionsResults(id)).length).toBe(6);
+  await expect.poll(async () => (await connectionsResults(id)).length).toBe(7);
 
-  const [plain, untyped, keyed, remove, added, listed] = await connectionsResults(id);
+  const [plain, untyped, keyed, stripped, remove, added, listed] = await connectionsResults(id);
 
   expect(plain.text).toContain("URL must use https://");
   expect(untyped.text).toContain("only a URL the owner typed");
   expect(keyed.text).toContain("query string or fragment");
+  expect(stripped.text).toContain("only a URL the owner typed");
   // remove isn't an action: deleting a server and its sign-in stays behind Settings' confirmation.
   expect(remove.isError).toBe(true);
   expect(added.isError).toBe(false);
@@ -1791,9 +1794,9 @@ it("adds only servers whose plain URL the owner typed, with the connections tool
     );
   });
   await expect.poll(() => replies.length, { timeout: 15_000 }).toBe(0);
-  await expect.poll(async () => (await connectionsResults(id)).length).toBe(7);
+  await expect.poll(async () => (await connectionsResults(id)).length).toBe(8);
 
-  const refused = (await connectionsResults(id))[6];
+  const refused = (await connectionsResults(id))[7];
 
   expect(refused.isError).toBe(true);
   expect(refused.text).toContain("acts only on a message the owner typed");

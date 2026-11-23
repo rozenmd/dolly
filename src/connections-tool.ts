@@ -46,6 +46,17 @@ export function nextStep(server: McpConnection | undefined) {
 }
 
 /**
+ * The whole URLs in `text`, query and fragment included, without the punctuation prose puts after
+ * one ("…/mcp." or "(…/mcp)"). Compared for equality, so a shortened URL (a tokenized one with its
+ * query cut off) never counts as one the owner typed.
+ */
+export function typedUrls(text: string) {
+  return [...text.matchAll(/https?:\/\/[^\s<>"'`]+/gi)].map(([match]) =>
+    match.replace(/[.,;:!?)\]}]+$/, ""),
+  );
+}
+
+/**
  * Why the tool won't save `url`, or undefined when it may. A URL with a query string or fragment
  * may carry a token, which belongs in Settings, not the transcript; one the owner didn't type in
  * `typed` (the turn's own messages) came from somewhere else, such as a fetched page.
@@ -62,8 +73,8 @@ export function chatUrlProblem(url: string, typed: readonly string[]) {
   if (parsed.search || parsed.hash || url.includes("?") || url.includes("#"))
     return "URLs with a query string or fragment can carry credentials: ask the owner to add this one in Settings > Connections instead, and not to paste tokens in chat";
 
-  if (!typed.some((text) => text.includes(url)))
-    return "add takes only a URL the owner typed, word for word, in their own message this turn; ask the owner to paste it";
+  if (!typed.some((text) => typedUrls(text).includes(url)))
+    return "add takes only a URL the owner typed, whole and word for word, in their own message this turn; ask the owner to paste it (a URL with a token in it goes in Settings > Connections instead)";
 
   return undefined;
 }
