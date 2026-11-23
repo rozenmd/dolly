@@ -743,14 +743,14 @@ function makeGitHub(
     return raw === undefined ? "" : yield* decode(WebhookUrl)(raw);
   });
 
-  // Who may run /dolly commands, and whether their new PRs get reviewed. The secret stays server-side.
+  // Who may run /dolly commands (and whose new PRs get reviewed). The secret stays server-side.
   const webhookAccess = Effect.gen(function* () {
     const raw = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
 
-    if (raw === undefined) return { senders: [], reviews: false };
+    if (raw === undefined) return { senders: [] };
     const profile = yield* decode(WebhookProfile)(raw);
 
-    return { senders: profile.senders, reviews: profile.reviews ?? false };
+    return { senders: profile.senders };
   });
 
   const read = Effect.fn("GitHub.configuration")(function* () {
@@ -1214,6 +1214,14 @@ function makeGitHub(
         );
         yield* attempt("github.ingress.save", () => storage.put("github:ingress", hook.value));
 
+        // GitHub now signs deliveries with this secret; without a profile dolly would refuse them
+        // all, so pull requests Dolly sessions open couldn't be reviewed until the sender list was
+        // saved. An empty list allows no /dolly commands.
+        if (!profile)
+          yield* attempt("github.webhook.save", () =>
+            storage.put("github:webhook", { secret, senders: [] }),
+          );
+
         return { ingress: hook.value };
       }),
     ),
@@ -1328,8 +1336,25 @@ function makeGitHub(
             details: null,
           });
         yield* jwt(app);
+        const previous = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
+
+        const senders = Option.match(Schema.decodeUnknownOption(WebhookProfile)(previous), {
+          onNone: () => [],
+          onSome: (profile) => profile.senders,
+        });
+
+        // The manifest turned the App's webhook on at the ingress URL, signed with this App's
+        // secret. Saving it as the webhook profile lets dolly accept those deliveries at once, so
+        // pull requests Dolly sessions open can be reviewed before any sender is listed (an empty
+        // list allows no /dolly commands). Senders saved for an earlier App are kept.
         yield* attempt("github.save", () =>
-          storage.put({ "github:connected": { app }, "github:ingress": value.setup.ingress }),
+          storage.put({
+            "github:connected": { app },
+            "github:ingress": value.setup.ingress,
+            ...(app.webhook_secret && {
+              "github:webhook": { secret: app.webhook_secret, senders },
+            }),
+          }),
         );
         publicToken = undefined;
         publicTokenRetry = 0;
@@ -1996,7 +2021,6 @@ function makeGitHub(
             details: null,
           });
 
-        const reviews = input.reviews ?? saved?.reviews ?? false;
         const token = yield* jwt(connected.app);
 
         const app = yield* api("/app", token).pipe(
@@ -2021,19 +2045,16 @@ function makeGitHub(
             details: null,
           });
 
-        if (reviews && !app.events.includes("pull_request"))
-          return yield* new OperationError({
-            operation: "github.webhook.permissions",
-            message:
-              "Enable Pull request events in GitHub App settings to review new pull requests, then approve installation changes",
-            details: null,
-          });
-
         yield* attempt("github.webhook.save", () =>
-          storage.put("github:webhook", { secret, senders: input.senders, reviews }),
+          storage.put("github:webhook", {
+            secret,
+            senders: input.senders,
+            // Kept until the review automation is made from it (Agent.migrateReviews).
+            ...(saved?.reviews !== undefined && { reviews: saved.reviews }),
+          }),
         );
 
-        return { configured: true, url: webhookUrl, senders: input.senders, reviews };
+        return { configured: true, url: webhookUrl, senders: input.senders };
       }),
     ),
   );
@@ -2042,6 +2063,8 @@ function makeGitHub(
     body: ArrayBuffer,
     signature: string,
     event: string,
+    /** Whether the pull request review automation is enabled. */
+    reviews: boolean,
   ) {
     const raw = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
 
@@ -2053,7 +2076,7 @@ function makeGitHub(
 
     const bot = app === undefined ? undefined : `${(yield* decode(Connected)(app)).app.slug}[bot]`;
 
-    const verified = yield* verifyWebhook(profile, body, signature, event, bot);
+    const verified = yield* verifyWebhook(profile, body, signature, event, bot, reviews);
 
     if (verified.status !== 202) return verified;
 
@@ -2240,14 +2263,27 @@ function makeGitHub(
     yield* api(`/repos/${event.repository}/${target}/reactions`, token, { content });
   });
 
-  /** Whether automatic reviews are on right now. Missing or unreadable settings count as off. */
-  const reviewsEnabled = Effect.gen(function* () {
-    const raw = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
+  /**
+   * Why pull requests can't reach the review automation, or undefined when they can: the App
+   * must be connected, its webhook configured, and subscribed to Pull request events.
+   */
+  const pullRequestEventsProblem = Effect.gen(function* () {
+    const raw = yield* attempt("github.read", () => storage.get("github:connected"));
 
-    return Option.match(Schema.decodeUnknownOption(WebhookProfile)(raw), {
-      onNone: () => false,
-      onSome: (profile) => profile.reviews === true,
-    });
+    if (raw === undefined) return "Connect a GitHub App in Settings > GitHub first";
+    const connected = yield* decode(Connected)(raw);
+
+    // Without a webhook profile every delivery is refused (receiveWebhook), so reviews never start.
+    if ((yield* attempt("github.webhook.read", () => storage.get("github:webhook"))) === undefined)
+      return "Set the ingress URL in Settings > GitHub first, so GitHub's webhook can reach dolly";
+
+    const app = yield* api("/app", yield* jwt(connected.app)).pipe(
+      Effect.flatMap(decode(Schema.Struct({ events: Schema.Array(Schema.String) }))),
+    );
+
+    return app.events.includes("pull_request")
+      ? undefined
+      : "Enable Pull request events in GitHub App settings so pull requests reach dolly, then approve installation changes";
   });
 
   /** A pull request's state and head, read fresh. */
@@ -2584,7 +2620,7 @@ function makeGitHub(
     receiveWebhook,
     reply,
     react,
-    reviewsEnabled,
+    pullRequestEventsProblem,
     pullHead,
     pullReview,
     reviewPublished,

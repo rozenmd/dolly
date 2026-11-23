@@ -104,6 +104,7 @@ export const AutomationToolInput = Schema.Struct({
   schedule: Field(Schema.String),
   timeZone: Field(Schema.String),
   runAt: Field(Schema.String),
+  event: Field(Schema.Literal("pull_request")),
   enabled: Schema.optional(Schema.Boolean),
   readOnly: Schema.optional(Schema.Boolean),
   repository: Field(Schema.String),
@@ -117,7 +118,7 @@ export const AutomationToolInput = Schema.Struct({
 
 export type AutomationToolInput = typeof AutomationToolInput.Type;
 
-export const automationToolDescription = `Manage the owner's automations (Settings > Automations): saved prompts that each start a FRESH session, with no memory of this one, on a cron schedule, once at a set time, or when run by hand. Use them for recurring or unattended work ("every weekday at 9 list stale PRs", "nightly dependency check"); use schedule_prompt instead to continue THIS session later. Actions: list (each automation with the start of its prompt and its latest run); read {id, offset?} (the automation and its recent runs, with its prompt in pages: when promptNext is set, read again with offset: promptNext for the rest); create {name, prompt, and schedule (five-field cron, at most every ${MIN_INTERVAL_MINUTES} minutes) with timeZone (IANA, default UTC), or runAt (ISO 8601 with an offset), or neither for run-by-hand only; optional repository (owner/repo) and ref (a branch; give the repository with it, also on update), readOnly (needs a repository; runs only read and report), model, mcpServers (names from Settings > Connections that runs may use; none by default), webhook (true gives it a secret URL that starts a run with the request body as the event, false revokes it; the owner copies the URL from Settings > Automations, you never see it), enabled}; update {id, any create field; null clears schedule, timeZone, runAt, repository or model}; delete {id}; run {id} starts a run now and returns its session id. Write the prompt for a reader with no context: the repository, what to check, what to produce, and what not to do. Confirm the schedule and time zone with the user when they are ambiguous. Only in sessions the owner starts from the web app.`;
+export const automationToolDescription = `Manage the owner's automations (Settings > Automations): saved prompts that each start a FRESH session, with no memory of this one, on a cron schedule, once at a set time, when run by hand, or for each pull request. Use them for recurring or unattended work ("every weekday at 9 list stale PRs", "nightly dependency check"); use schedule_prompt instead to continue THIS session later. Actions: list (each automation with the start of its prompt and its latest run); read {id, offset?} (the automation and its recent runs, with its prompt in pages: when promptNext is set, read again with offset: promptNext for the rest); create {name, prompt, and schedule (five-field cron, at most every ${MIN_INTERVAL_MINUTES} minutes) with timeZone (IANA, default UTC), or runAt (ISO 8601 with an offset), or event "pull_request" to be the automatic pull request review (its prompt is the review instructions; it runs read-only on each pull request an allowed sender or a dolly session opens, marks ready or pushes to, with no schedule, repository or MCP servers; only one may exist), or neither for run-by-hand only; optional repository (owner/repo) and ref (a branch; give the repository with it, also on update), readOnly (needs a repository; runs only read and report), model, mcpServers (names from Settings > Connections that runs may use; none by default), webhook (true gives it a secret URL that starts a run with the request body as the event, false revokes it; the owner copies the URL from Settings > Automations, you never see it), enabled}; update {id, any create field; null clears schedule, timeZone, runAt, event, repository or model}; delete {id}; run {id} starts a run now and returns its session id (not for a pull_request automation). Write the prompt for a reader with no context: the repository, what to check, what to produce, and what not to do. Confirm the schedule and time zone with the user when they are ambiguous. Only in sessions the owner starts from the web app.`;
 
 /** The tool's flat fields as an API body: the repository becomes a workspace. */
 function payload(input: AutomationToolInput) {
@@ -129,6 +130,7 @@ function payload(input: AutomationToolInput) {
     schedule: input.schedule,
     timeZone: input.timeZone,
     runAt: input.runAt,
+    event: input.event,
     enabled: input.enabled,
     readOnly: input.readOnly,
     model: input.model,
@@ -201,6 +203,7 @@ function listedAutomation(automation: Listed) {
     ...(automation.schedule !== undefined && { schedule: automation.schedule }),
     ...(automation.timeZone !== undefined && { timeZone: automation.timeZone }),
     ...(automation.runAt !== undefined && { runAt: automation.runAt }),
+    ...(automation.event !== undefined && { event: automation.event }),
     ...(automation.nextRunAt !== undefined && { nextRunAt: automation.nextRunAt }),
     ...(automation.workspace && { repository: automation.workspace.repository }),
     prompt: cut(automation.prompt, LIST_PROMPT_CHARS),

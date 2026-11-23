@@ -10,6 +10,7 @@ import {
 } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { GitHubThreads } from "../src/github-inbox";
+import { REVIEW_INSTRUCTIONS } from "../src/review-instructions";
 import { GitHubIngress } from "../src/github-ingress";
 import { ingress } from "../src/ingress";
 import type { SavedSession } from "../src/session-contracts";
@@ -547,10 +548,42 @@ const pullRequest = {
   },
 };
 
+/** reset() clears key-value storage but not Pi's documents, where automations live. */
+async function clearAutomations() {
+  const listed = await SELF.fetch("https://worker/api/automations", { headers });
+
+  for (const { id } of (await listed.json<{ automations: { id: string }[] }>()).automations)
+    await SELF.fetch(`https://worker/api/automations/${id}`, { method: "DELETE", headers });
+}
+
+/** A JSON request body. */
+type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
+
+const automationApi = (path: string, method: string, body?: Json) =>
+  SELF.fetch(`https://worker/api/automations${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+type ListedAutomation = {
+  id: string;
+  name: string;
+  prompt: string;
+  event?: string;
+  enabled: boolean;
+  readOnly: boolean;
+  model?: string;
+  runs: { trigger: string; status: string; sessionId?: string; summary?: string }[];
+};
+
+const listAutomations = async () =>
+  (await (await automationApi("", "GET")).json<{ automations: ListedAutomation[] }>()).automations;
+
 it("reviews a new pull request in an enrolled repository once, posting the answer only if the agent did not", async () => {
   const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
+  await clearAutomations();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    await state.storage.put("github:webhook", { ...profile, reviews: true });
     // Earlier tests leave Claude connected and chosen; this review runs on the ChatGPT mock.
     await state.storage.delete("credential:anthropic");
     await state.storage.put("github:connected", {
@@ -645,6 +678,10 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
       return Response.json({ id: 1 }, { status: 201 });
     }
 
+    // The App sends pull request events, so the review automation may be enabled.
+    if (parsed.pathname === "/app")
+      return Response.json({ events: ["issue_comment", "pull_request"] });
+
     // Before a review starts, its head is checked against the pull request's current one.
     const head = parsed.pathname.match(/^\/repos\/example\/project\/pulls\/(\d+)$/);
 
@@ -688,6 +725,22 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
     throw new Error(`Unexpected request to ${String(url)}`);
   });
 
+  // Without a pull request automation, nothing is reviewed.
+  expect((await hook(pullRequest, "pull_request")).status).toBe(204);
+
+  // The review automation, edited: its prompt leads every review and its model runs it, not the
+  // default for new sessions.
+  const created = await automationApi("", "POST", {
+    name: "Review pull requests",
+    prompt: `Also flag every TODO left in the diff.\n\n${REVIEW_INSTRUCTIONS}`,
+    event: "pull_request",
+    model: "gpt-6-sol",
+  });
+
+  expect(created.status).toBe(201);
+  const automation = await created.json<ListedAutomation>();
+  expect(automation).toMatchObject({ event: "pull_request", enabled: true, readOnly: true });
+
   // Not eligible: drafts, forks, senders who may not run commands, other events and actions.
   for (const ignored of [
     { ...pullRequest, pull_request: { ...pullRequest.pull_request, draft: true } },
@@ -722,18 +775,6 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   ).toBe(204);
   expect(reactions).toEqual([]);
 
-  // Reviews run on their own model, not the default for new sessions.
-  const chosen = await SELF.fetch("https://worker/api/settings/model", {
-    method: "PUT",
-    headers,
-    body: JSON.stringify({ reviewModel: "gpt-6-sol" }),
-  });
-
-  expect(await chosen.json()).toMatchObject({
-    reviewModel: "gpt-6-sol",
-    reviewEffective: "gpt-6-sol",
-  });
-
   expect((await hook(pullRequest, "pull_request")).status).toBe(202);
   // The same head again (a redelivery, or reopening) is the same review.
   expect((await hook({ ...pullRequest, action: "reopened" }, "pull_request")).status).toBe(202);
@@ -750,7 +791,8 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   });
   expect(reviews[0]?.body).toMatchObject({ body: expect.stringContaining("Looks good to me") });
   expect(prompts).toHaveLength(1);
-  // OpenSession's review prompt, with the PR's stated intent.
+  // The automation's prompt, then what the review is about and how to publish it.
+  expect(prompts[0]).toContain("Also flag every TODO left in the diff.");
   expect(prompts[0]).toContain("Review PR example/project#8");
   expect(prompts[0]).toContain(`(opened by @trusted, head ${sha})`);
   expect(prompts[0]).toContain("Blast radius: the worst bugs live OUTSIDE the diff");
@@ -804,6 +846,25 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   });
 
   expect(sessions).toEqual({ review: true, commands: undefined });
+
+  // The review is a run of the automation, linked to its session, settled when its task is.
+  const reviewSession = await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const state = await agent["harness"].snapshot(GitHubThreads, BACKGROUND_CONTEXT);
+
+    return String(state?.threads[`review:example/project#8@${sha}`]?.id);
+  });
+
+  await expect
+    .poll(async () => (await listAutomations()).find((item) => item.id === automation.id)?.runs)
+    .toEqual([
+      {
+        trigger: "pull_request",
+        at: expect.any(Number),
+        status: "succeeded",
+        sessionId: reviewSession,
+        summary: `example/project#8 at ${sha.slice(0, 7)}`,
+      },
+    ]);
 
   // The session list marks the automatic review, so the sidebar can leave it out.
   const listed = await (
@@ -911,18 +972,136 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   expect(prompts).toHaveLength(promptCount);
   expect(reviews).toHaveLength(3);
 
-  // Cleared, reviews follow the default model again.
-  const cleared = await SELF.fetch("https://worker/api/settings/model", {
-    method: "PUT",
-    headers,
-    body: JSON.stringify({ reviewModel: null }),
+  // Every review is in the automation's run history, newest first.
+  expect(
+    (await listAutomations())
+      .find((item) => item.id === automation.id)
+      ?.runs.map((run) => run.summary),
+  ).toEqual([
+    `example/project#8 at ${"d".repeat(7)}`,
+    `example/project#8 at ${pushed.slice(0, 7)}`,
+    `example/project#11 at ${sha.slice(0, 7)}`,
+    `example/project#9 at ${sha.slice(0, 7)}`,
+    `example/project#8 at ${sha.slice(0, 7)}`,
+  ]);
+
+  // Paused, pull requests are ignored again.
+  expect((await automationApi(`/${automation.id}`, "PUT", { enabled: false })).status).toBe(200);
+  expect((await hook({ ...pullRequest, number: 10 }, "pull_request")).status).toBe(204);
+
+  // Given another trigger, it keeps its reviews as finished runs, and can be run by hand.
+  expect(
+    (await automationApi(`/${automation.id}`, "PUT", { event: null, readOnly: false })).status,
+  ).toBe(200);
+  expect(
+    (await listAutomations())
+      .find((item) => item.id === automation.id)
+      ?.runs.map((run) => run.status),
+  ).toEqual(["succeeded", "succeeded", "succeeded", "succeeded", "succeeded"]);
+  expect(
+    (await automationApi(`/${automation.id}/run`, "POST", { requestId: crypto.randomUUID() }))
+      .status,
+  ).toBe(202);
+}, 30_000);
+
+it("keeps one pull request automation, and makes the old Settings > GitHub switch into it", async () => {
+  await clearAutomations();
+  let events = ["issue_comment"];
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url) =>
+    new URL(String(url)).pathname === "/app" ? Response.json({ events }) : Response.json({ id: 7 }),
+  );
+
+  const review = {
+    name: "Review pull requests",
+    prompt: REVIEW_INSTRUCTIONS,
+    event: "pull_request",
+  };
+
+  const error = async (response: Response) => (await response.json<{ error: string }>()).error;
+
+  // Nor before the webhook is configured: every delivery would be refused.
+  events = ["issue_comment", "pull_request"];
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.delete("github:webhook");
   });
 
-  expect(await cleared.json()).toMatchObject({ reviewModel: null, reviewEffective: "gpt-6-luna" });
-
-  // Turned off, pull requests are ignored again.
+  const unconfigured = await automationApi("", "POST", review);
+  expect(unconfigured.status).toBe(400);
+  expect(await error(unconfigured)).toContain("Set the ingress URL");
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("github:webhook", profile);
   });
-  expect((await hook({ ...pullRequest, number: 10 }, "pull_request")).status).toBe(204);
+  events = ["issue_comment"];
+
+  // Reviews can't be turned on while GitHub doesn't send this dolly pull request events.
+  const refused = await automationApi("", "POST", review);
+  expect(refused.status).toBe(400);
+  expect(await error(refused)).toContain("Enable Pull request events");
+
+  const paused = await automationApi("", "POST", { ...review, enabled: false });
+  expect(paused.status).toBe(201);
+  const { id } = await paused.json<ListedAutomation>();
+  expect((await automationApi(`/${id}`, "PUT", { enabled: true })).status).toBe(400);
+  // Editing the prompt of a paused one needs no GitHub check.
+  expect((await automationApi(`/${id}`, "PUT", { prompt: "Only look for bugs." })).status).toBe(
+    200,
+  );
+
+  events = ["issue_comment", "pull_request"];
+  expect((await automationApi(`/${id}`, "PUT", { enabled: true })).status).toBe(200);
+
+  // Only one automation answers pull requests, and it has no schedule, repository, MCP servers or
+  // runs by hand: the review pipeline decides where and when it runs.
+  const second = await automationApi("", "POST", { ...review, name: "Second", enabled: false });
+  expect(second.status).toBe(400);
+  expect(await error(second)).toContain(`"Review pull requests" already runs when`);
+
+  const invalid: { [key: string]: Json }[] = [
+    { schedule: "0 9 * * *" },
+    { webhook: true },
+    { workspace: { repository: "example/project" } },
+    { mcpServers: ["sentry"] },
+  ];
+
+  for (const body of invalid) expect((await automationApi(`/${id}`, "PUT", body)).status).toBe(400);
+
+  const run = await automationApi(`/${id}/run`, "POST", { requestId: crypto.randomUUID() });
+  expect(run.status).toBe(409);
+  expect(await error(run)).toContain("can't be run by hand");
+
+  // An owner who had reviews switched on in Settings > GitHub gets the automation, enabled, on the
+  // review model they had chosen, once, even at the automation limit.
+  await clearAutomations();
+
+  for (let index = 0; index < 50; index++)
+    expect(
+      (await automationApi("", "POST", { name: `Manual ${index}`, prompt: "Report" })).status,
+    ).toBe(201);
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("github:webhook", { ...profile, reviews: true });
+    await state.storage.put("settings:review-model", "gpt-6-sol");
+    await state.storage.delete("migration:review-automation");
+  });
+
+  for (let restart = 0; restart < 2; restart++) {
+    await abortAllDurableObjects();
+    const listed = await listAutomations();
+    expect(listed).toHaveLength(51);
+    expect(listed.filter((item) => item.event)).toEqual([
+      expect.objectContaining({
+        name: "Review pull requests",
+        prompt: REVIEW_INSTRUCTIONS,
+        event: "pull_request",
+        enabled: true,
+        readOnly: true,
+        model: "gpt-6-sol",
+      }),
+    ]);
+  }
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    expect(await state.storage.get("settings:review-model")).toBeUndefined();
+  });
 }, 30_000);

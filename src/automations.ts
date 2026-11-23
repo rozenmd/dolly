@@ -26,8 +26,14 @@ import {
 
 /**
  * Automations, after OpenSession's: a stored prompt plus a trigger. Each run is a fresh session
- * with no memory of earlier runs, started on a cron schedule, once at a set time, or by hand. Runs
- * are ordinary sessions: they show up in the sidebar and the owner can open, steer or stop them.
+ * with no memory of earlier runs, started on a cron schedule, once at a set time, by hand, or by
+ * a GitHub event. Runs are ordinary sessions: they show up in the sidebar and the owner can open,
+ * steer or stop them.
+ *
+ * An event automation is OpenSession's `eventKey` automation: the event's own pipeline runs it.
+ * The `pull_request` automation is the automatic pull request review (github-inbox.ts): while it
+ * is enabled, pull requests are reviewed with its prompt and model, and each review is one of its
+ * runs. There is at most one automation per event.
  *
  * Each automation is one Pi document holding its definition, its next fire and its recent runs,
  * and a small index lists every automation with its next fire. Every change (a save, a fire, a
@@ -52,6 +58,17 @@ const Expression = Schema.Trim.check(Schema.isMinLength(1), Schema.isMaxLength(1
 const TimeZone = Schema.Trim.check(Schema.isMinLength(1), Schema.isMaxLength(64));
 const At = Schema.Trim.check(Schema.isMinLength(1), Schema.isMaxLength(64));
 
+/** Events an automation can run on, after OpenSession's `github:pull_request` event key. */
+export const AUTOMATION_EVENTS = ["pull_request"] as const;
+
+export type AutomationEvent = (typeof AUTOMATION_EVENTS)[number];
+
+const Event = Schema.Literals(AUTOMATION_EVENTS);
+
+const EVENT_LABEL: Record<AutomationEvent, string> = {
+  pull_request: "a pull request is opened, marked ready or pushed to",
+};
+
 const McpServers = Schema.Array(Schema.String.check(Schema.isPattern(MCP_NAME))).check(
   Schema.isMaxLength(20),
 );
@@ -63,6 +80,8 @@ const optionalFields = {
   timeZone: Schema.optional(Schema.NullOr(TimeZone)),
   /** One run at this ISO 8601 time (with an offset), instead of a schedule; null clears it. */
   runAt: Schema.optional(Schema.NullOr(At)),
+  /** Run on this event instead of a schedule or time; null clears it. */
+  event: Schema.optional(Schema.NullOr(Event)),
   enabled: Schema.optional(Schema.Boolean),
   /** Runs read code and comment, never change a repository (like automatic reviews). */
   readOnly: Schema.optional(Schema.Boolean),
@@ -124,6 +143,8 @@ export type Automation = {
   schedule?: string;
   timeZone?: string;
   runAt?: number;
+  /** The event the automation runs on; its runs come from that event's pipeline. */
+  event?: AutomationEvent;
   enabled: boolean;
   readOnly: boolean;
   workspace?: { repository: string; ref?: string; networkHosts?: string[] };
@@ -136,12 +157,15 @@ export type Automation = {
   updatedAt: number;
 };
 
-export type Trigger = "schedule" | "manual" | "webhook";
+export type Trigger = "schedule" | "manual" | "webhook" | AutomationEvent;
 
 export type RunStatus = "running" | "succeeded" | "failed" | "skipped";
 
 export type AutomationRun = {
-  /** Identifies one fire: `schedule:<due time>`, `manual:<request id>` or `webhook:<delivery>`. */
+  /**
+   * Identifies one fire: `schedule:<due time>`, `manual:<request id>`, `webhook:<delivery>` or,
+   * for an event, `<event>:<what it is about>`.
+   */
   key: string;
   trigger: Trigger;
   at: number;
@@ -290,7 +314,7 @@ function validate(
     next.webhookSecret = webhookSecret();
   } else if (input.webhook && !next.webhookSecret) next.webhookSecret = webhookSecret();
 
-  const assign = <K extends "schedule" | "timeZone" | "model" | "thinkingLevel">(
+  const assign = <K extends "schedule" | "timeZone" | "model" | "thinkingLevel" | "event">(
     key: K,
     value: Automation[K] | null | undefined,
   ) => {
@@ -302,6 +326,7 @@ function validate(
   assign("timeZone", input.timeZone);
   assign("model", input.model);
   assign("thinkingLevel", input.thinkingLevel);
+  assign("event", input.event);
 
   if (input.workspace === null) delete next.workspace;
   else if (input.workspace !== undefined) {
@@ -333,6 +358,26 @@ function validate(
 
   if (next.schedule !== undefined && next.runAt !== undefined)
     return { error: "Give a schedule or a runAt time, not both" };
+
+  if (next.event !== undefined) {
+    const runs = `It runs when ${EVENT_LABEL[next.event]}`;
+
+    if (next.schedule !== undefined || next.runAt !== undefined || next.webhookSecret)
+      return {
+        error: `${runs}, so it can't also have a schedule, a runAt time or a webhook URL`,
+      };
+
+    // Its pipeline decides where it runs: a review reads the pull request's own repository,
+    // read-only, with no MCP servers (github-inbox.ts).
+    if (next.workspace)
+      return { error: `${runs}, in that pull request's repository: leave the repository out` };
+
+    if (next.mcpServers.length) return { error: `${runs} read-only, without MCP servers` };
+
+    next.readOnly = true;
+
+    return next;
+  }
 
   if (next.timeZone !== undefined && !validTimeZone(next.timeZone))
     return { error: `Unknown time zone "${next.timeZone}"; use an IANA name like Europe/Paris` };
@@ -384,6 +429,7 @@ const HOW: Record<Trigger, string> = {
   schedule: "scheduled run",
   manual: "manual run",
   webhook: "webhook run",
+  pull_request: "pull request run",
 };
 
 /**
@@ -510,6 +556,63 @@ function record(state: State, run: AutomationRun) {
 
   for (let index = state.runs.length - 1; state.runs.length > RUN_HISTORY && index >= 0; index--)
     if (state.runs[index]?.status !== "running") state.runs.splice(index, 1);
+}
+
+type TaskRecord = Awaited<ReturnType<Tx["task"]>>;
+
+/** Whether a run came from an event's pipeline rather than AutomationRunTask. */
+const isEventTrigger = (trigger: Trigger): trigger is AutomationEvent =>
+  AUTOMATION_EVENTS.some((event) => event === trigger);
+
+/** How an event run's task ended, as a run status; still running while the task is live. */
+function eventRunOutcome(task: TaskRecord): Pick<AutomationRun, "status" | "error"> {
+  if (!task) return { status: "failed", error: "The run ended without reporting back" };
+
+  if (task.state.status !== "terminal") return { status: "running" };
+
+  const { outcome } = task.state;
+
+  if (outcome.status === "completed") return { status: "succeeded" };
+
+  return {
+    status: "failed",
+    error:
+      outcome.status === "aborted" ? "Stopped" : "The run failed; open its session for details",
+  };
+}
+
+/**
+ * Record a run an event's pipeline started (`taskId` in `conversationId`) in the event's
+ * automation, in the pipeline's own commit. No-op if the automation is gone.
+ *
+ * The row stays `running` in storage: the pipeline, not AutomationRunTask, runs it, so its status
+ * is read from its task whenever the automation is shown (Automations.current). Called after the
+ * commit has written its task, when a transaction may no longer read tasks, so the oldest event
+ * rows past the history limit are dropped whatever their task's state.
+ */
+export async function recordEventRun(
+  tx: Tx,
+  id: string,
+  run: {
+    key: string;
+    trigger: AutomationEvent;
+    at: number;
+    summary: string;
+    conversationId: ConversationId;
+    taskId: TaskId<null>;
+  },
+) {
+  if (!Object.hasOwn((await tx.doc(AutomationIndex)).automations, id)) return;
+  const state = (await tx.doc(AutomationDoc, id, null)).state;
+
+  if (!state) return;
+  state.runs.unshift({ ...run, status: "running" });
+
+  for (let index = state.runs.length - 1; state.runs.length > RUN_HISTORY && index >= 0; index--) {
+    const old = state.runs[index];
+
+    if (old?.status !== "running" || old.trigger === run.trigger) state.runs.splice(index, 1);
+  }
 }
 
 /**
@@ -647,12 +750,28 @@ async function admit(
 
     const live: AutomationRun[] = [];
 
-    for (const run of state.runs.filter((item) => item.status === "running"))
+    for (const run of state.runs.filter((item) => item.status === "running")) {
+      // An event run's row stays running in storage (recordEventRun): its task says how it ended.
+      if (isEventTrigger(run.trigger) && run.taskId !== undefined) {
+        const outcome = eventRunOutcome(await tx.task(run.taskId));
+
+        if (outcome.status === "running") live.push(run);
+        else {
+          run.status = outcome.status;
+          run.finishedAt = at;
+
+          if (outcome.error) run.error = outcome.error;
+        }
+
+        continue;
+      }
+
       if (await stillRunning(tx, run)) live.push(run);
       else {
         run.status = "failed";
         run.error = "The run ended without reporting back";
       }
+    }
 
     // Webhook runs may overlap each other, up to `concurrency`; nothing overlaps another trigger.
     const limit = live.every((run) => run.trigger === trigger) ? concurrency : 1;
@@ -778,6 +897,8 @@ export class Automations {
     id: string,
     create: boolean,
     build: (current: Automation | undefined, now: number) => Automation | { error: string },
+    /** Allow one past MAX_AUTOMATIONS: for a migration that must not lose a feature. */
+    overLimit = false,
   ) {
     for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
       const now = this.host.now();
@@ -790,6 +911,9 @@ export class Automations {
       const pending = pendingAfterSave(automation, previous, now);
       const revision = previous?.revision ?? 0;
 
+      /** The automation that already has this one's event, when that refused the save. */
+      let holder = "";
+
       // Armed before the commit: a restart right after it still finds the alarm.
       const release = pending === undefined ? undefined : await this.host.prearm(pending);
 
@@ -798,9 +922,27 @@ export class Automations {
           const index = await tx.doc(AutomationIndex);
           const listed = Object.hasOwn(index.automations, id);
 
-          if (create && Object.keys(index.automations).length >= MAX_AUTOMATIONS) return "full";
+          if (
+            create &&
+            Object.keys(index.automations).length >= MAX_AUTOMATIONS + (overLimit ? 1 : 0)
+          )
+            return "full";
 
           if (listed !== !create) return "changed";
+
+          // One automation per event: which one a pull request runs must never be ambiguous.
+          if (automation.event !== undefined)
+            for (const other of Object.keys(index.automations)) {
+              if (other === id) continue;
+              const taken = (await tx.doc(AutomationDoc, other, null)).state?.automation;
+
+              if (taken?.event === automation.event) {
+                holder = taken.name;
+
+                return "taken";
+              }
+            }
+
           const doc = await tx.doc(AutomationDoc, id, null);
 
           // A run committed since the read may have moved the pending fire: build again.
@@ -823,6 +965,11 @@ export class Automations {
 
         if (outcome === "full") return { error: `Automation limit reached (${MAX_AUTOMATIONS})` };
 
+        if (outcome === "taken")
+          return {
+            error: `"${holder}" already runs when ${EVENT_LABEL[automation.event!]}; edit that automation instead`,
+          };
+
         if (outcome !== "changed") return outcome.saved;
       } finally {
         // Re-armed from the index before the fire is released, so no alarm change drops it.
@@ -840,35 +987,84 @@ export class Automations {
   async list() {
     const states = await Promise.all(Object.keys(await this.index()).map((id) => this.state(id)));
 
-    return states
-      .flatMap((state) => (state ? [view(state)] : []))
-      .sort((a, b) => a.name.localeCompare(b.name) || a.createdAt - b.createdAt);
+    const views = await Promise.all(
+      states.flatMap((state) => (state ? [this.current(state)] : [])),
+    );
+
+    return views.sort((a, b) => a.name.localeCompare(b.name) || a.createdAt - b.createdAt);
   }
 
   async read(id: string) {
     const state = await this.state(id);
 
-    return state && view(state);
+    return state && this.current(state);
   }
 
-  async create(input: typeof NewAutomation.Type) {
+  /**
+   * The view of `state` with each event run shown as its task stands now: an event's pipeline,
+   * not AutomationRunTask, runs those, so their stored rows stay `running` (recordEventRun).
+   */
+  private async current(state: Readonly<State>) {
+    const shown = view(state);
+
+    const runs = await Promise.all(
+      state.runs.map(async (run, index) => {
+        const listed = shown.runs[index]!;
+
+        // By the run's own trigger, not the definition's: an edit may have changed that since.
+        if (run.status !== "running" || run.taskId === undefined || !isEventTrigger(run.trigger))
+          return listed;
+
+        return {
+          ...listed,
+          ...eventRunOutcome(await this.host.harness().getTask(run.taskId, BACKGROUND_CONTEXT)),
+        };
+      }),
+    );
+
+    return { ...shown, runs };
+  }
+
+  /**
+   * The enabled automation for `event`, with what its runs need: its definition, for the prompt
+   * and model. Undefined when there is none, or it is paused.
+   */
+  async forEvent(event: AutomationEvent) {
+    for (const id of Object.keys(await this.index())) {
+      const automation = (await this.state(id))?.automation;
+
+      if (automation?.event === event) return automation.enabled ? detach(automation) : undefined;
+    }
+
+    return undefined;
+  }
+
+  /**
+   * `overLimit` lets a migration create one past MAX_AUTOMATIONS, so an owner already at the
+   * limit doesn't lose what it migrates.
+   */
+  async create(input: typeof NewAutomation.Type, overLimit = false) {
     const id = crypto.randomUUID();
 
-    const saved = await this.save(id, true, (_current, now) =>
-      validate(
-        {
-          id,
-          name: input.name,
-          prompt: input.prompt,
-          enabled: true,
-          readOnly: false,
-          mcpServers: [],
-          createdAt: now,
-          updatedAt: now,
-        },
-        input,
-        now,
-      ),
+    const saved = await this.save(
+      id,
+      true,
+      (_current, now) =>
+        validate(
+          {
+            id,
+            name: input.name,
+            prompt: input.prompt,
+            enabled: true,
+            readOnly: false,
+            mcpServers: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+          input,
+          now,
+        ),
+      overLimit,
     );
 
     return saved ?? { error: "Automation not saved" };
@@ -912,6 +1108,13 @@ export class Automations {
       const state = await this.state(id);
 
       if (!state) return undefined;
+      const { event } = state.automation;
+
+      // Its runs are about an event (a pull request to review); there is nothing to run by hand.
+      if (event !== undefined)
+        return {
+          error: `This automation runs when ${EVENT_LABEL[event]}; it can't be run by hand`,
+        };
       const agent = await this.host.agent(state.automation);
 
       if ("error" in agent) return agent;

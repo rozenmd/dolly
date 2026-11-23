@@ -9,7 +9,6 @@ const auth = {
     settingsUrl: "https://github.com/settings/apps/dolly-test",
     ingress: null,
     senders: ["octocat"],
-    reviews: false,
   },
   ownerClaimed: true,
   user: { login: "octocat" },

@@ -305,27 +305,6 @@ function DefaultModelSetting() {
       </div>
       <div className="connection-row">
         <span className="connection-label">
-          GitHub review model
-          <span className="muted">
-            {setting
-              ? setting.reviewModel != null && setting.reviewModel !== setting.reviewEffective
-                ? `Using ${modelName(setting.reviewEffective)} until that subscription is connected`
-                : `Automatic pull request reviews use ${modelName(setting.reviewEffective)}`
-              : "Loading…"}
-          </span>
-        </span>
-        <ModelPicker
-          id="review-model"
-          value={setting?.reviewModel ?? ""}
-          defaultLabel="Same as default"
-          disabled={!setting || pending}
-          onChange={(model) =>
-            save({ reviewModel: model || null }, "Could not save the GitHub review model.")
-          }
-        />
-      </div>
-      <div className="connection-row">
-        <span className="connection-label">
           Default effort
           <span className="muted">How long new sessions think before answering</span>
         </span>
@@ -424,7 +403,6 @@ export function GitHubSettings() {
   const [ingress, setIngress] = useState(github.ingress ?? "");
   const [accounts, setAccounts] = useState("");
   const [senders, setSenders] = useState(github.senders.join(", "));
-  const [reviews, setReviews] = useState(github.reviews);
   const [saved, setSaved] = useState("");
   const { pending, run, alert } = useAction();
   const onboarding = useOnboarding();
@@ -480,9 +458,9 @@ export function GitHubSettings() {
       const next = logins(senders);
 
       // Saved whenever it changed, including to empty, which stops every /dolly command.
-      if (next.join(",") !== github.senders.join(",") || reviews !== github.reviews) {
-        await request("/integrations/github/webhook", { senders: next, reviews }, undefined, "PUT");
-        update({ ...github, senders: next, reviews });
+      if (next.join(",") !== github.senders.join(",")) {
+        await request("/integrations/github/webhook", { senders: next }, undefined, "PUT");
+        update({ ...github, senders: next });
       }
 
       setSaved("access");
@@ -554,29 +532,11 @@ export function GitHubSettings() {
             ? "Saved."
             : "GitHub users whose /dolly comments on pull requests start an agent."}
         </p>
-        <label className="connection-row">
-          <span className="connection-label">
-            Review new pull requests
-            <span className="muted">
-              When one of these users or a dolly session opens a pull request in an enrolled
-              repository, marks a draft ready or pushes to it, dolly reviews it with inline
-              comments. Findings on a pull request a dolly session opened go back to that session to
-              fix, for up to 6 rounds. Each review uses your model subscription; choose its model
-              under Models.
-            </span>
-          </span>
-          <input
-            id="settings-reviews"
-            name="reviews"
-            type="checkbox"
-            className="switch"
-            checked={reviews}
-            onChange={(event) => {
-              setReviews(event.target.checked);
-              setSaved("");
-            }}
-          />
-        </label>
+        <p className="field-help">
+          Pull requests these users or dolly sessions open are reviewed by the Review pull requests
+          automation. Set it up, with its prompt and model, in{" "}
+          <Link to="/settings/automations">Automations</Link>.
+        </p>
         <div className="modal-actions">
           <button type="submit" className="primary-button" disabled={pending}>
             Save

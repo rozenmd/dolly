@@ -43,8 +43,10 @@ import {
   Automations,
   inheritAutomationRun,
   NewAutomation,
+  recordEventRun,
   type Automation,
 } from "./automations";
+import { REVIEW_INSTRUCTIONS } from "./review-instructions";
 import {
   ConversationWorkspace,
   workspaceConfig,
@@ -64,7 +66,7 @@ import {
 } from "./workspace";
 import { gitRoute, checkedPush } from "./git-transport";
 import { BROWSER_SESSION_MS, MAX_BROWSER_SESSIONS } from "./browser-workspace";
-import { pullRequestChange, WebhookSetup } from "./github-webhook";
+import { pullRequestChange, WebhookProfile, WebhookSetup } from "./github-webhook";
 import { STEER_TOOL_SKIP, SteerInterrupts, steerInterrupts, steerQueued } from "./steer-interrupt";
 import {
   runCancellable,
@@ -217,7 +219,7 @@ import {
   retriedByPi,
   sessionMetadataKey,
   writeDefaults,
-  effectiveReviewModel,
+  LEGACY_REVIEW_MODEL_KEY,
   type IntakeAgent,
   type SessionMetadata,
   FALLBACK_ENTRY,
@@ -293,9 +295,15 @@ export class Agent extends DurableObject<Env> {
         Effect.provide(this.services),
       ),
     handoff: {
-      enabled: () =>
-        Effect.flatMap(GitHub, (github) => github.reviewsEnabled).pipe(
-          Effect.provide(this.services),
+      // Only the automation the review was admitted for, while it is enabled: a replacement
+      // made meanwhile ran none of the admission (model, run history), so it doesn't take over.
+      reviewer: (review) =>
+        attempt("github.reviewer", () => this.reviewAutomation()).pipe(
+          Effect.map((automation) =>
+            automation && (review.automation === undefined || review.automation === automation.id)
+              ? { prompt: automation.prompt }
+              : undefined,
+          ),
         ),
       head: (review) =>
         Effect.flatMap(GitHub, (github) => github.pullHead(review.repository, review.number)).pipe(
@@ -1373,6 +1381,17 @@ export class Agent extends DurableObject<Env> {
     });
     this.automationWake = yield* attempt("automations.wake", () => this.automations.nextWake());
 
+    // Best effort here: the first review or automations list tries again.
+    yield* attempt("automations.reviews.migrate", () => this.migrateReviews()).pipe(
+      Effect.catchTag("OperationError", (error) =>
+        Effect.logError({
+          event: "review_automation_migration_failed",
+          error: exceptionDetails(error),
+          details: error.details,
+        }),
+      ),
+    );
+
     yield* this.arm(this.harness.wake());
     this.harness.resume();
   });
@@ -1820,8 +1839,15 @@ export class Agent extends DurableObject<Env> {
   githubWebhook(body: ArrayBuffer, signature: string, event: string) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
+        // Pull requests are reviewed while the review automation is enabled, with its prompt and
+        // model; only pull_request events need it.
+        const reviewer =
+          event === "pull_request"
+            ? yield* attempt("github.reviewer", () => this.reviewAutomation())
+            : undefined;
+
         const verified = yield* Effect.flatMap(GitHub, (github) =>
-          github.receiveWebhook(body, signature, event),
+          github.receiveWebhook(body, signature, event, reviewer !== undefined),
         );
 
         // 202 and 204 both mean the signature checked out.
@@ -1857,16 +1883,40 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(chatgpt) && Option.isNone(claude)) return { status: 503 as const };
 
-        const agent = yield* this.intakeAgent(
-          Option.isSome(chatgpt),
-          Option.isSome(claude),
-          verified.kind === "review",
-        );
+        const review = verified.kind === "review" ? verified.review : undefined;
+        const automation = review && reviewer;
+
+        const agent = automation
+          ? yield* attempt("github.review.agent", () => this.automationAgent(automation))
+          : yield* this.intakeAgent(Option.isSome(chatgpt), Option.isSome(claude));
+
+        if ("error" in agent) return { status: 503 as const };
 
         yield* this.arm({ active: true });
 
-        const delivery = verified.kind === "review" ? verified.review : verified.event;
-        const admitted = yield* admitGitHub(this.harness, this.githubTask, delivery, agent);
+        const delivery =
+          verified.kind === "review"
+            ? { ...verified.review, ...(automation && { automation: automation.id }) }
+            : verified.event;
+
+        // Each review is a run of the review automation, recorded in the commit that queues it.
+        const admitted = yield* admitGitHub(
+          this.harness,
+          this.githubTask,
+          delivery,
+          agent,
+          review &&
+            automation &&
+            ((tx, conversationId, taskId) =>
+              recordEventRun(tx, automation.id, {
+                key: `pull_request:${review.repository}#${review.number}@${review.sha}`,
+                trigger: "pull_request",
+                at: Date.now(),
+                summary: `${review.repository}#${review.number} at ${review.sha.slice(0, 7)}`,
+                conversationId,
+                taskId,
+              })),
+        );
 
         // Acknowledge on GitHub straight away. Best effort: the task is already queued.
         if (!admitted.duplicate)
@@ -2446,15 +2496,13 @@ export class Agent extends DurableObject<Env> {
     attempt("settings.model.read", () => readDefaults(this.ctx.storage));
 
   /**
-   * Model and effort for a session GitHub or Slack starts: the owner's effective defaults,
-   * or the review model for an automatic pull request review.
+   * Model and effort for a session GitHub or Slack starts: the owner's effective defaults. An
+   * automatic review runs on its automation's model instead (automationAgent).
    */
-  private intakeAgent = (chatgpt: boolean, claude: boolean, review = false) =>
+  private intakeAgent = (chatgpt: boolean, claude: boolean) =>
     this.storedDefaults().pipe(
       Effect.map((stored): IntakeAgent => {
-        const modelId = review
-          ? effectiveReviewModel(stored, chatgpt, claude)
-          : effectiveDefaultModel(stored.model, chatgpt, claude);
+        const modelId = effectiveDefaultModel(stored.model, chatgpt, claude);
 
         return {
           model: { provider: modelProvider(modelId), modelId },
@@ -2856,7 +2904,20 @@ export class Agent extends DurableObject<Env> {
     );
   });
 
-  automationsList() {
+  async automationsList() {
+    // The list must load whatever the migration does: it is where the owner fixes things.
+    await Effect.runPromise(
+      attempt("automations.reviews.migrate", () => this.migrateReviews()).pipe(
+        Effect.catchTag("OperationError", (error) =>
+          Effect.logError({
+            event: "review_automation_migration_failed",
+            error: exceptionDetails(error),
+            details: error.details,
+          }),
+        ),
+      ),
+    );
+
     return this.automations.list();
   }
 
@@ -2864,12 +2925,101 @@ export class Agent extends DurableObject<Env> {
     return this.automations.read(id);
   }
 
-  automationCreate(input: typeof NewAutomation.Type) {
+  async automationCreate(input: typeof NewAutomation.Type) {
+    if (input.event && input.enabled !== false) {
+      const problem = await this.pullRequestEventsProblem();
+
+      if (problem) return problem;
+    }
+
     return this.automations.create(input);
   }
 
-  automationUpdate(id: string, patch: typeof AutomationPatch.Type) {
+  async automationUpdate(id: string, patch: typeof AutomationPatch.Type) {
+    // Checked when a change would turn pull request reviews on, not on every prompt edit.
+    if (patch.event || patch.enabled) {
+      const current = await this.automations.read(id);
+      const event = patch.event === undefined ? current?.event : patch.event;
+
+      if (event && (patch.enabled ?? current?.enabled)) {
+        const problem = await this.pullRequestEventsProblem();
+
+        if (problem) return problem;
+      }
+    }
+
     return this.automations.update(id, patch);
+  }
+
+  /** Why GitHub can't send this dolly pull requests to review, if it can't. */
+  private async pullRequestEventsProblem() {
+    const problem = await this.githubRun(
+      Effect.flatMap(GitHub, (github) => github.pullRequestEventsProblem).pipe(
+        Effect.map((message) => message && { error: message }),
+      ),
+    );
+
+    return problem ?? undefined;
+  }
+
+  /** Whether the old Settings > GitHub review switch has been made into an automation. */
+  private reviewsMigrated = false;
+
+  /**
+   * Automatic reviews used to be a switch in Settings > GitHub, with their model under Models;
+   * now they are the pull request automation, after OpenSession's `github-pr-review`. An owner
+   * who had the switch on gets that automation, enabled, on the model they had picked, once. Safe
+   * to race: there is only ever one pull request automation.
+   */
+  private async migrateReviews() {
+    if (this.reviewsMigrated) return;
+
+    if (await this.ctx.storage.get("migration:review-automation")) {
+      this.reviewsMigrated = true;
+
+      return;
+    }
+
+    const profile = Schema.decodeUnknownOption(WebhookProfile)(
+      await this.ctx.storage.get("github:webhook"),
+    );
+
+    if (Option.isSome(profile) && profile.value.reviews === true) {
+      const model = Option.getOrUndefined(
+        Schema.decodeUnknownOption(SessionModel)(
+          await this.ctx.storage.get(LEGACY_REVIEW_MODEL_KEY),
+        ),
+      );
+
+      // Past the automation limit if need be: an owner at it would otherwise lose reviews.
+      const created = await this.automations.create(
+        {
+          name: "Review pull requests",
+          prompt: REVIEW_INSTRUCTIONS,
+          event: "pull_request",
+          ...(model && { model }),
+        },
+        true,
+      );
+
+      // Only an existing pull request automation (another migration won the race) is fine.
+      if (
+        "error" in created &&
+        !(await this.automations.list()).some((automation) => automation.event === "pull_request")
+      )
+        throw new Error(`Could not create the review automation: ${created.error}`);
+    }
+
+    await this.ctx.storage.delete(LEGACY_REVIEW_MODEL_KEY);
+    await this.ctx.storage.put("migration:review-automation", true);
+    this.reviewsMigrated = true;
+  }
+
+  /** The enabled pull request automation: automatic reviews run with its prompt and model. */
+  private async reviewAutomation() {
+    await this.migrateReviews();
+
+    return this.automations.forEvent("pull_request");
   }
 
   automationDelete(id: string) {

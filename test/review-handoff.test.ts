@@ -16,6 +16,7 @@ import { headers, signIn } from "./session";
 import { GitHubIngress } from "../src/github-ingress";
 import { ingress } from "../src/ingress";
 import { ReviewHandoffs } from "../src/review-handoff";
+import { REVIEW_INSTRUCTIONS } from "../src/review-instructions";
 import type { GitHubRequest } from "../src/github-contracts";
 import { GitHubThreads } from "../src/github-inbox";
 import { SlackThreads } from "../src/slack-inbox";
@@ -179,6 +180,9 @@ function fakeGitHub(url: URL, init: RequestInit | undefined) {
   const method = init?.method ?? "GET";
 
   if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+  // The App sends pull request events, so the review automation may be enabled.
+  if (path === "/app") return Response.json({ events: ["issue_comment", "pull_request"] });
 
   if (path.endsWith("/access_tokens"))
     return Response.json({
@@ -644,6 +648,7 @@ const handoffState = () =>
   );
 
 let roots: string[] = [];
+let reviewAutomation = "";
 
 beforeEach(async () => {
   await reset();
@@ -680,11 +685,7 @@ beforeEach(async () => {
       { fullName: repository, defaultBranch: "main", private: true, description: null },
     ]);
     await state.storage.put("github:accounts", ["example"]);
-    await state.storage.put("github:webhook", {
-      secret: WEBHOOK_SECRET,
-      senders: ["trusted"],
-      reviews: true,
-    });
+    await state.storage.put("github:webhook", { secret: WEBHOOK_SECRET, senders: ["trusted"] });
   });
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -702,6 +703,26 @@ beforeEach(async () => {
 
     return model(await modelRequest(init));
   });
+
+  // reset() clears key-value storage but not Pi's documents, where automations live.
+  const listed = await SELF.fetch("https://worker/api/automations", { headers });
+
+  for (const { id } of (await listed.json<{ automations: { id: string }[] }>()).automations)
+    await SELF.fetch(`https://worker/api/automations/${id}`, { method: "DELETE", headers });
+
+  // Reviews run while the pull request automation is enabled, as Settings > Automations makes it.
+  const created = await SELF.fetch("https://worker/api/automations", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      name: "Review pull requests",
+      prompt: REVIEW_INSTRUCTIONS,
+      event: "pull_request",
+    }),
+  });
+
+  if (created.status !== 201) throw new Error(await created.text());
+  reviewAutomation = (await created.json<{ id: string }>()).id;
 });
 
 afterEach(async () => {
@@ -1307,15 +1328,16 @@ it("hands findings to a session a Slack thread owns, and posts its answer in tha
   expect(slackPosts.filter((post) => post.method === "chat.postMessage")).toHaveLength(1);
 }, 60_000);
 
-/** Turn automatic reviews on or off, as Settings > GitHub does. */
-const setReviews = (reviews: boolean) =>
-  runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    await state.storage.put("github:webhook", {
-      secret: WEBHOOK_SECRET,
-      senders: ["trusted"],
-      reviews,
-    });
+/** Pause or resume the pull request automation, as Settings > Automations does. */
+async function setReviews(enabled: boolean) {
+  const saved = await SELF.fetch(`https://worker/api/automations/${reviewAutomation}`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ enabled }),
   });
+
+  expect(saved.status).toBe(200);
+}
 
 /** Whether every delivery admitted for PR `number`'s review session has finished. */
 const reviewsSettled = (number: number) =>
@@ -1345,7 +1367,7 @@ function holdReviews() {
   return () => release();
 }
 
-it("turning reviews off stops the handoff of a review already running", async () => {
+it("pausing the review automation stops the handoff of a review already running", async () => {
   github.number = 13;
   await opener();
 
@@ -1366,7 +1388,7 @@ it("turning reviews off stops the handoff of a review already running", async ()
   expect((await handoffState())?.pulls[`${repository}#13`]?.lastSha).toBeUndefined();
 }, 60_000);
 
-it("turning reviews off skips a review that is still queued", async () => {
+it("pausing the review automation skips a review that is still queued", async () => {
   github.number = 14;
   await opener();
 
@@ -1390,4 +1412,48 @@ it("turning reviews off skips a review that is still queued", async () => {
   expect(github.reviews).toEqual([]);
   // The queued head's session never started a review.
   expect((await reviewSandboxes(14, [pushed]))[0]?.pin).toBeUndefined();
+}, 60_000);
+
+it("a review automation made to replace a deleted one doesn't run reviews queued for the old one", async () => {
+  // A pull request no other test reviews: Pi's review receipts survive reset().
+  github.number = 24;
+  await opener();
+
+  const release = holdReviews();
+  verdicts.push("Fine.\nVERDICT: blocking=0 findings=0 confidence=5");
+  expect(await pullRequestHook("opened", 24, "a".repeat(40))).toBe(202);
+  await expect
+    .poll(async () => (await reviewSandboxes(24, ["a".repeat(40)]))[0]?.pin, { timeout: 15_000 })
+    .toBe("a".repeat(40));
+
+  // A push queues the next review, admitted for the current automation.
+  const pushed = "b".repeat(40);
+  expect(await pullRequestHook("synchronize", 24, pushed)).toBe(202);
+  github.heads["24"] = pushed;
+
+  // Replaced while that review waits: the new one's prompt and run history aren't the queued
+  // review's, so it is skipped rather than run on the new prompt.
+  await SELF.fetch(`https://worker/api/automations/${reviewAutomation}`, {
+    method: "DELETE",
+    headers,
+  });
+
+  const replacement = await SELF.fetch("https://worker/api/automations", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      name: "Replacement",
+      prompt: "Replacement review instructions.",
+      event: "pull_request",
+    }),
+  });
+
+  expect(replacement.status).toBe(201);
+  release();
+
+  await expect.poll(() => reviewsSettled(24), { timeout: 15_000 }).toBe(true);
+  // Only the first review reached the model; the queued one never started.
+  expect(reviewPrompts).toHaveLength(1);
+  expect(reviewPrompts.join("\n")).not.toContain("Replacement review instructions.");
+  expect((await reviewSandboxes(24, [pushed]))[0]?.pin).toBeUndefined();
 }, 60_000);

@@ -1095,8 +1095,16 @@ it("enables ingress in the manifest and configures allowed senders without repla
   expect(await callback(`state=${started.state}&code=manifest-code`)).toBe("/");
   vi.restoreAllMocks();
 
+  // The App's webhook is live at the ingress URL from the start, so dolly accepts its deliveries
+  // (and can review pull requests Dolly sessions open) before any sender is listed.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    expect(await state.storage.get("github:webhook")).toEqual({
+      secret: app.webhook_secret,
+      senders: [],
+    });
+  });
+
   let subscribed = true;
-  let pullRequests = false;
 
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
     expect(String(url)).toBe("https://api.github.com/app");
@@ -1104,7 +1112,7 @@ it("enables ingress in the manifest and configures allowed senders without repla
     return Response.json({
       id: 7,
       permissions: { issues: "read" },
-      events: [...(subscribed ? ["issue_comment"] : []), ...(pullRequests ? ["pull_request"] : [])],
+      events: subscribed ? ["issue_comment"] : [],
     });
   });
 
@@ -1166,28 +1174,8 @@ it("enables ingress in the manifest and configures allowed senders without repla
   ).toBe(200);
   expect((await configure()).status).toBe(200);
 
-  const review = () =>
-    SELF.fetch("https://worker/api/integrations/github/webhook", {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ senders: ["trusted"], reviews: true }),
-    });
-
-  // Automatic reviews need the App's pull_request events; turning them on without fails closed.
-  expect((await review()).status).toBe(409);
-  expect(
-    await (await SELF.fetch("https://worker/api/integrations/github", { headers })).json(),
-  ).toMatchObject({ reviews: false });
-  pullRequests = true;
-  expect(await (await review()).json()).toMatchObject({ configured: true, reviews: true });
-  // Saving senders alone keeps reviews on.
-  expect((await configure()).status).toBe(200);
-  expect(
-    await (await SELF.fetch("https://worker/api/integrations/github", { headers })).json(),
-  ).toMatchObject({ reviews: true });
-  pullRequests = false;
-  expect((await configure()).status).toBe(409);
-  pullRequests = true;
+  // Without Issue comments events, saving fails closed. Pull request events are checked when the
+  // review automation is turned on instead (Agent.automationCreate).
   subscribed = false;
   expect((await configure()).status).toBe(409);
   expect(

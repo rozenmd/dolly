@@ -73,13 +73,11 @@ export const DefaultModelSetting = Schema.Struct({
   thinkingLevel: Schema.optional(Schema.NullOr(ThinkingLevel)),
   speed: Schema.optional(Schema.NullOr(Speed)),
   autoFallback: Schema.optional(Schema.NullOr(Schema.Boolean)),
-  /** The model automatic GitHub reviews use; `null` follows the default model. */
-  reviewModel: Schema.optional(Schema.NullOr(SessionModel)),
 }).check(
   Schema.makeFilter((setting) =>
     Object.values(setting).some((value) => value !== undefined)
       ? undefined
-      : "Expected model, thinkingLevel, speed, autoFallback or reviewModel",
+      : "Expected model, thinkingLevel, speed or autoFallback",
   ),
 );
 

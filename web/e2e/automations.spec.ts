@@ -10,14 +10,13 @@ const auth = {
     settingsUrl: "https://github.com/settings/apps/dolly-test",
     ingress: null,
     senders: ["octocat"],
-    reviews: false,
   },
   ownerClaimed: true,
   user: { login: "octocat" },
 };
 
 type Run = {
-  trigger: "schedule" | "manual";
+  trigger: "schedule" | "manual" | "pull_request";
   at: number;
   status: "running" | "succeeded" | "failed" | "skipped";
   sessionId?: string;
@@ -32,6 +31,7 @@ type Automation = {
   schedule?: string;
   timeZone?: string;
   runAt?: number;
+  event?: "pull_request";
   enabled: boolean;
   readOnly: boolean;
   workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] };
@@ -49,6 +49,7 @@ const Body = Schema.Struct({
   schedule: Schema.optional(Schema.NullOr(Schema.String)),
   timeZone: Schema.optional(Schema.NullOr(Schema.String)),
   runAt: Schema.optional(Schema.NullOr(Schema.String)),
+  event: Schema.optional(Schema.NullOr(Schema.Literal("pull_request"))),
   enabled: Schema.optional(Schema.Boolean),
   readOnly: Schema.optional(Schema.Boolean),
   model: Schema.optional(Schema.NullOr(Schema.String)),
@@ -278,6 +279,7 @@ test("creates, runs, pauses and deletes an automation, and marks its sessions in
       name: "Nightly dependency check",
       prompt: "Update outdated dependencies and open a pull request.",
       enabled: true,
+      event: null,
       readOnly: false,
       model: null,
       mcpServers: ["linear"],
@@ -999,4 +1001,115 @@ test("shows an automation's webhook URL on the ingress Worker and replaces it", 
   await expect
     .poll(() => page.evaluate(() => document.body.dataset.copied))
     .toBe("https://dolly-ingress.example.workers.dev/hooks/automations/a1?secret=second-secret");
+});
+
+test("sets up pull request reviews from the recipe, as the only automation that runs on them", async ({
+  page,
+}) => {
+  const now = Date.now();
+  let automations: Automation[] = [];
+  const created: (typeof Body.Type)[] = [];
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+
+    if (path === "/api/auth") return route.fulfill({ json: auth });
+
+    if (path === "/api/connections") return route.fulfill({ json: { mcpServers: [] } });
+
+    if (path === "/api/automations" && method === "GET")
+      return route.fulfill({ json: { automations } });
+
+    if (path === "/api/automations" && method === "POST") {
+      const body = Schema.decodeUnknownSync(Body)(route.request().postDataJSON());
+
+      created.push(body);
+
+      const automation: Automation = {
+        id: "review",
+        name: body.name ?? "",
+        prompt: body.prompt ?? "",
+        event: "pull_request",
+        enabled: body.enabled ?? true,
+        readOnly: true,
+        ...(body.model && { model: body.model }),
+        mcpServers: [],
+        createdAt: now,
+        updatedAt: now,
+        runs: [
+          {
+            trigger: "pull_request",
+            at: now - 60_000,
+            status: "running",
+            sessionId: "43",
+            summary: "octocat/project#8 at aaaaaaa",
+          },
+        ],
+      };
+
+      automations = [automation];
+
+      return route.fulfill({ status: 201, json: automation });
+    }
+
+    return route.fulfill({ json: { state: "connected" } });
+  });
+
+  await page.goto("/settings/automations", { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "New automation" }).click();
+  await page.getByRole("button", { name: "Review pull requests" }).click();
+
+  // The recipe runs on pull requests: no schedule, webhook, repository or MCP servers to pick.
+  await expect(page.getByLabel("When a pull request is opened or updated")).toHaveJSProperty(
+    "checked",
+    true,
+  );
+  await expect(page.getByLabel("Name")).toHaveValue("Review pull requests");
+  await expect(page.getByLabel("Prompt")).toHaveValue(/codebase-aware review of a pull request/);
+  await expect(page.getByLabel("Cron expression")).toHaveCount(0);
+  await expect(page.getByText("Also run when its webhook URL is called")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Repository" })).toHaveCount(0);
+  await expect(page.getByText("MCP servers runs may use")).toHaveCount(0);
+  await expect(page.getByText(/The prompt is what the reviewer looks for/)).toBeVisible();
+
+  await page.getByLabel("Prompt").fill("Flag missing tests.");
+  await page.getByRole("button", { name: "Create automation" }).click();
+
+  await expect(page.getByText("When a pull request is opened or updated")).toBeVisible();
+  expect(created).toEqual([
+    {
+      name: "Review pull requests",
+      prompt: "Flag missing tests.",
+      enabled: true,
+      event: "pull_request",
+      readOnly: true,
+      model: null,
+      mcpServers: [],
+      webhook: false,
+      schedule: null,
+      timeZone: null,
+      runAt: null,
+      workspace: null,
+    },
+  ]);
+
+  // Its runs are its reviews; there is nothing to run by hand.
+  await expect(page.getByRole("button", { name: "Run now" })).toHaveCount(0);
+  await page.getByText("Recent runs (1)").click();
+  await expect(page.getByText("for a pull request")).toBeVisible();
+  await expect(page.getByText("octocat/project#8 at aaaaaaa")).toBeVisible();
+
+  // Only one automation reviews pull requests: a new one can't take the trigger or the recipe.
+  await page.getByRole("button", { name: "New automation" }).click();
+  await expect(page.getByLabel("When a pull request is opened or updated")).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Review pull requests", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByText(
+      '"Review pull requests" already reviews pull requests; only one automation can.',
+    ),
+  ).toBeVisible();
 });

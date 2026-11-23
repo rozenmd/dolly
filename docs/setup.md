@@ -147,17 +147,23 @@ To use Claude instead, see [step 7](#7-optional-use-claude-instead-of-chatgpt).
 
 ### Optional: review new pull requests
 
-1. Go to **Settings > GitHub**.
-2. Under **Who can run /dolly commands**, list the GitHub users whose pull requests Dolly reviews.
-3. Turn on **Review new pull requests**. Choose **Save**.
+Automatic reviews are an automation, after Open Session's `github-pr-review` recipe.
+
+1. Go to **Settings > GitHub**. Under **Who can run /dolly commands**, list the GitHub users whose pull requests Dolly reviews, then choose **Save**.
+2. Go to **Settings > Automations** and choose **New automation**.
+3. Pick the **Review pull requests** recipe. Its prompt is Open Session's review instructions: edit it to say what reviews should look for in your codebase, and pick the model reviews run on. Choose **Create automation**.
 
 When one of those users or a Dolly session opens a pull request in an enrolled repository, marks a draft ready, or pushes to it, Dolly reviews it with inline comments. Pull requests opened by other bots are skipped. It skips drafts and pull requests from forks. Comment `/dolly` on the pull request to follow up in the same session. Each review uses your model subscription, and every push gets its own review.
 
+Each review is a run of the automation: its sessions are listed under **Recent runs**. The prompt only says what to look for; Dolly adds the pull request, the previous review's digest, how to publish the review and the verdict the loop reads, so an edit can't break the loop. There is at most one pull request automation, and it can't have a schedule, a repository, MCP servers or a webhook URL, or be run by hand.
+
 Reviews follow Open Session's reviewer. Each push is reviewed in a fresh read-only session and checkout of exactly that commit, with the PR's description and conversation for context. A re-review also gets a digest of the previous one: its verdict, which of its comments were addressed, are still open or got pushback, and what changed since. Reviews of one pull request run one at a time, and a review whose head moves on before it finishes is never posted.
 
-If a Dolly session opened the pull request, the review loop is on. When the review finds a P0 or P1 problem, or finds problems and rates the change below 4/5, the open review feedback goes back to the session that opened the PR. That session fixes it and pushes, and the push is reviewed again. The loop stops when a review is satisfied or after 6 fix rounds; at the cap, Dolly comments on the PR, the session writes a short wrap-up, and the PR is left to you. A review that passes with non-blocking findings sends the session one notice for that commit. Findings only go back to sessions started in the web app that aren't archived, and only when the PR's branch is the session's own working branch. The session gets open feedback from trusted authors only (Dolly, the users listed above, and installed GitHub Apps), marked as evidence to check rather than instructions; other people's comments are never handed over. To stop the loop, turn reviews off: queued reviews are skipped and finished ones aren't handed back.
+If a Dolly session opened the pull request, the review loop is on. When the review finds a P0 or P1 problem, or finds problems and rates the change below 4/5, the open review feedback goes back to the session that opened the PR. That session fixes it and pushes, and the push is reviewed again. The loop stops when a review is satisfied or after 6 fix rounds; at the cap, Dolly comments on the PR, the session writes a short wrap-up, and the PR is left to you. A review that passes with non-blocking findings sends the session one notice for that commit. Findings only go back to sessions started in the web app that aren't archived, and only when the PR's branch is the session's own working branch. The session gets open feedback from trusted authors only (Dolly, the users listed above, and installed GitHub Apps), marked as evidence to check rather than instructions; other people's comments are never handed over. To stop the loop, pause the automation: queued reviews are skipped and finished ones aren't handed back.
 
-If **Save** reports that pull request events are missing, open the GitHub App settings, subscribe to **Pull request** events, and approve the change on each installation.
+If creating or resuming the automation reports that pull request events are missing, open the GitHub App settings, subscribe to **Pull request** events, and approve the change on each installation.
+
+If you had **Review new pull requests** turned on in Settings > GitHub before reviews became an automation, Dolly created the **Review pull requests** automation for you, on the review model you had chosen under Models.
 
 ## 6. Optional: connect Slack
 
