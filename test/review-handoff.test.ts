@@ -1415,20 +1415,21 @@ it("pausing the review automation skips a review that is still queued", async ()
 }, 60_000);
 
 it("a review automation made to replace a deleted one doesn't run reviews queued for the old one", async () => {
-  github.number = 16;
+  // A pull request no other test reviews: Pi's review receipts survive reset().
+  github.number = 24;
   await opener();
 
   const release = holdReviews();
   verdicts.push("Fine.\nVERDICT: blocking=0 findings=0 confidence=5");
-  expect(await pullRequestHook("opened", 16, "a".repeat(40))).toBe(202);
+  expect(await pullRequestHook("opened", 24, "a".repeat(40))).toBe(202);
   await expect
-    .poll(async () => (await reviewSandboxes(16, ["a".repeat(40)]))[0]?.pin, { timeout: 15_000 })
+    .poll(async () => (await reviewSandboxes(24, ["a".repeat(40)]))[0]?.pin, { timeout: 15_000 })
     .toBe("a".repeat(40));
 
   // A push queues the next review, admitted for the current automation.
   const pushed = "b".repeat(40);
-  expect(await pullRequestHook("synchronize", 16, pushed)).toBe(202);
-  github.heads["16"] = pushed;
+  expect(await pullRequestHook("synchronize", 24, pushed)).toBe(202);
+  github.heads["24"] = pushed;
 
   // Replaced while that review waits: the new one's prompt and run history aren't the queued
   // review's, so it is skipped rather than run on the new prompt.
@@ -1450,7 +1451,9 @@ it("a review automation made to replace a deleted one doesn't run reviews queued
   expect(replacement.status).toBe(201);
   release();
 
-  await expect.poll(() => reviewsSettled(16), { timeout: 15_000 }).toBe(true);
+  await expect.poll(() => reviewsSettled(24), { timeout: 15_000 }).toBe(true);
+  // Only the first review reached the model; the queued one never started.
+  expect(reviewPrompts).toHaveLength(1);
   expect(reviewPrompts.join("\n")).not.toContain("Replacement review instructions.");
-  expect((await reviewSandboxes(16, [pushed]))[0]?.pin).toBeUndefined();
+  expect((await reviewSandboxes(24, [pushed]))[0]?.pin).toBeUndefined();
 }, 60_000);

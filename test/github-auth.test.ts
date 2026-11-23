@@ -309,6 +309,15 @@ describe("GitHub sign-in", () => {
     ).toMatchObject({
       ingress: "https://new-ingress.example/hooks/github",
       settingsUrl: "https://github.com/settings/apps/dolly-test",
+      // GitHub now signs deliveries with the App's secret, so dolly accepts them: no /dolly
+      // commands yet, but pull requests Dolly sessions open can be reviewed.
+      senders: [],
+    });
+    await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+      expect(await state.storage.get("github:webhook")).toEqual({
+        secret: app.webhook_secret,
+        senders: [],
+      });
     });
   });
 });

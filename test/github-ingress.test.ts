@@ -1020,6 +1020,20 @@ it("keeps one pull request automation, and makes the old Settings > GitHub switc
 
   const error = async (response: Response) => (await response.json<{ error: string }>()).error;
 
+  // Nor before the webhook is configured: every delivery would be refused.
+  events = ["issue_comment", "pull_request"];
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.delete("github:webhook");
+  });
+
+  const unconfigured = await automationApi("", "POST", review);
+  expect(unconfigured.status).toBe(400);
+  expect(await error(unconfigured)).toContain("Set the ingress URL");
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("github:webhook", profile);
+  });
+  events = ["issue_comment"];
+
   // Reviews can't be turned on while GitHub doesn't send this dolly pull request events.
   const refused = await automationApi("", "POST", review);
   expect(refused.status).toBe(400);

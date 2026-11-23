@@ -1214,6 +1214,14 @@ function makeGitHub(
         );
         yield* attempt("github.ingress.save", () => storage.put("github:ingress", hook.value));
 
+        // GitHub now signs deliveries with this secret; without a profile dolly would refuse them
+        // all, so pull requests Dolly sessions open couldn't be reviewed until the sender list was
+        // saved. An empty list allows no /dolly commands.
+        if (!profile)
+          yield* attempt("github.webhook.save", () =>
+            storage.put("github:webhook", { secret, senders: [] }),
+          );
+
         return { ingress: hook.value };
       }),
     ),
@@ -2240,13 +2248,17 @@ function makeGitHub(
 
   /**
    * Why pull requests can't reach the review automation, or undefined when they can: the App
-   * must be connected and subscribed to Pull request events.
+   * must be connected, its webhook configured, and subscribed to Pull request events.
    */
   const pullRequestEventsProblem = Effect.gen(function* () {
     const raw = yield* attempt("github.read", () => storage.get("github:connected"));
 
     if (raw === undefined) return "Connect a GitHub App in Settings > GitHub first";
     const connected = yield* decode(Connected)(raw);
+
+    // Without a webhook profile every delivery is refused (receiveWebhook), so reviews never start.
+    if ((yield* attempt("github.webhook.read", () => storage.get("github:webhook"))) === undefined)
+      return "Set the ingress URL in Settings > GitHub first, so GitHub's webhook can reach dolly";
 
     const app = yield* api("/app", yield* jwt(connected.app)).pipe(
       Effect.flatMap(decode(Schema.Struct({ events: Schema.Array(Schema.String) }))),
