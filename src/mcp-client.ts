@@ -17,6 +17,8 @@
 import {
   Client,
   type PriorDiscovery,
+  ProtocolError,
+  ProtocolErrorCode,
   SdkError,
   SdkErrorCode,
   SdkHttpError,
@@ -180,6 +182,10 @@ function newClient() {
     {
       capabilities: {},
       versionNegotiation: { mode: "auto", probe: { timeoutMs: PROBE_TIMEOUT_MS } },
+      // A modern server that answers `input_required` gets an error, never a continuation the
+      // SDK sends on its own: every tools/call must pass Dolly's Disconnect and program checks
+      // (src/mcp.ts) right before it goes out, and Dolly has no input to give anyway.
+      inputRequired: { autoFulfill: false },
     },
   );
 }
@@ -221,6 +227,27 @@ async function connect(url: string, headers: Record<string, string>, prior?: Pri
   return { client, transport, state };
 }
 
+const RejectedEra = Schema.fromJsonString(
+  Schema.Struct({
+    error: Schema.Struct({ code: Schema.Literal(ProtocolErrorCode.UnsupportedProtocolVersion) }),
+  }),
+);
+
+/**
+ * Whether the server refused the session's protocol revision (-32022): as a JSON-RPC error the
+ * SDK matched to the request, or in the body of the HTTP 400 when it couldn't (no request id).
+ */
+function rejectsEra(cause: unknown): cause is Error {
+  if (cause instanceof ProtocolError)
+    return cause.code === ProtocolErrorCode.UnsupportedProtocolVersion;
+
+  return (
+    cause instanceof SdkHttpError &&
+    cause.status === 400 &&
+    Option.isSome(Schema.decodeUnknownOption(RejectedEra)(cause.data.text))
+  );
+}
+
 /** Whether a failed auto probe should be retried with the plain 2025 handshake. */
 function probeTimedOut(cause: unknown): cause is SdkError {
   return cause instanceof SdkError && cause.code === SdkErrorCode.RequestTimeout;
@@ -228,12 +255,16 @@ function probeTimedOut(cause: unknown): cause is SdkError {
 
 /**
  * Open a session with the server at `url`. `prior` is an earlier session's verdict: it skips
- * the probe, and is dropped (one fresh negotiation) if the server no longer accepts it.
+ * the probe, and is dropped (one fresh negotiation) if the server no longer accepts it. The SDK
+ * adopts a modern `prior` without asking the server, so a server rolled back to 2025 only says so
+ * on a later request (-32022 UnsupportedProtocolVersion): `forget` is then called, so the caller
+ * stops handing out the stale verdict and the next session negotiates afresh.
  */
 export async function openMcpSession(
   url: string,
   headers: Record<string, string>,
   prior?: PriorDiscovery,
+  forget?: () => void,
 ): Promise<McpSession> {
   let opened: Awaited<ReturnType<typeof connect>>;
 
@@ -249,7 +280,13 @@ export async function openMcpSession(
   }
 
   const { client, transport, state } = opened;
-  const failure = (cause: unknown) => (state.overflowed ? new Error(TOO_LARGE) : explain(cause));
+
+  const failure = (cause: unknown) => {
+    if (rejectsEra(cause)) forget?.();
+
+    return state.overflowed ? new Error(TOO_LARGE) : explain(cause);
+  };
+
   const discover = client.getDiscoverResult();
   const era = client.getProtocolEra() === "modern" ? "modern" : "legacy";
 

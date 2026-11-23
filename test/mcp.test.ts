@@ -3,7 +3,12 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { createMcpHandler, fromJsonSchema, McpServer } from "@modelcontextprotocol/server";
+import {
+  createMcpHandler,
+  fromJsonSchema,
+  inputRequired,
+  McpServer,
+} from "@modelcontextprotocol/server";
 import { headers, signIn } from "./session";
 import { Live, Snapshot } from "../src/transcript";
 import { McpConnections, type McpToolInput } from "../src/mcp";
@@ -1394,6 +1399,11 @@ function modernServer() {
         }),
       );
 
+      // Always asks to be called again with its state, as a multi-round-trip tool does.
+      server.registerTool("deploy", { description: "Deploy" }, () =>
+        inputRequired({ requestState: "awaiting-confirmation" }),
+      );
+
       return server;
     },
     { legacy: "reject" },
@@ -1437,7 +1447,10 @@ it("speaks the 2026-07-28 protocol to a modern server through the official SDK",
   );
 
   expect(listed.isError).not.toBe(true);
-  expect(JSON.parse(resultText(listed))).toEqual(["tools.tracker.create_issue"]);
+  expect(JSON.parse(resultText(listed))).toEqual([
+    "tools.tracker.create_issue",
+    "tools.tracker.deploy",
+  ]);
   expect(created.isError).not.toBe(true);
   expect(resultText(created)).toBe("Created Flaky test for infra");
 
@@ -1451,6 +1464,92 @@ it("speaks the 2026-07-28 protocol to a modern server through the official SDK",
   ]);
   expect(server.requests.find((request) => request.method === "tools/call")?.team).toBe("infra");
 });
+
+it("never lets the SDK send a tool call Dolly didn't, such as an input_required continuation", async () => {
+  const server = modernServer();
+
+  network({ "POST https://modern.example/mcp": server.fetch });
+  await call("/connections/mcp", "POST", { name: "tracker", url: "https://modern.example/mcp" });
+
+  const result = await runProgram("await tools.tracker.deploy({})");
+
+  // The continuation would be a second tools/call, sent past Dolly's Disconnect check.
+  expect(result.isError).toBe(true);
+  expect(server.requests.filter((request) => request.method === "tools/call")).toHaveLength(1);
+});
+
+// The refusal names the request it answers, or (like some servers) gives no id at all.
+it.each([true, false])(
+  "negotiates again once a server remembered as modern has been rolled back to 2025 (refusal names its request: %s)",
+  async (namesRequest) => {
+    const modern = modernServer();
+
+    const legacyCalls: { method: string; authorization: string | null; session: string | null }[] =
+      [];
+
+    const legacy = mcpEndpoint(legacyCalls);
+
+    let rolledBack = false;
+
+    network({
+      "POST https://modern.example/mcp": async (url, init, request) => {
+        if (!rolledBack) return modern.fetch(url, init, request);
+
+        // What a 2025 server answers a request made in the 2026-07-28 era.
+        if (request.headers.get("mcp-protocol-version") === "2026-07-28") {
+          const { id } = Schema.decodeUnknownSync(Schema.fromJsonString(RpcRequest))(
+            await request.text(),
+          );
+
+          return Response.json(
+            {
+              jsonrpc: "2.0",
+              id: namesRequest ? id : null,
+              error: {
+                code: -32022,
+                message: "Unsupported protocol version",
+                data: { supported: ["2025-06-18"], requested: "2026-07-28" },
+              },
+            },
+            { status: 400 },
+          );
+        }
+
+        return legacy(url, init, request);
+      },
+      "DELETE https://modern.example/mcp": () => new Response(null, { status: 204 }),
+    });
+    await call("/connections/mcp", "POST", { name: "tracker", url: "https://modern.example/mcp" });
+
+    const [before, stale, renegotiated] = await runInDurableObject(
+      env.AGENT.getByName("owner"),
+      async (_, state) => {
+        const connections = new McpConnections(state.storage);
+
+        const create =
+          'await callTool("tracker", "create_issue", { title: "Flaky test", team: "infra" })';
+
+        const first = await connections.execute(create);
+
+        rolledBack = true;
+
+        return [first, await connections.execute(create), await connections.execute(create)];
+      },
+    );
+
+    expect(resultText(before)).toBe("Created Flaky test for infra");
+    // The remembered verdict fails once, and is then dropped: the next session negotiates 2025.
+    expect(stale.isError).toBe(true);
+    expect(renegotiated.isError).not.toBe(true);
+    expect(resultText(renegotiated)).toContain("via create_issue");
+    // The probe was refused as 2026-07-28 too, so the 2025 handshake follows it.
+    expect(legacyCalls.map((entry) => entry.method)).toEqual([
+      "initialize",
+      "notifications/initialized",
+      "tools/call",
+    ]);
+  },
+);
 
 it("sends nothing more to a server disconnected while a program runs", async () => {
   const first = gate();

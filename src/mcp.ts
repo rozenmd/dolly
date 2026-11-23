@@ -921,7 +921,9 @@ export class McpConnections {
     const key = `${entry.id}:${epochOf(entry)}:${entry.url}`;
 
     try {
-      const session: McpSession = await openMcpSession(entry.url, headers, this.eras.get(key));
+      const session: McpSession = await openMcpSession(entry.url, headers, this.eras.get(key), () =>
+        this.eras.delete(key),
+      );
 
       this.eras.set(key, session.prior);
 
