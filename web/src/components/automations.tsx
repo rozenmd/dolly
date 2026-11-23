@@ -125,11 +125,11 @@ export function AutomationsSettings() {
   const [now, setNow] = useState(Date.now);
   const [busy, setBusy] = useState("");
   /**
-   * The automation whose webhook URL is being replaced. Held here, not in the form, so that
-   * closing and reopening the form mid-rotation can neither start a second rotation nor miss
-   * the new URL.
+   * The automations whose webhook URL is being replaced, each until its own request settles.
+   * Held here, not in the form, so that closing and reopening the form mid-rotation can neither
+   * start a second rotation nor miss the new URL, whichever other automation rotates meanwhile.
    */
-  const [rotating, setRotating] = useState("");
+  const [rotating, setRotating] = useState<ReadonlySet<string>>(() => new Set());
   const origin = useIngressOrigin();
   /** The latest load: an earlier one that answers later holds older state, so it is dropped. */
   const loads = useRef(0);
@@ -161,7 +161,7 @@ export function AutomationsSettings() {
   }, [load]);
 
   async function rotate(id: string) {
-    setRotating(id);
+    setRotating((current) => new Set(current).add(id));
     setError("");
 
     try {
@@ -178,7 +178,13 @@ export function AutomationsSettings() {
     } catch (cause) {
       setError(message(cause, "Could not replace the URL."));
     } finally {
-      setRotating("");
+      setRotating((current) => {
+        const next = new Set(current);
+
+        next.delete(id);
+
+        return next;
+      });
     }
   }
 
@@ -246,7 +252,7 @@ export function AutomationsSettings() {
               : (automations?.find((automation) => automation.id === editing.id) ?? editing)
                   .webhookPath
           }
-          rotating={editing !== "new" && rotating === editing.id}
+          rotating={editing !== "new" && rotating.has(editing.id)}
           onRotate={() => editing !== "new" && void rotate(editing.id)}
           onClose={() => setEditing(null)}
           onSaved={() => {

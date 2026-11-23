@@ -853,6 +853,24 @@ test("shows an automation's webhook URL on the ingress Worker and replaces it", 
     runs: [{ trigger: "webhook", at: now - 60_000, status: "succeeded", sessionId: "7" }],
   });
 
+  // Another automation, whose rotations answer at once.
+  let deploySecret = "deploy-first";
+
+  const deploy = () => ({
+    id: "a2",
+    name: "Deploy",
+    prompt: "Deploy the build",
+    schedule: "0 9 * * *",
+    timeZone: "UTC",
+    enabled: true,
+    readOnly: false,
+    mcpServers: [],
+    createdAt: now,
+    updatedAt: now,
+    webhookPath: `/hooks/automations/a2?secret=${deploySecret}`,
+    runs: [],
+  });
+
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -877,7 +895,13 @@ test("shows an automation's webhook URL on the ingress Worker and replaces it", 
 
       if (held) await held;
 
-      return route.fulfill({ json: { automations: [listed] } });
+      return route.fulfill({ json: { automations: [listed, deploy()] } });
+    }
+
+    if (path === "/api/automations/a2" && method === "PUT") {
+      deploySecret = "deploy-second";
+
+      return route.fulfill({ json: deploy() });
     }
 
     if (path === "/api/automations/a1" && method === "PUT") {
@@ -905,7 +929,7 @@ test("shows an automation's webhook URL on the ingress Worker and replaces it", 
 
   await page.goto("/settings/automations", { waitUntil: "networkidle" });
   await expect(page.getByText("When its webhook is called")).toBeVisible();
-  await expect(page.getByText("Webhook", { exact: true })).toBeVisible();
+  await expect(page.getByText("Webhook", { exact: true }).first()).toBeVisible();
   await page.getByText("Recent runs (1)").click();
   await expect(page.getByText(/by webhook/)).toBeVisible();
 
@@ -921,6 +945,19 @@ test("shows an automation's webhook URL on the ingress Worker and replaces it", 
   await expect(page.getByRole("button", { name: "Replacing…" })).toBeDisabled();
 
   // Closed and reopened mid-rotation: still one rotation, and the new form waits for it.
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Manage Triage" }).click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  await expect(page.getByRole("button", { name: "Replacing…" })).toBeDisabled();
+
+  // Another automation's rotation, started and finished meanwhile, doesn't unlock this one.
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Manage Deploy" }).click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  await page.getByRole("button", { name: "New URL" }).click();
+  await expect(page.getByLabel("Webhook URL", { exact: true })).toHaveValue(
+    "https://dolly-ingress.example.workers.dev/hooks/automations/a2?secret=deploy-second",
+  );
   await page.getByRole("button", { name: "Cancel" }).click();
   await page.getByRole("button", { name: "Manage Triage" }).click();
   await page.getByRole("menuitem", { name: "Edit" }).click();
