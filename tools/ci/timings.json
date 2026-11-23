@@ -32,5 +32,5 @@
   "test/container/cache-yarn.test.ts": 14985,
   "test/container/cache-bun.test.ts": 19938,
   "test/container/cache-pnpm.test.ts": 5312,
-  "test/automations.test.ts": 4500
+  "test/automations.test.ts": 5500
 }

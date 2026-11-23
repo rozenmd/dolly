@@ -3404,3 +3404,33 @@ label.connection-row {
   border-color: var(--text);
   color: var(--text);
 }
+.automation-webhook {
+  display: grid;
+  gap: 6px;
+  margin: 2px 0 4px 24px;
+}
+.automation-webhook-url {
+  display: flex;
+  gap: 6px;
+}
+.automation-webhook-url .input {
+  flex: 1;
+  min-width: 0;
+}
+.automation-webhook-url .secondary-button {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 6px;
+}
+@media (max-width: 760px) {
+  .automation-webhook {
+    margin-left: 0;
+  }
+  .automation-webhook-url {
+    flex-wrap: wrap;
+  }
+  .automation-webhook-url .input {
+    flex-basis: 100%;
+  }
+}

@@ -53,6 +53,7 @@ const Body = Schema.Struct({
   readOnly: Schema.optional(Schema.Boolean),
   model: Schema.optional(Schema.NullOr(Schema.String)),
   mcpServers: Schema.optional(Schema.Array(Schema.String)),
+  webhook: Schema.optional(Schema.Union([Schema.Boolean, Schema.Literal("rotate")])),
   workspace: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -280,6 +281,7 @@ test("creates, runs, pauses and deletes an automation, and marks its sessions in
       readOnly: false,
       model: null,
       mcpServers: ["linear"],
+      webhook: false,
       schedule: "30 2 * * *",
       timeZone: "UTC",
       runAt: null,
@@ -824,4 +826,127 @@ test("keeps a recipe off while an MCP server it needs is missing or not connecte
   }
 
   expect(served).toBeGreaterThanOrEqual(2);
+});
+
+test("shows an automation's webhook URL on the ingress Worker and replaces it", async ({
+  page,
+}) => {
+  const now = Date.now();
+  let secret = "first-secret";
+  const updates: unknown[] = [];
+  let finishRotation: () => void = () => {};
+  const rotation = new Promise<void>((resolve) => (finishRotation = resolve));
+  // A list request to hold: it answers with what it read when it arrived, after the rotation.
+  let holdList: Promise<void> | undefined;
+  let finishList: () => void = () => {};
+
+  const automation = () => ({
+    id: "a1",
+    name: "Triage",
+    prompt: "Triage the incoming issue",
+    enabled: true,
+    readOnly: false,
+    mcpServers: [],
+    createdAt: now,
+    updatedAt: now,
+    webhookPath: secret ? `/hooks/automations/a1?secret=${secret}` : undefined,
+    runs: [{ trigger: "webhook", at: now - 60_000, status: "succeeded", sessionId: "7" }],
+  });
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+
+    if (path === "/api/auth")
+      return route.fulfill({
+        json: {
+          ...auth,
+          github: {
+            ...auth.github,
+            ingress: "https://dolly-ingress.example.workers.dev/hooks/github",
+          },
+        },
+      });
+
+    if (path === "/api/automations") {
+      const listed = automation();
+      const held = holdList;
+
+      holdList = undefined;
+
+      if (held) await held;
+
+      return route.fulfill({ json: { automations: [listed] } });
+    }
+
+    if (path === "/api/automations/a1" && method === "PUT") {
+      const body = Schema.decodeUnknownSync(Body)(route.request().postDataJSON());
+
+      updates.push(body);
+
+      // Held open, as a slow network would, to try a second click while it is in flight.
+      if (body.webhook === "rotate") await rotation;
+
+      if (body.webhook === false) secret = "";
+      else if (body.webhook === "rotate") secret = "second-secret";
+      else if (body.webhook && !secret) secret = "second-secret";
+
+      return route.fulfill({ json: automation() });
+    }
+
+    if (path === "/api/connections") return route.fulfill({ json: { mcpServers: [] } });
+
+    if (path === "/api/integrations/github/repositories")
+      return route.fulfill({ json: { repositories: [] } });
+
+    return route.fulfill({ json: [] });
+  });
+
+  await page.goto("/settings/automations", { waitUntil: "networkidle" });
+  await expect(page.getByText("When its webhook is called")).toBeVisible();
+  await expect(page.getByText("Webhook", { exact: true })).toBeVisible();
+  await page.getByText("Recent runs (1)").click();
+  await expect(page.getByText(/by webhook/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Manage Triage" }).click();
+  await expect(page.getByRole("menuitem", { name: "Copy webhook URL" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+
+  await expect(page.getByLabel("Webhook URL", { exact: true })).toHaveValue(
+    "https://dolly-ingress.example.workers.dev/hooks/automations/a1?secret=first-secret",
+  );
+  await page.getByRole("button", { name: "New URL" }).click();
+  // One rotation at a time: a second could show a URL the other already revoked.
+  await expect(page.getByRole("button", { name: "Replacing…" })).toBeDisabled();
+
+  // A poll starts mid-rotation, reads the old URL, and answers only after the rotation has.
+  holdList = new Promise<void>((resolve) => (finishList = resolve));
+  await page.getByRole("button", { name: "Refresh automations" }).click();
+  await expect.poll(() => holdList === undefined).toBe(true);
+  finishRotation();
+  await expect(page.getByLabel("Webhook URL", { exact: true })).toHaveValue(
+    "https://dolly-ingress.example.workers.dev/hooks/automations/a1?secret=second-secret",
+  );
+  finishList();
+  // One request: there is never a moment with no working URL.
+  expect(updates).toEqual([{ webhook: "rotate" }]);
+
+  // The row menu copies the new URL, not the revoked one the late poll carried.
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          document.body.dataset.copied = text;
+        },
+      },
+    });
+  });
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Manage Triage" }).click();
+  await page.getByRole("menuitem", { name: "Copy webhook URL" }).click();
+  await expect
+    .poll(() => page.evaluate(() => document.body.dataset.copied))
+    .toBe("https://dolly-ingress.example.workers.dev/hooks/automations/a1?secret=second-secret");
 });

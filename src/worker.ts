@@ -9,6 +9,7 @@ export {
   Sandbox,
   GitHubIngress,
   SlackIngress,
+  AutomationIngress,
   WorkspaceOutbound,
   PreviewOutbound,
 } from "./index";

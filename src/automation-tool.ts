@@ -11,7 +11,7 @@ import {
   AutomationPatch,
   MIN_INTERVAL_MINUTES,
   NewAutomation,
-  type Automations,
+  type AutomationView,
 } from "./automations";
 
 /**
@@ -112,11 +112,12 @@ export const AutomationToolInput = Schema.Struct({
   mcpServers: Schema.optional(Schema.Array(Schema.String)),
   /** For read: where in the prompt to continue from, in characters. */
   offset: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  webhook: Schema.optional(Schema.Boolean),
 });
 
 export type AutomationToolInput = typeof AutomationToolInput.Type;
 
-export const automationToolDescription = `Manage the owner's automations (Settings > Automations): saved prompts that each start a FRESH session, with no memory of this one, on a cron schedule, once at a set time, or when run by hand. Use them for recurring or unattended work ("every weekday at 9 list stale PRs", "nightly dependency check"); use schedule_prompt instead to continue THIS session later. Actions: list (each automation with the start of its prompt and its latest run); read {id, offset?} (the automation and its recent runs, with its prompt in pages: when promptNext is set, read again with offset: promptNext for the rest); create {name, prompt, and schedule (five-field cron, at most every ${MIN_INTERVAL_MINUTES} minutes) with timeZone (IANA, default UTC), or runAt (ISO 8601 with an offset), or neither for run-by-hand only; optional repository (owner/repo) and ref (a branch; give the repository with it, also on update), readOnly (needs a repository; runs only read and report), model, mcpServers (names from Settings > Connections that runs may use; none by default), enabled}; update {id, any create field; null clears schedule, timeZone, runAt, repository or model}; delete {id}; run {id} starts a run now and returns its session id. Write the prompt for a reader with no context: the repository, what to check, what to produce, and what not to do. Confirm the schedule and time zone with the user when they are ambiguous. Only in sessions the owner starts from the web app.`;
+export const automationToolDescription = `Manage the owner's automations (Settings > Automations): saved prompts that each start a FRESH session, with no memory of this one, on a cron schedule, once at a set time, or when run by hand. Use them for recurring or unattended work ("every weekday at 9 list stale PRs", "nightly dependency check"); use schedule_prompt instead to continue THIS session later. Actions: list (each automation with the start of its prompt and its latest run); read {id, offset?} (the automation and its recent runs, with its prompt in pages: when promptNext is set, read again with offset: promptNext for the rest); create {name, prompt, and schedule (five-field cron, at most every ${MIN_INTERVAL_MINUTES} minutes) with timeZone (IANA, default UTC), or runAt (ISO 8601 with an offset), or neither for run-by-hand only; optional repository (owner/repo) and ref (a branch; give the repository with it, also on update), readOnly (needs a repository; runs only read and report), model, mcpServers (names from Settings > Connections that runs may use; none by default), webhook (true gives it a secret URL that starts a run with the request body as the event, false revokes it; the owner copies the URL from Settings > Automations, you never see it), enabled}; update {id, any create field; null clears schedule, timeZone, runAt, repository or model}; delete {id}; run {id} starts a run now and returns its session id. Write the prompt for a reader with no context: the repository, what to check, what to produce, and what not to do. Confirm the schedule and time zone with the user when they are ambiguous. Only in sessions the owner starts from the web app.`;
 
 /** The tool's flat fields as an API body: the repository becomes a workspace. */
 function payload(input: AutomationToolInput) {
@@ -132,6 +133,7 @@ function payload(input: AutomationToolInput) {
     readOnly: input.readOnly,
     model: input.model,
     mcpServers: input.mcpServers,
+    webhook: input.webhook,
     workspace: repository ? { repository, ...(ref && { ref }) } : repository,
   };
 }
@@ -157,6 +159,11 @@ export const newAutomation = (input: AutomationToolInput) =>
 export const automationPatch = (input: AutomationToolInput) =>
   decode(AutomationPatch, input, "update needs at least one field to change");
 
+/** An automation as the model sees it: whether it has a webhook, never the secret URL. */
+export function forModel({ webhookPath, ...automation }: AutomationView) {
+  return { ...automation, webhook: webhookPath !== undefined };
+}
+
 /**
  * Pi keeps the first 50 KiB of a tool's text output. Everything the tool returns stays under
  * this many bytes of JSON, so no result is cut off midway.
@@ -178,7 +185,8 @@ const bytes = <T>(value: T) => new TextEncoder().encode(JSON.stringify(value)).l
 const cut = (text: string, chars: number) =>
   text.length > chars ? `${text.slice(0, chars)}…` : text;
 
-type Listed = Awaited<ReturnType<Automations["list"]>>[number];
+/** What the outputs below format: an automation as the model may see it. */
+type Listed = ReturnType<typeof forModel>;
 
 /** An automation as `list` shows it: what it is, when it runs, the start of its prompt. */
 function listedAutomation(automation: Listed) {
@@ -189,6 +197,7 @@ function listedAutomation(automation: Listed) {
     name: automation.name,
     enabled: automation.enabled,
     readOnly: automation.readOnly,
+    webhook: automation.webhook,
     ...(automation.schedule !== undefined && { schedule: automation.schedule }),
     ...(automation.timeZone !== undefined && { timeZone: automation.timeZone }),
     ...(automation.runAt !== undefined && { runAt: automation.runAt }),

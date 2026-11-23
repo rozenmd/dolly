@@ -72,12 +72,12 @@ test("the sandbox test adapter retains the typed config's container link and ima
   );
 });
 
-test("public ingress binds only the private GitHub and Slack entrypoints and has no credentials or Durable Object binding", async () => {
+test("public ingress binds only the private GitHub, Slack and automation entrypoints and has no credentials or Durable Object binding", async () => {
   const { default: ingress } = await import("../ingress/cloudflare.config.ts");
   assert.equal(ingress.worker.name, "dolly-ingress");
   assert.equal(ingress.worker.entrypoint, "../src/ingress.ts");
   assert.equal(ingress.worker.previewUrls, false);
-  assert.deepEqual(Object.keys(ingress.worker.env), ["INGRESS", "SLACK"]);
+  assert.deepEqual(Object.keys(ingress.worker.env), ["INGRESS", "SLACK", "AUTOMATIONS"]);
   assert.deepEqual(ingress.worker.env.INGRESS, {
     type: "worker",
     worker: config.worker.name,
@@ -90,4 +90,12 @@ test("public ingress binds only the private GitHub and Slack entrypoints and has
     exportName: "SlackIngress",
   });
   assert.equal(config.worker.exports.SlackIngress.type, "worker");
+  assert.deepEqual(ingress.worker.env.AUTOMATIONS, {
+    type: "worker",
+    worker: config.worker.name,
+    exportName: "AutomationIngress",
+  });
+  assert.equal(config.worker.exports.AutomationIngress.type, "worker");
+  // Automation webhook secrets travel in the query string, which logs must never keep.
+  assert.equal(ingress.worker.observability.redactQueryString, true);
 });

@@ -1,22 +1,25 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import {
   ArrowPathIcon,
+  ClipboardDocumentIcon,
   PauseIcon,
   PencilSquareIcon,
   PlayIcon,
   PlusIcon,
   TrashIcon,
 } from "@heroicons/react/24/outline";
-import { request, type ApiBody } from "../lib/api";
+import { AuthState, request, type ApiBody } from "../lib/api";
 import {
   SCHEDULE_PRESETS,
   dateTimeInput,
   deleteAutomation,
   describeSchedule,
+  ingressOrigin,
   listAutomations,
   localTimeZone,
+  rotateWebhook,
   runAutomation,
   saveAutomation,
   shortDateTime,
@@ -27,6 +30,7 @@ import { AUTOMATION_RECIPES } from "../lib/automation-recipes";
 import { ago } from "../lib/time";
 import { untilLabel } from "../lib/scheduled";
 import { RowMenu, displayName } from "./connections";
+import { guessIngress } from "./github";
 import { ModelPicker } from "./model-select";
 import { RepositoryPicker } from "./repositories";
 import { Input, Select, Textarea } from "./ui";
@@ -52,8 +56,38 @@ function whenLabel(automation: Automation) {
 
   if (automation.runAt !== undefined) return `Once, ${shortDateTime(automation.runAt)}`;
 
-  return "Only when run by hand";
+  return automation.webhookPath ? "When its webhook is called" : "Only when run by hand";
 }
+
+const TRIGGER: Record<AutomationRun["trigger"], string> = {
+  schedule: "scheduled",
+  manual: "by hand",
+  webhook: "by webhook",
+};
+
+/** Where this dolly's ingress Worker serves webhooks, for full webhook URLs. */
+function useIngressOrigin() {
+  const [origin, setOrigin] = useState(() => guessIngress(window.location.hostname));
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    request("/auth", undefined, controller.signal)
+      .then((text) => {
+        const { github } = Schema.decodeUnknownSync(Schema.fromJsonString(AuthState))(text);
+
+        if (github.connected) setOrigin((guess) => ingressOrigin(github.ingress, guess));
+      })
+      .catch(() => {});
+
+    return () => controller.abort();
+  }, []);
+
+  return origin;
+}
+
+/** A full webhook URL, or its path alone when the ingress Worker's address is unknown. */
+const webhookUrl = (origin: string, path: string) => `${origin}${path}`;
 
 function RunLine({ run, now }: { run: AutomationRun; now: number }) {
   const status = STATUS[run.status];
@@ -64,7 +98,7 @@ function RunLine({ run, now }: { run: AutomationRun; now: number }) {
       <span className={`status-dot ${status.dot}`} aria-hidden="true" />
       <span className="automation-run-status">{status.label}</span>
       <span className="muted">
-        {run.trigger === "manual" ? "by hand" : "scheduled"} · {ago(run.at, now)} ago
+        {TRIGGER[run.trigger]} · {ago(run.at, now)} ago
       </span>
       {detail && (
         <span className="automation-run-detail" title={detail}>
@@ -90,10 +124,18 @@ export function AutomationsSettings() {
   const [error, setError] = useState("");
   const [now, setNow] = useState(Date.now);
   const [busy, setBusy] = useState("");
+  const origin = useIngressOrigin();
+  /** The latest load: an earlier one that answers later holds older state, so it is dropped. */
+  const loads = useRef(0);
 
   const load = useCallback(async (signal?: AbortSignal) => {
+    const seq = ++loads.current;
+
     try {
-      setAutomations(await listAutomations(signal));
+      const listed = await listAutomations(signal);
+
+      if (seq !== loads.current) return;
+      setAutomations(listed);
       setNow(Date.now());
     } catch (cause) {
       if (!signal?.aborted) setError(message(cause, "Could not load automations."));
@@ -147,9 +189,10 @@ export function AutomationsSettings() {
         </div>
       </div>
       <p className="settings-description">
-        Prompts that run on their own: on a schedule, once at a set time, or when you press Run.
-        Each run is a fresh session with no memory of earlier runs; open it from here or the sidebar
-        to read, steer or stop it. Runs can open pull requests but never merge them.
+        Prompts that run on their own: on a schedule, once at a set time, when their webhook URL is
+        called, or when you press Run. Each run is a fresh session with no memory of earlier runs;
+        open it from here or the sidebar to read, steer or stop it. Runs can open pull requests but
+        never merge them.
       </p>
 
       {error && (
@@ -166,7 +209,19 @@ export function AutomationsSettings() {
           // A row saved since the form opened opens afresh: Edit again must show what is saved now.
           key={editing === "new" ? "new" : `${editing.id}:${editing.updatedAt}`}
           automation={editing === "new" ? undefined : editing}
+          origin={origin}
           onClose={() => setEditing(null)}
+          onRotated={(next) => {
+            // The row menu copies the URL too: it must never offer the one just revoked, even
+            // until the next poll, nor have a poll that started before the rotation restore it.
+            ++loads.current;
+            setAutomations(
+              (current) =>
+                current?.map((automation) => (automation.id === next.id ? next : automation)) ??
+                null,
+            );
+            void load();
+          }}
           onSaved={() => {
             setEditing(null);
             void load();
@@ -205,6 +260,9 @@ export function AutomationsSettings() {
                       {!automation.enabled && <span className="mcp-pill paused">Paused</span>}
                       {automation.readOnly && (
                         <span className="mcp-pill muted-pill">Read-only</span>
+                      )}
+                      {automation.webhookPath && (
+                        <span className="mcp-pill muted-pill">Webhook</span>
                       )}
                     </div>
                     <div className="mcp-blurb" title={automation.prompt}>
@@ -250,6 +308,18 @@ export function AutomationsSettings() {
                         icon: <PencilSquareIcon />,
                         onSelect: () => setEditing(automation),
                       },
+                      ...(automation.webhookPath
+                        ? [
+                            {
+                              label: "Copy webhook URL",
+                              icon: <ClipboardDocumentIcon />,
+                              onSelect: () =>
+                                void navigator.clipboard.writeText(
+                                  webhookUrl(origin, automation.webhookPath ?? ""),
+                                ),
+                            },
+                          ]
+                        : []),
                       {
                         label: automation.enabled ? "Pause" : "Resume",
                         icon: automation.enabled ? <PauseIcon /> : <PlayIcon />,
@@ -333,6 +403,8 @@ type FormValues = {
   readOnly: boolean;
   model: string;
   mcpServers: readonly string[];
+  /** Whether it has a webhook URL. */
+  webhook: boolean;
   enabled: boolean;
 };
 
@@ -358,6 +430,7 @@ function initialValues(automation: Automation | undefined): FormValues {
     readOnly: automation?.readOnly ?? false,
     model: automation?.model ?? "",
     mcpServers: automation?.mcpServers ?? [],
+    webhook: Boolean(automation?.webhookPath),
     enabled: automation?.enabled ?? true,
   };
 }
@@ -376,6 +449,7 @@ function bodyOf(values: FormValues): { error: string } | { body: ApiBody } {
       readOnly: Boolean(values.repository) && values.readOnly,
       model: values.model || null,
       mcpServers: values.readOnly ? [] : values.mcpServers,
+      webhook: values.webhook,
       schedule: values.when === "schedule" ? values.schedule.trim() : null,
       timeZone: values.when === "schedule" ? values.timeZone.trim() || null : null,
       runAt: at ? at.toISOString() : null,
@@ -416,6 +490,7 @@ function patchOf(body: ApiBody, initial: ApiBody): ApiBody {
       workspace: body.workspace,
     }),
     ...(differs(body.model, initial.model) && { model: body.model }),
+    ...(differs(body.webhook, initial.webhook) && { webhook: body.webhook }),
     ...(differs(body.schedule, initial.schedule) && { schedule: body.schedule }),
     ...(differs(body.timeZone, initial.timeZone) && { timeZone: body.timeZone }),
     ...(differs(body.runAt, initial.runAt) && { runAt: body.runAt }),
@@ -428,11 +503,16 @@ const McpNames = Schema.Struct({
 
 function AutomationForm({
   automation,
+  origin,
   onClose,
+  onRotated,
   onSaved,
 }: {
   automation?: Automation;
+  origin: string;
   onClose: () => void;
+  /** The automation as a rotation left it, with its new webhook URL. */
+  onRotated: (automation: Automation) => void;
   onSaved: () => void;
 }) {
   /** The automation as the form opened it: its values and the access an edit is made against. */
@@ -456,6 +536,11 @@ function AutomationForm({
   const [connected, setConnected] = useState<readonly string[]>([]);
   const [connectionsFailed, setConnectionsFailed] = useState(false);
   const [enabled, setEnabled] = useState(initial.enabled);
+  const [webhook, setWebhook] = useState(initial.webhook);
+  const [webhookPath, setWebhookPath] = useState(automation?.webhookPath);
+  const [copied, setCopied] = useState(false);
+  /** One rotation at a time: overlapping ones could show a URL a later one already revoked. */
+  const [rotating, setRotating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [picked, setPicked] = useState("");
@@ -510,6 +595,7 @@ function AutomationForm({
       readOnly,
       model,
       mcpServers,
+      webhook,
       enabled,
     });
 
@@ -643,7 +729,7 @@ function AutomationForm({
           [
             ["schedule", "On a schedule"],
             ["once", "Once"],
-            ["manual", "Only when I press Run"],
+            ["manual", "No schedule (run by hand)"],
           ] as const
         ).map(([value, label]) => (
           <label key={value} className="checkbox-row">
@@ -712,6 +798,76 @@ function AutomationForm({
             onChange={(event) => setRunAt(event.target.value)}
           />
         </>
+      )}
+
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={webhook}
+          onChange={(event) => setWebhook(event.target.checked)}
+        />
+        Also run when its webhook URL is called
+      </label>
+      {webhook && (
+        <div className="automation-webhook">
+          {webhookPath && automation ? (
+            <>
+              <div className="automation-webhook-url">
+                <Input
+                  aria-label="Webhook URL"
+                  className="mono"
+                  readOnly
+                  value={webhookUrl(origin, webhookPath)}
+                  onFocus={(event) => event.target.select()}
+                />
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() =>
+                    void navigator.clipboard
+                      .writeText(webhookUrl(origin, webhookPath))
+                      .then(() => setCopied(true))
+                  }
+                >
+                  <ClipboardDocumentIcon width={16} aria-hidden="true" />
+                  {copied ? "Copied" : "Copy"}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={rotating}
+                  onClick={() => {
+                    setRotating(true);
+                    void rotateWebhook(automation.id)
+                      .then(
+                        (next) => {
+                          setWebhookPath(next.webhookPath);
+                          setCopied(false);
+                          onRotated(next);
+                        },
+                        (cause: unknown) => setError(message(cause, "Could not replace the URL.")),
+                      )
+                      .finally(() => setRotating(false));
+                  }}
+                >
+                  {rotating ? "Replacing…" : "New URL"}
+                </button>
+              </div>
+              {!origin && (
+                <p className="field-help">
+                  Prefix it with your ingress Worker&apos;s address (Settings &gt; GitHub).
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="field-help">The URL appears here and in the row menu once you save.</p>
+          )}
+          <p className="field-help">
+            A POST starts a run with the request body (up to 64 KB) as the event, at most 3 at once.
+            Treat the URL like a password: anyone who has it can start runs. Send an Idempotency-Key
+            or X-GitHub-Delivery header so retries don&apos;t run twice.
+          </p>
+        </div>
       )}
 
       <label htmlFor="repository">Repository</label>
