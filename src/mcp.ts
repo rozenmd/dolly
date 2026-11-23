@@ -1297,7 +1297,7 @@ export class McpConnections {
     const servers = await this.allowed(allow);
 
     if (!Object.keys(servers).length)
-      return "No MCP servers are connected. The owner can add them in Settings > Connections.";
+      return "No MCP servers are connected. The owner can add them in Settings > Connections, or give you a URL to save with the connections tool.";
 
     const catalog = await Promise.all(
       Object.entries(servers).map(async ([name, entry]) => {

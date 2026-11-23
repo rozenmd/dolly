@@ -17,6 +17,7 @@ import {
   type ConversationId,
   type ConversationView,
   type Cursor,
+  type EntryId,
   type EntryRecord,
   type ToolRegistration,
   type Wake,
@@ -187,6 +188,15 @@ import {
   forModel,
   newAutomation,
 } from "./automation-tool";
+import {
+  CONNECTIONS_TOOL_NAME,
+  CONNECTIONS_TOOL_REFUSAL,
+  CONNECTIONS_TOOL_TURN_REFUSAL,
+  ConnectionsToolInput,
+  connectionsToolDescription,
+  chatUrlProblem,
+  nextStep,
+} from "./connections-tool";
 import {
   AddMcpServer,
   McpConnections,
@@ -854,6 +864,42 @@ export class Agent extends DurableObject<Env> {
       },
     } satisfies ToolRegistration;
 
+    // Settings > Connections from a session: saves servers; the owner signs in (connections-tool.ts).
+    const connectionsTool = {
+      name: CONNECTIONS_TOOL_NAME,
+      description: connectionsToolDescription,
+      parameters: toolParameters(ConnectionsToolInput),
+      replay: "unsafe",
+      executionMode: "sequential",
+      execute: async (input: ConnectionsToolInput, api) => {
+        const parsed = Schema.decodeUnknownSync(ConnectionsToolInput)(input);
+
+        if (!(await this.automationsAllowed(api.conversationId)))
+          throw new OperationError({
+            operation: "connections.refused",
+            message: CONNECTIONS_TOOL_REFUSAL,
+            details: null,
+          });
+
+        // The server it adds decides where the mcp tool sends data: only on the owner's word,
+        // and only a URL the owner typed in it (chatUrlProblem), not one a tool result supplied.
+        const typed = await this.ownerTurnText(api.conversationId);
+
+        if (!typed)
+          throw new OperationError({
+            operation: "connections.refused",
+            message: CONNECTIONS_TOOL_TURN_REFUSAL,
+            details: null,
+          });
+
+        return {
+          output: [
+            { type: "text", text: JSON.stringify(await this.connectionsAction(parsed, typed)) },
+          ],
+        };
+      },
+    } satisfies ToolRegistration;
+
     const tools = [
       shell,
       readFile,
@@ -867,6 +913,7 @@ export class Agent extends DurableObject<Env> {
       retitleTool,
       mcpTool,
       automationTool,
+      connectionsTool,
       {
         name: "preview",
         description:
@@ -1433,6 +1480,36 @@ export class Agent extends DurableObject<Env> {
             } while (cursor);
           }, BACKGROUND_CONTEXT)
           .then(() => this.ctx.storage.put("migration:web-fetch-tool", true)),
+      );
+
+    if (
+      !(yield* attempt("connections.migration.read", () =>
+        this.ctx.storage.get("migration:connections-tool"),
+      ))
+    )
+      yield* attempt("connections.tools.update", () =>
+        this.harness
+          .commit(async (tx) => {
+            let cursor: Cursor | undefined;
+
+            do {
+              const page = await tx.scanConversations({}, 100, cursor);
+
+              for (const conversation of page.items) {
+                const agent = await tx.doc(AgentDoc, conversation.id);
+
+                // Read-only sessions keep their allowlist, which has no write_file.
+                if (!Array.isArray(agent.tools) || !agent.tools.includes(writeFile.name)) continue;
+
+                for (const names of [agent.tools, agent.modelTools])
+                  if (Array.isArray(names) && !names.includes(connectionsTool.name))
+                    names.push(connectionsTool.name);
+              }
+
+              cursor = page.next;
+            } while (cursor);
+          }, BACKGROUND_CONTEXT)
+          .then(() => this.ctx.storage.put("migration:connections-tool", true)),
       );
 
     this.automations = new Automations({
@@ -3155,23 +3232,81 @@ export class Agent extends DurableObject<Env> {
    * inputs too; while one is unanswered, the turn isn't the owner's, even after the owner steers.
    */
   private async ownerTurn(id: ConversationId) {
+    return (await this.ownerTurnText(id)) !== undefined;
+  }
+
+  /**
+   * The text of the messages the model is answering in `id`, when every one is the owner's (see
+   * `ownerTurn`); undefined otherwise. Tool results inside the turn (a fetched page, say) are not
+   * in it, so a value found here is one the owner typed.
+   */
+  private async ownerTurnText(id: ConversationId) {
     const conversation = await this.harness.conversation(id, BACKGROUND_CONTEXT);
 
-    if (!conversation) return false;
+    if (!conversation) return undefined;
+    const texts = new Map<EntryId, string>();
 
-    const inputs = await unanswered((cursor) =>
-      conversation.entries({ order: "descending" }, 50, cursor, BACKGROUND_CONTEXT),
-    );
+    const inputs = await unanswered(async (cursor) => {
+      const page = await conversation.entries(
+        { order: "descending" },
+        50,
+        cursor,
+        BACKGROUND_CONTEXT,
+      );
 
-    if (!inputs?.length) return false;
+      for (const entry of page.items)
+        texts.set(
+          entry.id,
+          (entry.model ?? [])
+            .flatMap((message) =>
+              message.role !== "user"
+                ? []
+                : Predicate.isString(message.content)
+                  ? [message.content]
+                  : message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])),
+            )
+            .join("\n"),
+        );
 
-    return conversation.commit(async (tx) => {
+      return page;
+    });
+
+    if (!inputs?.length) return undefined;
+
+    const owned = await conversation.commit(async (tx) => {
       const { submissions } = await tx.doc(OwnerInputDoc, id);
       const records = await Promise.all(submissions.map((submission) => tx.submission(submission)));
       const owner = new Set(records.flatMap((record) => (record?.entry ? [record.entry] : [])));
 
       return inputs.every((entry) => owner.has(entry));
     }, BACKGROUND_CONTEXT);
+
+    return owned ? inputs.map((entry) => texts.get(entry) ?? "") : undefined;
+  }
+
+  /**
+   * The connections tool: lists servers, or saves one whose URL the owner typed this turn. It
+   * never removes one: that stays in Settings > Connections, behind its confirmation.
+   */
+  private async connectionsAction(input: ConnectionsToolInput, typed: readonly string[]) {
+    switch (input.action) {
+      case "list":
+        return { mcpServers: await this.mcp.connections(true) };
+      case "add": {
+        if (!input.name || !input.url) return { error: "add needs a name and an https url" };
+        const url = input.url.trim();
+        const refused = chatUrlProblem(url, typed);
+
+        if (refused) return { error: refused };
+        const name = input.name.trim();
+        const added = await this.mcp.add({ name, url });
+
+        if ("error" in added) return added;
+        const saved = (await this.mcp.connections(true)).find((item) => item.name === name);
+
+        return { ok: true, server: saved, next: nextStep(saved) };
+      }
+    }
   }
 
   private async automationAction(input: AutomationToolInput) {
