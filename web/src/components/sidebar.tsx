@@ -21,6 +21,8 @@ export type WorkspaceRow = {
   updatedAt: number;
   running: boolean;
   archived?: boolean;
+  /** When the workspace was pinned to the top of the sidebar; absent if it isn't. */
+  pinnedAt?: number;
   pullRequest?: SavedSession["pullRequest"];
   /** The automation whose run started this workspace. */
   automationRun?: string;
@@ -73,6 +75,88 @@ function BranchIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/** A pushpin, in the 24px outline style of the Heroicons beside it; `off` strikes it through. */
+export function PinIcon({ off = false, ...props }: SVGProps<SVGSVGElement> & { off?: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M8.25 3.75h7.5M9.75 3.75v5.5l-3 3.5v1.5h10.5v-1.5l-3-3.5v-5.5M12 14.25v6" />
+      {off && <path d="m3.75 3.75 16.5 16.5" />}
+    </svg>
+  );
+}
+
+function SidebarRow({
+  row,
+  active,
+  now,
+  onSelect,
+  onArchive,
+  onPin,
+}: {
+  row: WorkspaceRow;
+  active: boolean;
+  now: number;
+  onSelect: (id: string) => void;
+  onArchive: (id: string) => void;
+  onPin: (id: string) => void;
+}) {
+  const pinned = Boolean(row.pinnedAt);
+
+  return (
+    <div className="workspace-item">
+      <button
+        type="button"
+        className={`workspace-row ${active ? "active" : ""}`}
+        aria-current={active ? "page" : undefined}
+        onClick={() => onSelect(row.id)}
+      >
+        <RowStatus row={row} />
+        <RepoBadge repository={row.repository} />
+        <span className="workspace-title">{row.title}</span>
+        {row.automationRun && (
+          <span
+            className="workspace-automation"
+            role="img"
+            aria-label={`Started by automation ${row.automationRun}`}
+            title={`Started by automation ${row.automationRun}`}
+          >
+            <BoltIcon />
+          </span>
+        )}
+        <span className="workspace-time">{ago(row.updatedAt, now)}</span>
+      </button>
+      {!row.archived && (
+        <div className="workspace-actions">
+          <IconButton
+            label={`${pinned ? "Unpin" : "Pin"} workspace: ${row.title}`}
+            aria-pressed={pinned}
+            className="workspace-pin"
+            onClick={() => onPin(row.id)}
+          >
+            <PinIcon off={pinned} />
+          </IconButton>
+          <IconButton
+            label={`Archive workspace: ${row.title}`}
+            className="workspace-archive"
+            onClick={() => onArchive(row.id)}
+          >
+            <ArchiveBoxIcon />
+          </IconButton>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Sidebar({
   rows,
   selected,
@@ -81,6 +165,7 @@ export function Sidebar({
   feed,
   onSelect,
   onArchive,
+  onPin,
   onNew,
   onSettings,
   onClose,
@@ -93,6 +178,7 @@ export function Sidebar({
   feed: boolean;
   onSelect: (id: string) => void;
   onArchive: (id: string) => void;
+  onPin: (id: string) => void;
   onNew: () => void;
   onSettings: () => void;
   onClose: () => void;
@@ -108,11 +194,25 @@ export function Sidebar({
   const visible = archived
     ? lists.archived
     : showOlder || query.trim()
-      ? lists.active
+      ? lists.unpinned
       : lists.recent;
 
-  const filtered = visible.filter((row) =>
-    `${row.title} ${row.repository}`.toLowerCase().includes(query.trim().toLowerCase()),
+  const matches = (row: WorkspaceRow) =>
+    `${row.title} ${row.repository}`.toLowerCase().includes(query.trim().toLowerCase());
+
+  const filtered = visible.filter(matches);
+  const pinned = archived ? [] : lists.pinned.filter(matches);
+
+  const item = (row: WorkspaceRow) => (
+    <SidebarRow
+      key={row.id}
+      row={row}
+      active={selected === row.id && !feed}
+      now={now}
+      onSelect={onSelect}
+      onArchive={onArchive}
+      onPin={onPin}
+    />
   );
 
   return (
@@ -195,51 +295,24 @@ export function Sidebar({
             }}
           />
         )}
-        {rows.length > 0 && (
+        {pinned.length > 0 && (
+          <>
+            <p className="sidebar-group">
+              Pinned <span>{pinned.length}</span>
+            </p>
+            <nav className="workspace-list" aria-label="Pinned workspaces">
+              {pinned.map(item)}
+            </nav>
+          </>
+        )}
+        {rows.length > 0 && (archived || filtered.length > 0 || pinned.length === 0) && (
           <p className="sidebar-group">
             {archived ? "Archived" : "Recent"} <span>{filtered.length}</span>
           </p>
         )}
         <nav className="workspace-list" aria-label="Workspaces">
-          {filtered.map((row) => {
-            const active = selected === row.id && !feed;
-
-            return (
-              <div key={row.id} className="workspace-item">
-                <button
-                  type="button"
-                  className={`workspace-row ${active ? "active" : ""}`}
-                  aria-current={active ? "page" : undefined}
-                  onClick={() => onSelect(row.id)}
-                >
-                  <RowStatus row={row} />
-                  <RepoBadge repository={row.repository} />
-                  <span className="workspace-title">{row.title}</span>
-                  {row.automationRun && (
-                    <span
-                      className="workspace-automation"
-                      role="img"
-                      aria-label={`Started by automation ${row.automationRun}`}
-                      title={`Started by automation ${row.automationRun}`}
-                    >
-                      <BoltIcon />
-                    </span>
-                  )}
-                  <span className="workspace-time">{ago(row.updatedAt, now)}</span>
-                </button>
-                {!row.archived && (
-                  <IconButton
-                    label={`Archive workspace: ${row.title}`}
-                    className="workspace-archive"
-                    onClick={() => onArchive(row.id)}
-                  >
-                    <ArchiveBoxIcon />
-                  </IconButton>
-                )}
-              </div>
-            );
-          })}
-          {query && filtered.length === 0 && (
+          {filtered.map(item)}
+          {query && filtered.length === 0 && pinned.length === 0 && (
             <p className="sidebar-empty">No matching workspaces.</p>
           )}
           {connected && rows.length === 0 && <p className="sidebar-empty">No workspaces yet.</p>}

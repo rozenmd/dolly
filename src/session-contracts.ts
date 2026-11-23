@@ -15,6 +15,11 @@ export const SavedSession = Schema.Struct({
   updatedAt: Schema.Number,
   archived: Schema.optional(Schema.Boolean),
   /**
+   * When the owner pinned this session's workspace to the top of the sidebar; absent if not
+   * pinned. Pinned workspaces are listed in the order they were pinned.
+   */
+  pinnedAt: Schema.optional(Schema.Number),
+  /**
    * The workspace grouping the sessions about one piece of work. Spawned sessions belong to
    * their root's workspace; sessions from before workspaces were recorded are their own.
    */
@@ -71,6 +76,11 @@ export type SavedSession = typeof SavedSession.Type;
 
 /** Owner sidebar choices for one session; at least one must be given. */
 export const SessionUpdate = Schema.Union([
-  Schema.Struct({ archived: Schema.Boolean, kept: Schema.optional(Schema.Boolean) }),
-  Schema.Struct({ kept: Schema.Boolean }),
+  Schema.Struct({
+    archived: Schema.Boolean,
+    kept: Schema.optional(Schema.Boolean),
+    pinned: Schema.optional(Schema.Boolean),
+  }),
+  Schema.Struct({ kept: Schema.Boolean, pinned: Schema.optional(Schema.Boolean) }),
+  Schema.Struct({ pinned: Schema.Boolean }),
 ]);

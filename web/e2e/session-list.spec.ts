@@ -3,14 +3,17 @@ import { expect, test } from "./browser";
 test.beforeEach(async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
 
-  let sessions = Array.from({ length: 8 }, (_, index) => ({
-    id: `session-${index}`,
-    title: `Task ${index}`,
-    model: "gpt-6-sol",
-    repository: "",
-    updatedAt: index,
-    archived: false,
-  }));
+  let sessions: { id: string; archived: boolean; pinnedAt?: number }[] = Array.from(
+    { length: 8 },
+    (_, index) => ({
+      id: `session-${index}`,
+      title: `Task ${index}`,
+      model: "gpt-6-sol",
+      repository: "",
+      updatedAt: index,
+      archived: false,
+    }),
+  );
 
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -19,12 +22,19 @@ test.beforeEach(async ({ page }) => {
 
     if (path.startsWith("/api/sessions/") && route.request().method() === "PUT") {
       const id = path.split("/").at(-1);
-      const { archived } = route.request().postDataJSON();
-      sessions = sessions.map((session) =>
-        session.id === id ? { ...session, archived } : session,
-      );
+      const body = route.request().postDataJSON();
+      sessions = sessions.map((session) => {
+        if (session.id !== id) return session;
+        const next = { ...session, ...("archived" in body && { archived: body.archived }) };
 
-      return route.fulfill({ json: { archived } });
+        if (body.pinned === true) return { ...next, pinnedAt: Date.now() };
+
+        if (body.pinned === false) return { ...next, pinnedAt: undefined };
+
+        return next;
+      });
+
+      return route.fulfill({ json: body });
     }
 
     if (path === "/api/auth")
@@ -152,6 +162,11 @@ test("archives sidebar sessions on hover or keyboard focus without opening them"
   });
 
   await expect(selectedArchive).toHaveCSS("opacity", "1");
+  // Pin comes before archive in the row's actions.
+  await page.keyboard.press("Tab");
+  await expect(
+    selectedRow.getByRole("button", { name: "Pin workspace: Task 7", exact: true }),
+  ).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(selectedArchive).toBeFocused();
   await page.keyboard.press("Enter");
@@ -162,4 +177,49 @@ test("archives sidebar sessions on hover or keyboard focus without opening them"
   await page.getByRole("button", { name: "Archived workspaces (2)", exact: true }).click();
   await expect(workspaces).toContainText("Task 6");
   await expect(workspaces).toContainText("Task 7");
+});
+
+test("pins an older workspace above Recent and keeps it pinned across reloads", async ({
+  page,
+}) => {
+  const pinned = page.getByRole("navigation", { name: "Pinned workspaces", exact: true });
+  const workspaces = page.getByRole("navigation", { name: "Workspaces", exact: true });
+
+  await expect(page.getByRole("heading", { name: "Task 7", exact: true })).toBeVisible();
+  await expect(pinned).toHaveCount(0);
+  await page.getByRole("button", { name: "Show older (3)", exact: true }).click();
+
+  const row = workspaces.locator(".workspace-item").filter({ hasText: "Task 0" });
+  await row.hover();
+  await row.getByRole("button", { name: "Pin workspace: Task 0", exact: true }).click();
+
+  // An old pinned workspace stays in sight without Show older, and leaves Recent.
+  await expect(pinned.locator(".workspace-row")).toHaveCount(1);
+  await expect(pinned).toContainText("Task 0");
+  await expect(workspaces).not.toContainText("Task 0");
+  await page.getByRole("button", { name: "Hide older", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Show older (2)", exact: true })).toBeVisible();
+  await expect(pinned).toContainText("Task 0");
+
+  // The header pins the open workspace; Pinned lists workspaces in the order they were pinned.
+  await page.getByRole("button", { name: "Pin workspace", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Unpin workspace", exact: true })).toBeVisible();
+  await expect(pinned.locator(".workspace-title")).toHaveCount(2);
+  await expect(pinned.locator(".workspace-title").nth(0)).toHaveText("Task 0");
+  await expect(pinned.locator(".workspace-title").nth(1)).toHaveText("Task 7");
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Task 7", exact: true })).toBeVisible();
+  await expect(pinned.locator(".workspace-title")).toHaveCount(2);
+  await expect(pinned.locator(".workspace-title").nth(0)).toHaveText("Task 0");
+  await expect(pinned.locator(".workspace-title").nth(1)).toHaveText("Task 7");
+
+  const pinnedRow = pinned.locator(".workspace-item").filter({ hasText: "Task 0" });
+  await pinnedRow.hover();
+  await pinnedRow.getByRole("button", { name: "Unpin workspace: Task 0", exact: true }).click();
+  await expect(pinned.locator(".workspace-title")).toHaveCount(1);
+  await expect(pinned.locator(".workspace-title").nth(0)).toHaveText("Task 7");
+  await page.getByRole("button", { name: "Unpin workspace", exact: true }).click();
+  await expect(pinned).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Show older (3)", exact: true })).toBeVisible();
 });

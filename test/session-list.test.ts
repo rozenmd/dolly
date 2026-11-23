@@ -232,6 +232,44 @@ it("persists archive choices across restarts and rejects the retired browser imp
   ).toBe(400);
 });
 
+it("pins a workspace across restarts, keeping its pin time when pinned again", async () => {
+  await seed();
+
+  // `pinned` is a string only to prove the API rejects it.
+  const update = (body: { pinned?: boolean | string; archived?: boolean }) =>
+    SELF.fetch("https://worker/api/sessions/legacy-id", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+  expect((await list())[0].pinnedAt).toBeUndefined();
+
+  const pinned = await update({ pinned: true });
+  expect(pinned.status).toBe(200);
+  expect(await pinned.json()).toEqual({ pinned: true });
+  await abortAllDurableObjects();
+
+  const pinnedAt = (await list())[0].pinnedAt;
+  expect(pinnedAt).toBeGreaterThan(0);
+
+  // Pinning again, or archiving and restoring, leaves the workspace where it was in Pinned.
+  expect((await update({ pinned: true })).status).toBe(200);
+  expect((await update({ archived: true })).status).toBe(200);
+  expect((await update({ archived: false })).status).toBe(200);
+  await abortAllDurableObjects();
+
+  const [session] = await list();
+  expect(session.pinnedAt).toBe(pinnedAt);
+  expect(session.archived).toBe(false);
+
+  const unpinned = await update({ pinned: false });
+  expect(await unpinned.json()).toEqual({ pinned: false });
+  await abortAllDurableObjects();
+  expect((await list())[0].pinnedAt).toBeUndefined();
+  expect((await update({ pinned: "yes" })).status).toBe(400);
+});
+
 it("reports a pull request opened deep in the transcript and remembers it after restart", async () => {
   await seed();
 

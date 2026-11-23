@@ -257,6 +257,7 @@ export async function listSessions(
             ref: workspace?.config?.ref,
             updatedAt: Math.max(transcript?.updatedAt ?? 0, metadata?.createdAt ?? 0),
             archived: metadata?.archived ?? false,
+            ...(metadata?.pinnedAt && { pinnedAt: metadata.pinnedAt }),
             ...(parent && { parentId: aliases.get(parent) ?? String(parent) }),
             ...(parent && metadata?.kept && { kept: true }),
             ...(run && !parent && { automationRun: { id: run.automationId, name: run.name } }),

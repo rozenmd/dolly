@@ -529,6 +529,7 @@ export type ApiBody = {
   sessions?: readonly SavedSession[];
   archived?: boolean;
   kept?: boolean;
+  pinned?: boolean;
   content?: string;
   requestId?: string;
   /** When a scheduled message is sent, as ISO 8601. */

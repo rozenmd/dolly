@@ -8,7 +8,7 @@ import {
   InboxArrowDownIcon,
   PlusIcon,
 } from "@heroicons/react/24/outline";
-import { Sidebar } from "./components/sidebar";
+import { PinIcon, Sidebar } from "./components/sidebar";
 import { Composer, Conversation } from "./components/conversation";
 import { IconButton, Input, Modal, RepoBadge } from "./components/ui";
 import { ChatGPTLogin } from "./components/chatgpt-login";
@@ -121,6 +121,7 @@ export function WorkspaceApp() {
         repository: item.repository,
         updatedAt: item.updatedAt,
         archived: item.archived,
+        pinnedAt: item.pinnedAt,
         // The open session streams live state; others rely on the polled list.
         running: item.id === selected && snapshot ? running : Boolean(item.running),
         pullRequest: item.pullRequest,
@@ -142,6 +143,7 @@ export function WorkspaceApp() {
   );
 
   const tabs = workspace ? workspaceTabs(rows, workspace) : [];
+  const workspaceRow = sidebarRows.find((row) => row.id === workspace);
 
   const parent = session?.parentId
     ? sessions.find((item) => item.id === session.parentId)
@@ -545,6 +547,47 @@ export function WorkspaceApp() {
       selectAfterArchive(row.sessions.map((item) => item.id));
   }
 
+  /**
+   * Pins a workspace by its main session, or unpins it by every tab that holds a pin, so it
+   * leaves Pinned whichever session was pinned.
+   */
+  async function togglePinWorkspace(id: string) {
+    const row = sidebarRows.find((item) => item.id === id);
+
+    if (!row) return;
+    const pinned = !row.pinnedAt;
+
+    const changed = pinned
+      ? row.sessions.filter((item) => item.id === row.main)
+      : row.sessions.filter((item) => item.pinnedAt);
+
+    try {
+      await Promise.all(
+        changed.map((item) =>
+          request(`/sessions/${encodeURIComponent(item.id)}`, { pinned }, undefined, "PUT"),
+        ),
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not update the sidebar.");
+
+      return;
+    }
+
+    const ids = changed.map((item) => item.id);
+    const pinnedAt = Date.now();
+
+    updateSessions((current) =>
+      current.map((item) => {
+        if (!ids.includes(item.id)) return item;
+
+        if (pinned) return { ...item, pinnedAt: item.pinnedAt ?? pinnedAt };
+        const { pinnedAt: _unpinned, ...rest } = item;
+
+        return rest;
+      }),
+    );
+  }
+
   /** Keeping a spawned session makes it a tab of its workspace. */
   async function toggleKept(id: string) {
     const target = sessions.find((item) => item.id === id);
@@ -793,6 +836,7 @@ export function WorkspaceApp() {
         feed={feed}
         onSelect={openWorkspace}
         onArchive={(id) => void toggleArchiveWorkspace(id)}
+        onPin={(id) => void togglePinWorkspace(id)}
         onNew={() => newSession()}
         onSettings={() => {
           setMobileOpen(false);
@@ -848,6 +892,16 @@ export function WorkspaceApp() {
                 onClick={() => void toggleKept(session.id)}
               >
                 <InboxArrowDownIcon />
+              </IconButton>
+            )}
+            {session && !feed && workspaceRow && !workspaceRow.archived && (
+              <IconButton
+                label={workspaceRow.pinnedAt ? "Unpin workspace" : "Pin workspace"}
+                aria-pressed={Boolean(workspaceRow.pinnedAt)}
+                className={workspaceRow.pinnedAt ? "pressed" : ""}
+                onClick={() => void togglePinWorkspace(workspaceRow.id)}
+              >
+                <PinIcon />
               </IconButton>
             )}
             {session && !feed && (
