@@ -206,7 +206,7 @@ export function priorReviewSection(opts: {
 }) {
   const { rounds = 0, lastReview, priorFindings, humanThreadLines } = opts;
 
-  if (!lastReview && !priorFindings.length && !humanThreadLines.length) return "";
+  if (!rounds && !lastReview && !priorFindings.length && !humanThreadLines.length) return "";
 
   const parts = ["## Your previous review of this PR", ""];
 
