@@ -3,6 +3,7 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { createMcpHandler, fromJsonSchema, McpServer } from "@modelcontextprotocol/server";
 import { headers, signIn } from "./session";
 import { Live, Snapshot } from "../src/transcript";
 import { McpConnections, type McpToolInput } from "../src/mcp";
@@ -116,7 +117,7 @@ function oauthServer(
 }
 
 const RpcRequest = Schema.Struct({
-  id: Schema.optional(Schema.Number),
+  id: Schema.optional(Schema.Union([Schema.Number, Schema.String])),
   method: Schema.String,
   params: Schema.optional(
     Schema.Struct({
@@ -125,6 +126,19 @@ const RpcRequest = Schema.Struct({
     }),
   ),
 });
+
+type RpcId = number | string;
+
+/** What a 2025-era server answers to initialize. */
+const LEGACY_INITIALIZE = {
+  protocolVersion: "2025-06-18",
+  capabilities: { tools: {} },
+  serverInfo: { name: "test", version: "1" },
+};
+
+/** A 2025-era server's answer to the SDK's `server/discover` probe: an unknown method. */
+const methodNotFound = (id: RpcId) =>
+  Response.json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
 
 /** An MCP endpoint answering initialize, tools/list and tools/call, in SSE like many servers. */
 function mcpEndpoint(
@@ -145,9 +159,12 @@ function mcpEndpoint(
     const id = message.id;
 
     const respond = (result: string) =>
-      new Response(`event: message\ndata: {"jsonrpc":"2.0","id":${id},"result":${result}}\n\n`, {
-        headers: { "Content-Type": "text/event-stream", "Mcp-Session-Id": "session-1" },
-      });
+      new Response(
+        `event: message\ndata: {"jsonrpc":"2.0","id":${JSON.stringify(id)},"result":${result}}\n\n`,
+        {
+          headers: { "Content-Type": "text/event-stream", "Mcp-Session-Id": "session-1" },
+        },
+      );
 
     if (message.method === "initialize")
       return respond(
@@ -640,8 +657,10 @@ it("runs a session's code mode program against a connected server with a refresh
     grant_type: "refresh_token",
     refresh_token: "old-refresh",
   });
-  // The list is fetched once and cached; the third program needs no session at all.
+  // The list is fetched once and cached; the third program needs no session at all. Only the
+  // first session probes for the 2026-07-28 protocol: the legacy verdict is remembered.
   expect(mcpCalls.map((entry) => entry.method)).toEqual([
+    "server/discover",
     "initialize",
     "notifications/initialized",
     "tools/list",
@@ -655,7 +674,7 @@ it("runs a session's code mode program against a connected server with a refresh
   );
   expect(
     mcpCalls
-      .filter((entry) => entry.method !== "initialize")
+      .filter((entry) => entry.method !== "initialize" && entry.method !== "server/discover")
       .every((entry) => entry.session === "session-1"),
   ).toBe(true);
 
@@ -813,7 +832,7 @@ type ToolsPage = {
 };
 
 /** A tools/call answer naming the tool that was called. */
-const called = (id: number, name: string) =>
+const called = (id: RpcId, name: string) =>
   Response.json({
     jsonrpc: "2.0",
     id,
@@ -823,7 +842,7 @@ const called = (id: number, name: string) =>
 /** A JSON-RPC MCP server whose tools/list and tools/call answers come from the test. */
 function scriptedServer(
   list: (page: number) => ToolsPage | Promise<ToolsPage>,
-  callTool: (id: number, name: string) => Response | Promise<Response>,
+  callTool: (id: RpcId, name: string) => Response | Promise<Response>,
 ): Handler {
   let pages = 0;
 
@@ -834,8 +853,10 @@ function scriptedServer(
 
     if (message.id === undefined) return new Response(null, { status: 202 });
 
+    if (message.method === "server/discover") return methodNotFound(message.id);
+
     if (message.method === "initialize")
-      return Response.json({ jsonrpc: "2.0", id: message.id, result: {} });
+      return Response.json({ jsonrpc: "2.0", id: message.id, result: LEGACY_INITIALIZE });
 
     if (message.method === "tools/list")
       return Response.json({ jsonrpc: "2.0", id: message.id, result: await list(pages++) });
@@ -1341,6 +1362,96 @@ it("gives each tool name one stable path, before and after a catalog refresh", a
   });
 });
 
+/**
+ * A server built on the official SDK (@modelcontextprotocol/server) that serves only the
+ * 2026-07-28 revision, recording each request's method and mirrored `Mcp-Param-Team` header.
+ */
+const ISSUE_SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string" },
+    // SEP-2243: a modern client mirrors this argument into an `Mcp-Param-Team` header.
+    team: { type: "string", "x-mcp-header": "Team" },
+  },
+  required: ["title", "team"],
+};
+
+function modernServer() {
+  const requests: { method: string; team: string | null }[] = [];
+
+  const handler = createMcpHandler(
+    () => {
+      const server = new McpServer({ name: "tracker", version: "1" });
+
+      server.registerTool(
+        "create_issue",
+        {
+          description: "Create an issue",
+          inputSchema: fromJsonSchema<{ title: string; team: string }>(ISSUE_SCHEMA),
+        },
+        ({ title, team }) => ({
+          content: [{ type: "text", text: `Created ${title} for ${team}` }],
+        }),
+      );
+
+      return server;
+    },
+    { legacy: "reject" },
+  );
+
+  const fetch: Handler = async (_url, _init, request) => {
+    const message = Schema.decodeUnknownSync(Schema.fromJsonString(RpcRequest))(
+      await request.clone().text(),
+    );
+
+    requests.push({ method: message.method, team: request.headers.get("mcp-param-team") });
+
+    return handler.fetch(request);
+  };
+
+  return { fetch, requests };
+}
+
+it("speaks the 2026-07-28 protocol to a modern server through the official SDK", async () => {
+  const server = modernServer();
+
+  network({ "POST https://modern.example/mcp": server.fetch });
+  await call("/connections/mcp", "POST", { name: "tracker", url: "https://modern.example/mcp" });
+
+  // One McpConnections, as the owner Durable Object keeps: the second program's session reuses
+  // the first one's negotiated era.
+  const [listed, created] = await runInDurableObject(
+    env.AGENT.getByName("owner"),
+    async (_, state) => {
+      const connections = new McpConnections(state.storage);
+
+      return [
+        await connections.execute(
+          'search({ namespace: "tracker" }).items.map((item) => item.path)',
+        ),
+        await connections.execute(
+          'await tools.tracker.create_issue({ title: "Flaky test", team: "infra" })',
+        ),
+      ];
+    },
+  );
+
+  expect(listed.isError).not.toBe(true);
+  expect(JSON.parse(resultText(listed))).toEqual(["tools.tracker.create_issue"]);
+  expect(created.isError).not.toBe(true);
+  expect(resultText(created)).toBe("Created Flaky test for infra");
+
+  // Discovered once, never the 2025 handshake; the second session reuses the verdict. The
+  // argument the tool marks with x-mcp-header is mirrored into its header, which the server
+  // checks against the body.
+  expect(server.requests.map((request) => request.method)).toEqual([
+    "server/discover",
+    "tools/list",
+    "tools/call",
+  ]);
+  expect(server.requests.find((request) => request.method === "tools/call")?.team).toBe("infra");
+});
+
 it("sends nothing more to a server disconnected while a program runs", async () => {
   const first = gate();
   const calls: string[] = [];
@@ -1443,13 +1554,15 @@ function holdableServer() {
 
     if (message.id === undefined) return new Response(null, { status: 202 });
 
+    if (message.method === "server/discover") return methodNotFound(message.id);
+
     if (message.method === "initialize") {
       if (hold) {
         initializing += 1;
         await held.opened;
       }
 
-      return Response.json({ jsonrpc: "2.0", id: message.id, result: {} });
+      return Response.json({ jsonrpc: "2.0", id: message.id, result: LEGACY_INITIALIZE });
     }
 
     if (message.method === "tools/list")
@@ -1596,8 +1709,10 @@ it("sends no call when the final check's storage read outlasts the program", asy
 
       if (message.id === undefined) return new Response(null, { status: 202 });
 
+      if (message.method === "server/discover") return methodNotFound(message.id);
+
       if (message.method === "initialize")
-        return Response.json({ jsonrpc: "2.0", id: message.id, result: {} });
+        return Response.json({ jsonrpc: "2.0", id: message.id, result: LEGACY_INITIALIZE });
 
       if (message.method === "tools/list")
         return Response.json({
