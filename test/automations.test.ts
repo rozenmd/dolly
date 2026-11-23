@@ -1552,6 +1552,17 @@ it("starts a run per webhook delivery with the body as untrusted data, deduplica
   expect(rotated).toMatch(new RegExp(`^/hooks/automations/${created.id}\\?secret=[\\w-]{43}$`));
   expect(rotated).not.toBe(renewed);
   expect((await hook(renewed, "{}")).status).toBe(404);
+
+  // A rotation that lands after a revocation (New URL pending while the webhook was turned off)
+  // is refused: it replaces a URL, never brings one back.
+  await api(`/automations/${created.id}`, "PUT", { webhook: false });
+  const late = await api(`/automations/${created.id}`, "PUT", { webhook: "rotate" });
+  expect(late.status).toBe(400);
+  expect(await late.json()).toEqual({
+    error: "This automation has no webhook URL to replace; it may have just been turned off.",
+  });
+  expect((await read(created.id)).webhookPath).toBeUndefined();
+  expect((await hook(rotated, "{}")).status).toBe(404);
 }, 30_000);
 
 it("runs a delivery refused for want of a subscription once retried, and never beside a manual run", async () => {

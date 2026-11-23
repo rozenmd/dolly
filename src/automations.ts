@@ -282,8 +282,16 @@ function validate(
   if (input.mcpServers !== undefined) next.mcpServers = [...new Set(input.mcpServers)];
 
   if (input.webhook === false) delete next.webhookSecret;
-  else if (input.webhook === "rotate") next.webhookSecret = webhookSecret();
-  else if (input.webhook && !next.webhookSecret) next.webhookSecret = webhookSecret();
+  else if (input.webhook === "rotate") {
+    // Replaces a URL, never creates one: a rotation committed after a revocation (sent from
+    // another tab, or saved while New URL was pending) must not turn the webhook back on.
+    if (!base.webhookSecret)
+      return {
+        error: "This automation has no webhook URL to replace; it may have just been turned off.",
+      };
+
+    next.webhookSecret = webhookSecret();
+  } else if (input.webhook && !next.webhookSecret) next.webhookSecret = webhookSecret();
 
   const assign = <K extends "schedule" | "timeZone" | "model" | "thinkingLevel">(
     key: K,
