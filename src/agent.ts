@@ -17,6 +17,7 @@ import {
   type ConversationId,
   type ConversationView,
   type Cursor,
+  type EntryId,
   type EntryRecord,
   type ToolRegistration,
   type Wake,
@@ -193,6 +194,7 @@ import {
   CONNECTIONS_TOOL_TURN_REFUSAL,
   ConnectionsToolInput,
   connectionsToolDescription,
+  chatUrlProblem,
   nextStep,
 } from "./connections-tool";
 import {
@@ -879,8 +881,11 @@ export class Agent extends DurableObject<Env> {
             details: null,
           });
 
-        // The server it adds decides where the mcp tool sends data: only on the owner's word.
-        if (!(await this.ownerTurn(api.conversationId)))
+        // The server it adds decides where the mcp tool sends data: only on the owner's word,
+        // and only a URL the owner typed in it (chatUrlProblem), not one a tool result supplied.
+        const typed = await this.ownerTurnText(api.conversationId);
+
+        if (!typed)
           throw new OperationError({
             operation: "connections.refused",
             message: CONNECTIONS_TOOL_TURN_REFUSAL,
@@ -888,7 +893,9 @@ export class Agent extends DurableObject<Env> {
           });
 
         return {
-          output: [{ type: "text", text: JSON.stringify(await this.connectionsAction(parsed)) }],
+          output: [
+            { type: "text", text: JSON.stringify(await this.connectionsAction(parsed, typed)) },
+          ],
         };
       },
     } satisfies ToolRegistration;
@@ -3225,48 +3232,80 @@ export class Agent extends DurableObject<Env> {
    * inputs too; while one is unanswered, the turn isn't the owner's, even after the owner steers.
    */
   private async ownerTurn(id: ConversationId) {
+    return (await this.ownerTurnText(id)) !== undefined;
+  }
+
+  /**
+   * The text of the messages the model is answering in `id`, when every one is the owner's (see
+   * `ownerTurn`); undefined otherwise. Tool results inside the turn (a fetched page, say) are not
+   * in it, so a value found here is one the owner typed.
+   */
+  private async ownerTurnText(id: ConversationId) {
     const conversation = await this.harness.conversation(id, BACKGROUND_CONTEXT);
 
-    if (!conversation) return false;
+    if (!conversation) return undefined;
+    const texts = new Map<EntryId, string>();
 
-    const inputs = await unanswered((cursor) =>
-      conversation.entries({ order: "descending" }, 50, cursor, BACKGROUND_CONTEXT),
-    );
+    const inputs = await unanswered(async (cursor) => {
+      const page = await conversation.entries(
+        { order: "descending" },
+        50,
+        cursor,
+        BACKGROUND_CONTEXT,
+      );
 
-    if (!inputs?.length) return false;
+      for (const entry of page.items)
+        texts.set(
+          entry.id,
+          (entry.model ?? [])
+            .flatMap((message) =>
+              message.role !== "user"
+                ? []
+                : Predicate.isString(message.content)
+                  ? [message.content]
+                  : message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])),
+            )
+            .join("\n"),
+        );
 
-    return conversation.commit(async (tx) => {
+      return page;
+    });
+
+    if (!inputs?.length) return undefined;
+
+    const owned = await conversation.commit(async (tx) => {
       const { submissions } = await tx.doc(OwnerInputDoc, id);
       const records = await Promise.all(submissions.map((submission) => tx.submission(submission)));
       const owner = new Set(records.flatMap((record) => (record?.entry ? [record.entry] : [])));
 
       return inputs.every((entry) => owner.has(entry));
     }, BACKGROUND_CONTEXT);
+
+    return owned ? inputs.map((entry) => texts.get(entry) ?? "") : undefined;
   }
 
-  /** The connections tool: saves or removes servers and says what the owner does next. */
-  private async connectionsAction(input: ConnectionsToolInput) {
-    const server = async (name: string) =>
-      (await this.mcp.connections(true)).find((item) => item.name === name);
-
+  /**
+   * The connections tool: lists servers, or saves one whose URL the owner typed this turn. It
+   * never removes one: that stays in Settings > Connections, behind its confirmation.
+   */
+  private async connectionsAction(input: ConnectionsToolInput, typed: readonly string[]) {
     switch (input.action) {
       case "list":
         return { mcpServers: await this.mcp.connections(true) };
       case "add": {
         if (!input.name || !input.url) return { error: "add needs a name and an https url" };
+        const url = input.url.trim();
+        const refused = chatUrlProblem(url, typed);
+
+        if (refused) return { error: refused };
         const name = input.name.trim();
-        const added = await this.mcp.add({ name, url: input.url });
+        const added = await this.mcp.add({ name, url });
 
         if ("error" in added) return added;
-        const saved = await server(name);
+        const saved = (await this.mcp.connections(true)).find((item) => item.name === name);
 
         return { ok: true, server: saved, next: nextStep(saved) };
       }
-
-      case "remove":
-        if (!input.name) return { error: "remove needs the server's name; list shows them" };
-
-        return this.mcp.remove(input.name.trim());
     }
   }
 

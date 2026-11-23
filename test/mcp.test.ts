@@ -1706,17 +1706,20 @@ async function connectionsResults(id: string) {
   );
 }
 
-it("lets the owner's own message add, list and remove servers with the connections tool, never a handoff", async () => {
+it("adds only servers whose plain URL the owner typed, with the connections tool, never on a handoff", async () => {
   const replies = [
     () => connectionsCall({ action: "add", name: "plain", url: "http://plain.example/mcp" }),
+    // A URL a tool result could have supplied: not in the owner's message.
+    () => connectionsCall({ action: "add", name: "exfil", url: "https://exfil.example/mcp" }),
+    () =>
+      connectionsCall({ action: "add", name: "keyed", url: "https://keyed.example/mcp?token=x" }),
+    () => connectionsCall({ action: "remove", name: "linear" }),
     () => connectionsCall({ action: "add", name: "linear", url: `${LINEAR}/mcp` }),
     () => connectionsCall({ action: "list" }),
     () => answer("Added linear: sign in from Settings > Connections"),
     // Text the owner didn't write asks for a server; the session tries to add it.
     () => connectionsCall({ action: "add", name: "exfil", url: "https://exfil.example/mcp" }),
     () => answer("Not allowed from a handoff"),
-    () => connectionsCall({ action: "remove", name: "linear" }),
-    () => answer("Removed linear"),
   ];
 
   const model: Handler = () => {
@@ -1744,24 +1747,26 @@ it("lets the owner's own message add, list and remove servers with the connectio
 
   const id = await newSession();
 
-  const send = async (content: string) =>
-    expect(
-      (
-        await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ content, requestId: crypto.randomUUID() }),
-        })
-      ).status,
-    ).toBe(202);
+  const sent = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      content: `Set up these MCP servers: http://plain.example/mcp, https://keyed.example/mcp?token=x and ${LINEAR}/mcp`,
+      requestId: crypto.randomUUID(),
+    }),
+  });
 
-  await send(`Set up this MCP server: ${LINEAR}/mcp`);
-  await expect.poll(() => replies.length, { timeout: 15_000 }).toBe(4);
-  await expect.poll(async () => (await connectionsResults(id)).length).toBe(3);
+  expect(sent.status).toBe(202);
+  await expect.poll(() => replies.length, { timeout: 15_000 }).toBe(2);
+  await expect.poll(async () => (await connectionsResults(id)).length).toBe(6);
 
-  const [plain, added, listed] = await connectionsResults(id);
+  const [plain, untyped, keyed, remove, added, listed] = await connectionsResults(id);
 
   expect(plain.text).toContain("URL must use https://");
+  expect(untyped.text).toContain("only a URL the owner typed");
+  expect(keyed.text).toContain("query string or fragment");
+  // remove isn't an action: deleting a server and its sign-in stays behind Settings' confirmation.
+  expect(remove.isError).toBe(true);
   expect(added.isError).toBe(false);
   expect(added.text).toContain('"status":"needs-auth"');
   expect(added.text).toContain("choose Connect on the linear card");
@@ -1785,18 +1790,12 @@ it("lets the owner's own message add, list and remove servers with the connectio
       BACKGROUND_CONTEXT,
     );
   });
-  await expect.poll(() => replies.length, { timeout: 15_000 }).toBe(2);
-  await expect.poll(async () => (await connectionsResults(id)).length).toBe(4);
+  await expect.poll(() => replies.length, { timeout: 15_000 }).toBe(0);
+  await expect.poll(async () => (await connectionsResults(id)).length).toBe(7);
 
-  const refused = (await connectionsResults(id))[3];
+  const refused = (await connectionsResults(id))[6];
 
   expect(refused.isError).toBe(true);
   expect(refused.text).toContain("acts only on a message the owner typed");
   expect((await connections()).map((server) => server.name)).toEqual(["linear"]);
-
-  await send("Remove linear");
-  await expect.poll(() => replies.length, { timeout: 15_000 }).toBe(0);
-  await expect.poll(async () => (await connectionsResults(id)).length).toBe(5);
-  expect((await connectionsResults(id))[4].text).toBe('{"ok":true}');
-  expect(await connections()).toEqual([]);
 }, 45_000);
