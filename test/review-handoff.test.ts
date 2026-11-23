@@ -1107,6 +1107,7 @@ it("reviews with the noise and what-not-to-flag rules, and keeps a PR descriptio
   expect(reviewed).toContain("What NOT to flag");
   expect(reviewed).toContain("Skip files that are noise rather than authored code");
   expect(reviewed).toContain("Always review database migrations");
+  expect(reviewed).toContain("a lock file can be the only place a dependency change appears");
 
   // The description is still there, but can't close its quotes or add a section of the prompt.
   const intent = reviewed.split("## What this PR says it does")[1]!.split("\n## ")[0]!;

@@ -276,7 +276,9 @@ export function reviewPrompt(
 
 Read the PR with github read_pull_request and the complete diff with github list_pull_request_files. Your sandbox checkout of ${review.repository} is pinned to the PR's HEAD, ${review.sha}; it is shallow, so fetch any other commit you need with \`git fetch --depth=1 origin <sha>\`. Use it for surrounding context.${deltaHint}
 
-Skip files that are noise rather than authored code: lock files (pnpm-lock.yaml, package-lock.json, yarn.lock, bun.lock, Cargo.lock, go.sum, poetry.lock and the like), vendored dependencies, minified or bundled assets (\`.min.js\`, \`.min.css\`, \`.bundle.js\`), source maps (\`.map\`) and files marked generated (\`@generated\`, "Code generated ... DO NOT EDIT"). Only open one when an authored change depends on it, such as a dependency bump the code relies on. Always review database migrations, even when a tool marked them generated.`;
+Skip files that are noise rather than authored code: vendored dependencies, minified or bundled assets (\`.min.js\`, \`.min.css\`, \`.bundle.js\`), source maps (\`.map\`) and files marked generated (\`@generated\`, "Code generated ... DO NOT EDIT"). Always review database migrations, even when a tool marked them generated.
+
+Don't read lock files (pnpm-lock.yaml, package-lock.json, yarn.lock, bun.lock, Cargo.lock, go.sum, poetry.lock and the like) line by line, but don't ignore them either: a lock file can be the only place a dependency change appears, such as a transitive version that moved without any manifest change. When one changes, check which packages were added, removed or moved to a different version or source, and review any that the manifest changes don't account for.`;
 
   const priorReview = isUpdate
     ? priorReviewSection({
