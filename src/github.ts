@@ -1336,8 +1336,25 @@ function makeGitHub(
             details: null,
           });
         yield* jwt(app);
+        const previous = yield* attempt("github.webhook.read", () => storage.get("github:webhook"));
+
+        const senders = Option.match(Schema.decodeUnknownOption(WebhookProfile)(previous), {
+          onNone: () => [],
+          onSome: (profile) => profile.senders,
+        });
+
+        // The manifest turned the App's webhook on at the ingress URL, signed with this App's
+        // secret. Saving it as the webhook profile lets dolly accept those deliveries at once, so
+        // pull requests Dolly sessions open can be reviewed before any sender is listed (an empty
+        // list allows no /dolly commands). Senders saved for an earlier App are kept.
         yield* attempt("github.save", () =>
-          storage.put({ "github:connected": { app }, "github:ingress": value.setup.ingress }),
+          storage.put({
+            "github:connected": { app },
+            "github:ingress": value.setup.ingress,
+            ...(app.webhook_secret && {
+              "github:webhook": { secret: app.webhook_secret, senders },
+            }),
+          }),
         );
         publicToken = undefined;
         publicTokenRetry = 0;

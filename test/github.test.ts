@@ -1095,6 +1095,15 @@ it("enables ingress in the manifest and configures allowed senders without repla
   expect(await callback(`state=${started.state}&code=manifest-code`)).toBe("/");
   vi.restoreAllMocks();
 
+  // The App's webhook is live at the ingress URL from the start, so dolly accepts its deliveries
+  // (and can review pull requests Dolly sessions open) before any sender is listed.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    expect(await state.storage.get("github:webhook")).toEqual({
+      secret: app.webhook_secret,
+      senders: [],
+    });
+  });
+
   let subscribed = true;
 
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
