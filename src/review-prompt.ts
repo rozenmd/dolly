@@ -81,9 +81,20 @@ const PLAIN_REVIEW_INSTRUCTION = `## Review execution
 
 Perform this as a plain review yourself in this run. Do not follow skill workflows or delegate to other sessions. Use only direct repository inspection and your own reasoning. ${READ_ONLY_INSTRUCTION}`;
 
+/**
+ * Untrusted multi-line text made safe to quote inside a `"""` block: a run of three or more double
+ * quotes can't close the block early, and a Markdown heading can't pose as one of this prompt's own
+ * `## ` sections (like "## Publishing the review"). Everything else is kept as written.
+ */
+export function quoteUntrusted(text: string) {
+  return text
+    .replace(/"{3,}/g, (quotes) => "'".repeat(quotes.length))
+    .replace(/^([ \t]*)(#{1,6})(?=[ \t]|$)/gm, "$1\\$2");
+}
+
 /** The author's stated goal: the anchor that keeps review rounds from drifting. */
 export function prIntentSection(pull: Pick<PullReviewContext, "author" | "body">) {
-  const body = (pull.body || "").trim();
+  const body = quoteUntrusted((pull.body || "").trim());
 
   if (!body)
     return `## What this PR says it does\n\nThe author (@${pull.author}) provided no description. Infer the intent from the diff and commit messages, and judge cohesion against that inferred goal.`;
@@ -320,7 +331,11 @@ export function reviewPrompt(
 
   const diffSection = `## The diff
 
-Read the PR with github read_pull_request and the complete diff with github list_pull_request_files. Your sandbox checkout of ${review.repository} is pinned to the PR's HEAD, ${review.sha}; it is shallow, so fetch any other commit you need with \`git fetch --depth=1 origin <sha>\`. Use it for surrounding context.${deltaHint}`;
+Read the PR with github read_pull_request and the complete diff with github list_pull_request_files. Your sandbox checkout of ${review.repository} is pinned to the PR's HEAD, ${review.sha}; it is shallow, so fetch any other commit you need with \`git fetch --depth=1 origin <sha>\`. Use it for surrounding context.${deltaHint}
+
+Skip files that are noise rather than authored code: vendored dependencies, minified or bundled assets (\`.min.js\`, \`.min.css\`, \`.bundle.js\`), source maps (\`.map\`) and files marked generated (\`@generated\`, "Code generated ... DO NOT EDIT"). Review one anyway when an authored change in this PR depends on it, or when it was edited by hand, as with a vendored file the repository adapted locally. Always review database migrations, even when a tool marked them generated.
+
+Don't read lock files (pnpm-lock.yaml, package-lock.json, yarn.lock, bun.lock, Cargo.lock, go.sum, poetry.lock and the like) line by line, but don't ignore them either: a lock file can be the only place a dependency change appears, such as a transitive version that moved without any manifest change. When one changes, check which packages were added, removed or moved to a different version or source, and review any that the manifest changes don't account for.`;
 
   const priorReview = isUpdate
     ? priorReviewSection({ rounds, lastReview, priorFindings, humanThreadLines })

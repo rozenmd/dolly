@@ -28,6 +28,14 @@ The precision bar (your misses are rare — unverified extras are your actual fa
 - One issue per finding. Never append secondary "also/minor/consider" observations to a finding's body — promote one to its own finding only if it independently clears the bar; otherwise cut it.
 - Every failure scenario must be verified against the code on disk, not hypothesized. If your scenario depends on a configuration value, input shape, or code path you haven't confirmed exists in this codebase, cut the finding.
 
+What NOT to flag (these are the noise that teaches authors to ignore reviews):
+- Theoretical risks that need unlikely preconditions you can't show this codebase reaches.
+- Defense-in-depth suggestions when the primary defense is adequate.
+- Issues in code this PR doesn't change or affect. Blast-radius breakage of callers the PR does affect still counts.
+- "Consider using library X" or "consider adding error handling / logging / tests" without a concrete failure it would prevent.
+- Style, formatting or naming the project's formatter or linter already enforces.
+- Speculative performance concerns without a realistic input size or hot path that makes them matter.
+
 Maintainability lens (advisory — never blocks a merge):
 - Beyond bugs, flag the patterns that quietly make the codebase harder to change: blanket try/catch that swallows errors the caller should see, near-duplicate logic that must now change in lockstep with code elsewhere (shotgun surgery), defensive guards for states the types already rule out, comments narrating the next line instead of stating a constraint, single-caller indirection, and naming/style that diverges from the surrounding module.
 - Rules for this lens: always severity P3, at most 2 such findings per review, and only when the better shape is concrete and obviously right — name it in the body ("extract X", "let this throw", "inline Y"). These are advisory: never let them change your verdict or lower your confidence, and never promote a pure-design observation above P3 unless it is also a real bug under the correctness lens. A maintainability-only review is still an approve.
