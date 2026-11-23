@@ -4,7 +4,7 @@ import { request, type ApiBody } from "./api";
 /** Settings > Automations: the API in src/automation-routes.ts, behaviour in src/automations.ts. */
 
 export const AutomationRun = Schema.Struct({
-  trigger: Schema.Literals(["schedule", "manual", "webhook"]),
+  trigger: Schema.Literals(["schedule", "manual", "webhook", "pull_request"]),
   at: Schema.Number,
   status: Schema.Literals(["running", "succeeded", "failed", "skipped"]),
   sessionId: Schema.optional(Schema.String),
@@ -22,6 +22,8 @@ export const Automation = Schema.Struct({
   schedule: Schema.optional(Schema.String),
   timeZone: Schema.optional(Schema.String),
   runAt: Schema.optional(Schema.Number),
+  /** Runs for each pull request instead: the automatic pull request review. */
+  event: Schema.optional(Schema.Literal("pull_request")),
   enabled: Schema.Boolean,
   readOnly: Schema.Boolean,
   workspace: Schema.optional(

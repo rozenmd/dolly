@@ -3363,6 +3363,15 @@ label.connection-row {
   .automation-row .automation-head {
     flex-wrap: wrap;
   }
+  /* With no Run now button to wrap below, the row menu stays beside the text. */
+  .automation-row .automation-head.no-run {
+    flex-wrap: nowrap;
+  }
+  .automation-row .automation-head.no-run .mcp-body {
+    flex: 1;
+    flex-basis: auto;
+    min-width: 0;
+  }
   .automation-row .mcp-body {
     flex-basis: calc(100% - 60px);
   }

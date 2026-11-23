@@ -361,7 +361,7 @@ app.put("/api/settings/model", (c) =>
           () =>
             new InvalidInput({
               message:
-                "Expected model (a catalog model), thinkingLevel, speed (standard or fast), autoFallback or reviewModel (a catalog model); null restores a built-in default",
+                "Expected model (a catalog model), thinkingLevel, speed (standard or fast) or autoFallback; null restores a built-in default",
             }),
         ),
       );

@@ -8,6 +8,7 @@ import {
   type ConversationId,
   type Harness,
   type TaskId,
+  type Tx,
 } from "@earendil-works/pi-durable";
 import * as Result from "effect/Result";
 import * as Effect from "effect/Effect";
@@ -88,8 +89,11 @@ type Checkpoint =
 export type HandoffOwner = { id: ConversationId; slack?: SlackThread };
 
 export type HandoffDeps = {
-  /** Whether automatic reviews are still turned on; checked again before each review and handoff. */
-  enabled: () => Effect.Effect<boolean, OperationError>;
+  /**
+   * The review automation's prompt while it is enabled, undefined once it is paused or deleted;
+   * read again before each review and handoff, so an edit or a pause applies to queued reviews.
+   */
+  reviewer: () => Effect.Effect<{ prompt: string } | undefined, OperationError>;
   /** The PR's state and head, read fresh: a stale head is neither reviewed nor handed off. */
   head: (review: Review) => Effect.Effect<PullHead, OperationError>;
   /** The PR's description, conversation, review threads and reviews, read fresh. */
@@ -158,7 +162,8 @@ export function githubDelivery({
                 yield* attempt("github.after.wait", () => runtime.waitForTask(previous, context));
               }
 
-              const enabled = yield* handoff.enabled();
+              const reviewer = yield* handoff.reviewer();
+              const enabled = reviewer !== undefined;
 
               const current =
                 enabled &&
@@ -167,7 +172,7 @@ export function githubDelivery({
                   Effect.catchTag("OperationError", () => Effect.succeed(true)),
                 ));
 
-              if (!current) {
+              if (!reviewer || !current) {
                 yield* Effect.logInfo({
                   event: enabled ? "github_review_skipped_stale" : "github_review_skipped_disabled",
                   pull: `${review.repository}#${review.number}`,
@@ -216,7 +221,7 @@ export function githubDelivery({
                 }, context),
               );
 
-              content = reviewPrompt(review, pull, lastReview);
+              content = reviewPrompt(review, pull, lastReview, reviewer.prompt);
             }
 
             const submission = yield* attempt("github.submit", () =>
@@ -392,8 +397,8 @@ export function githubDelivery({
               }, context),
             );
 
-            // Turning reviews off stops the loop, also for reviews admitted before that.
-            const enabled = yield* handoff.enabled();
+            // Pausing the review automation stops the loop, also for reviews admitted before that.
+            const enabled = (yield* handoff.reviewer()) !== undefined;
 
             // Findings about a head that has moved on would only confuse the session.
             const head = enabled ? yield* handoff.head(review) : undefined;
@@ -576,6 +581,8 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
   delivery: ReturnType<typeof githubDelivery>,
   event: GitHubDelivery,
   agent: IntakeAgent,
+  /** Called in the same commit for a review's new task: the review automation records its run. */
+  started?: (tx: Tx, conversationId: ConversationId, taskId: TaskId<null>) => Promise<void>,
 ) {
   return yield* attempt("github.intake", () =>
     harness.commit(async (tx) => {
@@ -642,7 +649,10 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
         events: { ...thread.events, [deliveryKey(event)]: taskId },
       };
 
-      if (review) state.latestReview = { ...state.latestReview, [pull]: taskId };
+      if (review) {
+        state.latestReview = { ...state.latestReview, [pull]: taskId };
+        await started?.(tx, thread.id, taskId);
+      }
 
       return {
         status: 202 as const,

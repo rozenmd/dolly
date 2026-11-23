@@ -1,3 +1,5 @@
+import { REVIEW_INSTRUCTIONS } from "../../../src/review-instructions";
+
 /**
  * Starting points for Settings > Automations, after OpenSession's automation templates. Picking
  * one fills the new-automation form; every field stays editable before saving. Prompts are
@@ -12,8 +14,10 @@ export type AutomationRecipe = {
   /** One line for the picker. */
   description: string;
   /** Five-field cron, read in the owner's time zone. */
-  schedule: string;
-  /** Runs only read and report; needs a repository. */
+  schedule?: string;
+  /** Runs for each pull request instead of on a schedule (src/automations.ts). */
+  event?: "pull_request";
+  /** Runs only read and report; needs a repository (an event's pipeline picks its own). */
   readOnly: boolean;
   /** MCP servers the prompt uses, ticked only when connected. */
   mcpServers: readonly string[];
@@ -21,6 +25,16 @@ export type AutomationRecipe = {
 };
 
 export const AUTOMATION_RECIPES: readonly AutomationRecipe[] = [
+  {
+    // After OpenSession's `github-pr-review` recipe, the one most workflows hang off.
+    id: "pull-request-review",
+    name: "Review pull requests",
+    description: "Reviews each pull request when it opens and on every push, with inline comments.",
+    event: "pull_request",
+    readOnly: true,
+    mcpServers: [],
+    prompt: REVIEW_INSTRUCTIONS,
+  },
   {
     id: "weekly-changelog",
     name: "Weekly changelog draft",

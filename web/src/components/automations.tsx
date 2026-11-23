@@ -37,7 +37,8 @@ import { Input, Select, Textarea } from "./ui";
 
 /**
  * Settings > Automations, after OpenSession's: prompts that start a fresh session on a schedule,
- * once at a set time, or when run by hand. Behaviour lives in src/automations.ts.
+ * once at a set time, when run by hand, or for each pull request (the automatic review).
+ * Behaviour lives in src/automations.ts.
  */
 
 const message = (cause: unknown, fallback: string) =>
@@ -50,7 +51,12 @@ const STATUS: Record<AutomationRun["status"], { label: string; dot: string }> = 
   skipped: { label: "Skipped", dot: "" },
 };
 
+/** What the pull request trigger does, for the row and the form. */
+const PULL_REQUEST_WHEN = "When a pull request is opened or updated";
+
 function whenLabel(automation: Automation) {
+  if (automation.event === "pull_request") return PULL_REQUEST_WHEN;
+
   if (automation.schedule)
     return `${describeSchedule(automation.schedule)}${automation.timeZone && automation.timeZone !== "UTC" ? ` (${automation.timeZone})` : " (UTC)"}`;
 
@@ -63,6 +69,7 @@ const TRIGGER: Record<AutomationRun["trigger"], string> = {
   schedule: "scheduled",
   manual: "by hand",
   webhook: "by webhook",
+  pull_request: "for a pull request",
 };
 
 /** Where this dolly's ingress Worker serves webhooks, for full webhook URLs. */
@@ -224,9 +231,9 @@ export function AutomationsSettings() {
       </div>
       <p className="settings-description">
         Prompts that run on their own: on a schedule, once at a set time, when their webhook URL is
-        called, or when you press Run. Each run is a fresh session with no memory of earlier runs;
-        open it from here or the sidebar to read, steer or stop it. Runs can open pull requests but
-        never merge them.
+        called, for each pull request, or when you press Run. Each run is a fresh session with no
+        memory of earlier runs; open it from here or the sidebar to read, steer or stop it. Runs can
+        open pull requests but never merge them.
       </p>
 
       {error && (
@@ -243,6 +250,14 @@ export function AutomationsSettings() {
           // A row saved since the form opened opens afresh: Edit again must show what is saved now.
           key={editing === "new" ? "new" : `${editing.id}:${editing.updatedAt}`}
           automation={editing === "new" ? undefined : editing}
+          // Only one automation reviews pull requests: another one can't take the trigger.
+          reviewer={
+            automations?.find(
+              (automation) =>
+                automation.event === "pull_request" &&
+                (editing === "new" || automation.id !== editing.id),
+            )?.name
+          }
           origin={origin}
           // The URL as the list holds it now, not as the form opened: a rotation finishing after
           // the form was closed and reopened still reaches it.
@@ -282,7 +297,7 @@ export function AutomationsSettings() {
 
             return (
               <li key={automation.id} className="automation-row">
-                <div className="mcp-row automation-head">
+                <div className={`mcp-row automation-head${automation.event ? " no-run" : ""}`}>
                   <span
                     className={`status-dot ${last ? STATUS[last.status].dot : ""}`}
                     aria-label={last ? `Last run: ${STATUS[last.status].label}` : "Never run"}
@@ -316,23 +331,26 @@ export function AutomationsSettings() {
                       )}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    className="secondary-button automation-run-button"
-                    disabled={running || busy === automation.id}
-                    onClick={() =>
-                      void act(
-                        automation.id,
-                        async () => {
-                          await runAutomation(automation.id);
-                        },
-                        `Could not run ${automation.name}.`,
-                      )
-                    }
-                  >
-                    <PlayIcon width={16} aria-hidden="true" />
-                    {running ? "Running" : "Run now"}
-                  </button>
+                  {/* A pull request automation runs for a pull request; there is nothing to run by hand. */}
+                  {!automation.event && (
+                    <button
+                      type="button"
+                      className="secondary-button automation-run-button"
+                      disabled={running || busy === automation.id}
+                      onClick={() =>
+                        void act(
+                          automation.id,
+                          async () => {
+                            await runAutomation(automation.id);
+                          },
+                          `Could not run ${automation.name}.`,
+                        )
+                      }
+                    >
+                      <PlayIcon width={16} aria-hidden="true" />
+                      {running ? "Running" : "Run now"}
+                    </button>
+                  )}
                   <RowMenu
                     label={`Manage ${automation.name}`}
                     items={[
@@ -420,7 +438,7 @@ export function AutomationsSettings() {
   );
 }
 
-type When = "schedule" | "once" | "manual";
+type When = "schedule" | "once" | "manual" | "pull_request";
 
 /** Everything the form edits, as it stands. */
 type FormValues = {
@@ -446,8 +464,9 @@ function initialValues(automation: Automation | undefined): FormValues {
   return {
     name: automation?.name ?? "",
     prompt: automation?.prompt ?? "",
-    when:
-      !automation || automation.schedule
+    when: automation?.event
+      ? automation.event
+      : !automation || automation.schedule
         ? "schedule"
         : automation.runAt !== undefined
           ? "once"
@@ -474,11 +493,32 @@ function bodyOf(values: FormValues): { error: string } | { body: ApiBody } {
 
   if (at && Number.isNaN(at.getTime())) return { error: "Choose a date and time to run it at." };
 
+  // The review pipeline decides where a pull request automation runs: read-only, on the pull
+  // request's own repository, with no MCP servers, schedule or webhook.
+  if (values.when === "pull_request")
+    return {
+      body: {
+        name: values.name.trim(),
+        prompt: values.prompt.trim(),
+        enabled: values.enabled,
+        event: "pull_request",
+        readOnly: true,
+        model: values.model || null,
+        mcpServers: [],
+        webhook: false,
+        schedule: null,
+        timeZone: null,
+        runAt: null,
+        workspace: null,
+      },
+    };
+
   return {
     body: {
       name: values.name.trim(),
       prompt: values.prompt.trim(),
       enabled: values.enabled,
+      event: null,
       readOnly: Boolean(values.repository) && values.readOnly,
       model: values.model || null,
       mcpServers: values.readOnly ? [] : values.mcpServers,
@@ -527,6 +567,7 @@ function patchOf(body: ApiBody, initial: ApiBody): ApiBody {
     ...(differs(body.schedule, initial.schedule) && { schedule: body.schedule }),
     ...(differs(body.timeZone, initial.timeZone) && { timeZone: body.timeZone }),
     ...(differs(body.runAt, initial.runAt) && { runAt: body.runAt }),
+    ...(differs(body.event, initial.event) && { event: body.event }),
   };
 }
 
@@ -536,6 +577,7 @@ const McpNames = Schema.Struct({
 
 function AutomationForm({
   automation,
+  reviewer,
   origin,
   webhookPath,
   rotating,
@@ -544,6 +586,8 @@ function AutomationForm({
   onSaved,
 }: {
   automation?: Automation;
+  /** The name of another automation that already reviews pull requests, if one does. */
+  reviewer: string | undefined;
   origin: string;
   /** The automation's current webhook URL path, from the page's list. */
   webhookPath: string | undefined;
@@ -608,8 +652,9 @@ function AutomationForm({
   async function save(event: FormEvent) {
     event.preventDefault();
 
-    // A recipe's prompt is about "this repository", and read-only runs only read one.
-    if (!repository && (picked || readOnly)) {
+    // A recipe's prompt is about "this repository", and read-only runs only read one. A pull
+    // request automation reads each pull request's own.
+    if (when !== "pull_request" && !repository && (picked || readOnly)) {
       setError(
         picked
           ? "Pick the repository this recipe works on."
@@ -691,6 +736,8 @@ function AutomationForm({
               // Every MCP server the recipe works through, connected: without one, its runs
               // couldn't do the job it describes.
               const missing = recipe.mcpServers.filter((server) => !connected.includes(server));
+              // Only one automation reviews pull requests.
+              const taken = recipe.event === "pull_request" && reviewer !== undefined;
 
               return (
                 <button
@@ -699,17 +746,20 @@ function AutomationForm({
                   className={`automation-recipe${recipe.id === picked ? " active" : ""}`}
                   aria-pressed={recipe.id === picked}
                   title={
-                    loaded && missing.length > 0
-                      ? `Connect ${missing.join(", ")} in Settings > Connections to use this recipe.`
-                      : recipe.description
+                    taken
+                      ? `"${reviewer}" already reviews pull requests.`
+                      : loaded && missing.length > 0
+                        ? `Connect ${missing.join(", ")} in Settings > Connections to use this recipe.`
+                        : recipe.description
                   }
-                  disabled={missing.length > 0}
+                  disabled={missing.length > 0 || taken}
                   onClick={() => {
                     setPicked(recipe.id);
                     setName(recipe.name);
                     setPrompt(recipe.prompt);
-                    setWhen("schedule");
-                    setSchedule(recipe.schedule);
+                    setWhen(recipe.event ?? "schedule");
+
+                    if (recipe.schedule) setSchedule(recipe.schedule);
                     setReadOnly(recipe.readOnly);
                     setMcpServers([...recipe.mcpServers]);
                   }}
@@ -721,8 +771,8 @@ function AutomationForm({
           </div>
           {picked && (
             <p className="field-help">
-              {AUTOMATION_RECIPES.find((recipe) => recipe.id === picked)?.description} Pick the
-              repository it should work on below.
+              {AUTOMATION_RECIPES.find((recipe) => recipe.id === picked)?.description}
+              {when !== "pull_request" && " Pick the repository it should work on below."}
             </p>
           )}
           {loaded &&
@@ -766,6 +816,7 @@ function AutomationForm({
             ["schedule", "On a schedule"],
             ["once", "Once"],
             ["manual", "No schedule (run by hand)"],
+            ["pull_request", PULL_REQUEST_WHEN],
           ] as const
         ).map(([value, label]) => (
           <label key={value} className="checkbox-row">
@@ -774,12 +825,29 @@ function AutomationForm({
               name="automation-when"
               value={value}
               checked={when === value}
+              disabled={value === "pull_request" && reviewer !== undefined}
               onChange={() => setWhen(value)}
             />
             {label}
           </label>
         ))}
+        {reviewer !== undefined && (
+          <p className="field-help">
+            &quot;{reviewer}&quot; already reviews pull requests; only one automation can.
+          </p>
+        )}
       </fieldset>
+
+      {when === "pull_request" && (
+        <p className="field-help">
+          Reviews each pull request in an enrolled repository when someone who can run /dolly
+          commands, or a dolly session, opens it, marks it ready or pushes to it. Each review is a
+          read-only session on that commit that posts inline comments. The prompt is what the
+          reviewer looks for: dolly adds the pull request, its earlier reviews and how to publish.
+          Findings on a pull request a dolly session opened go back to that session to fix, for up
+          to 6 rounds. Pausing it stops reviews, including queued ones.
+        </p>
+      )}
 
       {when === "schedule" && (
         <div className="mcp-form-row">
@@ -836,15 +904,17 @@ function AutomationForm({
         </>
       )}
 
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={webhook}
-          onChange={(event) => setWebhook(event.target.checked)}
-        />
-        Also run when its webhook URL is called
-      </label>
-      {webhook && (
+      {when !== "pull_request" && (
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={webhook}
+            onChange={(event) => setWebhook(event.target.checked)}
+          />
+          Also run when its webhook URL is called
+        </label>
+      )}
+      {when !== "pull_request" && webhook && (
         <div className="automation-webhook">
           {webhookPath && automation ? (
             <>
@@ -894,23 +964,27 @@ function AutomationForm({
         </div>
       )}
 
-      <label htmlFor="repository">Repository</label>
-      <RepositoryPicker
-        compact
-        value={repository}
-        onChange={(next, defaultRef) => {
-          setRepository(next);
-          // Back on the automation's own repository: its own branch, not the last one picked.
-          setRef(
-            next === automation?.workspace?.repository
-              ? (automation.workspace.ref ?? "")
-              : next
-                ? defaultRef
-                : "",
-          );
-        }}
-      />
-      {repository && (
+      {when !== "pull_request" && (
+        <>
+          <label htmlFor="repository">Repository</label>
+          <RepositoryPicker
+            compact
+            value={repository}
+            onChange={(next, defaultRef) => {
+              setRepository(next);
+              // Back on the automation's own repository: its own branch, not the last one picked.
+              setRef(
+                next === automation?.workspace?.repository
+                  ? (automation.workspace.ref ?? "")
+                  : next
+                    ? defaultRef
+                    : "",
+              );
+            }}
+          />
+        </>
+      )}
+      {when !== "pull_request" && repository && (
         <label className="checkbox-row">
           <input
             type="checkbox"
@@ -924,7 +998,7 @@ function AutomationForm({
       <label htmlFor="automation-model">Model</label>
       <ModelPicker id="automation-model" value={model} onChange={setModel} />
 
-      {!readOnly && (
+      {when !== "pull_request" && !readOnly && (
         <fieldset className="automation-mcp">
           <legend>MCP servers runs may use</legend>
           {available.length === 0 ? (

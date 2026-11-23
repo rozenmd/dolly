@@ -9,7 +9,6 @@ const github = {
   settingsUrl: "https://github.com/settings/apps/dolly-test",
   ingress: "https://dolly-ingress.example.workers.dev/hooks/github",
   senders: ["octocat"],
-  reviews: false,
 };
 
 type Server = {

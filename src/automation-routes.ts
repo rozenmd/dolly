@@ -6,7 +6,7 @@ import { rpc } from "./operations";
 import { AutomationPatch, NewAutomation } from "./automations";
 import type { Env } from "./env";
 
-/** Settings > Automations: stored prompts that start sessions on a schedule (automations.ts). */
+/** Settings > Automations: stored prompts that start sessions on a trigger (automations.ts). */
 export const automationRoutes = new Hono<{ Bindings: Env }>();
 
 const owner = (c: Context<{ Bindings: Env }>) => c.env.AGENT.getByName("owner");
@@ -26,7 +26,7 @@ const call = <A>(operation: string, run: () => Promise<A>) =>
   Effect.runPromise(rpc(operation, run));
 
 const FIELDS =
-  "name, prompt, and optionally schedule (five-field cron), timeZone, runAt (ISO 8601 with an offset), enabled, readOnly, workspace ({ repository, ref?, networkHosts? }), model, thinkingLevel and mcpServers";
+  "name, prompt, and optionally schedule (five-field cron), timeZone, runAt (ISO 8601 with an offset), event (pull_request), enabled, readOnly, workspace ({ repository, ref?, networkHosts? }), model, thinkingLevel and mcpServers";
 
 automationRoutes.get("/api/automations", async (c) =>
   c.json({

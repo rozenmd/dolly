@@ -547,7 +547,6 @@ export type ApiBody = {
   url?: string;
   accounts?: readonly string[];
   senders?: readonly string[];
-  reviews?: boolean;
   token?: string;
   enabled?: boolean;
   botToken?: string;
@@ -563,6 +562,8 @@ export type ApiBody = {
   schedule?: string | null;
   timeZone?: string | null;
   runAt?: string | null;
+  /** The event an automation runs on instead of a schedule; `null` clears it. */
+  event?: "pull_request" | null;
   readOnly?: boolean;
   mcpServers?: readonly string[];
   /** An automation's access as the editor saw it; the save is refused if it has changed. */
@@ -587,10 +588,6 @@ export const DefaultModel = Schema.Struct({
   autoFallback: Schema.Boolean,
   /** The ChatGPT login is on a plan that serves Ultrafast (Pro). */
   ultrafastAvailable: Schema.Boolean,
-  /** The saved model for automatic GitHub reviews; `null` follows the default model. */
-  reviewModel: Schema.NullOr(Schema.String),
-  /** What the next automatic GitHub review would run on. */
-  reviewEffective: Schema.String,
 });
 
 export type DefaultModel = typeof DefaultModel.Type;
@@ -601,7 +598,6 @@ export type DefaultModelChange = {
   thinkingLevel?: string | null;
   speed?: Speed | null;
   autoFallback?: boolean | null;
-  reviewModel?: string | null;
 };
 
 /** Reads the defaults for new sessions, or saves a change to them. */
@@ -656,7 +652,6 @@ const GitHubApp = Schema.Union([
     settingsUrl: Schema.String,
     ingress: Schema.NullOr(Schema.String),
     senders: Schema.Array(Schema.String),
-    reviews: Schema.Boolean,
   }),
 ]);
 

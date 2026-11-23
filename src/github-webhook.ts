@@ -16,13 +16,15 @@ export const WebhookSetup = Schema.Struct({
   /** Who may run /dolly commands. An empty list stops every command. */
   senders: Schema.Array(Login),
   secret: Schema.optional(Schema.String.check(Schema.isMinLength(32), Schema.isMaxLength(256))),
-  /** Review new pull requests these senders (or Dolly sessions) open in enrolled repositories. Omitted keeps the saved choice. */
-  reviews: Schema.optional(Schema.Boolean),
 });
 
 export const WebhookProfile = Schema.Struct({
   secret: Schema.String.check(Schema.isMinLength(32), Schema.isMaxLength(256)),
   senders: Schema.Array(Login),
+  /**
+   * The Settings > GitHub switch automatic reviews had before they became an automation. Only
+   * read once, to create the review automation for an owner who had it on (Agent.migrateReviews).
+   */
   reviews: Schema.optional(Schema.Boolean),
 });
 
@@ -275,6 +277,8 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
   event: string,
   /** This App's bot login (`slug[bot]`), whose own pull requests are reviewed too. */
   bot?: string,
+  /** Whether the pull request review automation is enabled (automations.ts). */
+  reviews = false,
 ) {
   if (body.byteLength > MAX_WEBHOOK_BYTES) return { status: 413 as const };
 
@@ -300,7 +304,7 @@ export const verifyWebhook = Effect.fn("GitHub.verifyWebhook")(function* (
 
   if (!valid) return { status: 401 as const };
 
-  if (event === "pull_request" && profile.reviews) {
+  if (event === "pull_request" && reviews) {
     const review = reviewEvent(profile, new TextDecoder().decode(body), bot);
 
     if (review) return { status: 202 as const, kind: "review" as const, review };

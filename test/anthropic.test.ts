@@ -414,13 +414,11 @@ it("saves the owner's default model in Durable Object storage and applies it to 
     speed: "standard",
     autoFallback: true,
     ultrafastAvailable: false,
-    reviewModel: null,
   };
 
   expect(await (await call("/settings/model")).json()).toEqual({
     model: null,
     effective: "gpt-6-luna",
-    reviewEffective: "gpt-6-luna",
     ...builtIn,
   });
 
@@ -432,29 +430,17 @@ it("saves the owner's default model in Durable Object storage and applies it to 
     {
       model: "claude-opus-5-5",
       effective: "gpt-6-luna",
-      reviewEffective: "gpt-6-luna",
       ...builtIn,
     },
   );
   expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({ model: "gpt-6-luna" });
 
-  // A Claude review model likewise waits for its subscription, and reviews use the default.
-  expect(
-    await (await call("/settings/model", "PUT", { reviewModel: "claude-sonnet-5-5" })).json(),
-  ).toMatchObject({ reviewModel: "claude-sonnet-5-5", reviewEffective: "gpt-6-luna" });
-
   await call("/auth/anthropic", "PUT", { token });
-  expect(await (await call("/settings/model")).json()).toMatchObject({
-    reviewModel: "claude-sonnet-5-5",
-    reviewEffective: "claude-sonnet-5-5",
-  });
-  await call("/settings/model", "PUT", { reviewModel: null });
   // The setting survives Durable Object restarts.
   await abortAllDurableObjects();
   expect(await (await call("/settings/model")).json()).toEqual({
     model: "claude-opus-5-5",
     effective: "claude-opus-5-5",
-    reviewEffective: "claude-opus-5-5",
     ...builtIn,
   });
   expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({
@@ -471,7 +457,6 @@ it("saves the owner's default model in Durable Object storage and applies it to 
   expect(await (await call("/settings/model", "PUT", { model: null })).json()).toEqual({
     model: null,
     effective: "gpt-6-luna",
-    reviewEffective: "gpt-6-luna",
     ...builtIn,
   });
   expect(await (await call("/sessions", "POST", {})).json()).toMatchObject({ model: "gpt-6-luna" });

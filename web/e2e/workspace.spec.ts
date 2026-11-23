@@ -10,7 +10,6 @@ const app = {
   settingsUrl: "https://github.com/settings/apps/dolly-test",
   ingress: "https://dolly-ingress.example.workers.dev/hooks/github",
   senders: ["octocat"],
-  reviews: false,
 };
 
 const signedIn = { github: app, ownerClaimed: true, user: { login: "octocat" } };
@@ -229,8 +228,6 @@ test("one composer pill switches the session's model, effort, speed and fallback
     speed: "standard",
     autoFallback: true,
     ultrafastAvailable: false,
-    reviewModel: null,
-    reviewEffective: "gpt-6-luna",
   };
 
   await page.route("**/api/**", (route) => {
@@ -407,8 +404,6 @@ test("connects Claude without ChatGPT, explicitly tests Worker inference, and st
           speed: "standard",
           autoFallback: true,
           ultrafastAvailable: false,
-          reviewModel: null,
-          reviewEffective: "claude-sonnet-5-5",
         },
       });
 
@@ -1027,17 +1022,20 @@ test("settings show who is signed in and update the ingress URL and GitHub acces
   await main.getByRole("button", { name: "Save", exact: true }).last().click();
   await expect(main.getByText("Saved.", { exact: true })).toBeVisible();
   expect(accounts).toEqual({ accounts: ["octocat", "acme"] });
-  expect(senders).toEqual({ senders: ["octocat", "hubot"], reviews: false });
+  expect(senders).toEqual({ senders: ["octocat", "hubot"] });
   // Leaving and returning keeps what was saved, and clearing the list saves an empty list.
   await nav.getByRole("link", { name: "Account" }).click();
   await nav.getByRole("link", { name: "GitHub" }).click();
   await expect(main.getByLabel("Who can run /dolly commands")).toHaveValue("octocat, hubot");
   await main.getByLabel("Who can run /dolly commands").fill("");
-  // Turning on automatic reviews saves with the sender list.
-  await main.locator("#settings-reviews").click();
   await main.getByRole("button", { name: "Save", exact: true }).last().click();
   await expect(main.getByText("Saved.", { exact: true })).toBeVisible();
-  expect(senders).toEqual({ senders: [], reviews: true });
+  expect(senders).toEqual({ senders: [] });
+  // Automatic reviews are an automation now; the GitHub settings point there.
+  await expect(main.getByRole("link", { name: "Automations" })).toHaveAttribute(
+    "href",
+    "/settings/automations",
+  );
   // Loading /settings directly opens the first section.
   await page.goto("/settings", { waitUntil: "networkidle" });
   await expect(page).toHaveURL(/\/settings\/account$/);
