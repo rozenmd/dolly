@@ -920,6 +920,12 @@ test("shows an automation's webhook URL on the ingress Worker and replaces it", 
   // One rotation at a time: a second could show a URL the other already revoked.
   await expect(page.getByRole("button", { name: "Replacing…" })).toBeDisabled();
 
+  // Closed and reopened mid-rotation: still one rotation, and the new form waits for it.
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Manage Triage" }).click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  await expect(page.getByRole("button", { name: "Replacing…" })).toBeDisabled();
+
   // A poll starts mid-rotation, reads the old URL, and answers only after the rotation has.
   holdList = new Promise<void>((resolve) => (finishList = resolve));
   await page.getByRole("button", { name: "Refresh automations" }).click();
@@ -943,6 +949,13 @@ test("shows an automation's webhook URL on the ingress Worker and replaces it", 
       },
     });
   });
+  // The reopened form copies the new URL, as the row menu does.
+  await page.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => document.body.dataset.copied))
+    .toBe("https://dolly-ingress.example.workers.dev/hooks/automations/a1?secret=second-secret");
+  await page.evaluate(() => delete document.body.dataset.copied);
+
   await page.getByRole("button", { name: "Cancel" }).click();
   await page.getByRole("button", { name: "Manage Triage" }).click();
   await page.getByRole("menuitem", { name: "Copy webhook URL" }).click();

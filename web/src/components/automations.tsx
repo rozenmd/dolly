@@ -124,6 +124,12 @@ export function AutomationsSettings() {
   const [error, setError] = useState("");
   const [now, setNow] = useState(Date.now);
   const [busy, setBusy] = useState("");
+  /**
+   * The automation whose webhook URL is being replaced. Held here, not in the form, so that
+   * closing and reopening the form mid-rotation can neither start a second rotation nor miss
+   * the new URL.
+   */
+  const [rotating, setRotating] = useState("");
   const origin = useIngressOrigin();
   /** The latest load: an earlier one that answers later holds older state, so it is dropped. */
   const loads = useRef(0);
@@ -153,6 +159,28 @@ export function AutomationsSettings() {
       clearInterval(timer);
     };
   }, [load]);
+
+  async function rotate(id: string) {
+    setRotating(id);
+    setError("");
+
+    try {
+      const next = await rotateWebhook(id);
+
+      // The form and the row menu both read the list: neither may offer the URL just revoked,
+      // nor have a poll that started before the rotation restore it.
+      ++loads.current;
+      setAutomations(
+        (current) =>
+          current?.map((automation) => (automation.id === next.id ? next : automation)) ?? null,
+      );
+      void load();
+    } catch (cause) {
+      setError(message(cause, "Could not replace the URL."));
+    } finally {
+      setRotating("");
+    }
+  }
 
   async function act(id: string, action: () => Promise<void>, failure: string) {
     setBusy(id);
@@ -210,18 +238,17 @@ export function AutomationsSettings() {
           key={editing === "new" ? "new" : `${editing.id}:${editing.updatedAt}`}
           automation={editing === "new" ? undefined : editing}
           origin={origin}
+          // The URL as the list holds it now, not as the form opened: a rotation finishing after
+          // the form was closed and reopened still reaches it.
+          webhookPath={
+            editing === "new"
+              ? undefined
+              : (automations?.find((automation) => automation.id === editing.id) ?? editing)
+                  .webhookPath
+          }
+          rotating={editing !== "new" && rotating === editing.id}
+          onRotate={() => editing !== "new" && void rotate(editing.id)}
           onClose={() => setEditing(null)}
-          onRotated={(next) => {
-            // The row menu copies the URL too: it must never offer the one just revoked, even
-            // until the next poll, nor have a poll that started before the rotation restore it.
-            ++loads.current;
-            setAutomations(
-              (current) =>
-                current?.map((automation) => (automation.id === next.id ? next : automation)) ??
-                null,
-            );
-            void load();
-          }}
           onSaved={() => {
             setEditing(null);
             void load();
@@ -504,15 +531,20 @@ const McpNames = Schema.Struct({
 function AutomationForm({
   automation,
   origin,
+  webhookPath,
+  rotating,
+  onRotate,
   onClose,
-  onRotated,
   onSaved,
 }: {
   automation?: Automation;
   origin: string;
+  /** The automation's current webhook URL path, from the page's list. */
+  webhookPath: string | undefined;
+  /** Whether its URL is being replaced; one rotation at a time, held by the page. */
+  rotating: boolean;
+  onRotate: () => void;
   onClose: () => void;
-  /** The automation as a rotation left it, with its new webhook URL. */
-  onRotated: (automation: Automation) => void;
   onSaved: () => void;
 }) {
   /** The automation as the form opened it: its values and the access an edit is made against. */
@@ -537,10 +569,8 @@ function AutomationForm({
   const [connectionsFailed, setConnectionsFailed] = useState(false);
   const [enabled, setEnabled] = useState(initial.enabled);
   const [webhook, setWebhook] = useState(initial.webhook);
-  const [webhookPath, setWebhookPath] = useState(automation?.webhookPath);
-  const [copied, setCopied] = useState(false);
-  /** One rotation at a time: overlapping ones could show a URL a later one already revoked. */
-  const [rotating, setRotating] = useState(false);
+  /** The URL the Copy button last copied: "Copied" only while that is still the URL shown. */
+  const [copied, setCopied] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [picked, setPicked] = useState("");
@@ -826,29 +856,17 @@ function AutomationForm({
                   onClick={() =>
                     void navigator.clipboard
                       .writeText(webhookUrl(origin, webhookPath))
-                      .then(() => setCopied(true))
+                      .then(() => setCopied(webhookPath))
                   }
                 >
                   <ClipboardDocumentIcon width={16} aria-hidden="true" />
-                  {copied ? "Copied" : "Copy"}
+                  {copied === webhookPath ? "Copied" : "Copy"}
                 </button>
                 <button
                   type="button"
                   className="secondary-button"
                   disabled={rotating}
-                  onClick={() => {
-                    setRotating(true);
-                    void rotateWebhook(automation.id)
-                      .then(
-                        (next) => {
-                          setWebhookPath(next.webhookPath);
-                          setCopied(false);
-                          onRotated(next);
-                        },
-                        (cause: unknown) => setError(message(cause, "Could not replace the URL.")),
-                      )
-                      .finally(() => setRotating(false));
-                  }}
+                  onClick={onRotate}
                 >
                   {rotating ? "Replacing…" : "New URL"}
                 </button>
