@@ -35,12 +35,20 @@ test.beforeEach(async ({ page }) => {
 
     if (path.startsWith("/api/sessions/") && route.request().method() === "PUT") {
       const id = path.split("/").at(-1);
-      const { archived } = route.request().postDataJSON();
-      const session = sessions.find((item) => item.id === id);
+      const body = route.request().postDataJSON();
 
-      if (session) session.archived = archived;
+      const session: { archived: boolean; pinnedAt?: number } | undefined = sessions.find(
+        (item) => item.id === id,
+      );
 
-      return route.fulfill({ json: { archived } });
+      if (session && "archived" in body) session.archived = body.archived;
+
+      if (session && "pinned" in body) {
+        if (body.pinned) session.pinnedAt = 1_000;
+        else delete session.pinnedAt;
+      }
+
+      return route.fulfill({ json: { ...body, ...(body.pinned && { pinnedAt: 1_000 }) } });
     }
 
     if (path === "/api/auth")
@@ -104,6 +112,32 @@ test("shows an open review's row until another session is opened", async ({ page
   ).toBeVisible();
   await expect(workspaces.locator(".workspace-row")).toHaveCount(3);
   await expect(workspaces).not.toContainText("Review example/project#8");
+});
+
+test("a pinned review stays in the sidebar after another session is opened", async ({ page }) => {
+  await page.goto("/workspace/review-1/session/review-1");
+
+  const pinned = page.getByRole("navigation", { name: "Pinned workspaces", exact: true });
+  const workspaces = page.getByRole("navigation", { name: "Workspaces", exact: true });
+
+  await expect(
+    page.getByRole("heading", { name: "Review example/project#8", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Pin workspace", exact: true }).click();
+  await expect(pinned).toContainText("Review example/project#8");
+
+  await workspaces.locator(".workspace-row").filter({ hasText: "Fix the flaky test" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Fix the flaky test", exact: true }),
+  ).toBeVisible();
+  await expect(pinned).toContainText("Review example/project#8");
+
+  // Another device, which never opened the review, lists it too.
+  await page.goto("/workspace/task-2/session/task-2");
+  await expect(
+    page.getByRole("heading", { name: "Fix the flaky test", exact: true }),
+  ).toBeVisible();
+  await expect(pinned).toContainText("Review example/project#8");
 });
 
 test("archiving the writable tab in a review's workspace does not open the review", async ({

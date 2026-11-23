@@ -33,6 +33,7 @@ import {
   readSessions,
   request,
   SavedSession,
+  SessionUpdateResult,
   Snapshot,
   turnsFromSnapshot,
   sessionBody,
@@ -52,6 +53,7 @@ import { useSessionSummary } from "./lib/session-summary";
 import { workspaceMain, workspaceOf, workspaceRows, workspaceTabs } from "./lib/workspaces";
 
 const cacheStorageKey = "dolly.sessions.cache.v1";
+const decodeUpdate = Schema.decodeUnknownSync(Schema.fromJsonString(SessionUpdateResult));
 const decodeSessions = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(SavedSession)));
 
 /** Model settings the composer can change on a session; each applies from the next request. */
@@ -138,8 +140,9 @@ export function WorkspaceApp() {
 
   // One row per workspace; spawned sessions live with their parent. A workspace of only automatic
   // reviews is left out unless open; writable work started in one keeps it (lib/session-threads).
+  // A pinned one stays too: the owner asked to keep it in sight.
   const sidebarRows = workspaceRows(rows).filter(
-    (row) => row.id === workspace || !row.sessions.every(automated),
+    (row) => row.id === workspace || Boolean(row.pinnedAt) || !row.sessions.every(automated),
   );
 
   const tabs = workspace ? workspaceTabs(rows, workspace) : [];
@@ -561,11 +564,18 @@ export function WorkspaceApp() {
       ? row.sessions.filter((item) => item.id === row.main)
       : row.sessions.filter((item) => item.pinnedAt);
 
+    // The server's pin times, so Pinned orders the same here as on every other device.
+    const pinTimes = new Map<string, number>();
+
     try {
       await Promise.all(
-        changed.map((item) =>
-          request(`/sessions/${encodeURIComponent(item.id)}`, { pinned }, undefined, "PUT"),
-        ),
+        changed.map(async (item) => {
+          const response = decodeUpdate(
+            await request(`/sessions/${encodeURIComponent(item.id)}`, { pinned }, undefined, "PUT"),
+          );
+
+          if (response.pinnedAt) pinTimes.set(item.id, response.pinnedAt);
+        }),
       );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not update the sidebar.");
@@ -574,13 +584,13 @@ export function WorkspaceApp() {
     }
 
     const ids = changed.map((item) => item.id);
-    const pinnedAt = Date.now();
 
     updateSessions((current) =>
       current.map((item) => {
         if (!ids.includes(item.id)) return item;
 
-        if (pinned) return { ...item, pinnedAt: item.pinnedAt ?? pinnedAt };
+        if (pinned)
+          return { ...item, pinnedAt: pinTimes.get(item.id) ?? item.pinnedAt ?? Date.now() };
         const { pinnedAt: _unpinned, ...rest } = item;
 
         return rest;

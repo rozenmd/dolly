@@ -3546,6 +3546,8 @@ export class Agent extends DurableObject<Env> {
         ...(patch.archived !== undefined && { archived: Boolean(next.archived) }),
         ...(patch.kept !== undefined && { kept: patch.kept }),
         ...(pinned !== undefined && { pinned }),
+        // The client orders Pinned by the server's clock, not its own.
+        ...(pinned && next.pinnedAt && { pinnedAt: next.pinnedAt }),
       };
     });
 

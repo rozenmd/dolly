@@ -59,7 +59,7 @@ export const Session = Schema.Struct({
   autoFallback: Schema.optional(Schema.Boolean),
 });
 
-export { SavedSession } from "../../../src/session-contracts";
+export { SavedSession, SessionUpdateResult } from "../../../src/session-contracts";
 
 import { SavedSession } from "../../../src/session-contracts";
 

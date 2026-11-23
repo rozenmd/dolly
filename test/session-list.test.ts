@@ -235,8 +235,8 @@ it("persists archive choices across restarts and rejects the retired browser imp
 it("pins a workspace across restarts, keeping its pin time when pinned again", async () => {
   await seed();
 
-  // `pinned` is a string only to prove the API rejects it.
-  const update = (body: { pinned?: boolean | string; archived?: boolean }) =>
+  // Strings are allowed only to prove the API rejects them.
+  const update = (body: { pinned?: boolean | string; archived?: boolean | string }) =>
     SELF.fetch("https://worker/api/sessions/legacy-id", {
       method: "PUT",
       headers,
@@ -247,11 +247,10 @@ it("pins a workspace across restarts, keeping its pin time when pinned again", a
 
   const pinned = await update({ pinned: true });
   expect(pinned.status).toBe(200);
-  expect(await pinned.json()).toEqual({ pinned: true });
-  await abortAllDurableObjects();
-
-  const pinnedAt = (await list())[0].pinnedAt;
+  const { pinnedAt } = await pinned.json<{ pinnedAt: number }>();
   expect(pinnedAt).toBeGreaterThan(0);
+  await abortAllDurableObjects();
+  expect((await list())[0].pinnedAt).toBe(pinnedAt);
 
   // Pinning again, or archiving and restoring, leaves the workspace where it was in Pinned.
   expect((await update({ pinned: true })).status).toBe(200);
@@ -268,6 +267,11 @@ it("pins a workspace across restarts, keeping its pin time when pinned again", a
   await abortAllDurableObjects();
   expect((await list())[0].pinnedAt).toBeUndefined();
   expect((await update({ pinned: "yes" })).status).toBe(400);
+  expect((await update({})).status).toBe(400);
+
+  // A malformed field fails the whole update instead of applying only the valid pin.
+  expect((await update({ archived: "yes", pinned: true })).status).toBe(400);
+  expect((await list())[0].pinnedAt).toBeUndefined();
 });
 
 it("reports a pull request opened deep in the transcript and remembers it after restart", async () => {

@@ -74,13 +74,26 @@ export type PullRequestSummary = {
 
 export type SavedSession = typeof SavedSession.Type;
 
-/** Owner sidebar choices for one session; at least one must be given. */
-export const SessionUpdate = Schema.Union([
-  Schema.Struct({
-    archived: Schema.Boolean,
-    kept: Schema.optional(Schema.Boolean),
-    pinned: Schema.optional(Schema.Boolean),
-  }),
-  Schema.Struct({ kept: Schema.Boolean, pinned: Schema.optional(Schema.Boolean) }),
-  Schema.Struct({ pinned: Schema.Boolean }),
-]);
+/**
+ * Owner sidebar choices for one session; at least one must be given. One struct, so a
+ * malformed field fails the whole update rather than being dropped by another branch.
+ */
+export const SessionUpdate = Schema.Struct({
+  archived: Schema.optional(Schema.Boolean),
+  kept: Schema.optional(Schema.Boolean),
+  pinned: Schema.optional(Schema.Boolean),
+}).check(
+  Schema.makeFilter((update) =>
+    Object.values(update).some((value) => value !== undefined)
+      ? undefined
+      : "Expected archived, kept or pinned",
+  ),
+);
+
+/** What a session update applied; `pinnedAt` is the server's pin time when pinned. */
+export const SessionUpdateResult = Schema.Struct({
+  archived: Schema.optional(Schema.Boolean),
+  kept: Schema.optional(Schema.Boolean),
+  pinned: Schema.optional(Schema.Boolean),
+  pinnedAt: Schema.optional(Schema.Number),
+});
