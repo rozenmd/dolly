@@ -260,6 +260,11 @@ export const GitHubReview = Schema.Struct({
   sender: Actor,
   /** New commits on a PR that may have been reviewed before, rather than a PR becoming ready. */
   pushed: Schema.optional(Schema.Boolean),
+  /**
+   * The review automation this review was admitted for (automations.ts): only it may run the
+   * review, so one deleted and replaced while the review waits can't lend it the new prompt.
+   */
+  automation: Schema.optional(Schema.String),
 });
 
 /** What a GitHub thread delivers: a /dolly command or an automatic review. */

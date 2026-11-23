@@ -1413,3 +1413,44 @@ it("pausing the review automation skips a review that is still queued", async ()
   // The queued head's session never started a review.
   expect((await reviewSandboxes(14, [pushed]))[0]?.pin).toBeUndefined();
 }, 60_000);
+
+it("a review automation made to replace a deleted one doesn't run reviews queued for the old one", async () => {
+  github.number = 16;
+  await opener();
+
+  const release = holdReviews();
+  verdicts.push("Fine.\nVERDICT: blocking=0 findings=0 confidence=5");
+  expect(await pullRequestHook("opened", 16, "a".repeat(40))).toBe(202);
+  await expect
+    .poll(async () => (await reviewSandboxes(16, ["a".repeat(40)]))[0]?.pin, { timeout: 15_000 })
+    .toBe("a".repeat(40));
+
+  // A push queues the next review, admitted for the current automation.
+  const pushed = "b".repeat(40);
+  expect(await pullRequestHook("synchronize", 16, pushed)).toBe(202);
+  github.heads["16"] = pushed;
+
+  // Replaced while that review waits: the new one's prompt and run history aren't the queued
+  // review's, so it is skipped rather than run on the new prompt.
+  await SELF.fetch(`https://worker/api/automations/${reviewAutomation}`, {
+    method: "DELETE",
+    headers,
+  });
+
+  const replacement = await SELF.fetch("https://worker/api/automations", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      name: "Replacement",
+      prompt: "Replacement review instructions.",
+      event: "pull_request",
+    }),
+  });
+
+  expect(replacement.status).toBe(201);
+  release();
+
+  await expect.poll(() => reviewsSettled(16), { timeout: 15_000 }).toBe(true);
+  expect(reviewPrompts.join("\n")).not.toContain("Replacement review instructions.");
+  expect((await reviewSandboxes(16, [pushed]))[0]?.pin).toBeUndefined();
+}, 60_000);

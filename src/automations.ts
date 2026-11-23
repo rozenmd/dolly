@@ -560,6 +560,10 @@ function record(state: State, run: AutomationRun) {
 
 type TaskRecord = Awaited<ReturnType<Tx["task"]>>;
 
+/** Whether a run came from an event's pipeline rather than AutomationRunTask. */
+const isEventTrigger = (trigger: Trigger): trigger is AutomationEvent =>
+  AUTOMATION_EVENTS.some((event) => event === trigger);
+
 /** How an event run's task ended, as a run status; still running while the task is live. */
 function eventRunOutcome(task: TaskRecord): Pick<AutomationRun, "status" | "error"> {
   if (!task) return { status: "failed", error: "The run ended without reporting back" };
@@ -746,12 +750,28 @@ async function admit(
 
     const live: AutomationRun[] = [];
 
-    for (const run of state.runs.filter((item) => item.status === "running"))
+    for (const run of state.runs.filter((item) => item.status === "running")) {
+      // An event run's row stays running in storage (recordEventRun): its task says how it ended.
+      if (isEventTrigger(run.trigger) && run.taskId !== undefined) {
+        const outcome = eventRunOutcome(await tx.task(run.taskId));
+
+        if (outcome.status === "running") live.push(run);
+        else {
+          run.status = outcome.status;
+          run.finishedAt = at;
+
+          if (outcome.error) run.error = outcome.error;
+        }
+
+        continue;
+      }
+
       if (await stillRunning(tx, run)) live.push(run);
       else {
         run.status = "failed";
         run.error = "The run ended without reporting back";
       }
+    }
 
     // Webhook runs may overlap each other, up to `concurrency`; nothing overlaps another trigger.
     const limit = live.every((run) => run.trigger === trigger) ? concurrency : 1;
@@ -877,6 +897,8 @@ export class Automations {
     id: string,
     create: boolean,
     build: (current: Automation | undefined, now: number) => Automation | { error: string },
+    /** Allow one past MAX_AUTOMATIONS: for a migration that must not lose a feature. */
+    overLimit = false,
   ) {
     for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
       const now = this.host.now();
@@ -900,7 +922,11 @@ export class Automations {
           const index = await tx.doc(AutomationIndex);
           const listed = Object.hasOwn(index.automations, id);
 
-          if (create && Object.keys(index.automations).length >= MAX_AUTOMATIONS) return "full";
+          if (
+            create &&
+            Object.keys(index.automations).length >= MAX_AUTOMATIONS + (overLimit ? 1 : 0)
+          )
+            return "full";
 
           if (listed !== !create) return "changed";
 
@@ -985,11 +1011,8 @@ export class Automations {
       state.runs.map(async (run, index) => {
         const listed = shown.runs[index]!;
 
-        if (
-          run.status !== "running" ||
-          run.taskId === undefined ||
-          run.trigger !== state.automation.event
-        )
+        // By the run's own trigger, not the definition's: an edit may have changed that since.
+        if (run.status !== "running" || run.taskId === undefined || !isEventTrigger(run.trigger))
           return listed;
 
         return {
@@ -1016,24 +1039,32 @@ export class Automations {
     return undefined;
   }
 
-  async create(input: typeof NewAutomation.Type) {
+  /**
+   * `overLimit` lets a migration create one past MAX_AUTOMATIONS, so an owner already at the
+   * limit doesn't lose what it migrates.
+   */
+  async create(input: typeof NewAutomation.Type, overLimit = false) {
     const id = crypto.randomUUID();
 
-    const saved = await this.save(id, true, (_current, now) =>
-      validate(
-        {
-          id,
-          name: input.name,
-          prompt: input.prompt,
-          enabled: true,
-          readOnly: false,
-          mcpServers: [],
-          createdAt: now,
-          updatedAt: now,
-        },
-        input,
-        now,
-      ),
+    const saved = await this.save(
+      id,
+      true,
+      (_current, now) =>
+        validate(
+          {
+            id,
+            name: input.name,
+            prompt: input.prompt,
+            enabled: true,
+            readOnly: false,
+            mcpServers: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+          input,
+          now,
+        ),
+      overLimit,
     );
 
     return saved ?? { error: "Automation not saved" };

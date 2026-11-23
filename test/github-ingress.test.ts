@@ -988,6 +988,20 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
   // Paused, pull requests are ignored again.
   expect((await automationApi(`/${automation.id}`, "PUT", { enabled: false })).status).toBe(200);
   expect((await hook({ ...pullRequest, number: 10 }, "pull_request")).status).toBe(204);
+
+  // Given another trigger, it keeps its reviews as finished runs, and can be run by hand.
+  expect(
+    (await automationApi(`/${automation.id}`, "PUT", { event: null, readOnly: false })).status,
+  ).toBe(200);
+  expect(
+    (await listAutomations())
+      .find((item) => item.id === automation.id)
+      ?.runs.map((run) => run.status),
+  ).toEqual(["succeeded", "succeeded", "succeeded", "succeeded", "succeeded"]);
+  expect(
+    (await automationApi(`/${automation.id}/run`, "POST", { requestId: crypto.randomUUID() }))
+      .status,
+  ).toBe(202);
 }, 30_000);
 
 it("keeps one pull request automation, and makes the old Settings > GitHub switch into it", async () => {
@@ -1043,8 +1057,14 @@ it("keeps one pull request automation, and makes the old Settings > GitHub switc
   expect(await error(run)).toContain("can't be run by hand");
 
   // An owner who had reviews switched on in Settings > GitHub gets the automation, enabled, on the
-  // review model they had chosen, once.
+  // review model they had chosen, once, even at the automation limit.
   await clearAutomations();
+
+  for (let index = 0; index < 50; index++)
+    expect(
+      (await automationApi("", "POST", { name: `Manual ${index}`, prompt: "Report" })).status,
+    ).toBe(201);
+
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("github:webhook", { ...profile, reviews: true });
     await state.storage.put("settings:review-model", "gpt-6-sol");
@@ -1053,7 +1073,9 @@ it("keeps one pull request automation, and makes the old Settings > GitHub switc
 
   for (let restart = 0; restart < 2; restart++) {
     await abortAllDurableObjects();
-    expect(await listAutomations()).toEqual([
+    const listed = await listAutomations();
+    expect(listed).toHaveLength(51);
+    expect(listed.filter((item) => item.event)).toEqual([
       expect.objectContaining({
         name: "Review pull requests",
         prompt: REVIEW_INSTRUCTIONS,

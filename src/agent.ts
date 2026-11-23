@@ -295,9 +295,15 @@ export class Agent extends DurableObject<Env> {
         Effect.provide(this.services),
       ),
     handoff: {
-      reviewer: () =>
+      // Only the automation the review was admitted for, while it is enabled: a replacement
+      // made meanwhile ran none of the admission (model, run history), so it doesn't take over.
+      reviewer: (review) =>
         attempt("github.reviewer", () => this.reviewAutomation()).pipe(
-          Effect.map((automation) => automation && { prompt: automation.prompt }),
+          Effect.map((automation) =>
+            automation && (review.automation === undefined || review.automation === automation.id)
+              ? { prompt: automation.prompt }
+              : undefined,
+          ),
         ),
       head: (review) =>
         Effect.flatMap(GitHub, (github) => github.pullHead(review.repository, review.number)).pipe(
@@ -1888,7 +1894,10 @@ export class Agent extends DurableObject<Env> {
 
         yield* this.arm({ active: true });
 
-        const delivery = verified.kind === "review" ? verified.review : verified.event;
+        const delivery =
+          verified.kind === "review"
+            ? { ...verified.review, ...(automation && { automation: automation.id }) }
+            : verified.event;
 
         // Each review is a run of the review automation, recorded in the commit that queues it.
         const admitted = yield* admitGitHub(
@@ -2896,7 +2905,18 @@ export class Agent extends DurableObject<Env> {
   });
 
   async automationsList() {
-    await this.migrateReviews();
+    // The list must load whatever the migration does: it is where the owner fixes things.
+    await Effect.runPromise(
+      attempt("automations.reviews.migrate", () => this.migrateReviews()).pipe(
+        Effect.catchTag("OperationError", (error) =>
+          Effect.logError({
+            event: "review_automation_migration_failed",
+            error: exceptionDetails(error),
+            details: error.details,
+          }),
+        ),
+      ),
+    );
 
     return this.automations.list();
   }
@@ -2971,12 +2991,16 @@ export class Agent extends DurableObject<Env> {
         ),
       );
 
-      const created = await this.automations.create({
-        name: "Review pull requests",
-        prompt: REVIEW_INSTRUCTIONS,
-        event: "pull_request",
-        ...(model && { model }),
-      });
+      // Past the automation limit if need be: an owner at it would otherwise lose reviews.
+      const created = await this.automations.create(
+        {
+          name: "Review pull requests",
+          prompt: REVIEW_INSTRUCTIONS,
+          event: "pull_request",
+          ...(model && { model }),
+        },
+        true,
+      );
 
       // Only an existing pull request automation (another migration won the race) is fine.
       if (

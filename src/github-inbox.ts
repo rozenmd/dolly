@@ -93,7 +93,7 @@ export type HandoffDeps = {
    * The review automation's prompt while it is enabled, undefined once it is paused or deleted;
    * read again before each review and handoff, so an edit or a pause applies to queued reviews.
    */
-  reviewer: () => Effect.Effect<{ prompt: string } | undefined, OperationError>;
+  reviewer: (review: Review) => Effect.Effect<{ prompt: string } | undefined, OperationError>;
   /** The PR's state and head, read fresh: a stale head is neither reviewed nor handed off. */
   head: (review: Review) => Effect.Effect<PullHead, OperationError>;
   /** The PR's description, conversation, review threads and reviews, read fresh. */
@@ -162,7 +162,7 @@ export function githubDelivery({
                 yield* attempt("github.after.wait", () => runtime.waitForTask(previous, context));
               }
 
-              const reviewer = yield* handoff.reviewer();
+              const reviewer = yield* handoff.reviewer(review);
               const enabled = reviewer !== undefined;
 
               const current =
@@ -398,7 +398,7 @@ export function githubDelivery({
             );
 
             // Pausing the review automation stops the loop, also for reviews admitted before that.
-            const enabled = (yield* handoff.reviewer()) !== undefined;
+            const enabled = (yield* handoff.reviewer(review)) !== undefined;
 
             // Findings about a head that has moved on would only confuse the session.
             const head = enabled ? yield* handoff.head(review) : undefined;
