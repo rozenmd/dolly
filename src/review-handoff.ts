@@ -64,11 +64,15 @@ export function stripVerdict(text: string) {
 }
 
 /**
- * The same bar OpenSession's loops stop at: nothing blocking, and either nothing open or a
- * reviewer who rates the change 4/5 or better.
+ * Nearly the bar OpenSession's loops stop at: nothing blocking, and either nothing open, a
+ * reviewer who rates the change 4/5 or better, or an explicit approval.
  */
 export function reviewSatisfied(verdict: ReviewVerdict) {
-  return verdict.blocking === 0 && (verdict.findings === 0 || verdict.confidence >= 4);
+  return (
+    verdict.blocking === 0 &&
+    // An explicit approval leaves only advisory findings, such as follow-ups: never a fix round.
+    (verdict.verdict === "approve" || verdict.findings === 0 || verdict.confidence >= 4)
+  );
 }
 
 /** What the last automatic review of a pull request concluded, for the next review's digest. */
@@ -368,12 +372,12 @@ export function handoffMessage(
           "Do this now:",
           `0. ${checkoutStep(review.repository, review.number, pull.ref, review.sha)}`,
           `1. Check the branch hasn't moved: \`git rev-parse HEAD\` should be \`${review.sha}\`. These findings describe \`${head}\`; if the branch has moved on, don't patch against stale feedback: say it was superseded and let the fresh review run instead.`,
-          "2. Address every actionable finding you can confirm in the code. If you disagree with one, leave the code unchanged and reply in that thread with github reply_to_review_comment explaining why; never skip one silently.",
+          "2. Address every actionable finding you can confirm in the code, with the smallest change that fixes it inside this PR's goal. If you disagree with one, or fixing it would take new mechanism the PR never set out to build (new tables, locking or reconciliation schemes, retry machinery, ever more edge cases of a problem an earlier round fixed), leave the code unchanged and reply in that thread with github reply_to_review_comment explaining why, proposing a follow-up where it's real; the next review won't re-raise it without new evidence. Never skip one silently.",
           `3. ${pushStep(pull.ref, review.sha)} Push to ${review.repository} and nowhere else.`,
           "4. Reply in each addressed inline thread with what you did, e.g. `Fixed in <sha>`, with github reply_to_review_comment and the thread's comment id above, once per thread.",
           `5. ${NEVER_MERGE}`,
         ].join("\n"),
-        `The review re-runs automatically after your push and its result comes back here, so don't wait for it: end your turn after pushing. ${
+        `The review re-runs automatically after your push and its result comes back here, so don't wait for it: end your turn after pushing. Only a push starts a review: if you changed no code and only replied, don't push an empty commit to trigger one; say in your answer that the remaining findings are left for a human to decide. ${
           remaining > 0
             ? `If it still finds problems you'll get at most ${remaining} more round${remaining === 1 ? "" : "s"} here before it's handed to humans.`
             : "This is the last automatic round: anything still open after it goes to humans."

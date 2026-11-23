@@ -843,6 +843,11 @@ it("hands an unsatisfied review back to the session that opened the PR, until a 
   );
   expect(handoffs[0]).toContain(`git merge-base --is-ancestor ${first} HEAD`);
   expect(handoffs[0]).toContain("Never merge the PR");
+  // Fixes stay minimal and in scope: new machinery is pushed back on, not built.
+  expect(handoffs[0]).toContain("with the smallest change that fixes it inside this PR's goal");
+  expect(handoffs[0]).toContain("new mechanism the PR never set out to build");
+  // A round that only replies doesn't push to trigger a review that would change nothing.
+  expect(handoffs[0]).toContain("Only a push starts a review");
   await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Handled 1");
 
   // A redelivery of the same head neither reviews nor hands off again.
@@ -862,13 +867,20 @@ it("hands an unsatisfied review back to the session that opened the PR, until a 
   expect(reviewPrompts[1]).toContain("You previously reviewed PR example/project#8");
   expect(reviewPrompts[1]).toContain("You reviewed `aaaaaaa`");
   expect(reviewPrompts[1]).toContain("request changes, confidence 2/5, 2 findings (1 blocking)");
-  // Someone else's reply never settles a finding; only the PR's author can push back.
+  // Someone else's reply never settles a finding; only the PR's author answers one.
   expect(reviewPrompts[1]).toContain(
     "[still open] `src/parse.ts` — **P1** — parse() dereferences a null config.",
   );
   expect(reviewPrompts[1]).toContain(
-    "[author pushback] `src/cache.ts` — **P2** — The cache never expires.",
+    "[author replied] `src/cache.ts` — **P2** — The cache never expires.",
   );
+  // It knows how many heads it has reviewed, and that it is checking fixes, not auditing a new PR:
+  // fixes for its own findings aren't fresh scope to escalate on.
+  expect(reviewPrompts[1]).toContain("This is review round 2 of this PR");
+  expect(reviewPrompts[1]).toContain("This is not a new PR");
+  expect(reviewPrompts[1]).toContain("Converge, don't escalate");
+  expect(reviewPrompts[1]).toContain("Code written to fix your own findings is not new scope");
+  expect(reviewPrompts[1]).not.toContain("freshest scrutiny");
   expect(reviewPrompts[1]).toContain("Intentional: entries are immutable.");
   expect(reviewPrompts[1]).toContain("[addressed] `src/old.ts`");
   expect(reviewPrompts[1]).toContain("@mallory on `src/parse.ts:3`");
@@ -902,9 +914,16 @@ it("tells the session about non-blocking findings once for each reviewed commit"
   github.number = 15;
   await opener();
 
-  for (const [index, sha] of ["a".repeat(40), "b".repeat(40)].entries()) {
+  // The last is an approval that leaves a follow-up and rates the change 3/5: still a pass.
+  const answers = [
+    "Fine.\nVERDICT: verdict=comment blocking=0 findings=1 confidence=4",
+    "Fine.\nVERDICT: verdict=comment blocking=0 findings=1 confidence=4",
+    "Fine, with a follow-up.\nVERDICT: verdict=approve blocking=0 findings=1 confidence=3",
+  ];
+
+  for (const [index, sha] of ["a".repeat(40), "b".repeat(40), "c".repeat(40)].entries()) {
     github.heads["15"] = sha;
-    verdicts.push("Fine.\nVERDICT: verdict=comment blocking=0 findings=1 confidence=4");
+    verdicts.push(answers[index]!);
     expect(await pullRequestHook(index ? "synchronize" : "opened", 15, sha)).toBe(202);
     await expect.poll(() => handoffs, { timeout: 15_000 }).toHaveLength(index + 1);
     expect(handoffs[index]).toContain(`passed review at \`${sha.slice(0, 12)}\``);
@@ -913,6 +932,25 @@ it("tells the session about non-blocking findings once for each reviewed commit"
 
   // No fix round started.
   expect((await handoffState())?.pulls[`${repository}#15`]?.rounds).toBe(0);
+}, 60_000);
+
+it("gives a PR's first review a full audit even when a push triggered it", async () => {
+  github.number = 16;
+  await opener();
+
+  // The opening review never ran (skipped or superseded); the first one Dolly runs is for a push,
+  // on a PR with an open human thread.
+  const sha = "a".repeat(40);
+  github.heads["16"] = sha;
+  verdicts.push("Fine.\nVERDICT: verdict=approve blocking=0 findings=0 confidence=5");
+  expect(await pullRequestHook("synchronize", 16, sha)).toBe(202);
+  await expect.poll(() => reviewPrompts, { timeout: 15_000 }).toHaveLength(1);
+
+  expect(reviewPrompts[0]).toContain("You haven't reviewed it before: review the whole PR.");
+  expect(reviewPrompts[0]).not.toContain("You previously reviewed");
+  expect(reviewPrompts[0]).not.toContain("What a re-review is for");
+  // The human thread is still there as context.
+  expect(reviewPrompts[0]).toContain("@mallory on `src/parse.ts:3`");
 }, 60_000);
 
 it("holds an automatic review's GitHub writes to the pull request and head it was started for", async () => {
