@@ -187,6 +187,7 @@ export const READ_ONLY_GITHUB_ACTIONS: ReadonlySet<string> = new Set([
   "read_job_log",
   "create_review",
   "reply_to_review_comment",
+  "resolve_review_thread",
 ]);
 
 /** The only tools a read-only session is offered. An allowlist, so tools added later stay out. */
@@ -201,8 +202,9 @@ export const READ_ONLY_TOOLS = [
 
 /**
  * Why a read-only session's GitHub write is refused, or undefined when it may go ahead: only the
- * review its host pinned, as a COMMENT on exactly that pull request and head. Thread replies and
- * writes from a session with no pinned review are refused.
+ * review its host pinned, as a COMMENT on exactly that pull request and head, and resolving
+ * threads on that pull request (GitHub.execute then checks this App started each one).
+ * Thread replies and writes from a session with no pinned review are refused.
  */
 export function reviewWriteRefusal(
   state: WorkspaceState | null | undefined,
@@ -215,9 +217,16 @@ export function reviewWriteRefusal(
   },
 ) {
   const target = state?.reviewTarget;
+  const pull = target && `${target.repository}#${target.number}`;
+
+  if (target && operation.action === "resolve_review_thread")
+    return operation.repository?.toLowerCase() === target.repository &&
+      operation.number === target.number
+      ? undefined
+      : `This automatic review session can only resolve its own threads on ${pull}.`;
 
   if (!target || operation.action !== "create_review")
-    return "This automatic review session can only publish its one review with create_review.";
+    return "This automatic review session can only publish its one review with create_review and resolve its own threads with resolve_review_thread.";
 
   if (
     operation.repository?.toLowerCase() !== target.repository ||
@@ -225,7 +234,7 @@ export function reviewWriteRefusal(
     operation.commit_id !== target.sha ||
     operation.event !== "COMMENT"
   )
-    return `This automatic review session can only publish one COMMENT review on ${target.repository}#${target.number} at commit ${target.sha}.`;
+    return `This automatic review session can only publish one COMMENT review on ${pull} at commit ${target.sha}.`;
 
   return undefined;
 }

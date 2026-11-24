@@ -201,6 +201,13 @@ export const GitHubRequest = Schema.Struct({
       comment_id: PullNumber,
       body: CommentBody,
     }),
+    Schema.Struct({
+      /** Marks the review thread holding `comment_id` resolved; a resolved thread stays resolved. */
+      action: Schema.Literal("resolve_review_thread"),
+      repository: Repository,
+      number: PullNumber,
+      comment_id: PullNumber,
+    }),
   ]),
 });
 
@@ -234,6 +241,7 @@ export const GitHubResult = Schema.Union([
       "job_log",
       "review",
       "review_comment",
+      "review_thread",
       "screenshot",
     ]),
     data: Schema.Unknown,

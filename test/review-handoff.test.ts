@@ -158,9 +158,18 @@ type FakeGitHub = {
   refs: Record<string, string>;
   reviews: { id: number; number: number; commit_id: string; body: string }[];
   comments: { number: number; body: string }[];
+  /** Node ids of the review threads resolved through GraphQL. */
+  resolved: string[];
 };
 
-const github: FakeGitHub = { number: 8, heads: {}, refs: {}, reviews: [], comments: [] };
+const github: FakeGitHub = {
+  number: 8,
+  heads: {},
+  refs: {},
+  reviews: [],
+  comments: [],
+  resolved: [],
+};
 
 /** The verdicts the review model answers with, in order. */
 let verdicts: string[] = [];
@@ -267,9 +276,17 @@ function fakeGitHub(url: URL, init: RequestInit | undefined) {
   }
 
   if (path === "/graphql") {
-    const { variables }: { variables: { number: number; after?: string } } = JSON.parse(
-      String(init?.body),
-    );
+    const {
+      query,
+      variables,
+    }: { query: string; variables: { number: number; after?: string; thread?: string } } =
+      JSON.parse(String(init?.body));
+
+    if (query.includes("resolveReviewThread")) {
+      github.resolved.push(String(variables.thread));
+
+      return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } });
+    }
 
     // Threads come in pages; the second page holds a current finding.
     if (variables.after === "threads-2")
@@ -336,6 +353,7 @@ function pullReview(number: number) {
       nodes: [
         ...olderComments(number),
         {
+          id: "T_parse",
           isResolved: false,
           isOutdated: false,
           path: "src/parse.ts",
@@ -358,6 +376,7 @@ function pullReview(number: number) {
           },
         },
         {
+          id: "T_mallory",
           isResolved: false,
           isOutdated: false,
           path: "src/parse.ts",
@@ -374,6 +393,7 @@ function pullReview(number: number) {
           },
         },
         {
+          id: "T_load",
           isResolved: false,
           isOutdated: false,
           path: "src/load.ts",
@@ -390,6 +410,7 @@ function pullReview(number: number) {
           },
         },
         {
+          id: "T_cache",
           isResolved: false,
           isOutdated: false,
           path: "src/cache.ts",
@@ -413,6 +434,7 @@ function pullReview(number: number) {
           },
         },
         {
+          id: "T_old",
           isResolved: true,
           isOutdated: false,
           path: "src/old.ts",
@@ -482,6 +504,7 @@ let bulkyPulls: number[] = [];
 const olderComments = (number: number) =>
   bulkyPulls.includes(number)
     ? Array.from({ length: 40 }, (_, index) => ({
+        id: `T_older_${index}`,
         isResolved: false,
         isOutdated: false,
         path: `src/old-${index}.ts`,
@@ -504,6 +527,7 @@ const laterThreads = (number: number) => ({
   pageInfo: { hasNextPage: false, endCursor: null },
   nodes: [
     {
+      id: "T_late",
       isResolved: false,
       isOutdated: false,
       path: "src/late.ts",
@@ -663,6 +687,7 @@ beforeEach(async () => {
   reviewGate = Promise.resolve();
   github.reviews = [];
   github.comments = [];
+  github.resolved = [];
   verdicts = [];
   reviewWrites = [];
   writeResults = [];
@@ -873,10 +898,10 @@ it("hands an unsatisfied review back to the session that opened the PR, until a 
   expect(reviewPrompts[1]).toContain("request changes, confidence 2/5, 2 findings (1 blocking)");
   // Someone else's reply never settles a finding; only the PR's author answers one.
   expect(reviewPrompts[1]).toContain(
-    "[still open] `src/parse.ts` — **P1** — parse() dereferences a null config.",
+    "[still open · thread open · comment 4652901592] `src/parse.ts` — **P1** — parse() dereferences a null config.",
   );
   expect(reviewPrompts[1]).toContain(
-    "[author replied] `src/cache.ts` — **P2** — The cache never expires.",
+    "[author replied · thread open · comment 4652901597] `src/cache.ts` — **P2** — The cache never expires.",
   );
   // It knows how many heads it has reviewed, and that it is checking fixes, not auditing a new PR:
   // fixes for its own findings aren't fresh scope to escalate on.
@@ -886,7 +911,10 @@ it("hands an unsatisfied review back to the session that opened the PR, until a 
   expect(reviewPrompts[1]).toContain("Code written to fix your own findings is not new scope");
   expect(reviewPrompts[1]).not.toContain("freshest scrutiny");
   expect(reviewPrompts[1]).toContain("Intentional: entries are immutable.");
-  expect(reviewPrompts[1]).toContain("[addressed] `src/old.ts`");
+  expect(reviewPrompts[1]).toContain("[addressed · thread resolved] `src/old.ts`");
+  // It closes the threads whose fixes it accepts, and the fix round leaves that to it.
+  expect(reviewPrompts[1]).toContain("call github resolve_review_thread");
+  expect(handoffs[0]).toContain("Don't resolve the threads yourself");
   expect(reviewPrompts[1]).toContain("@mallory on `src/parse.ts:3`");
   expect(reviewPrompts[1]).toContain(`git diff --find-renames ${first} HEAD`);
   expect(reviewPrompts[1]).not.toContain("Found a null dereference in parse().");
@@ -1000,6 +1028,53 @@ it("holds an automatic review's GitHub writes to the pull request and head it wa
     expect.objectContaining({ commit_id: sha, body: expect.stringContaining("Fine.") }),
   ]);
   expect(github.reviews.filter((review) => review.number === 99)).toEqual([]);
+}, 60_000);
+
+it("lets an automatic review resolve its own threads on its pull request, and nothing else", async () => {
+  github.number = 26;
+  await opener();
+
+  const sha = "a".repeat(40);
+
+  const resolve = (comment_id: number, number = 26) => ({
+    action: "resolve_review_thread" as const,
+    repository,
+    number,
+    comment_id,
+  });
+
+  reviewWrites = [
+    // Another pull request is out of bounds, whatever the PR's text asks.
+    resolve(4652901592, 99),
+    // A thread a person started stays theirs to resolve.
+    resolve(4652901594),
+    // A comment GitHub doesn't know.
+    resolve(1),
+    // Its own finding, named by the thread's first comment, then by a reply in it.
+    resolve(4652901592),
+    resolve(4652901598),
+    // Its own finding on the second page of threads.
+    resolve(4652901599),
+    // Already resolved: nothing to do.
+    resolve(4652901596),
+  ];
+  github.heads["26"] = sha;
+  expect(await pullRequestHook("opened", 26, sha)).toBe(202);
+  await expect.poll(() => writeResults, { timeout: 15_000 }).toHaveLength(7);
+
+  expect(writeResults[0]).toContain("read_only");
+  expect(writeResults[0]).toContain(`can only resolve its own threads on ${repository}#26`);
+  expect(writeResults[1]).toContain("read_only");
+  expect(writeResults[1]).toContain("started by @mallory");
+  expect(writeResults[2]).toContain("thread_not_found");
+
+  for (const resolved of writeResults.slice(3, 6)) {
+    expect(resolved).toContain('"ok":true');
+    expect(resolved).toContain('"already_resolved":false');
+  }
+
+  expect(writeResults[6]).toContain('"already_resolved":true');
+  expect(github.resolved).toEqual(["T_parse", "T_cache", "T_late"]);
 }, 60_000);
 
 it("rechecks the head before retrying a failed post, so a push during the backoff wins", async () => {
