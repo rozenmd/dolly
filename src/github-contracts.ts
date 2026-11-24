@@ -151,10 +151,18 @@ export const GitHubRequest = Schema.Struct({
       page: Schema.optional(Page),
     }),
     Schema.Struct({
+      /**
+       * Discussion, reviews and inline threads, newest activity first, in pages that fit the tool
+       * output; `unresolved` keeps only review threads nobody resolved. A call without `cursor`
+       * reads GitHub once; its `cursor` serves the later pages from that read.
+       */
       action: Schema.Literal("list_pull_request_comments"),
       repository: Repository,
       number: PullNumber,
-      page: Schema.optional(Page),
+      // Not the shared Page: a big conversation can have more than 100 pages.
+      page: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+      cursor: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
+      filter: Schema.optional(Schema.Literals(["all", "unresolved"])),
     }),
     Schema.Struct({
       action: Schema.Literal("read_pull_request_checks"),

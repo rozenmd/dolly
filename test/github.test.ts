@@ -1740,9 +1740,22 @@ it("reads public pull requests, files, comment threads and checks anonymously", 
     result: {
       data: {
         next_page: null,
-        discussion: [{ id: 1, body: "hi" }],
-        threads: [{ id: 10, comments: [{ id: 10 }, { id: 11, outdated: true }] }],
-        reviews: [{ id: 5, state: "APPROVED" }],
+        pages: 1,
+        counts: { discussion: 1, reviews: 1, threads: 1, unresolved_threads: null },
+        // Anonymous reads can't see resolution state; the items still come newest first.
+        items: [
+          {
+            type: "thread",
+            id: 10,
+            path: "f.ts",
+            line: 3,
+            resolved: null,
+            outdated: false,
+            comments: [{ id: 10 }, { id: 11 }],
+          },
+          { type: "review", id: 5, state: "APPROVED" },
+          { type: "comment", id: 1, body: "hi" },
+        ],
       },
     },
   });
@@ -1759,6 +1772,338 @@ it("reads public pull requests, files, comment threads and checks anonymously", 
     },
   });
   expect(fetch).toHaveBeenCalledTimes(8);
+});
+
+const minute = (n: number) => new Date(Date.UTC(2026, 0, 1, 0, n)).toISOString();
+
+type Conversation = {
+  discussion?: unknown[];
+  inline?: Array<{ id: number; in_reply_to_id?: number }>;
+  reviews?: unknown[];
+  /** Thread root id → resolved; a root left out has no GraphQL state. */
+  resolved?: Map<number, boolean>;
+  /** A REST list path that answers HTTP 500 on its second page. */
+  failing?: string;
+};
+
+/** A connected App and a mocked GitHub serving one pull request's conversation. */
+async function serveConversation(conversation: Conversation) {
+  await connect();
+  const calls = { rest: 0, graphql: 0 };
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    const { pathname, searchParams } = new URL(String(url));
+    const page = Number(searchParams.get("page"));
+    const size = Number(searchParams.get("per_page"));
+    const slice = (list: unknown[] = []) => list.slice((page - 1) * size, page * size);
+
+    if (pathname === "/app/installations") return Response.json([{ id: 7 }]);
+
+    if (pathname.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (pathname.endsWith("/access_tokens"))
+      return Response.json({
+        token: "read-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+    if (pathname === "/repos/example/project") return Response.json({ private: false });
+
+    if (pathname === "/graphql") {
+      calls.graphql++;
+      const roots = (conversation.inline ?? []).filter((comment) => !comment.in_reply_to_id);
+
+      return Response.json({
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: roots
+                  .filter((root) => conversation.resolved?.has(root.id) ?? true)
+                  .map((root) => ({
+                    isResolved: conversation.resolved?.get(root.id) ?? true,
+                    isOutdated: false,
+                    comments: { nodes: [{ fullDatabaseId: String(root.id) }] },
+                  })),
+              },
+            },
+          },
+        },
+      });
+    }
+
+    calls.rest++;
+
+    if (conversation.failing && pathname.endsWith(conversation.failing) && page === 2)
+      return Response.json({ message: "Server Error" }, { status: 500 });
+
+    if (pathname.endsWith("/issues/50/comments"))
+      return Response.json(slice(conversation.discussion));
+
+    if (pathname.endsWith("/pulls/50/comments")) return Response.json(slice(conversation.inline));
+
+    if (pathname.endsWith("/pulls/50/reviews")) return Response.json(slice(conversation.reviews));
+
+    throw new Error(`Unexpected GitHub path ${pathname}`);
+  });
+
+  return calls;
+}
+
+type CommentsPage = {
+  ok: boolean;
+  message?: string;
+  result: {
+    data: {
+      cursor: string;
+      next_page: number | null;
+      pages: number;
+      counts: Record<string, number | null>;
+      note: string;
+      items: Array<{
+        type: string;
+        id: number;
+        resolved?: boolean | null;
+        part?: number;
+        parts?: number;
+        body?: string;
+        comments?: Array<{ id: number; body: string; body_part?: number }>;
+      }>;
+    };
+  };
+};
+
+async function readComments(
+  options: { page?: number; cursor?: string; filter?: "unresolved"; number?: number } = {},
+) {
+  const response = await execute({
+    action: "list_pull_request_comments",
+    repository,
+    number: options.number ?? 50,
+    ...(options.page && { page: options.page }),
+    ...(options.cursor && { cursor: options.cursor }),
+    ...(options.filter && { filter: options.filter }),
+  });
+
+  const text = await response.text();
+
+  // Every page fits Pi's 51,200-byte tool output with the agent's own envelope to spare.
+  expect(new TextEncoder().encode(text).length).toBeLessThan(48_000);
+
+  // SAFETY: the tool's reply for this action has this shape; the assertions check it.
+  return JSON.parse(text) as CommentsPage;
+}
+
+/** Every item of one read, following next_page with its cursor. */
+async function readAllComments(filter?: "unresolved") {
+  const first = await readComments({ filter });
+  const items = [...first.result.data.items];
+  let next = first.result.data.next_page;
+
+  while (next) {
+    const { data }: CommentsPage["result"] = (
+      await readComments({ page: next, cursor: first.result.data.cursor })
+    ).result;
+
+    items.push(...data.items);
+    next = data.next_page;
+  }
+
+  return { first: first.result.data, items };
+}
+
+it("reads a long PR conversation once, then pages it newest first by cursor", async () => {
+  // 120 one-comment threads span two REST pages and several tool pages.
+  const inline = Array.from({ length: 120 }, (_, index) => ({
+    id: index + 1,
+    user: { login: "reviewer[bot]" },
+    body: `finding ${index + 1} ${"x".repeat(1_000)}`,
+    path: "src/a.ts",
+    line: index + 1,
+    side: "RIGHT",
+    pull_request_review_id: 900,
+    html_url: `u${index + 1}`,
+    created_at: minute(index + 1),
+  }));
+
+  const calls = await serveConversation({
+    inline,
+    resolved: new Map(inline.map((comment) => [comment.id, ![3, 117].includes(comment.id)])),
+    discussion: [
+      {
+        id: 1000,
+        user: { login: "deploy[bot]" },
+        body: "Deployed",
+        html_url: "d",
+        created_at: minute(0),
+      },
+    ],
+    reviews: [
+      // Only wraps the inline comments, so it is left out.
+      {
+        id: 900,
+        user: { login: "reviewer[bot]" },
+        body: "",
+        state: "COMMENTED",
+        submitted_at: minute(1),
+      },
+      {
+        id: 901,
+        user: { login: "reviewer[bot]" },
+        body: "Two P1s left",
+        state: "COMMENTED",
+        submitted_at: minute(200),
+      },
+    ],
+  });
+
+  const { first, items } = await readAllComments();
+
+  expect(first.pages).toBeGreaterThan(1);
+  expect(first.counts).toEqual({ discussion: 1, reviews: 2, threads: 120, unresolved_threads: 2 });
+
+  // Newest activity first: the latest review, then threads newest to oldest, then the deploy note.
+  expect(items.map((item) => `${item.type}:${item.id}`)).toEqual([
+    "review:901",
+    ...inline.map((comment) => `thread:${comment.id}`).reverse(),
+    "comment:1000",
+  ]);
+
+  // Later pages came from the first read: GitHub was read once (two inline pages, one of each other list).
+  expect(calls).toEqual({ rest: 4, graphql: 1 });
+
+  const unresolved = await readComments({ filter: "unresolved" });
+  expect(unresolved.result.data.next_page).toBeNull();
+  expect(unresolved.result.data.items).toMatchObject([
+    { type: "thread", id: 117, resolved: false },
+    { type: "thread", id: 3, resolved: false },
+  ]);
+
+  // A cursor serves only its own pull request and filter.
+  for (const options of [
+    { cursor: first.cursor, number: 51 },
+    { cursor: first.cursor, filter: "unresolved" as const },
+    { cursor: "expired-or-made-up" },
+  ])
+    expect(await readComments(options)).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("Call list_pull_request_comments again without cursor"),
+    });
+
+  // Changing the accounts dolly can work in drops held reads: a cursor never outlives the access
+  // that made its read.
+  expect((await readComments({ page: 2, cursor: first.cursor })).ok).toBe(true);
+  await setAccounts(["another-owner"]);
+  expect(await readComments({ page: 2, cursor: first.cursor })).toMatchObject({
+    ok: false,
+    message: expect.stringContaining("Call list_pull_request_comments again without cursor"),
+  });
+});
+
+it("splits a thread and a comment too big for one page into parts without dropping any text", async () => {
+  // A 61-comment thread of 1,100 characters each, and one comment far past a page that mixes
+  // multi-byte characters, so splitting must count bytes and keep code points whole.
+  const thread = Array.from({ length: 61 }, (_, index) => ({
+    id: index + 1,
+    ...(index && { in_reply_to_id: 1 }),
+    user: { login: "reviewer" },
+    body: `reply ${index} ${"y".repeat(1_100)}`,
+    path: "src/a.ts",
+    line: 4,
+    html_url: `t${index + 1}`,
+    created_at: minute(index + 1),
+  }));
+
+  const huge = `start ${'😀é\n"'.repeat(30_000)} end`;
+
+  await serveConversation({
+    inline: thread,
+    discussion: [
+      { id: 500, user: { login: "a" }, body: huge, html_url: "h", created_at: minute(0) },
+    ],
+  });
+
+  const { items } = await readAllComments();
+  const threadParts = items.filter((item) => item.type === "thread");
+  const hugeParts = items.filter((item) => item.type === "comment");
+
+  expect(threadParts.length).toBeGreaterThan(1);
+  expect(threadParts.map((part) => part.part)).toEqual(threadParts.map((_, index) => index + 1));
+  expect(threadParts.flatMap((part) => part.comments!.map((comment) => comment.body))).toEqual(
+    thread.map((comment) => comment.body),
+  );
+
+  expect(hugeParts.length).toBeGreaterThan(1);
+  expect(hugeParts.every((part) => part.id === 500 && part.parts === hugeParts.length)).toBe(true);
+  expect(hugeParts.map((part) => part.body).join("")).toBe(huge);
+});
+
+it("serves pages past 100 of one read, re-reading GitHub batches over the response bound", async () => {
+  // Each comment fills most of a page, so 150 of them need 150 pages. A batch of 100 is over
+  // the 1 MiB response bound, so GitHub is read again in batches of 10.
+  await serveConversation({
+    discussion: Array.from({ length: 150 }, (_, index) => ({
+      id: index + 1,
+      user: { login: "a" },
+      body: `${index + 1} ${"z".repeat(40_000)}`,
+      html_url: `c${index + 1}`,
+      created_at: minute(index + 1),
+    })),
+  });
+
+  const read = await readComments();
+  expect(read).toMatchObject({ ok: true });
+  const first = read.result.data;
+  expect(first.pages).toBe(150);
+
+  const later = await readComments({ page: 101, cursor: first.cursor });
+  expect(later.result.data.next_page).toBe(102);
+  expect(later.result.data.items).toMatchObject([{ type: "comment", id: 50 }]);
+});
+
+it("counts a thread with no resolution state as unresolved and says so", async () => {
+  const root = (id: number) => ({
+    id,
+    user: { login: "reviewer" },
+    body: `thread ${id}`,
+    path: "src/a.ts",
+    line: id,
+    html_url: `t${id}`,
+    created_at: minute(id),
+  });
+
+  // GraphQL was read before thread 3 was started: it knows 1 (resolved) and 2 (open) only.
+  await serveConversation({
+    inline: [root(1), root(2), root(3)],
+    resolved: new Map([
+      [1, true],
+      [2, false],
+    ]),
+  });
+
+  const { first, items } = await readAllComments("unresolved");
+  expect(items).toMatchObject([
+    { type: "thread", id: 3, resolved: null },
+    { type: "thread", id: 2, resolved: false },
+  ]);
+  expect(first.counts.unresolved_threads).toBe(2);
+  expect(first.note).toContain("1 thread has no resolution state");
+});
+
+it("fails the read rather than returning part of a list GitHub didn't finish sending", async () => {
+  await serveConversation({
+    discussion: Array.from({ length: 150 }, (_, index) => ({
+      id: index + 1,
+      user: { login: "a" },
+      body: "hi",
+      html_url: `c${index + 1}`,
+      created_at: minute(index + 1),
+    })),
+    failing: "/issues/50/comments",
+  });
+
+  expect(await readComments()).toMatchObject({ ok: false });
 });
 
 it("posts inline reviews only against the current head and diff, and never approves", async () => {
