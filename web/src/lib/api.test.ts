@@ -139,7 +139,8 @@ describe("session transcript", () => {
     );
 
     expect(responding?.activity).toBe("Responding");
-    expect(responding?.items[0]).toMatchObject({ text: "Checking tests." });
+    // Text still streaming in is held back so the reply appears in one piece.
+    expect(responding?.items).toEqual([]);
 
     const [tools] = turnsFromSnapshot(
       snapshot({
@@ -385,7 +386,7 @@ describe("session transcript", () => {
     ).toThrow();
   });
 
-  it("keeps a running turn open with live text and running tools, skipping finished tools", () => {
+  it("keeps a running turn open with running tools, holding back live text and finished tools", () => {
     const snapshot = Schema.decodeUnknownSync(Snapshot)({
       entries: [{ id: 1, kind: "pi.input", model: [{ role: "user", content: "Fix it" }] }],
       docs: {
@@ -410,13 +411,72 @@ describe("session transcript", () => {
     expect(turn?.running).toBe(true);
     expect(turn?.answer).toBeUndefined();
     expect(turn?.items).toEqual([
-      { kind: "text", id: "live-0", text: "Working on the fix." },
       {
         kind: "steps",
         id: "steps-1",
         steps: [{ id: "1", name: "shell", detail: "", output: "Running tests", status: "running" }],
       },
     ]);
+  });
+
+  it("holds back streaming text, then shows the saved final reply as the answer at once", () => {
+    const prompt = { id: 1, kind: "pi.input", model: [{ role: "user", content: "Fix it" }] };
+
+    const looked = [
+      {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: [
+          { type: "text", text: "Looking." },
+          { type: "toolCall", id: "1", name: "shell", arguments: { command: "ls" } },
+        ],
+      },
+      { role: "toolResult", toolCallId: "1", content: "ok" },
+    ];
+
+    const [working] = turnsFromSnapshot(
+      Schema.decodeUnknownSync(Snapshot)({
+        entries: [prompt, { id: 2, kind: "pi.message", model: looked }],
+        docs: {
+          "pi.live": {
+            run: {},
+            generation: {
+              message: {
+                role: "assistant",
+                content: [
+                  { type: "text", text: "Half a sen" },
+                  { type: "toolCall", id: "2", name: "shell", arguments: { command: "pwd" } },
+                ],
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    // The live tool call shows; its message's streaming text does not.
+    expect(working?.answer).toBeUndefined();
+    expect(working?.items).toMatchObject([
+      { kind: "text", text: "Looking." },
+      { kind: "steps", steps: [{ id: "1" }, { id: "2", status: "running" }] },
+    ]);
+
+    const final = {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "text", text: "Fixed." }],
+    };
+
+    const [winding] = turnsFromSnapshot(
+      Schema.decodeUnknownSync(Snapshot)({
+        entries: [prompt, { id: 2, kind: "pi.message", model: [...looked, final] }],
+        docs: { "pi.live": { run: {} } },
+      }),
+    );
+
+    // Saved before the run ends: already the answer, so it doesn't move out of the work log later.
+    expect(winding?.running).toBe(true);
+    expect(winding?.answer).toEqual({ id: "2-2-0", text: "Fixed." });
   });
 });
 

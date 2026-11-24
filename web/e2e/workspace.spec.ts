@@ -99,7 +99,8 @@ for (const width of [1280, 320]) {
       generation: { message: { role: "assistant", content: "All passed" } },
     });
     await expect(status).toContainText("Responding");
-    await expect(page.getByText("All passed", { exact: true })).toBeVisible();
+    // Streaming text is held back so the reply appears in one piece, without layout shift.
+    await expect(page.getByText("All passed", { exact: true })).toHaveCount(0);
     push({}, true);
     await expect(status).toHaveCount(0);
     await expect(page.getByRole("article", { name: "assistant message" })).toContainText(

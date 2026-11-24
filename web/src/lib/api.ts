@@ -288,6 +288,9 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
   const turns: Turn[] = [];
   const calls = new Map<string, Step>();
   const entryTurns = new Map<number, Turn>();
+  // Turns whose latest saved assistant message ended the reply (`stop`): its text is the answer
+  // even while the run winds down, so it doesn't jump from the work log once the run ends.
+  const replied = new Set<Turn>();
   const live = liveFromSnapshot(snapshot);
 
   function current(id: string) {
@@ -357,6 +360,9 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     if (message.role !== "assistant" && message.role !== "toolResult") return;
     const turn = current(id);
     touch(turn, message.timestamp);
+
+    if (message.role === "assistant" && message.stopReason === "stop") replied.add(turn);
+    else replied.delete(turn);
 
     if (
       message.role === "assistant" &&
@@ -453,7 +459,21 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     if (turn) entryTurns.set(entry.id, turn);
   }
 
-  if (live?.generation?.message) add(live.generation.message, "live");
+  // The in-flight message's text is not shown until it is saved, so replies appear in one
+  // piece instead of streaming in and shifting the layout; its tool calls still show as they start.
+  const generating = live?.generation?.message;
+
+  // Blocks keep their positions so tool calls keep the ids they will have once saved.
+  if (generating && !Schema.is(Schema.String)(generating.content))
+    add(
+      {
+        ...generating,
+        content: generating.content.map((block) =>
+          block.type === "toolCall" ? block : { type: block.type },
+        ),
+      },
+      "live",
+    );
 
   for (const tool of live?.tools ?? []) {
     const step = calls.get(tool.callId);
@@ -504,7 +524,7 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
   for (const turn of turns) {
     const tail = turn.items.at(-1);
 
-    if (!turn.running && !turn.failure && tail?.kind === "text") {
+    if ((!turn.running || replied.has(turn)) && !turn.failure && tail?.kind === "text") {
       turn.items.pop();
       turn.answer = { id: tail.id, text: tail.text };
     }
