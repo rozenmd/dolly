@@ -1874,7 +1874,7 @@ function makeGitHub(
       return {
         ok: false as const,
         code: "read_only",
-        message: `This automatic review session can only resolve threads it started; the thread of comment ${op.comment_id} was started by @${found.root}. Leave it for its author.`,
+        message: `This automatic review session can only resolve threads Dolly started (its own findings from this or earlier review rounds); the thread of comment ${op.comment_id} was started by @${found.root}. Leave it for its author.`,
       };
 
     const done = (already: boolean) => ({

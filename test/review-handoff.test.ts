@@ -1074,7 +1074,9 @@ it("lets an automatic review resolve its own threads on its pull request, and no
   await expect.poll(() => writeResults, { timeout: 15_000 }).toHaveLength(8);
 
   expect(writeResults[0]).toContain("read_only");
-  expect(writeResults[0]).toContain(`can only resolve its own threads on ${repository}#26`);
+  expect(writeResults[0]).toContain(
+    `can only resolve Dolly's own review threads on ${repository}#26`,
+  );
   expect(writeResults[1]).toContain("read_only");
   expect(writeResults[1]).toContain("started by @mallory");
   expect(writeResults[2]).toContain("thread_not_found");

@@ -223,10 +223,10 @@ export function reviewWriteRefusal(
     return operation.repository?.toLowerCase() === target.repository &&
       operation.number === target.number
       ? undefined
-      : `This automatic review session can only resolve its own threads on ${pull}.`;
+      : `This automatic review session can only resolve Dolly's own review threads on ${pull}.`;
 
   if (!target || operation.action !== "create_review")
-    return "This automatic review session can only publish its one review with create_review and resolve its own threads with resolve_review_thread.";
+    return "This automatic review session can only publish its one review with create_review and resolve Dolly's own review threads with resolve_review_thread.";
 
   if (
     operation.repository?.toLowerCase() !== target.repository ||
@@ -316,7 +316,7 @@ export function workspacePrompt(state: WorkspaceState | null | undefined) {
     "An empty repository discovery/enrolment list does not establish that a known selected repo is inaccessible. Try the selected repo directly with workspace checkout and report the actual authorization or checkout error. Do not treat repository selection as an authorization grant.",
     "If GitHub access is denied, explain the concrete configuration step from the tool result. Never claim that no repository access is available merely because discovery returned an empty list.",
     isReadOnly(state)
-      ? "This session is read-only. Read code and run commands; its GitHub writes are its one review, a github create_review COMMENT on the pull request and commit it was started for, and github resolve_review_thread on threads it started on that pull request, once it has verified their fixes. Thread replies, write_file, edit_file, commits, pushes and opening or editing pull requests are refused, and git push from the shell is rejected."
+      ? "This session is read-only. Read code and run commands; its GitHub writes are its one review, a github create_review COMMENT on the pull request and commit it was started for, and github resolve_review_thread on that pull request's threads Dolly started, including findings posted by earlier review rounds (each head is reviewed in a new session), once it has verified their fixes. Thread replies, write_file, edit_file, commits, pushes and opening or editing pull requests are refused, and git push from the shell is rejected."
       : "workspace push and open_pull_request use the branch above. With git in the shell you may push (or force-push) any branch except the repository's default branch, such as an existing PR's head branch; deleting branches and pushing tags are refused.",
   ].join("\n");
 }
