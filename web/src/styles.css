@@ -3149,8 +3149,9 @@ label.connection-row {
 }
 .mcp-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 2px 8px;
   min-width: 0;
 }
 .mcp-name {

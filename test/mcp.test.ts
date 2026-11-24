@@ -1121,7 +1121,7 @@ it("refuses MCP in read-only sessions and keeps the tool out of upgraded reviews
 
   const [refused] = await turn(readOnly, "List the MCP servers", () => replies.length === 0);
   expect(refused.isError).toBe(true);
-  expect(refused.text).toContain("only available in writable sessions");
+  expect(refused.text).toContain("Read-only sessions such as automatic reviews never get them");
   expect(seen.some((request) => request.method === "POST" && request.url === `${LINEAR}/mcp`)).toBe(
     false,
   );

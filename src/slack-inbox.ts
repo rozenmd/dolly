@@ -21,7 +21,15 @@ import { ConversationWorkspace, workspaceConfig, type WorkspaceInput } from "./w
 
 /** Slack thread (`channel:threadTs`) → its Dolly conversation and the messages delivered to it. */
 export const SlackThreads = defineDoc<{
-  threads: Record<string, { id: ConversationId; events: Record<string, TaskId<null>> }>;
+  threads: Record<
+    string,
+    {
+      id: ConversationId;
+      events: Record<string, TaskId<null>>;
+      /** Slack member ID of who started the thread: whose MCP access it gets (mcp.ts). */
+      creator?: string;
+    }
+  >;
 }>({
   kind: "app.slack-threads",
   version: 1,
@@ -409,7 +417,7 @@ export const admitSlack = Effect.fn("Slack.admit")(function* (
       if (!thread) {
         const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
         await configure(tx, conversation.id, options.agent);
-        thread = { id: conversation.id, events: {} };
+        thread = { id: conversation.id, events: {}, creator: event.user };
       }
 
       const taskId = await tx.createTask(
@@ -418,7 +426,7 @@ export const admitSlack = Effect.fn("Slack.admit")(function* (
         { conversationId: thread.id, ownership: { kind: "conversation" }, background: true },
       );
 
-      state.threads[key] = { id: thread.id, events: { ...thread.events, [event.ts]: taskId } };
+      state.threads[key] = { ...thread, events: { ...thread.events, [event.ts]: taskId } };
 
       return { status: "accepted" as const, id: String(thread.id), taskId: String(taskId), isNew };
     }, BACKGROUND_CONTEXT),

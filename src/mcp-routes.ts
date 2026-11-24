@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { rpc } from "./operations";
-import { AddMcpServer, MCP_NAME, McpTokenInput, mcpDisplayName } from "./mcp";
+import { AddMcpServer, MCP_NAME, McpAccessInput, McpTokenInput, mcpDisplayName } from "./mcp";
 import type { Env } from "./env";
 
 /** Settings > Connections: MCP servers sessions get tools from (mcp.ts). */
@@ -61,6 +61,22 @@ mcpRoutes.delete("/api/connections/mcp/:name", async (c) => {
   );
 
   return c.json(result, "error" in result ? 404 : 200);
+});
+
+mcpRoutes.put("/api/connections/mcp/:name", async (c) => {
+  const name = serverName(c);
+
+  if (!name) return c.json({ error: "Unknown server" }, 404);
+  const parsed = await body(c, McpAccessInput);
+
+  if (Option.isNone(parsed))
+    return c.json({ error: "Expected allowedUsers: a list of names" }, 400);
+
+  const result = await Effect.runPromise(
+    rpc("mcp.access", async () => await owner(c).mcpSetAccess(name, parsed.value)),
+  );
+
+  return c.json(result, "error" in result ? 400 : 200);
 });
 
 mcpRoutes.get("/api/connections/mcp/:name/oauth", async (c) => {

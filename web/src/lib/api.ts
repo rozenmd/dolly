@@ -580,6 +580,8 @@ export type ApiBody = {
   name?: string;
   transport?: "http";
   headers?: Record<string, string>;
+  /** Who besides the owner may use an MCP server; empty opens it to every session. */
+  allowedUsers?: readonly string[];
   /** Automations (lib/automations.ts); `null` clears a field. */
   prompt?: string;
   schedule?: string | null;

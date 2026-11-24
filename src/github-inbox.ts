@@ -53,6 +53,8 @@ export const GitHubThreads = defineDoc<{
       events: Record<string, TaskId<null>>;
       /** For a review: the same PR's previous review task, which this one runs after. */
       after?: TaskId<null>;
+      /** GitHub login of who started a /dolly session: whose MCP access it gets (mcp.ts). */
+      creator?: string;
     }
   >;
   /** Each PR's newest review task, by `repository#number`. */
@@ -628,7 +630,9 @@ export const admitGitHub = Effect.fn("GitHub.admit")(function* (
           String(conversation.id),
           { readOnly: review },
         );
-        thread = { id: conversation.id, events: {} };
+        thread = review
+          ? { id: conversation.id, events: {} }
+          : { id: conversation.id, events: {}, creator: event.sender };
 
         // Reviews of one PR run one after another, each after the previous head's.
         const previous = review

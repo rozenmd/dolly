@@ -405,7 +405,7 @@ it("rejects an otherwise valid webhook from an account that is not allowed befor
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it("runs a /dolly command on the owner's default model, including a Claude one", async () => {
+it("runs a /dolly command on the owner's default model, with the MCP servers its sender may use", async () => {
   const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("github:connected", {
@@ -423,7 +423,24 @@ it("runs a /dolly command on the owner's default model, including a Claude one",
       type: "api_key",
       key: `sk-ant-oat01-${"a".repeat(64)}`,
     });
+    // One open server, one the sender may use, one restricted to someone else.
+    await state.storage.put("mcp:servers", {
+      linear: { type: "http", id: "linear-1", url: "https://mcp.linear.example/mcp" },
+      sentry: {
+        type: "http",
+        id: "sentry-1",
+        url: "https://mcp.sentry.example/mcp",
+        allowedUsers: ["Trusted"],
+      },
+      stripe: {
+        type: "http",
+        id: "stripe-1",
+        url: "https://mcp.stripe.example/mcp",
+        allowedUsers: ["U0SOMEONE"],
+      },
+    });
   });
+  const systems: string[] = [];
   const models: string[] = [];
   const posted: string[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
@@ -438,6 +455,7 @@ it("runs a /dolly command on the owner's default model, including a Claude one",
     if (parsed.hostname === "api.anthropic.com") {
       const model = JSON.parse(String(init?.body)).model;
       models.push(model);
+      systems.push(JSON.stringify(JSON.parse(String(init?.body)).system));
 
       const events = [
         {
@@ -513,6 +531,17 @@ it("runs a /dolly command on the owner's default model, including a Claude one",
   await expect.poll(() => posted, { timeout: 15_000 }).toHaveLength(1);
   expect(posted[0]).toContain("Answered by Opus");
   expect(models).toEqual(["claude-opus-5-5"]);
+
+  expect(systems[0]).toContain("linear (Linear");
+  expect(systems[0]).toContain("sentry (Sentry");
+  expect(systems[0]).not.toContain("stripe (Stripe");
+  expect(
+    await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+      const state = await agent["harness"].snapshot(GitHubThreads, BACKGROUND_CONTEXT);
+
+      return state?.threads["example/project#5"]?.creator;
+    }),
+  ).toBe("trusted");
 }, 25_000);
 
 it("runs a /dolly command with only Claude connected", async () => {

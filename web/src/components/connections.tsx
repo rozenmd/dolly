@@ -4,6 +4,7 @@ import {
   ArrowPathIcon,
   EllipsisHorizontalIcon,
   KeyIcon,
+  LockClosedIcon,
   PlusIcon,
   TrashIcon,
 } from "@heroicons/react/24/outline";
@@ -11,9 +12,9 @@ import { request } from "../lib/api";
 import { Input, Modal, Textarea } from "./ui";
 
 /**
- * Settings > Connections: the MCP servers owner web sessions get tools from. Works like Opensession's
+ * Settings > Connections: the MCP servers sessions get tools from. Works like Opensession's
  * Connections page: live status per server, OAuth or API-token connect from each row's menu,
- * add and remove. Server-side behaviour lives in src/mcp.ts.
+ * per-server access lists, add and remove. Server-side behaviour lives in src/mcp.ts.
  */
 
 const McpConnection = Schema.Struct({
@@ -21,6 +22,8 @@ const McpConnection = Schema.Struct({
   transport: Schema.Literal("http"),
   target: Schema.String,
   headerKeys: Schema.Array(Schema.String),
+  /** Empty: every writable session. Older servers may omit it. */
+  allowedUsers: Schema.optional(Schema.Array(Schema.String)),
   status: Schema.Literals(["connected", "needs-auth", "unreachable"]),
   detail: Schema.optional(Schema.String),
 });
@@ -115,6 +118,11 @@ const message = (cause: unknown, fallback: string) =>
 
 const path = (name: string) => `/connections/mcp/${encodeURIComponent(name)}`;
 
+/** Slack member IDs or GitHub logins, separated by commas, spaces or new lines. */
+export function parseUsers(text: string): string[] {
+  return text.split(/[\s,]+/).filter(Boolean);
+}
+
 /** `KEY: value` (or `KEY=value`) lines as headers; blank lines are skipped. */
 export function parseHeaders(text: string): Record<string, string> {
   const headers = new Map<string, string>();
@@ -136,6 +144,7 @@ export function ConnectionsSettings() {
   const [showAdd, setShowAdd] = useState(false);
   const [error, setError] = useState("");
   const [tokenConnect, setTokenConnect] = useState<McpConnection | null>(null);
+  const [accessEdit, setAccessEdit] = useState<McpConnection | null>(null);
   const [oauthByName, setOauthByName] = useState<Record<string, OauthStatus>>({});
   const polls = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -272,9 +281,10 @@ export function ConnectionsSettings() {
         </div>
       </div>
       <p className="settings-description">
-        MCP servers add tools to the sessions you start here in the web app. Slack, GitHub and
-        automatic review sessions don't get them, since other people can steer those. Calls run in
-        dolly's Worker over HTTPS with the credentials stored here; sandboxes never see them.
+        MCP servers add tools to your sessions, including ones started from Slack and GitHub.
+        Restrict a server to let only listed people's Slack and GitHub sessions use it; your web
+        sessions always can. Automatic reviews never get them. Calls run in dolly's Worker over
+        HTTPS with the credentials stored here; sandboxes never see them.
       </p>
 
       {error && (
@@ -296,7 +306,7 @@ export function ConnectionsSettings() {
         />
       )}
 
-      <h2 className="settings-group-label">MCP servers: tools for your web sessions</h2>
+      <h2 className="settings-group-label">MCP servers: tools for your sessions</h2>
       {!data ? (
         <div className="settings-card mcp-list" aria-busy="true">
           <p className="field-help">Checking connections…</p>
@@ -305,7 +315,7 @@ export function ConnectionsSettings() {
         <div className="settings-card mcp-list">
           <p className="field-help">
             No MCP servers yet. Add one, such as https://mcp.linear.app/mcp, to use its tools in
-            your web sessions.
+            your sessions.
           </p>
         </div>
       ) : (
@@ -313,6 +323,7 @@ export function ConnectionsSettings() {
           {data.map((server) => {
             const meta = STATUS_META[server.status];
             const oauth = oauthByName[server.name];
+            const allowed = server.allowedUsers ?? [];
 
             return (
               <li key={server.name} className="mcp-row">
@@ -326,6 +337,15 @@ export function ConnectionsSettings() {
                         title={`Workspace grant${oauth.shared.connectedBy ? ` (by ${oauth.shared.connectedBy})` : ""}`}
                       >
                         {oauth.manualToken ? "Token" : "OAuth"} · workspace
+                      </span>
+                    )}
+                    {allowed.length > 0 && (
+                      <span
+                        className="mcp-pill muted-pill"
+                        title={`Slack and GitHub sessions only for: ${allowed.join(", ")}`}
+                      >
+                        Restricted ·{" "}
+                        {allowed.length === 1 ? allowed[0] : `${allowed.length} people`}
                       </span>
                     )}
                   </div>
@@ -375,6 +395,11 @@ export function ConnectionsSettings() {
                       hidden: !oauth?.shared,
                     },
                     {
+                      label: allowed.length ? "Edit access" : "Restrict access",
+                      icon: <LockClosedIcon />,
+                      onSelect: () => setAccessEdit(server),
+                    },
+                    {
                       label: "Remove server",
                       icon: <TrashIcon />,
                       onSelect: () => void remove(server.name),
@@ -387,6 +412,17 @@ export function ConnectionsSettings() {
             );
           })}
         </ul>
+      )}
+
+      {accessEdit && (
+        <AccessDialog
+          server={accessEdit}
+          onClose={() => setAccessEdit(null)}
+          onSaved={() => {
+            setAccessEdit(null);
+            void load(true);
+          }}
+        />
       )}
 
       {tokenConnect && (
@@ -558,10 +594,77 @@ function ConnectTokenDialog({
   );
 }
 
+const ACCESS_HELP =
+  "Slack member IDs (like U0123ABCD) or GitHub logins, separated by commas or new lines. Slack and GitHub sessions get this server only when the person who started them is listed; your web sessions always do. Leave empty to let every session use it.";
+
+/** Who may use a server: its `allowedUsers`, saved with PUT /api/connections/mcp/:name. */
+function AccessDialog({
+  server,
+  onClose,
+  onSaved,
+}: {
+  server: McpConnection;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [users, setUsers] = useState((server.allowedUsers ?? []).join("\n"));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+
+    if (saving) return;
+    setSaving(true);
+    setError("");
+
+    try {
+      await request(path(server.name), { allowedUsers: parseUsers(users) }, undefined, "PUT");
+      onSaved();
+    } catch (cause) {
+      setError(message(cause, `Could not save access for ${server.name}`));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal title={`Who can use ${displayName(server.name)}`} onClose={onClose}>
+      <form onSubmit={(event) => void save(event)}>
+        <label htmlFor="mcp-access">Allowed users</label>
+        <Textarea
+          id="mcp-access"
+          className="mono"
+          rows={4}
+          autoCapitalize="none"
+          spellCheck={false}
+          value={users}
+          onChange={(event) => setUsers(event.target.value)}
+          placeholder={"U0123ABCD\noctocat"}
+        />
+        <p className="field-help">{ACCESS_HELP}</p>
+        {error && (
+          <p role="alert" className="error-text">
+            {error}
+          </p>
+        )}
+        <div className="modal-actions">
+          <button type="button" className="secondary-button" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button type="submit" className="primary-button" disabled={saving}>
+            {saving ? "Saving…" : parseUsers(users).length ? "Restrict" : "Open to everyone"}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 function AddMcpForm({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [headers, setHeaders] = useState("");
+  const [users, setUsers] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -573,7 +676,13 @@ function AddMcpForm({ onClose, onAdded }: { onClose: () => void; onAdded: () => 
     try {
       await request(
         "/connections/mcp",
-        { name: name.trim(), transport: "http", url: url.trim(), headers: parseHeaders(headers) },
+        {
+          name: name.trim(),
+          transport: "http",
+          url: url.trim(),
+          headers: parseHeaders(headers),
+          allowedUsers: parseUsers(users),
+        },
         undefined,
         "POST",
       );
@@ -632,6 +741,16 @@ function AddMcpForm({ onClose, onAdded }: { onClose: () => void; onAdded: () => 
         Leave headers blank for servers that sign in with OAuth, then choose Connect from the row's
         menu. Local stdio servers aren't supported: dolly runs in a Worker.
       </p>
+      <label htmlFor="mcp-users">Allowed users (optional)</label>
+      <Input
+        id="mcp-users"
+        autoCapitalize="none"
+        spellCheck={false}
+        value={users}
+        onChange={(event) => setUsers(event.target.value)}
+        placeholder="Everyone"
+      />
+      <p className="field-help">{ACCESS_HELP}</p>
       {error && (
         <p role="alert" className="error-text">
           {error}

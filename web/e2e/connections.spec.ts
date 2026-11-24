@@ -16,6 +16,7 @@ type Server = {
   transport: "http";
   target: string;
   headerKeys: string[];
+  allowedUsers?: string[];
   status: "connected" | "needs-auth" | "unreachable";
   detail?: string;
 };
@@ -44,6 +45,7 @@ test("lists MCP servers with status, connects a token server and adds a server w
 
   const tokens: unknown[] = [];
   const added: unknown[] = [];
+  const access: unknown[] = [];
   let vercelConnected = false;
 
   await page.route("**/api/**", (route) => {
@@ -101,6 +103,17 @@ test("lists MCP servers with status, connects a token server and adds a server w
       return route.fulfill({ json: { ok: true } });
     }
 
+    if (path === "/api/connections/mcp/linear" && method === "PUT") {
+      const body = Schema.decodeUnknownSync(
+        Schema.Struct({ allowedUsers: Schema.Array(Schema.String) }),
+      )(route.request().postDataJSON());
+
+      access.push(body);
+      servers[0] = { ...servers[0], allowedUsers: [...body.allowedUsers] };
+
+      return route.fulfill({ json: { ok: true, allowedUsers: body.allowedUsers } });
+    }
+
     if (/^\/api\/connections\/mcp\/[^/]+\/oauth$/.test(path))
       return route.fulfill({ json: { users: [], manualToken: false } });
 
@@ -122,6 +135,23 @@ test("lists MCP servers with status, connects a token server and adds a server w
   await expect(page.getByRole("menuitem", { name: "Remove server" })).toBeVisible();
   await page.press("Escape");
 
+  // Restricting a server lists who may use it from Slack and GitHub; the row says so.
+  await page.getByRole("button", { name: "Manage linear" }).click();
+  await page.getByRole("menuitem", { name: "Restrict access" }).click();
+
+  const accessDialog = page.getByRole("dialog", { name: "Who can use Linear" });
+  await accessDialog.getByLabel("Allowed users").fill("U0123ABCD, @octocat\n");
+  await accessDialog.getByRole("button", { name: "Restrict" }).click();
+  await expect(page.getByText("Restricted · 2 people")).toBeVisible();
+  expect(access).toEqual([{ allowedUsers: ["U0123ABCD", "@octocat"] }]);
+
+  await page.getByRole("button", { name: "Manage linear" }).click();
+  await page.getByRole("menuitem", { name: "Edit access" }).click();
+  await accessDialog.getByLabel("Allowed users").fill("");
+  await accessDialog.getByRole("button", { name: "Open to everyone" }).click();
+  await expect(page.getByText(/^Restricted/)).toHaveCount(0);
+  expect(access.at(-1)).toEqual({ allowedUsers: [] });
+
   await page.getByRole("button", { name: "Manage vercel" }).click();
   await expect(page.getByRole("menuitem", { name: "Connect (workspace)" })).toHaveCount(0);
   await page.getByRole("menuitem", { name: "Connect with API token" }).click();
@@ -137,6 +167,7 @@ test("lists MCP servers with status, connects a token server and adds a server w
   await page.getByLabel("Name").fill("internal");
   await page.getByLabel("URL").fill("https://tools.example.com/mcp");
   await page.getByLabel(/^Headers/).fill("X-Api-Key: secret-value");
+  await page.getByLabel(/^Allowed users/).fill("octocat");
   await page.getByRole("button", { name: "Add server" }).click();
 
   await expect(page.getByRole("listitem")).toHaveCount(3);
@@ -146,6 +177,7 @@ test("lists MCP servers with status, connects a token server and adds a server w
       transport: "http",
       url: "https://tools.example.com/mcp",
       headers: { "X-Api-Key": "secret-value" },
+      allowedUsers: ["octocat"],
     },
   ]);
   await expect(page.getByText("Internal")).toBeVisible();

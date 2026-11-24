@@ -84,6 +84,7 @@ import {
   rememberPublicBaseUrl,
   removeSlack,
   saveSlackMembers,
+  slackMember,
   slackMembers,
   SlackMembersUpdate,
   SlackSetup,
@@ -199,7 +200,10 @@ import {
 } from "./connections-tool";
 import {
   AddMcpServer,
+  McpAccessInput,
   McpConnections,
+  type McpIdentity,
+  type McpScope,
   McpToolInput,
   MCP_TOOL_NAME,
   mcpToolDescription,
@@ -251,6 +255,9 @@ function placeholderModel(stored: string | null) {
 }
 
 type SessionPull = NonNullable<SavedSession["pullRequest"]>;
+
+/** GitHubThreads and SlackThreads, as far as MCP access reads them. */
+type StartedThreads = { threads: Record<string, { id: ConversationId; creator?: string }> };
 
 type CachedPullSummary = { summary: PullRequestSummary; checked: number };
 
@@ -819,7 +826,7 @@ export class Agent extends DurableObject<Env> {
       execute: async (input: typeof McpToolInput.Type, api) => {
         const { code } = Schema.decodeUnknownSync(McpToolInput)(input);
 
-        // The owner's credentials, so only sessions only the owner can steer and read may use them.
+        // The owner's credentials: limited by session kind, automation and allowedUsers (mcpScope).
         const scope = await this.mcpScope(api.conversationId);
 
         if (!scope)
@@ -829,7 +836,7 @@ export class Agent extends DurableObject<Env> {
             details: null,
           });
 
-        return await this.mcp.execute(code, scope.allow);
+        return await this.mcp.execute(code, scope);
       },
     } satisfies ToolRegistration;
 
@@ -1111,15 +1118,14 @@ export class Agent extends DurableObject<Env> {
             read.snapshot(AutomationRunDoc, conversationId, context),
           ]);
 
-          const external = [github, slack].some((state) =>
-            Object.values(state?.threads ?? {}).some((thread) => thread.id === conversationId),
-          );
-
           const allow = automation?.run?.mcpServers;
 
-          return external || isReadOnly(workspace) || allow?.length === 0
-            ? MCP_UNAVAILABLE_PROMPT
-            : await this.mcp.promptSection(allow);
+          if (isReadOnly(workspace) || allow?.length === 0) return MCP_UNAVAILABLE_PROMPT;
+
+          return await this.mcp.promptSection({
+            allow,
+            identity: allow ? "owner" : await this.mcpIdentity(conversationId, github, slack),
+          });
         }),
       ],
     });
@@ -2140,6 +2146,13 @@ export class Agent extends DurableObject<Env> {
     return this.mcp.remove(name);
   }
 
+  async mcpSetAccess(name: string, input: typeof McpAccessInput.Type) {
+    return this.mcp.setAllowedUsers(
+      name,
+      Schema.decodeUnknownSync(McpAccessInput)(input).allowedUsers,
+    );
+  }
+
   mcpOauthStatus(name: string) {
     return this.mcp.oauthStatus(name);
   }
@@ -2372,16 +2385,31 @@ export class Agent extends DurableObject<Env> {
   }
 
   /**
-   * MCP servers carry the owner's credentials: only writable sessions started from the web app,
-   * and an automation's runs only with the servers it lists. False, or the allowlist to apply.
+   * Which MCP servers a session may use, or false for none. Read-only sessions get none. An
+   * automation run (or a session it spawned) gets only the servers its automation lists. Any
+   * other session gets every server whose `allowedUsers` admit who it acts for (`mcpIdentity`).
    */
-  private async mcpScope(id: ConversationId): Promise<false | { allow?: readonly string[] }> {
-    if ((await this.isReadOnly(id)) || !(await this.startedFromWeb(id))) return false;
-    const run = (await this.harness.snapshot(AutomationRunDoc, id, BACKGROUND_CONTEXT))?.run;
+  private async mcpScope(id: ConversationId): Promise<false | McpScope> {
+    if (await this.isReadOnly(id)) return false;
+    const root = await this.rootConversation(id);
 
-    if (!run) return {};
+    if (root === undefined) return false;
 
-    return run.mcpServers.length ? { allow: run.mcpServers } : false;
+    const [own, rootRun] = await Promise.all([
+      this.harness.snapshot(AutomationRunDoc, id, BACKGROUND_CONTEXT),
+      this.harness.snapshot(AutomationRunDoc, root, BACKGROUND_CONTEXT),
+    ]);
+
+    const run = own?.run ?? rootRun?.run;
+
+    if (run) return run.mcpServers.length ? { allow: run.mcpServers, identity: "owner" } : false;
+
+    const [github, slack] = await Promise.all([
+      this.harness.snapshot(GitHubThreads, BACKGROUND_CONTEXT),
+      this.harness.snapshot(SlackThreads, BACKGROUND_CONTEXT),
+    ]);
+
+    return { identity: await this.mcpIdentity(root, github, slack) };
   }
 
   private async refuseReadOnly(id: ConversationId) {
@@ -3614,6 +3642,48 @@ export class Agent extends DurableObject<Env> {
     return origin.kind === "slack" ? { id, slack: origin.thread } : { id };
   }
 
+  /** The top-level conversation `conversationId` was spawned from (itself when top-level). */
+  private async rootConversation(conversationId: ConversationId) {
+    return await this.harness.commit(async (tx) => {
+      let record = await tx.conversation(conversationId);
+
+      while (record?.owner) record = await tx.conversation(record.owner.conversationId);
+
+      return record?.id;
+    }, BACKGROUND_CONTEXT);
+  }
+
+  /**
+   * Who a top-level conversation acts for, for MCP `allowedUsers`: the owner in web sessions, or
+   * the person who started its Slack thread (member ID and linked GitHub login) or GitHub /dolly
+   * session. A thread recorded before starters were kept acts for nobody: open servers only.
+   */
+  private async mcpIdentity(
+    root: ConversationId,
+    github: StartedThreads | undefined,
+    slack: StartedThreads | undefined,
+  ): Promise<McpIdentity> {
+    const slackThread = Object.values(slack?.threads ?? {}).find((thread) => thread.id === root);
+
+    if (slackThread) {
+      if (!slackThread.creator) return [];
+
+      const profile = await Effect.runPromise(
+        readSlackProfile(this.ctx.storage).pipe(Effect.orElseSucceed(() => null)),
+      );
+
+      const login = profile ? slackMember(profile, slackThread.creator)?.github : null;
+
+      return login ? [slackThread.creator, login] : [slackThread.creator];
+    }
+
+    const githubThread = Object.values(github?.threads ?? {}).find((thread) => thread.id === root);
+
+    if (githubThread) return githubThread.creator ? [githubThread.creator] : [];
+
+    return "owner";
+  }
+
   /** What started a session's root conversation; undefined for a conversation that no longer exists. */
   private async sessionOrigin(
     conversationId: ConversationId,
@@ -3623,13 +3693,7 @@ export class Agent extends DurableObject<Env> {
     | { kind: "slack"; thread: { channel: string; threadTs: string } }
     | undefined
   > {
-    const root = await this.harness.commit(async (tx) => {
-      let record = await tx.conversation(conversationId);
-
-      while (record?.owner) record = await tx.conversation(record.owner.conversationId);
-
-      return record?.id;
-    }, BACKGROUND_CONTEXT);
+    const root = await this.rootConversation(conversationId);
 
     if (root === undefined) return undefined;
 

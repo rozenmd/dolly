@@ -13,7 +13,10 @@
  * Differences from Opensession, because Dolly runs on Workers with a single owner:
  *  - Only remote (streamable HTTP) servers. A Worker cannot spawn stdio processes, and running
  *    them inside a session sandbox would hand it the server's credentials.
- *  - One workspace grant per server; there are no per-teammate grants or allowlists.
+ *  - One workspace grant per server; there are no per-teammate grants. A server may carry an
+ *    `allowedUsers` list, as in Opensession: empty means every writable session gets it; otherwise
+ *    Slack and GitHub sessions get it only when the person who started them is listed
+ *    (`mcpUserAllowed`). Owner web sessions always get every server.
  *  - The add form also takes static headers, because there is no config file to edit by hand.
  *  - No Client ID Metadata Document: authorization servers must offer dynamic registration.
  */
@@ -57,6 +60,11 @@ export interface McpServerEntry {
   url: string;
   /** Static request headers (API keys). Never returned by the API. */
   headers?: Record<string, string>;
+  /**
+   * Who besides the owner may use it, as Slack member IDs or GitHub logins. Empty or unset: any
+   * writable session. Set: Slack and GitHub sessions only when their starter is listed.
+   */
+  allowedUsers?: string[];
 }
 
 export interface McpConnection {
@@ -66,6 +74,8 @@ export interface McpConnection {
   target: string;
   /** Names of static headers, never their values. */
   headerKeys: string[];
+  /** Empty when every writable session may use the server (see McpServerEntry.allowedUsers). */
+  allowedUsers: string[];
   status: "connected" | "needs-auth" | "unreachable";
   detail?: string;
 }
@@ -148,7 +158,56 @@ export const AddMcpServer = Schema.Struct({
   transport: Schema.optional(Schema.Literal("http")),
   url: Schema.String,
   headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  allowedUsers: Schema.optional(Schema.Array(Schema.String)),
 });
+
+/** PUT /api/connections/mcp/:name: who may use a server; empty opens it to every session. */
+export const McpAccessInput = Schema.Struct({ allowedUsers: Schema.Array(Schema.String) });
+
+const MAX_ALLOWED_USERS = 50;
+
+/**
+ * Trimmed, de-duplicated identities (Slack member IDs or GitHub logins, an optional leading @
+ * dropped), or an error. Matching is case-insensitive.
+ */
+export function normalizeAllowedUsers(
+  users: readonly string[] | undefined,
+): string[] | { error: string } {
+  const seen = new Map<string, string>();
+
+  for (const raw of users ?? []) {
+    const user = raw.trim().replace(/^@/, "");
+
+    if (!user) continue;
+
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(user))
+      return { error: `"${raw.trim()}" is not a Slack member ID or GitHub login` };
+    seen.set(user.toLowerCase(), user);
+  }
+
+  if (seen.size > MAX_ALLOWED_USERS)
+    return { error: `At most ${MAX_ALLOWED_USERS} allowed users per server` };
+
+  return [...seen.values()];
+}
+
+/**
+ * Who a session acts for, for `allowedUsers`: `owner` for the owner's web sessions, otherwise the
+ * identities of the person who started it (Slack member ID and linked GitHub login, or the GitHub
+ * sender). An empty list matches only unrestricted servers.
+ */
+export type McpIdentity = "owner" | readonly string[];
+
+/** Whether a session acting for `identity` may use `entry`. */
+export function mcpUserAllowed(entry: Pick<McpServerEntry, "allowedUsers">, identity: McpIdentity) {
+  if (identity === "owner" || !entry.allowedUsers?.length) return true;
+  const allowed = new Set(entry.allowedUsers.map((user) => user.toLowerCase()));
+
+  return identity.some((user) => allowed.has(user.toLowerCase()));
+}
+
+/** Which servers a session may use: an automation's list, and who it acts for. */
+export type McpScope = { allow?: readonly string[]; identity: McpIdentity };
 
 export const McpTokenInput = Schema.Struct({
   token: Schema.Trim.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
@@ -160,10 +219,10 @@ export const McpToolInput = Schema.Struct({
 });
 
 export const MCP_REFUSAL =
-  "MCP servers use the owner's credentials, so they are only available in writable sessions the owner starts from the web app. Slack and GitHub sessions can be steered by other people, automatic reviews are read-only, and automation runs may use only the servers their automation lists.";
+  "MCP servers are not available in this session. Read-only sessions such as automatic reviews never get them, and automation runs may use only the servers their automation lists.";
 
 export const MCP_UNAVAILABLE_PROMPT =
-  "MCP servers are not available in this session: they use the owner's credentials and work only in writable sessions started from the web app, and in automation runs only for the servers their automation lists. Don't call the mcp tool here.";
+  "MCP servers are not available in this session: read-only sessions never get them, and automation runs get only the servers their automation lists. Don't call the mcp tool here.";
 
 export const mcpToolDescription = MCP_CODE_DESCRIPTION;
 
@@ -452,6 +511,11 @@ export class McpConnections {
     }
 
     if (headers.size) entry.headers = Object.fromEntries(headers);
+    const allowedUsers = normalizeAllowedUsers(input.allowedUsers);
+
+    if (!Array.isArray(allowedUsers)) return allowedUsers;
+
+    if (allowedUsers.length) entry.allowedUsers = allowedUsers;
     servers[name] = entry;
     // A record a removed server of this name left behind must never attach to the new one.
     await this.storage.delete([authKey(name), toolsKey(name)]);
@@ -469,6 +533,27 @@ export class McpConnections {
     await this.storage.delete([authKey(name), toolsKey(name)]);
 
     return { ok: true };
+  }
+
+  /** Restrict a server to `users`, or open it to every writable session with an empty list. */
+  async setAllowedUsers(
+    name: string,
+    users: readonly string[],
+  ): Promise<{ ok: true; allowedUsers: string[] } | { error: string }> {
+    const allowedUsers = normalizeAllowedUsers(users);
+
+    if (!Array.isArray(allowedUsers)) return allowedUsers;
+    const servers = await this.servers();
+    const entry = servers[name];
+
+    if (!entry) return { error: `Server "${name}" not found` };
+
+    // Only the access list changes: id, URL and epoch stay, so grants and cached tools are kept.
+    if (allowedUsers.length) entry.allowedUsers = allowedUsers;
+    else delete entry.allowedUsers;
+    await this.writeServers(servers);
+
+    return { ok: true, allowedUsers };
   }
 
   // ── Status ──
@@ -493,6 +578,7 @@ export class McpConnections {
       transport: "http" as const,
       target: sanitizedTarget(entry.url),
       headerKeys: Object.keys(entry.headers ?? {}),
+      allowedUsers: entry.allowedUsers ?? [],
     };
 
     try {
@@ -1061,21 +1147,27 @@ export class McpConnections {
     }
   }
 
-  /** Connected servers, limited to `allow` when given (an automation's MCP allowlist). */
-  private async allowed(allow?: readonly string[]) {
+  /**
+   * Connected servers the scope may use: those an automation lists (`allow`, when given), and of
+   * those only the ones whose `allowedUsers` admit who the session acts for.
+   */
+  private async allowed(scope: McpScope) {
     const servers = await this.servers();
 
-    return allow
-      ? Object.fromEntries(Object.entries(servers).filter(([name]) => allow.includes(name)))
-      : servers;
+    return Object.fromEntries(
+      Object.entries(servers).filter(
+        ([name, entry]) =>
+          (!scope.allow || scope.allow.includes(name)) && mcpUserAllowed(entry, scope.identity),
+      ),
+    );
   }
 
-  /**
-   * The system prompt's server list and tool catalog, limited to `allow` when given. Reads
-   * storage only, never the network.
-   */
-  async promptSection(allow?: readonly string[]): Promise<string> {
-    const servers = await this.allowed(allow);
+  /** The system prompt's server list and tool catalog for `scope`. Reads storage only. */
+  async promptSection(scope: McpScope = { identity: "owner" }): Promise<string> {
+    const servers = await this.allowed(scope);
+
+    if (!Object.keys(servers).length && Object.keys(await this.servers()).length)
+      return "No MCP servers are available to this session: Settings > Connections limits who may use the connected ones.";
 
     if (!Object.keys(servers).length)
       return "No MCP servers are connected. The owner can add them in Settings > Connections, or give you a URL to save with the connections tool.";
@@ -1096,9 +1188,9 @@ export class McpConnections {
     return catalogPrompt(catalog);
   }
 
-  /** Run one model-written program over every usable server's tools, or those `allow` names. */
-  async execute(code: string, allow?: readonly string[]) {
-    const servers = await this.allowed(allow);
+  /** Run one model-written program over the tools of every server `scope` may use. */
+  async execute(code: string, scope: McpScope = { identity: "owner" }) {
+    const servers = await this.allowed(scope);
     const sessions = new Map<string, Promise<McpSession>>();
     const unavailable = new Map<string, string>();
     const usable = new Map<string, CatalogTool[]>();
