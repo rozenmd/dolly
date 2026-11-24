@@ -1854,7 +1854,7 @@ export class Agent extends DurableObject<Env> {
   }
   githubExecute(
     input: typeof GitHubRequest.Type,
-    options: { ownThreadsOnly?: boolean } = {},
+    options: { ownThreadsOnly?: boolean; head?: string } = {},
   ): Promise<typeof GitHubReply.Type> {
     return Effect.runPromise(
       Schema.decodeUnknownEffect(GitHubRequest)(input).pipe(
@@ -1948,7 +1948,10 @@ export class Agent extends DurableObject<Env> {
 
         // The reviewer closes only its own findings, once it has checked their fixes.
         if (input.operation.action === "resolve_review_thread")
-          return this.githubExecute(input, { ownThreadsOnly: true });
+          return this.githubExecute(input, {
+            ownThreadsOnly: true,
+            head: workspace?.reviewTarget?.sha,
+          });
 
         return this.publishReview(input);
       }

@@ -285,6 +285,9 @@ function fakeGitHub(url: URL, init: RequestInit | undefined) {
     if (query.includes("resolveReviewThread")) {
       github.resolved.push(String(variables.thread));
 
+      if (pushAfterResolutions?.count === github.resolved.length)
+        github.heads[pushAfterResolutions.number] = pushAfterResolutions.sha;
+
       return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } });
     }
 
@@ -560,6 +563,9 @@ let failCommentPosts = 0;
 /** GitHub writes the review model attempts instead of reviewing, in order; empty for a normal review. */
 let reviewWrites: GitHubOperation[] = [];
 
+/** Moves a PR's head once this many threads are resolved, as a push between two calls would. */
+let pushAfterResolutions: { count: number; number: string; sha: string } | undefined;
+
 /** What the tool answered to each of them. */
 let writeResults: string[] = [];
 
@@ -688,6 +694,7 @@ beforeEach(async () => {
   github.reviews = [];
   github.comments = [];
   github.resolved = [];
+  pushAfterResolutions = undefined;
   verdicts = [];
   reviewWrites = [];
   writeResults = [];
@@ -1057,10 +1064,14 @@ it("lets an automatic review resolve its own threads on its pull request, and no
     resolve(4652901599),
     // Already resolved: nothing to do.
     resolve(4652901596),
+    // A push landed after the third resolution: the head it checked is gone, so nothing more
+    // is resolved.
+    resolve(4652901592),
   ];
+  pushAfterResolutions = { count: 3, number: "26", sha: "b".repeat(40) };
   github.heads["26"] = sha;
   expect(await pullRequestHook("opened", 26, sha)).toBe(202);
-  await expect.poll(() => writeResults, { timeout: 15_000 }).toHaveLength(7);
+  await expect.poll(() => writeResults, { timeout: 15_000 }).toHaveLength(8);
 
   expect(writeResults[0]).toContain("read_only");
   expect(writeResults[0]).toContain(`can only resolve its own threads on ${repository}#26`);
@@ -1074,6 +1085,7 @@ it("lets an automatic review resolve its own threads on its pull request, and no
   }
 
   expect(writeResults[6]).toContain('"already_resolved":true');
+  expect(writeResults[7]).toContain("stale_commit");
   expect(github.resolved).toEqual(["T_parse", "T_cache", "T_late"]);
 }, 60_000);
 

@@ -1818,12 +1818,15 @@ function makeGitHub(
   /**
    * Resolves the review thread holding a comment. With `ownThreadsOnly`, as for an automatic
    * review, only a thread this App started may be resolved: the reviewer closes its own findings
-   * once it has checked the fix, never a person's or another bot's.
+   * once it has checked the fix, never a person's or another bot's. With `head`, the thread is
+   * resolved only while the pull request is still at that commit: a review of a superseded head
+   * must not settle a finding a later push may have undone.
    */
   const resolveThread = Effect.fn("GitHub.resolveThread")(function* (
     connected: typeof Connected.Type,
     op: Extract<typeof GitHubRequest.Type.operation, { action: "resolve_review_thread" }>,
     ownThreadsOnly: boolean,
+    head: string | undefined,
   ) {
     const token = yield* tokenFor(connected, op.repository, "write");
     const [owner = "", name = ""] = op.repository.split("/");
@@ -1884,6 +1887,20 @@ function makeGitHub(
 
     if (found.resolved) return done(true);
 
+    // Checked last, right before the write, so a push during the lookup is never missed.
+    if (head) {
+      const pull = yield* api(`/repos/${op.repository}/pulls/${op.number}`, token).pipe(
+        Effect.flatMap(decode(Schema.Struct({ head: Schema.Struct({ sha: Schema.String }) }))),
+      );
+
+      if (pull.head.sha !== head)
+        return {
+          ok: false as const,
+          code: "stale_commit",
+          message: `The pull request head is now ${pull.head.sha}, not ${head}, so no thread was resolved: the fix you checked may not be what the PR holds now.`,
+        };
+    }
+
     const resolved = yield* api("/graphql", token, {
       query: RESOLVE_THREAD_MUTATION,
       variables: { thread: found.id },
@@ -1901,7 +1918,7 @@ function makeGitHub(
 
   const execute = Effect.fn("GitHub.execute")(function* (
     input: typeof GitHubRequest.Type,
-    options: { ownThreadsOnly?: boolean } = {},
+    options: { ownThreadsOnly?: boolean; head?: string } = {},
   ): Effect.fn.Return<typeof GitHubReply.Type, OperationError> {
     const op = input.operation;
 
@@ -2219,7 +2236,7 @@ function makeGitHub(
     if (op.action === "upload_screenshot") return yield* uploadScreenshot(op, connected);
 
     if (op.action === "resolve_review_thread")
-      return yield* resolveThread(connected, op, options.ownThreadsOnly === true);
+      return yield* resolveThread(connected, op, options.ownThreadsOnly === true, options.head);
 
     if (op.action === "create_review" || op.action === "reply_to_review_comment") {
       const token = yield* tokenFor(connected, op.repository, "write");
