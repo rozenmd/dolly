@@ -288,6 +288,9 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
   const turns: Turn[] = [];
   const calls = new Map<string, Step>();
   const entryTurns = new Map<number, Turn>();
+  // Turns whose latest saved assistant message ended the reply (`stop`): its text is the answer
+  // even while the run winds down, so it doesn't jump from the work log once the run ends.
+  const replied = new Set<Turn>();
   const live = liveFromSnapshot(snapshot);
 
   function current(id: string) {
@@ -303,11 +306,16 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 
   // A group is keyed by its first tool call, which keeps the same id while a
   // message streams live and after it is saved, so the UI never remounts it.
+  // Set by hidden live text: the next step starts a new group, as it will once the text is saved.
+  let split = false;
+
   function addStep(turn: Turn, step: Step) {
     const last = turn.items.at(-1);
 
-    if (last?.kind === "steps") last.steps.push(step);
+    if (last?.kind === "steps" && !split) last.steps.push(step);
     else turn.items.push({ kind: "steps", id: `steps-${step.id}`, steps: [step] });
+
+    split = false;
 
     turn.steps += 1;
     calls.set(step.id, step);
@@ -320,7 +328,7 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     turn.endedAt = at;
   }
 
-  function add(message: typeof Message.Type, id: string) {
+  function add(message: typeof Message.Type, id: string, hideText = false) {
     if (message.role === "user") {
       const text = messageText(message);
       const scheduled = parseScheduledMessage(text);
@@ -357,6 +365,14 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     if (message.role !== "assistant" && message.role !== "toolResult") return;
     const turn = current(id);
     touch(turn, message.timestamp);
+
+    // Pi treats a reply cut off at the output limit as finished too.
+    if (
+      message.role === "assistant" &&
+      (message.stopReason === "stop" || message.stopReason === "length")
+    )
+      replied.add(turn);
+    else replied.delete(turn);
 
     if (
       message.role === "assistant" &&
@@ -423,7 +439,8 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 
         if (message.timestamp !== undefined) step.startedAt = message.timestamp;
         addStep(turn, step);
-      } else if (block.text) {
+      } else if (block.text && hideText) split = true;
+      else if (block.text) {
         const last = turn.items.at(-1);
 
         if (last?.kind === "text") last.text += `\n\n${block.text}`;
@@ -453,7 +470,12 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     if (turn) entryTurns.set(entry.id, turn);
   }
 
-  if (live?.generation?.message) add(live.generation.message, "live");
+  // The in-flight message's text is not shown until it is saved, so replies appear in one
+  // piece instead of streaming in and shifting the layout; its tool calls still show as they start.
+  const generating = live?.generation?.message;
+
+  // Its text still splits step groups, so live tools land in the groups they will have once saved.
+  if (generating && !Schema.is(Schema.String)(generating.content)) add(generating, "live", true);
 
   for (const tool of live?.tools ?? []) {
     const step = calls.get(tool.callId);
@@ -504,7 +526,7 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
   for (const turn of turns) {
     const tail = turn.items.at(-1);
 
-    if (!turn.running && !turn.failure && tail?.kind === "text") {
+    if ((!turn.running || replied.has(turn)) && !turn.failure && tail?.kind === "text") {
       turn.items.pop();
       turn.answer = { id: tail.id, text: tail.text };
     }
