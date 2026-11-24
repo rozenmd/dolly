@@ -7,13 +7,16 @@ import { BROWSER_HOST, browserRoute, SandboxOutbound } from "./browser-workspace
 /**
  * Reachable from every sandbox. Besides package registries, raw.githubusercontent.com serves
  * pinned files from public GitHub repositories, such as OpenAPI schemas that code generators
- * download. Requests carry no credentials: the outbound strips auth headers.
+ * download, and Playwright's CDN mirrors serve the browsers `playwright install` downloads.
+ * Requests carry no credentials: the outbound strips auth headers.
  */
 const defaultNetworkHosts = new Set([
   "registry.npmjs.org",
   "registry.yarnpkg.com",
   "repo.yarnpkg.com",
   "raw.githubusercontent.com",
+  "cdn.playwright.dev",
+  "playwright.download.prss.microsoft.com",
 ]);
 
 /**
