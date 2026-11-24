@@ -151,10 +151,15 @@ export const GitHubRequest = Schema.Struct({
       page: Schema.optional(Page),
     }),
     Schema.Struct({
+      /**
+       * Discussion, reviews and inline threads, newest activity first, in pages that fit the tool
+       * output; `unresolved` keeps only review threads nobody resolved.
+       */
       action: Schema.Literal("list_pull_request_comments"),
       repository: Repository,
       number: PullNumber,
       page: Schema.optional(Page),
+      filter: Schema.optional(Schema.Literals(["all", "unresolved"])),
     }),
     Schema.Struct({
       action: Schema.Literal("read_pull_request_checks"),

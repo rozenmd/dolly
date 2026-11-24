@@ -1740,9 +1740,22 @@ it("reads public pull requests, files, comment threads and checks anonymously", 
     result: {
       data: {
         next_page: null,
-        discussion: [{ id: 1, body: "hi" }],
-        threads: [{ id: 10, comments: [{ id: 10 }, { id: 11, outdated: true }] }],
-        reviews: [{ id: 5, state: "APPROVED" }],
+        pages: 1,
+        counts: { discussion: 1, reviews: 1, threads: 1, unresolved_threads: null },
+        // Anonymous reads can't see resolution state; the items still come newest first.
+        items: [
+          {
+            type: "thread",
+            id: 10,
+            path: "f.ts",
+            line: 3,
+            resolved: null,
+            outdated: false,
+            comments: [{ id: 10 }, { id: 11 }],
+          },
+          { type: "review", id: 5, state: "APPROVED" },
+          { type: "comment", id: 1, body: "hi" },
+        ],
       },
     },
   });
@@ -1759,6 +1772,160 @@ it("reads public pull requests, files, comment threads and checks anonymously", 
     },
   });
   expect(fetch).toHaveBeenCalledTimes(8);
+});
+
+it("pages a long PR conversation newest first within the output budget and filters open threads", async () => {
+  await connect();
+  const time = (minute: number) => new Date(Date.UTC(2026, 0, 1, 0, minute)).toISOString();
+  const open = new Set([3, 117]);
+
+  // 120 one-comment threads with long bodies span two REST pages and several tool pages.
+  const inline = Array.from({ length: 120 }, (_, index) => ({
+    id: index + 1,
+    user: { login: "reviewer[bot]" },
+    body: `finding ${index + 1} ${"x".repeat(1_000)}`,
+    path: "src/a.ts",
+    line: index + 1,
+    side: "RIGHT",
+    pull_request_review_id: 900,
+    html_url: `u${index + 1}`,
+    created_at: time(index + 1),
+  }));
+
+  const graphql: unknown[] = [];
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const { pathname, searchParams } = new URL(String(url));
+
+    if (pathname === "/app/installations") return Response.json([{ id: 7 }]);
+
+    if (pathname.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (pathname.endsWith("/access_tokens"))
+      return Response.json({
+        token: "read-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+    if (pathname === "/repos/example/project") return Response.json({ private: false });
+
+    if (pathname === "/graphql") {
+      graphql.push(JSON.parse(String(init?.body)));
+
+      return Response.json({
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: inline.map((comment) => ({
+                  isResolved: !open.has(comment.id),
+                  isOutdated: false,
+                  comments: { nodes: [{ fullDatabaseId: String(comment.id) }] },
+                })),
+              },
+            },
+          },
+        },
+      });
+    }
+
+    if (pathname.endsWith("/issues/50/comments"))
+      return Response.json([
+        {
+          id: 1000,
+          user: { login: "deploy[bot]" },
+          body: "Deployed",
+          html_url: "d",
+          created_at: time(0),
+        },
+      ]);
+
+    if (pathname.endsWith("/pulls/50/comments")) {
+      const page = Number(searchParams.get("page"));
+
+      return Response.json(inline.slice((page - 1) * 100, page * 100));
+    }
+
+    if (pathname.endsWith("/pulls/50/reviews"))
+      return Response.json([
+        // Only wraps the inline comments, so it is left out.
+        {
+          id: 900,
+          user: { login: "reviewer[bot]" },
+          body: "",
+          state: "COMMENTED",
+          submitted_at: time(1),
+        },
+        {
+          id: 901,
+          user: { login: "reviewer[bot]" },
+          body: "Two P1s left",
+          state: "COMMENTED",
+          submitted_at: time(200),
+        },
+      ]);
+
+    throw new Error(`Unexpected GitHub path ${pathname}`);
+  });
+
+  type Page = {
+    result: {
+      data: {
+        next_page: number | null;
+        counts: Record<string, number | null>;
+        items: Array<{ type: string; id: number; resolved?: boolean | null }>;
+      };
+    };
+  };
+
+  const read = async (page?: number, filter?: "all" | "unresolved") => {
+    const response = await execute({
+      action: "list_pull_request_comments",
+      repository,
+      number: 50,
+      ...(page && { page }),
+      ...(filter && { filter }),
+    });
+
+    const text = await response.text();
+
+    // Every page fits the tool output, so nothing is cut off before next_page.
+    expect(new TextEncoder().encode(text).length).toBeLessThan(32_000);
+
+    // SAFETY: the tool's reply for this action has this shape; the assertions below check it.
+    return JSON.parse(text) as Page;
+  };
+
+  const seen: Array<{ type: string; id: number }> = [];
+  let page: number | null = 1;
+
+  while (page) {
+    const { data }: Page["result"] = (await read(page)).result;
+    seen.push(...data.items);
+    page = data.next_page;
+  }
+
+  // Newest activity first: the latest review, then threads newest to oldest, then the deploy note.
+  expect(seen.map((item) => `${item.type}:${item.id}`)).toEqual([
+    "review:901",
+    ...inline.map((comment) => `thread:${comment.id}`).reverse(),
+    "comment:1000",
+  ]);
+
+  const first = (await read()).result.data;
+  expect(first.next_page).toBe(2);
+  expect(first.counts).toEqual({ discussion: 1, reviews: 2, threads: 120, unresolved_threads: 2 });
+
+  const unresolved = (await read(undefined, "unresolved")).result.data;
+  expect(unresolved.next_page).toBeNull();
+  expect(unresolved.items).toMatchObject([
+    { type: "thread", id: 117, resolved: false },
+    { type: "thread", id: 3, resolved: false },
+  ]);
+  expect(graphql[0]).toMatchObject({
+    variables: { owner: "example", name: "project", number: 50 },
+  });
 });
 
 it("posts inline reviews only against the current head and diff, and never approves", async () => {
