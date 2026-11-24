@@ -43,34 +43,50 @@ try:
 except Exception as error:
     failed(f"node_runtime: could not install the declared Node: {error}")
 
-manager = None
-manifest = Path("package.json")
-if manifest.is_file():
+
+def select(report):
+    """The manager package.json declares, with its PATH shim in place."""
+    if not Path("package.json").is_file():
+        return None
     try:
         manager, executable = selected_manager()
     except Exception as error:
-        failed(f"package_manager: {error}")
-if manager:
-    command = install_command(manager, executable)
+        if report:
+            failed(f"package_manager: {error}")
+        return None
     try:
         install_shim(manager, executable)
     except OSError as error:
         # A missing shim must not block dependency installation.
-        print(f"package_manager: could not add {manager} to PATH: {error}", file=sys.stderr, flush=True)
-    if manager == "yarn":
-        # Keep modern Yarn's PnP archives inside the checkout, rather than in a
-        # global store that would be absent in another session.
-        os.environ["YARN_ENABLE_GLOBAL_CACHE"] = "false"
+        if report:
+            print(f"package_manager: could not add {manager} to PATH: {error}", file=sys.stderr, flush=True)
+    return manager, executable
+
 
 hook = Path(".agents/setup")
 custom_setup = hook.is_file()
 if custom_setup:
-    # A failed hook still leaves the declared dependencies to install.
-    code = subprocess.run(["./" + str(hook)] if os.access(hook, os.X_OK) else ["sh", str(hook)]).returncode
+    # Shim the declared manager for the hook; problems are reported after it,
+    # which may still write or fix the manifest.
+    select(report=False)
+    try:
+        code = subprocess.run(["./" + str(hook)] if os.access(hook, os.X_OK) else ["sh", str(hook)]).returncode
+    except OSError as error:
+        code = None
+        failed(f"{hook} could not start: {error}")
     if code:
         failed(f"{hook} exited {code}")
 
-if manager:
+# Read the manifest after the hook, which may have produced it or its lockfile.
+selected = select(report=True)
+if selected:
+    manager, executable = selected
+    command = install_command(manager, executable)
+    if manager == "yarn":
+        # Keep modern Yarn's PnP archives inside the checkout, rather than in a
+        # global store that would be absent in another session.
+        os.environ["YARN_ENABLE_GLOBAL_CACHE"] = "false"
+    # A failed hook still leaves the declared dependencies to install.
     key = None if custom_setup else eligible_key()
     if key is None or not restore(key):
         code = subprocess.run(command).returncode

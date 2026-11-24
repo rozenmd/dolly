@@ -78,14 +78,69 @@ fs.writeFileSync(process.env.SETUP_RESULT, JSON.stringify(process.argv.slice(2))
   });
 }
 
-test("reports a failed repository hook without running the installer", (t) => {
+for (const [name, hook, mode, reported] of [
+  ["fails", "exit 9\n", 0o644, /- \.agents\/setup exited 9/],
+  ["cannot start", "#!/missing/interpreter\n", 0o755, /- \.agents\/setup could not start:/],
+]) {
+  test(`reports a repository hook that ${name} and still installs dependencies`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), "dolly-setup-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    mkdirSync(join(root, ".agents"));
+    writeFileSync(join(root, ".agents/setup"), hook, { mode });
+    writeFileSync(join(root, "package.json"), JSON.stringify({ packageManager: "npm@11.0.0" }));
+    writeFileSync(join(root, "npx"), "#!/bin/sh\ntouch installed\n", { mode: 0o755 });
+    const shims = join(root, "shims");
+    mkdirSync(shims);
+
+    const result = spawnSync("python3", [script], {
+      cwd: root,
+      env: { ...process.env, PATH: `${root}:${process.env.PATH}`, DOLLY_SHIM_DIR: shims },
+      encoding: "utf8",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Setup finished with problems:/);
+    assert.match(result.stderr, reported);
+    assert.ok(statSync(join(root, "installed")).isFile());
+  });
+}
+
+test("installs from a manifest the repository hook writes", (t) => {
   const root = mkdtempSync(join(tmpdir(), "dolly-setup-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, ".agents"));
-  writeFileSync(join(root, ".agents/setup"), "exit 9\n");
-  const result = spawnSync("python3", [script], { cwd: root, encoding: "utf8" });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /exit status 9/);
+  writeFileSync(
+    join(root, ".agents/setup"),
+    `printf '%s' '{"packageManager":"npm@11.0.0"}' > package.json\ntouch package-lock.json\n`,
+  );
+  const output = join(root, "install.json");
+  writeFileSync(
+    join(root, "npx"),
+    `#!${process.execPath}\nrequire("node:fs").writeFileSync(process.env.SETUP_RESULT, JSON.stringify(process.argv.slice(2)));\n`,
+    { mode: 0o755 },
+  );
+  const shims = join(root, "shims");
+  mkdirSync(shims);
+
+  const result = spawnSync("python3", [script], {
+    cwd: root,
+    env: {
+      ...process.env,
+      PATH: `${root}:${process.env.PATH}`,
+      SETUP_RESULT: output,
+      DOLLY_SHIM_DIR: shims,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(output, "utf8")), [
+    "--yes",
+    "--package=npm@11.0.0",
+    "--",
+    "npm",
+    "ci",
+  ]);
 });
 
 test("pins an undeclared pnpm shim to the release npx resolves", (t) => {

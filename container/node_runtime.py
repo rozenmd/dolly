@@ -55,15 +55,18 @@ def current():
         return ""
 
 
+def npm_root():
+    return Path(npm("root", "--global").strip()) / "npm"
+
+
 def satisfies(version, spec):
     """Ask npm's bundled semver, so ranges mean what they mean to npm."""
-    root = npm("root", "--global").strip()
     script = (
         "const semver=require(process.argv[1]);"
         "process.exit(semver.satisfies(process.argv[2],process.argv[3])?0:1)"
     )
     return subprocess.run(
-        ["node", "-e", script, str(Path(root) / "npm/node_modules/semver"), version, spec],
+        ["node", "-e", script, str(npm_root() / "node_modules/semver"), version, spec],
         timeout=30,
     ).returncode == 0
 
@@ -122,6 +125,13 @@ def prepare(root=Path("."), bin_directory=None, store=None):
         raise RuntimeError(f"No Node binaries for {platform.machine()}")
     package = "node-linux-" + arch
     wanted = spec if EXACT.fullmatch(spec) else resolve(package, spec)
+    # npm and npx run on whichever node is on PATH; switching to a release the
+    # image's npm cannot run would leave nothing able to install dependencies.
+    supported = json.loads((npm_root() / "package.json").read_text()).get("engines", {}).get("node")
+    if supported and not satisfies(wanted, supported):
+        raise RuntimeError(
+            f"{source} asks for Node {wanted}, but the image's npm needs Node {supported}; keeping Node {version}"
+        )
     binary = install(package, wanted, Path(store or os.environ.get("DOLLY_NODE_DIR", Path.home() / ".cache/dolly-node")))
     reported = subprocess.check_output([str(binary), "-p", "process.versions.node"], text=True, timeout=30).strip()
     if reported != wanted:
