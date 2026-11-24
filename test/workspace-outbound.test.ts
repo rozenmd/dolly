@@ -69,6 +69,23 @@ it("still refuses other GitHub hosts and insecure raw.githubusercontent.com requ
   expect(sent).toEqual([]);
 });
 
+it("lets every sandbox download Playwright browsers from its CDN mirrors", async () => {
+  const builds = [
+    "https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1200/chromium-linux.zip",
+    "https://playwright.download.prss.microsoft.com/dbazure/download/playwright/builds/chromium/1200/chromium-linux.zip",
+    "https://cdn.playwright.dev/builds/chromium/1200/chromium-linux.zip",
+  ];
+
+  const { statuses, sent } = await egress(
+    [...builds, "http://cdn.playwright.dev/builds/chromium/1200/chromium-linux.zip"],
+    [],
+    { headers: { Authorization: "Bearer secret" } },
+  );
+
+  expect(statuses).toEqual([200, 200, 200, 403]);
+  expect(sent).toEqual(builds.map((url) => ({ url, authorization: null, cookie: null })));
+});
+
 it("keeps package registries and configured hosts reachable", async () => {
   const { statuses, sent } = await egress(
     ["https://registry.npmjs.org/zod", "https://pkg.pr.new/example", "https://example.com/"],
