@@ -472,6 +472,70 @@ const ThreadStatesResponse = Schema.Struct({
   ),
 });
 
+/** Each review thread's node id, resolution and comments, to find the thread a comment is in. */
+const THREAD_LOOKUP_QUERY = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id isResolved comments(first: 100) { nodes { fullDatabaseId author { login __typename } } } }
+      }
+    }
+  }
+}`;
+
+const ThreadLookupResponse = Schema.Struct({
+  data: Schema.NullOr(
+    Schema.Struct({
+      repository: Schema.NullOr(
+        Schema.Struct({
+          pullRequest: Schema.NullOr(
+            Schema.Struct({
+              reviewThreads: Schema.Struct({
+                pageInfo: Schema.Struct({
+                  hasNextPage: Schema.Boolean,
+                  endCursor: Schema.NullOr(Schema.String),
+                }),
+                nodes: Schema.Array(
+                  Schema.Struct({
+                    id: Schema.String,
+                    isResolved: Schema.Boolean,
+                    comments: Schema.Struct({
+                      nodes: Schema.Array(
+                        Schema.Struct({
+                          fullDatabaseId: Schema.NullOr(GraphId),
+                          author: Schema.NullOr(GraphActor),
+                        }),
+                      ),
+                    }),
+                  }),
+                ),
+              }),
+            }),
+          ),
+        }),
+      ),
+    }),
+  ),
+});
+
+const RESOLVE_THREAD_MUTATION = `mutation($thread: ID!) {
+  resolveReviewThread(input: { threadId: $thread }) { thread { isResolved } }
+}`;
+
+const ResolveThreadResponse = Schema.Struct({
+  data: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        resolveReviewThread: Schema.NullOr(
+          Schema.Struct({ thread: Schema.NullOr(Schema.Struct({ isResolved: Schema.Boolean })) }),
+        ),
+      }),
+    ),
+  ),
+  errors: Schema.optional(Schema.Array(Schema.Struct({ message: Schema.String }))),
+});
+
 type ThreadState = { resolved: boolean; outdated: boolean };
 
 /** One read of a pull request's conversation, held for its cursor's later pages. */
@@ -1751,8 +1815,110 @@ function makeGitHub(
     } satisfies CommentSnapshot;
   });
 
+  /**
+   * Resolves the review thread holding a comment. With `ownThreadsOnly`, as for an automatic
+   * review, only a thread this App started may be resolved: the reviewer closes its own findings
+   * once it has checked the fix, never a person's or another bot's. With `head`, the thread is
+   * resolved only while the pull request is still at that commit: a review of a superseded head
+   * must not settle a finding a later push may have undone.
+   */
+  const resolveThread = Effect.fn("GitHub.resolveThread")(function* (
+    connected: typeof Connected.Type,
+    op: Extract<typeof GitHubRequest.Type.operation, { action: "resolve_review_thread" }>,
+    ownThreadsOnly: boolean,
+    head: string | undefined,
+  ) {
+    const token = yield* tokenFor(connected, op.repository, "write");
+    const [owner = "", name = ""] = op.repository.split("/");
+    const self = `${connected.app.slug}[bot]`;
+    let after: string | null = null;
+    let found: { id: string; resolved: boolean; root: string } | undefined;
+
+    for (let pages = 0; !found && pages < MAX_THREAD_PAGES; pages++) {
+      const response: typeof ThreadLookupResponse.Type = yield* api("/graphql", token, {
+        query: THREAD_LOOKUP_QUERY,
+        variables: { owner, name, number: op.number, ...(after && { after }) },
+      }).pipe(Effect.flatMap(decode(ThreadLookupResponse)));
+
+      const threads = response.data?.repository?.pullRequest?.reviewThreads;
+
+      if (!threads) break;
+
+      for (const thread of threads.nodes) {
+        const comments = thread.comments.nodes;
+
+        if (!comments.some((comment) => restId(comment.fullDatabaseId) === op.comment_id)) continue;
+        const actor = comments[0]?.author;
+        const login = actor?.login ?? "ghost";
+
+        // GraphQL names an App by its slug alone; REST and the rest of Dolly use `slug[bot]`.
+        const root =
+          actor?.__typename === "Bot" && !login.endsWith("[bot]") ? `${login}[bot]` : login;
+
+        found = { id: thread.id, resolved: thread.isResolved, root };
+        break;
+      }
+
+      if (!threads.pageInfo.hasNextPage || !threads.pageInfo.endCursor) break;
+      after = threads.pageInfo.endCursor;
+    }
+
+    if (!found)
+      return {
+        ok: false as const,
+        code: "thread_not_found",
+        message: `No review thread on ${op.repository}#${op.number} holds comment ${op.comment_id}. Use a review comment id from list_pull_request_comments.`,
+      };
+
+    if (ownThreadsOnly && found.root !== self)
+      return {
+        ok: false as const,
+        code: "read_only",
+        message: `This automatic review session can only resolve threads Dolly started (its own findings from this or earlier review rounds); the thread of comment ${op.comment_id} was started by @${found.root}. Leave it for its author.`,
+      };
+
+    const done = (already: boolean) => ({
+      ok: true as const,
+      result: {
+        kind: "review_thread" as const,
+        data: { comment_id: op.comment_id, resolved: true, already_resolved: already },
+      },
+    });
+
+    if (found.resolved) return done(true);
+
+    // Checked last, right before the write, so a push during the lookup is never missed.
+    if (head) {
+      const pull = yield* api(`/repos/${op.repository}/pulls/${op.number}`, token).pipe(
+        Effect.flatMap(decode(Schema.Struct({ head: Schema.Struct({ sha: Schema.String }) }))),
+      );
+
+      if (pull.head.sha !== head)
+        return {
+          ok: false as const,
+          code: "stale_commit",
+          message: `The pull request head is now ${pull.head.sha}, not ${head}, so no thread was resolved: the fix you checked may not be what the PR holds now.`,
+        };
+    }
+
+    const resolved = yield* api("/graphql", token, {
+      query: RESOLVE_THREAD_MUTATION,
+      variables: { thread: found.id },
+    }).pipe(Effect.flatMap(decode(ResolveThreadResponse)));
+
+    if (resolved.errors?.length || !resolved.data?.resolveReviewThread?.thread?.isResolved)
+      return yield* new OperationError({
+        operation: "github.resolve_review_thread",
+        message: `GitHub did not resolve the thread of comment ${op.comment_id}: ${resolved.errors?.map((error) => error.message).join("; ") || "no thread came back"}`,
+        details: null,
+      });
+
+    return done(false);
+  });
+
   const execute = Effect.fn("GitHub.execute")(function* (
     input: typeof GitHubRequest.Type,
+    options: { ownThreadsOnly?: boolean; head?: string } = {},
   ): Effect.fn.Return<typeof GitHubReply.Type, OperationError> {
     const op = input.operation;
 
@@ -2068,6 +2234,9 @@ function makeGitHub(
     const connected = yield* read();
 
     if (op.action === "upload_screenshot") return yield* uploadScreenshot(op, connected);
+
+    if (op.action === "resolve_review_thread")
+      return yield* resolveThread(connected, op, options.ownThreadsOnly === true, options.head);
 
     if (op.action === "create_review" || op.action === "reply_to_review_comment") {
       const token = yield* tokenFor(connected, op.repository, "write");

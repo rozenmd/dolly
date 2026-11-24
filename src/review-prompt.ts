@@ -132,6 +132,10 @@ export type PriorFinding = {
   path: string;
   title: string;
   reply?: string;
+  /** The thread's first comment, for resolve_review_thread; null when GitHub sent no id. */
+  id: number | null;
+  /** Whether the thread is resolved on GitHub already. */
+  resolved: boolean;
 };
 
 /**
@@ -156,11 +160,12 @@ export function classifyPriorFindings(
 
     const title = clip(root.body.split("\n").find((line) => line.trim()) ?? "", 160);
     const path = thread.path ?? "(file-level)";
+    const base = { path, title, id: root.id, resolved: thread.resolved };
 
-    if (thread.resolved || thread.outdated) out.push({ status: "addressed", path, title });
+    if (thread.resolved || thread.outdated) out.push({ ...base, status: "addressed" });
     else if (replies.length)
-      out.push({ status: "replied", path, title, reply: clip(replies.at(-1)!.body, REPLY_CAP) });
-    else out.push({ status: "open", path, title });
+      out.push({ ...base, status: "replied", reply: clip(replies.at(-1)!.body, REPLY_CAP) });
+    else out.push({ ...base, status: "open" });
   }
 
   return out.slice(-MAX_DIGEST_FINDINGS);
@@ -205,7 +210,9 @@ Converge, don't escalate:
 - Never ask for new mechanism beyond the PR's stated goal: new tables, locking or reconciliation schemes, retry machinery, background jobs. If one seems warranted, it belongs in a follow-up issue: say so in one P3 at most, and don't let it affect the verdict.
 - Look at your own trajectory in the digest. If successive rounds keep drilling into the same area, each fix adding machinery to cover the previous round's edge case, you are the cause: stop. Accept the residual risk as a follow-up, and where an earlier fix made the PR more complex than its goal needs, suggest simplifying it rather than adding more.
 - Do not raise brand-new findings on code that was already in the diff you previously reviewed unless they are P0/P1 under the bar above, or you can say concretely why you missed them last round. Late-round discovery on unchanged code is churn, not rigor.
-- A PR that achieves its stated goal without regressions is ready, even if it is not as robust as it could be. Approve it.`;
+- A PR that achieves its stated goal without regressions is ready, even if it is not as robust as it could be. Approve it.
+
+Close the threads you have settled: for each of your findings marked "thread open" below whose fix you checked and found correct (or whose author's rationale you accept), call github resolve_review_thread with the repository, PR number and that thread's comment id, once per thread. Never resolve a thread whose finding still holds, and leave human reviewers' threads alone. Resolving is bookkeeping, not a substitute for your review: still publish it.`;
 
 /** The re-review digest: what Dolly concluded last time and what happened to each finding since. */
 export function priorReviewSection(opts: {
@@ -244,8 +251,14 @@ export function priorReviewSection(opts: {
     parts.push("", "Findings you have posted on this PR and their current status:");
 
     for (const finding of priorFindings) {
+      const thread = finding.resolved
+        ? "thread resolved"
+        : finding.id === null
+          ? "thread open"
+          : `thread open · comment ${finding.id}`;
+
       const head = clip(
-        `- [${label[finding.status]}] \`${finding.path}\` — ${finding.title}`,
+        `- [${label[finding.status]} · ${thread}] \`${finding.path}\` — ${finding.title}`,
         FINDING_LINE_CAP,
       );
 

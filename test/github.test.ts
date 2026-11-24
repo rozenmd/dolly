@@ -2199,6 +2199,79 @@ it("posts inline reviews only against the current head and diff, and never appro
     ).toBe(false);
 });
 
+it("resolves the review thread holding a comment, from any session but a review's", async () => {
+  type Query = { query: string; variables: { after?: string; thread?: string } };
+
+  await connect();
+  const resolutions: Query["variables"][] = [];
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const path = new URL(String(url)).pathname;
+
+    if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (path.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+    if (path !== "/graphql") throw new Error(`Unexpected GitHub path ${path}`);
+
+    const body: Query = JSON.parse(String(init?.body));
+
+    if (body.query.includes("resolveReviewThread")) {
+      resolutions.push(body.variables);
+
+      return Response.json({ data: { resolveReviewThread: { thread: { isResolved: true } } } });
+    }
+
+    const thread = (id: string, resolved: boolean, comments: number[]) => ({
+      id,
+      isResolved: resolved,
+      comments: {
+        nodes: comments.map((comment) => ({
+          fullDatabaseId: String(comment),
+          author: { login: "someone", __typename: "User" },
+        })),
+      },
+    });
+
+    return Response.json({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: body.variables.after
+              ? {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [thread("T_two", false, [30, 31])],
+                }
+              : {
+                  pageInfo: { hasNextPage: true, endCursor: "page-2" },
+                  nodes: [thread("T_one", true, [10])],
+                },
+          },
+        },
+      },
+    });
+  });
+
+  const resolve = (comment_id: number) =>
+    execute({ action: "resolve_review_thread", repository, number: 49, comment_id });
+
+  // A person's thread, found by a reply on the second page: an ordinary session may resolve it.
+  expect(await (await resolve(31)).json()).toMatchObject({
+    ok: true,
+    result: { kind: "review_thread", data: { comment_id: 31, already_resolved: false } },
+  });
+  expect(await (await resolve(10)).json()).toMatchObject({
+    ok: true,
+    result: { data: { already_resolved: true } },
+  });
+  expect(await (await resolve(99)).json()).toMatchObject({ ok: false, code: "thread_not_found" });
+  expect(resolutions).toEqual([{ thread: "T_two" }]);
+});
+
 it("edits only pull request titles and descriptions through the App, never state or base", async () => {
   const update = {
     action: "update_pull_request" as const,
