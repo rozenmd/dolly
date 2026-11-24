@@ -306,11 +306,16 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 
   // A group is keyed by its first tool call, which keeps the same id while a
   // message streams live and after it is saved, so the UI never remounts it.
+  // Set by hidden live text: the next step starts a new group, as it will once the text is saved.
+  let split = false;
+
   function addStep(turn: Turn, step: Step) {
     const last = turn.items.at(-1);
 
-    if (last?.kind === "steps") last.steps.push(step);
+    if (last?.kind === "steps" && !split) last.steps.push(step);
     else turn.items.push({ kind: "steps", id: `steps-${step.id}`, steps: [step] });
+
+    split = false;
 
     turn.steps += 1;
     calls.set(step.id, step);
@@ -323,7 +328,7 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     turn.endedAt = at;
   }
 
-  function add(message: typeof Message.Type, id: string) {
+  function add(message: typeof Message.Type, id: string, hideText = false) {
     if (message.role === "user") {
       const text = messageText(message);
       const scheduled = parseScheduledMessage(text);
@@ -361,7 +366,12 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
     const turn = current(id);
     touch(turn, message.timestamp);
 
-    if (message.role === "assistant" && message.stopReason === "stop") replied.add(turn);
+    // Pi treats a reply cut off at the output limit as finished too.
+    if (
+      message.role === "assistant" &&
+      (message.stopReason === "stop" || message.stopReason === "length")
+    )
+      replied.add(turn);
     else replied.delete(turn);
 
     if (
@@ -429,7 +439,8 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 
         if (message.timestamp !== undefined) step.startedAt = message.timestamp;
         addStep(turn, step);
-      } else if (block.text) {
+      } else if (block.text && hideText) split = true;
+      else if (block.text) {
         const last = turn.items.at(-1);
 
         if (last?.kind === "text") last.text += `\n\n${block.text}`;
@@ -463,17 +474,8 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
   // piece instead of streaming in and shifting the layout; its tool calls still show as they start.
   const generating = live?.generation?.message;
 
-  // Blocks keep their positions so tool calls keep the ids they will have once saved.
-  if (generating && !Schema.is(Schema.String)(generating.content))
-    add(
-      {
-        ...generating,
-        content: generating.content.map((block) =>
-          block.type === "toolCall" ? block : { type: block.type },
-        ),
-      },
-      "live",
-    );
+  // Its text still splits step groups, so live tools land in the groups they will have once saved.
+  if (generating && !Schema.is(Schema.String)(generating.content)) add(generating, "live", true);
 
   for (const tool of live?.tools ?? []) {
     const step = calls.get(tool.callId);

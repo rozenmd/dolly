@@ -458,7 +458,8 @@ describe("session transcript", () => {
     expect(working?.answer).toBeUndefined();
     expect(working?.items).toMatchObject([
       { kind: "text", text: "Looking." },
-      { kind: "steps", steps: [{ id: "1" }, { id: "2", status: "running" }] },
+      { kind: "steps", steps: [{ id: "1" }] },
+      { kind: "steps", id: "steps-2", steps: [{ id: "2", status: "running" }] },
     ]);
 
     const final = {
@@ -477,6 +478,83 @@ describe("session transcript", () => {
     // Saved before the run ends: already the answer, so it doesn't move out of the work log later.
     expect(winding?.running).toBe(true);
     expect(winding?.answer).toEqual({ id: "2-2-0", text: "Fixed." });
+  });
+  it("puts a live tool after hidden text in the group it will have once saved", () => {
+    const prompt = { id: 1, kind: "pi.input", model: [{ role: "user", content: "Fix it" }] };
+
+    const first = {
+      role: "assistant",
+      stopReason: "toolUse",
+      content: [{ type: "toolCall", id: "call-1", name: "shell", arguments: { command: "ls" } }],
+    };
+
+    const result = { role: "toolResult", toolCallId: "call-1", content: "ok" };
+
+    const second = {
+      role: "assistant",
+      content: [
+        { type: "text", text: "Now running the tests." },
+        { type: "toolCall", id: "call-2", name: "shell", arguments: { command: "pnpm test" } },
+      ],
+    };
+
+    const groups = (turn: ReturnType<typeof turnsFromSnapshot>[number] | undefined) =>
+      turn?.items.flatMap((item) =>
+        item.kind === "steps" ? [[item.id, item.steps.map((step) => step.id)]] : [],
+      );
+
+    const [live] = turnsFromSnapshot(
+      Schema.decodeUnknownSync(Snapshot)({
+        entries: [prompt, { id: 2, kind: "pi.message", model: [first, result] }],
+        docs: { "pi.live": { run: {}, generation: { message: second } } },
+      }),
+    );
+
+    const [saved] = turnsFromSnapshot(
+      Schema.decodeUnknownSync(Snapshot)({
+        entries: [
+          prompt,
+          {
+            id: 2,
+            kind: "pi.message",
+            model: [first, result, { ...second, stopReason: "toolUse" }],
+          },
+        ],
+        docs: { "pi.live": { run: {} } },
+      }),
+    );
+
+    expect(groups(live)).toEqual([
+      ["steps-call-1", ["call-1"]],
+      ["steps-call-2", ["call-2"]],
+    ]);
+    expect(groups(saved)).toEqual(groups(live));
+    expect(live?.items.some((item) => item.kind === "text")).toBe(false);
+  });
+
+  it("shows a saved reply cut off at the output limit as the answer while the run winds down", () => {
+    const [turn] = turnsFromSnapshot(
+      Schema.decodeUnknownSync(Snapshot)({
+        entries: [
+          { id: 1, kind: "pi.input", model: [{ role: "user", content: "Explain" }] },
+          {
+            id: 2,
+            kind: "pi.message",
+            model: [
+              {
+                role: "assistant",
+                stopReason: "length",
+                content: [{ type: "text", text: "Long" }],
+              },
+            ],
+          },
+        ],
+        docs: { "pi.live": { run: {} } },
+      }),
+    );
+
+    expect(turn?.running).toBe(true);
+    expect(turn?.answer).toEqual({ id: "2-0-0", text: "Long" });
   });
 });
 
