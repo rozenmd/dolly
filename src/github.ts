@@ -36,6 +36,13 @@ import {
 } from "./github-review";
 import { attempt, OperationError } from "./operations";
 import { MAX_IMAGE_BYTES } from "./images";
+import {
+  COMMENTS_SNAPSHOT_MS,
+  commentPages,
+  type CommentItem,
+  type Json,
+  type Post,
+} from "./github-comments";
 import type { Env } from "./env";
 import type { PullRequestState, PullRequestSummary } from "./session-contracts";
 import type { PullReviewContext } from "./review-prompt";
@@ -127,15 +134,6 @@ const PullStateResponse = Schema.Struct({
 });
 
 const FILES_PER_PAGE = 30;
-
-/** GitHub pages of 100 read per comment list, so a pathological PR can't stall the tool. */
-const COMMENT_API_PAGES = 10;
-
-/**
- * Bytes of serialized items in one list_pull_request_comments page. Kept well under the tool
- * output cap, so a page is never cut off and next_page always reaches the rest.
- */
-const COMMENTS_PAGE_BYTES = 24_000;
 
 const User = Schema.NullOr(Schema.Struct({ login: Schema.String }));
 
@@ -476,30 +474,21 @@ const ThreadStatesResponse = Schema.Struct({
 
 type ThreadState = { resolved: boolean; outdated: boolean };
 
-/**
- * Split items into pages of at most `budget` serialized bytes (an item larger than the budget
- * gets a page of its own), so every page fits the tool output and next_page reaches the rest.
- */
-export function pageByBytes<T>(items: readonly T[], budget: number): T[][] {
-  const encoder = new TextEncoder();
-  const pages: T[][] = [[]];
-  let size = 0;
-
-  for (const item of items) {
-    const bytes = encoder.encode(JSON.stringify(item)).length;
-    const current = pages[pages.length - 1]!;
-
-    if (current.length && size + bytes > budget) {
-      pages.push([item]);
-      size = bytes;
-    } else {
-      current.push(item);
-      size += bytes;
-    }
-  }
-
-  return pages;
-}
+/** One read of a pull request's conversation, held for its cursor's later pages. */
+type CommentSnapshot = {
+  repository: string;
+  number: number;
+  filter: "all" | "unresolved";
+  expires: number;
+  counts: {
+    discussion: number;
+    reviews: number;
+    threads: number;
+    unresolved_threads: number | null;
+  };
+  note: string;
+  pages: Json[][];
+};
 
 const PullReviewResponse = Schema.Struct({
   data: Schema.NullOr(
@@ -1531,21 +1520,50 @@ function makeGitHub(
     ),
   );
 
-  /** Every page of a REST list, up to COMMENT_API_PAGES; `complete` is false when cut there. */
+  /**
+   * Items `[(page - 1) * perPage, page * perPage)` of a REST list. A batch over the 1 MiB
+   * response bound is read again as ten smaller batches, down to single items: GitHub caps a
+   * comment at 65,536 characters, so one always fits.
+   */
+  const readBatch = (
+    repository: string,
+    path: string,
+    perPage: number,
+    page: number,
+  ): Effect.Effect<readonly unknown[], OperationError> =>
+    readApi(repository, `${path}?per_page=${perPage}&page=${page}`).pipe(
+      Effect.flatMap(decode(Schema.Array(Schema.Unknown))),
+      Effect.catchTag("OperationError", (error) =>
+        !error.message.startsWith("Provider response exceeds") || perPage === 1
+          ? Effect.fail(error)
+          : Effect.gen(function* () {
+              const smaller = perPage / 10;
+              const items: unknown[] = [];
+
+              for (let part = 1; part <= 10; part++) {
+                const batch = yield* readBatch(repository, path, smaller, (page - 1) * 10 + part);
+
+                items.push(...batch);
+
+                if (batch.length < smaller) break;
+              }
+
+              return items;
+            }),
+      ),
+    );
+
+  /** Every item of a REST list. A failed batch fails the read: it never returns part of one. */
   const readPaged = Effect.fn("GitHub.readPaged")(function* (repository: string, path: string) {
     const items: unknown[] = [];
 
-    for (let page = 1; page <= COMMENT_API_PAGES; page++) {
-      const batch = yield* readApi(repository, `${path}?per_page=100&page=${page}`).pipe(
-        Effect.flatMap(decode(Schema.Array(Schema.Unknown))),
-      );
+    for (let page = 1; ; page++) {
+      const batch = yield* readBatch(repository, path, 100, page);
 
       items.push(...batch);
 
-      if (batch.length < 100) return { items, complete: true };
+      if (batch.length < 100) return items;
     }
-
-    return { items, complete: false };
   });
 
   /**
@@ -1564,7 +1582,7 @@ function makeGitHub(
         const states = new Map<number, ThreadState>();
         let after: string | null = null;
 
-        for (let pages = 0; pages < MAX_THREAD_PAGES; pages++) {
+        for (let pages = 0; ; pages++) {
           const response: typeof ThreadStatesResponse.Type = yield* api("/graphql", token, {
             query: THREAD_STATES_QUERY,
             variables: { owner, name, number, ...(after && { after }) },
@@ -1597,6 +1615,135 @@ function makeGitHub(
       Effect.flatMap(query),
       Effect.catch(() => Effect.succeed(undefined)),
     );
+  });
+
+  /** list_pull_request_comments reads by cursor, so later pages never re-read GitHub. */
+  const commentSnapshots = new Map<string, CommentSnapshot>();
+
+  /**
+   * One complete read of a pull request's conversation, paged for list_pull_request_comments.
+   * Resolution state is best effort (GraphQL needs a token); everything else must read in full.
+   */
+  const readComments = Effect.fn("GitHub.readComments")(function* (
+    repository: string,
+    number: number,
+    filter: "all" | "unresolved",
+  ) {
+    const root = `/repos/${repository}`;
+
+    const [discussion, inline, reviews, states] = yield* Effect.all(
+      [
+        readPaged(repository, `${root}/issues/${number}/comments`).pipe(
+          Effect.flatMap(decode(Schema.Array(IssueComment))),
+        ),
+        readPaged(repository, `${root}/pulls/${number}/comments`).pipe(
+          Effect.flatMap(decode(Schema.Array(InlineComment))),
+        ),
+        readPaged(repository, `${root}/pulls/${number}/reviews`).pipe(
+          Effect.flatMap(decode(Schema.Array(Review))),
+        ),
+        threadStates(repository, number),
+      ],
+      { concurrency: "unbounded" },
+    );
+
+    const threads = new Map<number, Array<typeof InlineComment.Type>>();
+
+    for (const comment of [...inline].sort((a, b) => a.id - b.id)) {
+      const id = comment.in_reply_to_id ?? comment.id;
+      threads.set(id, [...(threads.get(id) ?? []), comment]);
+    }
+
+    // A thread with no known state (none at all, or one started after GraphQL was read) counts
+    // as open, so "unresolved" never hides one.
+    const open = new Set([...threads.keys()].filter((id) => states?.get(id)?.resolved !== true));
+    const unknown = states ? [...threads.keys()].filter((id) => !states.has(id)).length : 0;
+
+    const post = (comment: {
+      id: number;
+      user: typeof User.Type;
+      created_at?: string | null;
+      submitted_at?: string | null;
+      html_url?: string;
+      body?: string | null;
+    }): Post => ({
+      id: comment.id,
+      author: comment.user?.login ?? null,
+      created_at: comment.created_at ?? comment.submitted_at ?? null,
+      url: comment.html_url ?? null,
+      body: comment.body ?? "",
+    });
+
+    const items: CommentItem[] = [
+      ...discussion.map((comment) => ({
+        type: "comment" as const,
+        id: comment.id,
+        at: comment.created_at ?? "",
+        fields: {},
+        posts: [post(comment)],
+      })),
+      // A bodiless COMMENTED review only wraps inline comments, which its threads already show.
+      ...reviews
+        .filter((review) => review.body || review.state !== "COMMENTED")
+        .map((review) => ({
+          type: "review" as const,
+          id: review.id,
+          at: review.submitted_at ?? "",
+          fields: { state: review.state, commit_id: review.commit_id ?? null },
+          posts: [post(review)],
+        })),
+      ...[...threads].map(([id, thread]) => {
+        const first = thread[0]!;
+        const state = states?.get(id);
+
+        return {
+          type: "thread" as const,
+          id,
+          at: thread.reduce((at, comment) => {
+            const created = comment.created_at ?? "";
+
+            return created > at ? created : at;
+          }, ""),
+          fields: {
+            review_id: first.pull_request_review_id ?? null,
+            path: first.path,
+            line: first.line ?? null,
+            start_line: first.start_line ?? null,
+            side: first.side ?? null,
+            resolved: state?.resolved ?? null,
+            outdated: state?.outdated ?? first.line === null,
+          },
+          posts: thread.map(post),
+        };
+      }),
+    ].filter((item) => filter === "all" || (item.type === "thread" && open.has(item.id)));
+
+    const note = [
+      "Newest activity first; a thread's comments are oldest first. An item too big for one page continues as numbered parts (part/parts; body_part/body_parts inside a thread comment), so follow next_page with this cursor to read everything. Bodiless COMMENTED reviews are omitted: their inline comments are the threads with that review_id.",
+      states
+        ? undefined
+        : "resolved is null: GitHub's resolution state needs a connected GitHub App (or an allowed account for private repositories), so filter unresolved returns every thread.",
+      unknown
+        ? `${unknown} thread${unknown === 1 ? " has" : "s have"} no resolution state (started after it was read) and count${unknown === 1 ? "s" : ""} as unresolved.`
+        : undefined,
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return {
+      repository: repository.toLowerCase(),
+      number,
+      filter,
+      expires: Date.now() + COMMENTS_SNAPSHOT_MS,
+      counts: {
+        discussion: discussion.length,
+        reviews: reviews.length,
+        threads: threads.size,
+        unresolved_threads: states ? open.size : null,
+      },
+      note,
+      pages: commentPages(items),
+    } satisfies CommentSnapshot;
   });
 
   const execute = Effect.fn("GitHub.execute")(function* (
@@ -1737,154 +1884,46 @@ function makeGitHub(
     }
 
     if (op.action === "list_pull_request_comments") {
+      const now = Date.now();
+
+      for (const [key, snapshot] of commentSnapshots)
+        if (snapshot.expires <= now) commentSnapshots.delete(key);
+
       const page = op.page ?? 1;
-      const filter = op.filter ?? "all";
-      const root = `/repos/${op.repository}`;
+      const held = op.cursor ? commentSnapshots.get(op.cursor) : undefined;
 
-      const [discussion, inline, reviews, states] = yield* Effect.all(
-        [
-          readPaged(op.repository, `${root}/issues/${op.number}/comments`),
-          readPaged(op.repository, `${root}/pulls/${op.number}/comments`),
-          readPaged(op.repository, `${root}/pulls/${op.number}/reviews`),
-          threadStates(op.repository, op.number),
-        ],
-        { concurrency: "unbounded" },
-      );
-
-      const comments = yield* decode(Schema.Array(IssueComment))(discussion.items);
-      const inlineComments = yield* decode(Schema.Array(InlineComment))(inline.items);
-      const submitted = yield* decode(Schema.Array(Review))(reviews.items);
-
-      const threads = new Map<number, Array<typeof InlineComment.Type>>();
-
-      for (const comment of inlineComments) {
-        const id = comment.in_reply_to_id ?? comment.id;
-        threads.set(id, [...(threads.get(id) ?? []), comment]);
-      }
-
-      // Each item renders its bodies at `limit` characters; one that alone outgrows a page is
-      // rendered again with shorter bodies.
-      type Item = {
-        at: string;
-        id: number;
-        thread?: boolean;
-        render: (limit: number) => object;
-      };
-
-      const items: Item[] = [
-        ...comments.map((comment) => ({
-          at: comment.created_at ?? "",
-          id: comment.id,
-          render: (limit: number) => ({
-            type: "comment",
-            id: comment.id,
-            author: comment.user?.login ?? null,
-            created_at: comment.created_at ?? null,
-            body: truncate(comment.body ?? "", limit),
-            url: comment.html_url,
-          }),
-        })),
-        // A bodiless COMMENTED review only wraps inline comments, which its threads already show.
-        ...submitted
-          .filter((review) => review.body || review.state !== "COMMENTED")
-          .map((review) => ({
-            at: review.submitted_at ?? "",
-            id: review.id,
-            render: (limit: number) => ({
-              type: "review",
-              id: review.id,
-              author: review.user?.login ?? null,
-              state: review.state,
-              submitted_at: review.submitted_at ?? null,
-              commit_id: review.commit_id ?? null,
-              body: truncate(review.body ?? "", limit),
-              url: review.html_url ?? null,
-            }),
-          })),
-        ...[...threads].map(([id, thread]) => {
-          const first = thread[0]!;
-          const state = states?.get(id);
-
-          return {
-            thread: true,
-            at: thread.reduce((latest, comment) => {
-              const at = comment.created_at ?? "";
-
-              return at > latest ? at : latest;
-            }, ""),
-            id,
-            render: (limit: number) => ({
-              type: "thread",
-              id,
-              review_id: first.pull_request_review_id ?? null,
-              path: first.path,
-              line: first.line ?? null,
-              start_line: first.start_line ?? null,
-              side: first.side ?? null,
-              resolved: state?.resolved ?? null,
-              outdated: state?.outdated ?? first.line === null,
-              comments: thread.map((comment) => ({
-                id: comment.id,
-                author: comment.user?.login ?? null,
-                created_at: comment.created_at ?? null,
-                body: truncate(comment.body, limit),
-                url: comment.html_url,
-              })),
-            }),
-          };
-        }),
-      ];
-
-      const unresolved = [...threads.keys()].filter((id) => states?.get(id)?.resolved === false);
-
-      // Without resolution state, "unresolved" keeps every thread rather than hiding open ones.
-      const shown = items
-        .filter(
-          (item) =>
-            filter === "all" ||
-            (item.thread && (!states || states.get(item.id)?.resolved === false)),
-        )
-        .sort((a, b) => (a.at === b.at ? b.id - a.id : a.at < b.at ? 1 : -1))
-        .map((item) => {
-          const rendered = item.render(4_096);
-
-          return JSON.stringify(rendered).length > COMMENTS_PAGE_BYTES
-            ? item.render(1_000)
-            : rendered;
+      if (
+        op.cursor &&
+        (!held ||
+          held.repository !== op.repository.toLowerCase() ||
+          held.number !== op.number ||
+          (op.filter !== undefined && op.filter !== held.filter))
+      )
+        return yield* new OperationError({
+          operation: "github.comments",
+          message:
+            "This cursor expired (a read's pages last 10 minutes) or belongs to another pull request or filter. Call list_pull_request_comments again without cursor for a fresh read.",
+          details: null,
         });
 
-      const pages = pageByBytes(shown, COMMENTS_PAGE_BYTES);
+      const cursor = op.cursor ?? crypto.randomUUID();
+      const snapshot = held ?? (yield* readComments(op.repository, op.number, op.filter ?? "all"));
 
-      const notes = [
-        "Newest activity first; a thread's comments are oldest first. Bodiless COMMENTED reviews are omitted: their inline comments are the threads with that review_id.",
-        states
-          ? undefined
-          : "resolved is null: GitHub's resolution state needs a connected GitHub App (or an allowed account for private repositories).",
-        filter === "unresolved" && !states
-          ? "filter unresolved fell back to every review thread, since resolution state is unavailable."
-          : undefined,
-        discussion.complete && inline.complete && reviews.complete
-          ? undefined
-          : `Only the oldest ${COMMENT_API_PAGES * 100} of a list were read; newer items may be missing.`,
-      ].filter(Boolean);
+      commentSnapshots.set(cursor, snapshot);
 
       return {
         ok: true,
         result: {
           kind: "pull_request_comments",
           data: {
+            cursor,
             page,
-            next_page: page < pages.length ? page + 1 : null,
-            pages: pages.length,
-            filter,
-            counts: {
-              discussion: comments.length,
-              reviews: submitted.length,
-              threads: threads.size,
-              unresolved_threads: states ? unresolved.length : null,
-            },
-            note: notes.join(" "),
-            items: pages[page - 1] ?? [],
+            pages: snapshot.pages.length,
+            next_page: page < snapshot.pages.length ? page + 1 : null,
+            filter: snapshot.filter,
+            counts: snapshot.counts,
+            note: snapshot.note,
+            items: snapshot.pages[page - 1] ?? [],
           },
         },
       };
