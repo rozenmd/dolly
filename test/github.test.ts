@@ -1990,6 +1990,15 @@ it("reads a long PR conversation once, then pages it newest first by cursor", as
       ok: false,
       message: expect.stringContaining("Call list_pull_request_comments again without cursor"),
     });
+
+  // Changing the accounts dolly can work in drops held reads: a cursor never outlives the access
+  // that made its read.
+  expect((await readComments({ page: 2, cursor: first.cursor })).ok).toBe(true);
+  await setAccounts(["another-owner"]);
+  expect(await readComments({ page: 2, cursor: first.cursor })).toMatchObject({
+    ok: false,
+    message: expect.stringContaining("Call list_pull_request_comments again without cursor"),
+  });
 });
 
 it("splits a thread and a comment too big for one page into parts without dropping any text", async () => {

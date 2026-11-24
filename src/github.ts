@@ -768,6 +768,12 @@ function makeGitHub(
   const setupPermit = Semaphore.makeUnsafe(1);
   const tokens = new Map<string, { value: string; expires: number }>();
 
+  /**
+   * list_pull_request_comments reads by cursor, so later pages never re-read GitHub. Cleared
+   * with the token cache, so a cursor never outlives the access that made its read.
+   */
+  const commentSnapshots = new Map<string, CommentSnapshot>();
+
   // Stored policy is authoritative: absence or an empty list denies every owner.
   const accounts = Effect.gen(function* () {
     const raw = yield* attempt("github.accounts.read", () => storage.get("github:accounts"));
@@ -791,6 +797,7 @@ function makeGitHub(
 
           yield* attempt("github.accounts.save", () => storage.put("github:accounts", allowed));
           tokens.clear();
+          commentSnapshots.clear();
 
           return { accounts: allowed };
         }),
@@ -1418,6 +1425,7 @@ function makeGitHub(
         );
         publicToken = undefined;
         publicTokenRetry = 0;
+        commentSnapshots.clear();
         yield* attempt("github.pending.delete", () => storage.delete("github:pending"));
 
         return yield* status;
@@ -1616,9 +1624,6 @@ function makeGitHub(
       Effect.catch(() => Effect.succeed(undefined)),
     );
   });
-
-  /** list_pull_request_comments reads by cursor, so later pages never re-read GitHub. */
-  const commentSnapshots = new Map<string, CommentSnapshot>();
 
   /**
    * One complete read of a pull request's conversation, paged for list_pull_request_comments.
