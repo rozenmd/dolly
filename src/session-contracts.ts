@@ -15,6 +15,11 @@ export const SavedSession = Schema.Struct({
   updatedAt: Schema.Number,
   archived: Schema.optional(Schema.Boolean),
   /**
+   * When the owner pinned this session's workspace to the top of the sidebar; absent if not
+   * pinned. Pinned workspaces are listed in the order they were pinned.
+   */
+  pinnedAt: Schema.optional(Schema.Number),
+  /**
    * The workspace grouping the sessions about one piece of work. Spawned sessions belong to
    * their root's workspace; sessions from before workspaces were recorded are their own.
    */
@@ -69,8 +74,26 @@ export type PullRequestSummary = {
 
 export type SavedSession = typeof SavedSession.Type;
 
-/** Owner sidebar choices for one session; at least one must be given. */
-export const SessionUpdate = Schema.Union([
-  Schema.Struct({ archived: Schema.Boolean, kept: Schema.optional(Schema.Boolean) }),
-  Schema.Struct({ kept: Schema.Boolean }),
-]);
+/**
+ * Owner sidebar choices for one session; at least one must be given. One struct, so a
+ * malformed field fails the whole update rather than being dropped by another branch.
+ */
+export const SessionUpdate = Schema.Struct({
+  archived: Schema.optional(Schema.Boolean),
+  kept: Schema.optional(Schema.Boolean),
+  pinned: Schema.optional(Schema.Boolean),
+}).check(
+  Schema.makeFilter((update) =>
+    Object.values(update).some((value) => value !== undefined)
+      ? undefined
+      : "Expected archived, kept or pinned",
+  ),
+);
+
+/** What a session update applied; `pinnedAt` is the server's pin time when pinned. */
+export const SessionUpdateResult = Schema.Struct({
+  archived: Schema.optional(Schema.Boolean),
+  kept: Schema.optional(Schema.Boolean),
+  pinned: Schema.optional(Schema.Boolean),
+  pinnedAt: Schema.optional(Schema.Number),
+});

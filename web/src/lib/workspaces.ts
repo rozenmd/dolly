@@ -82,6 +82,7 @@ type Row = Member & {
   title: string;
   repository: string;
   archived?: boolean;
+  pinnedAt?: number;
   running?: boolean;
   pullRequest?: unknown;
 };
@@ -89,7 +90,8 @@ type Row = Member & {
 /**
  * One sidebar row per workspace, named after the session that started it. It is as recent as
  * its latest tab, busy while any of its sessions is, and archived only when all its tabs are
- * (automatic reviews aside, once other work was started in the workspace).
+ * (automatic reviews aside, once other work was started in the workspace). It is pinned while
+ * any of its tabs is, from the earliest pin.
  */
 export function workspaceRows<T extends Row>(sessions: readonly T[]) {
   const ids = new Set(
@@ -112,6 +114,7 @@ export function workspaceRows<T extends Row>(sessions: readonly T[]) {
     const newest = [...members].sort((a, b) => b.updatedAt - a.updatedAt);
     // Like the session list, only prompts to its own sessions move a workspace up.
     const updatedAt = Math.max(...tabs.map((session) => session.updatedAt));
+    const pins = tabs.flatMap((session) => (session.pinnedAt ? [session.pinnedAt] : []));
 
     return [
       {
@@ -121,6 +124,7 @@ export function workspaceRows<T extends Row>(sessions: readonly T[]) {
         sessions: tabs,
         updatedAt,
         archived: live.length === 0,
+        ...(pins.length > 0 && { pinnedAt: Math.min(...pins) }),
         running: members.some((session) => session.running),
         pullRequest: newest.find((session) => session.pullRequest)?.pullRequest,
       },

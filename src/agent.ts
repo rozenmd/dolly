@@ -3521,22 +3521,34 @@ export class Agent extends DurableObject<Env> {
     return this.updateSession(id, { archived });
   }
 
-  /** Persist the owner's sidebar choices for one session: archive state and "keep in sidebar". */
-  async updateSession(id: string, patch: { archived?: boolean; kept?: boolean }) {
+  /**
+   * Persist the owner's sidebar choices for one session: archive state, "keep in sidebar" and
+   * whether its workspace is pinned. Pinning again keeps the original pin time, so a pinned
+   * workspace holds its place in the Pinned list.
+   */
+  async updateSession(id: string, patch: { archived?: boolean; kept?: boolean; pinned?: boolean }) {
     const conversation = await Effect.runPromise(this.conversation(id));
 
     if (Option.isNone(conversation)) return undefined;
     const key = `session-meta:${conversation.value.id}`;
+    const { pinned, ...choices } = patch;
 
     const result = await this.ctx.storage.transaction(async (tx) => {
-      const metadata = await tx.get<{ archived?: boolean; kept?: boolean; createdAt?: number }>(
-        key,
-      );
+      const metadata = await tx.get<SessionMetadata>(key);
+      const next: SessionMetadata = { archived: false, ...metadata, ...choices };
 
-      const next = { archived: false, ...metadata, ...patch };
+      if (pinned) next.pinnedAt ??= Date.now();
+      else if (pinned === false) delete next.pinnedAt;
+
       await tx.put(key, next);
 
-      return patch.kept === undefined ? { archived: next.archived } : patch;
+      return {
+        ...(patch.archived !== undefined && { archived: Boolean(next.archived) }),
+        ...(patch.kept !== undefined && { kept: patch.kept }),
+        ...(pinned !== undefined && { pinned }),
+        // The client orders Pinned by the server's clock, not its own.
+        ...(pinned && next.pinnedAt && { pinnedAt: next.pinnedAt }),
+      };
     });
 
     this.sessionsFeed.changed();

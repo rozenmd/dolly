@@ -387,7 +387,7 @@ app.put("/api/sessions/:id", (c) =>
       const input = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
         Effect.flatMap(Schema.decodeUnknownEffect(SessionUpdate)),
         Effect.mapError(
-          () => new InvalidInput({ message: "Expected an archived or kept boolean" }),
+          () => new InvalidInput({ message: "Expected an archived, kept or pinned boolean" }),
         ),
       );
 

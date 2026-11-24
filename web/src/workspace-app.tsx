@@ -8,7 +8,7 @@ import {
   InboxArrowDownIcon,
   PlusIcon,
 } from "@heroicons/react/24/outline";
-import { Sidebar } from "./components/sidebar";
+import { PinIcon, Sidebar } from "./components/sidebar";
 import { Composer, Conversation } from "./components/conversation";
 import { IconButton, Input, Modal, RepoBadge } from "./components/ui";
 import { ChatGPTLogin } from "./components/chatgpt-login";
@@ -33,6 +33,7 @@ import {
   readSessions,
   request,
   SavedSession,
+  SessionUpdateResult,
   Snapshot,
   turnsFromSnapshot,
   sessionBody,
@@ -52,6 +53,7 @@ import { useSessionSummary } from "./lib/session-summary";
 import { workspaceMain, workspaceOf, workspaceRows, workspaceTabs } from "./lib/workspaces";
 
 const cacheStorageKey = "dolly.sessions.cache.v1";
+const decodeUpdate = Schema.decodeUnknownSync(Schema.fromJsonString(SessionUpdateResult));
 const decodeSessions = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(SavedSession)));
 
 /** Model settings the composer can change on a session; each applies from the next request. */
@@ -121,6 +123,7 @@ export function WorkspaceApp() {
         repository: item.repository,
         updatedAt: item.updatedAt,
         archived: item.archived,
+        pinnedAt: item.pinnedAt,
         // The open session streams live state; others rely on the polled list.
         running: item.id === selected && snapshot ? running : Boolean(item.running),
         pullRequest: item.pullRequest,
@@ -137,11 +140,13 @@ export function WorkspaceApp() {
 
   // One row per workspace; spawned sessions live with their parent. A workspace of only automatic
   // reviews is left out unless open; writable work started in one keeps it (lib/session-threads).
+  // A pinned one stays too: the owner asked to keep it in sight.
   const sidebarRows = workspaceRows(rows).filter(
-    (row) => row.id === workspace || !row.sessions.every(automated),
+    (row) => row.id === workspace || Boolean(row.pinnedAt) || !row.sessions.every(automated),
   );
 
   const tabs = workspace ? workspaceTabs(rows, workspace) : [];
+  const workspaceRow = sidebarRows.find((row) => row.id === workspace);
 
   const parent = session?.parentId
     ? sessions.find((item) => item.id === session.parentId)
@@ -545,6 +550,54 @@ export function WorkspaceApp() {
       selectAfterArchive(row.sessions.map((item) => item.id));
   }
 
+  /**
+   * Pins a workspace by its main session, or unpins it by every tab that holds a pin, so it
+   * leaves Pinned whichever session was pinned.
+   */
+  async function togglePinWorkspace(id: string) {
+    const row = sidebarRows.find((item) => item.id === id);
+
+    if (!row) return;
+    const pinned = !row.pinnedAt;
+
+    const changed = pinned
+      ? row.sessions.filter((item) => item.id === row.main)
+      : row.sessions.filter((item) => item.pinnedAt);
+
+    // The server's pin times, so Pinned orders the same here as on every other device.
+    const pinTimes = new Map<string, number>();
+
+    try {
+      await Promise.all(
+        changed.map(async (item) => {
+          const response = decodeUpdate(
+            await request(`/sessions/${encodeURIComponent(item.id)}`, { pinned }, undefined, "PUT"),
+          );
+
+          if (response.pinnedAt) pinTimes.set(item.id, response.pinnedAt);
+        }),
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not update the sidebar.");
+
+      return;
+    }
+
+    const ids = changed.map((item) => item.id);
+
+    updateSessions((current) =>
+      current.map((item) => {
+        if (!ids.includes(item.id)) return item;
+
+        if (pinned)
+          return { ...item, pinnedAt: pinTimes.get(item.id) ?? item.pinnedAt ?? Date.now() };
+        const { pinnedAt: _unpinned, ...rest } = item;
+
+        return rest;
+      }),
+    );
+  }
+
   /** Keeping a spawned session makes it a tab of its workspace. */
   async function toggleKept(id: string) {
     const target = sessions.find((item) => item.id === id);
@@ -793,6 +846,7 @@ export function WorkspaceApp() {
         feed={feed}
         onSelect={openWorkspace}
         onArchive={(id) => void toggleArchiveWorkspace(id)}
+        onPin={(id) => void togglePinWorkspace(id)}
         onNew={() => newSession()}
         onSettings={() => {
           setMobileOpen(false);
@@ -848,6 +902,16 @@ export function WorkspaceApp() {
                 onClick={() => void toggleKept(session.id)}
               >
                 <InboxArrowDownIcon />
+              </IconButton>
+            )}
+            {session && !feed && workspaceRow && !workspaceRow.archived && (
+              <IconButton
+                label={workspaceRow.pinnedAt ? "Unpin workspace" : "Pin workspace"}
+                aria-pressed={Boolean(workspaceRow.pinnedAt)}
+                className={workspaceRow.pinnedAt ? "pressed" : ""}
+                onClick={() => void togglePinWorkspace(workspaceRow.id)}
+              >
+                <PinIcon />
               </IconButton>
             )}
             {session && !feed && (

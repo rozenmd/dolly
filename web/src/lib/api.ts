@@ -59,7 +59,7 @@ export const Session = Schema.Struct({
   autoFallback: Schema.optional(Schema.Boolean),
 });
 
-export { SavedSession } from "../../../src/session-contracts";
+export { SavedSession, SessionUpdateResult } from "../../../src/session-contracts";
 
 import { SavedSession } from "../../../src/session-contracts";
 
@@ -529,6 +529,7 @@ export type ApiBody = {
   sessions?: readonly SavedSession[];
   archived?: boolean;
   kept?: boolean;
+  pinned?: boolean;
   content?: string;
   requestId?: string;
   /** When a scheduled message is sent, as ISO 8601. */

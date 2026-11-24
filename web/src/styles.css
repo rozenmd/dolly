@@ -370,29 +370,45 @@ select.input {
 .workspace-row:has(.working) .workspace-time {
   color: var(--amber);
 }
-.workspace-archive {
+.workspace-actions {
   position: absolute;
   top: 50%;
   right: 4px;
+  display: flex;
   transform: translateY(-50%);
+  pointer-events: none;
+}
+.workspace-pin,
+.workspace-archive {
   opacity: 0;
   pointer-events: none;
 }
-.workspace-item:has(.workspace-archive):hover .workspace-time,
-.workspace-item:has(.workspace-archive):focus-within .workspace-time {
+/* Shown actions take the time's place; with a pointer, the title also makes room for both. */
+.workspace-item:has(.workspace-actions):hover .workspace-time,
+.workspace-item:has(.workspace-actions):focus-within .workspace-time {
   opacity: 0;
 }
-.workspace-item:hover .workspace-archive,
-.workspace-item:focus-within .workspace-archive {
+@media (hover: hover) {
+  .workspace-item:has(.workspace-actions):hover .workspace-row,
+  .workspace-item:has(.workspace-actions):focus-within .workspace-row {
+    padding-right: 64px;
+  }
+}
+.workspace-item:hover :is(.workspace-pin, .workspace-archive),
+.workspace-item:focus-within :is(.workspace-pin, .workspace-archive) {
   opacity: 1;
   pointer-events: auto;
 }
+/* Touch screens keep archive in reach and pin from the header, so titles keep their room. */
 @media (hover: none) {
+  .workspace-pin {
+    display: none;
+  }
   .workspace-archive {
     opacity: 1;
     pointer-events: auto;
   }
-  .workspace-item:has(.workspace-archive) .workspace-time {
+  .workspace-item:has(.workspace-actions) .workspace-time {
     opacity: 0;
   }
 }

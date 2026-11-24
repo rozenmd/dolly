@@ -118,6 +118,8 @@ export type SessionMetadata = {
   workspaceId?: string;
   archived?: boolean;
   kept?: boolean;
+  /** When the owner pinned this session's workspace to the top of the sidebar; absent if unpinned. */
+  pinnedAt?: number;
   speed?: Speed;
   autoFallback?: boolean;
   /** The model an automatic fallback last switched to; it never falls back again from there. */
