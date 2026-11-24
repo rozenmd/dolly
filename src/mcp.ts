@@ -61,7 +61,7 @@ export interface McpServerEntry {
   /** Static request headers (API keys). Never returned by the API. */
   headers?: Record<string, string>;
   /**
-   * Who besides the owner may use it, as Slack member IDs or GitHub logins. Empty or unset: any
+   * Who besides the owner may use it, as `slack:<member ID>` or `github:<login>`. Empty or unset: any
    * writable session. Set: Slack and GitHub sessions only when their starter is listed.
    */
   allowedUsers?: string[];
@@ -166,44 +166,73 @@ export const McpAccessInput = Schema.Struct({ allowedUsers: Schema.Array(Schema.
 
 const MAX_ALLOWED_USERS = 50;
 
+/** Slack member IDs as Slack events carry them (slack-events.ts `SlackId`). */
+const SLACK_ID = /^[A-Z0-9]{2,32}$/;
+
+/** The usual form of a member ID (U… or, on Enterprise Grid, W…): read as Slack when bare. */
+const SLACK_MEMBER_ID = /^[UW][A-Z0-9]{2,31}$/;
+
+/** GitHub's login format (github-webhook.ts `Login`). */
+const GITHUB_LOGIN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+
+/** One session identity, kept apart by provider so a Slack ID never matches a GitHub login. */
+export const slackIdentity = (slackId: string) => `slack:${slackId}`;
+
+export const githubIdentity = (login: string) => `github:${login.toLowerCase()}`;
+
+/** One allowed-users entry as an identity, or undefined when it names no one. */
+function allowedIdentity(token: string) {
+  const prefixed = /^(slack|github):(.*)$/i.exec(token);
+
+  if (prefixed?.[1].toLowerCase() === "slack")
+    return SLACK_ID.test(prefixed[2]) ? slackIdentity(prefixed[2]) : undefined;
+
+  if (!prefixed && SLACK_MEMBER_ID.test(token)) return slackIdentity(token);
+  const login = (prefixed ? prefixed[2] : token).replace(/^@/, "");
+
+  return GITHUB_LOGIN.test(login) ? githubIdentity(login) : undefined;
+}
+
 /**
- * Trimmed, de-duplicated identities (Slack member IDs or GitHub logins, an optional leading @
- * dropped), or an error. Matching is case-insensitive.
+ * Provider-qualified, de-duplicated identities, or an error. Each entry is `slack:<member ID>`,
+ * `github:<login>` (or `@<login>`), or bare: a Slack member ID when it has a member ID's form,
+ * otherwise a GitHub login. Blank entries are skipped; anything else that names no one, such as
+ * a lone `@`, is rejected rather than dropped, so it can never open a server by accident.
  */
 export function normalizeAllowedUsers(
   users: readonly string[] | undefined,
 ): string[] | { error: string } {
-  const seen = new Map<string, string>();
+  const seen = new Set<string>();
 
   for (const raw of users ?? []) {
-    const user = raw.trim().replace(/^@/, "");
+    const token = raw.trim();
 
-    if (!user) continue;
+    if (!token) continue;
+    const identity = allowedIdentity(token);
 
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(user))
-      return { error: `"${raw.trim()}" is not a Slack member ID or GitHub login` };
-    seen.set(user.toLowerCase(), user);
+    if (!identity) return { error: `"${token}" is not a Slack member ID or GitHub login` };
+    seen.add(identity);
   }
 
   if (seen.size > MAX_ALLOWED_USERS)
     return { error: `At most ${MAX_ALLOWED_USERS} allowed users per server` };
 
-  return [...seen.values()];
+  return [...seen];
 }
 
 /**
  * Who a session acts for, for `allowedUsers`: `owner` for the owner's web sessions, otherwise the
- * identities of the person who started it (Slack member ID and linked GitHub login, or the GitHub
- * sender). An empty list matches only unrestricted servers.
+ * provider-qualified identities of the person who started it (`slackIdentity` and the linked
+ * `githubIdentity`, or the GitHub sender's). An empty list matches only unrestricted servers.
  */
 export type McpIdentity = "owner" | readonly string[];
 
-/** Whether a session acting for `identity` may use `entry`. */
+/** Whether a session acting for `identity` may use `entry`. Entries are stored normalized. */
 export function mcpUserAllowed(entry: Pick<McpServerEntry, "allowedUsers">, identity: McpIdentity) {
   if (identity === "owner" || !entry.allowedUsers?.length) return true;
-  const allowed = new Set(entry.allowedUsers.map((user) => user.toLowerCase()));
+  const allowed = new Set(entry.allowedUsers);
 
-  return identity.some((user) => allowed.has(user.toLowerCase()));
+  return identity.some((user) => allowed.has(user));
 }
 
 /** Which servers a session may use: an automation's list, and who it acts for. */
@@ -1237,6 +1266,12 @@ export class McpConnections {
         if (!unchanged(entry, current))
           throw new Error(
             `${name} was disconnected, removed or changed while this program ran; nothing more was sent to it`,
+          );
+
+        // Access can be narrowed while the program runs; the entry's id, URL and epoch stay.
+        if (current && !mcpUserAllowed(current, scope.identity))
+          throw new Error(
+            `${name} was restricted to other people while this program ran; nothing more was sent to it`,
           );
       };
 

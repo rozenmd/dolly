@@ -11,7 +11,14 @@ import {
 } from "@modelcontextprotocol/server";
 import { headers, signIn } from "./session";
 import { Live, Snapshot } from "../src/transcript";
-import { McpConnections, type McpToolInput } from "../src/mcp";
+import {
+  githubIdentity,
+  McpConnections,
+  type McpScope,
+  type McpToolInput,
+  mcpUserAllowed,
+  slackIdentity,
+} from "../src/mcp";
 import { ImageSink, scriptValue } from "../src/mcp-codemode";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
@@ -821,9 +828,9 @@ it("never follows redirects on requests that carry credentials", async () => {
 });
 
 /** Run one code mode program directly in the owner Durable Object. */
-function runProgram(code: string) {
+function runProgram(code: string, scope?: McpScope) {
   return runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
-    new McpConnections(state.storage).execute(code),
+    new McpConnections(state.storage).execute(code, scope),
   );
 }
 
@@ -1588,6 +1595,106 @@ it("sends nothing more to a server disconnected while a program runs", async () 
   expect(resultText(result)).toContain("keyed was disconnected, removed or changed");
   expect(resultText(result)).toContain("Tool calls already made");
   expect(calls).toEqual(["write"]);
+});
+
+it("sends nothing more to a server restricted to other people while a program runs", async () => {
+  const first = gate();
+  const calls: string[] = [];
+
+  network({
+    "POST https://shared.example/mcp": scriptedServer(
+      () => ({ tools: [{ name: "write" }] }),
+      async (id, name) => {
+        calls.push(name);
+
+        if (calls.length === 1) await first.opened;
+
+        return called(id, name);
+      },
+    ),
+    "DELETE https://shared.example/mcp": () => new Response(null, { status: 204 }),
+  });
+
+  await call("/connections/mcp", "POST", {
+    name: "shared",
+    url: "https://shared.example/mcp",
+    headers: { Authorization: "Bearer static-key-123456" },
+  });
+
+  // A Slack session's program, started while the server is open to everyone.
+  const program = runProgram(
+    'await tools.shared.write({ n: "1" })\nawait tools.shared.write({ n: "2" })\nreturn "both"',
+    { identity: ["slack:USTARTER"] },
+  );
+
+  await expect.poll(() => calls.length).toBe(1);
+  expect(
+    (await call("/connections/mcp/shared", "PUT", { allowedUsers: ["USOMEONE"] })).status,
+  ).toBe(200);
+  first.open();
+
+  const result = await program;
+  expect(result.isError).toBe(true);
+  expect(resultText(result)).toContain("shared was restricted to other people");
+  expect(calls).toEqual(["write"]);
+});
+
+it("keeps Slack member IDs and GitHub logins apart, and never opens a server on a lone @", async () => {
+  await call("/connections/mcp", "POST", {
+    name: "guarded",
+    url: "https://guarded.example/mcp",
+    headers: { Authorization: "Bearer static-key-123456" },
+  });
+
+  const access = async (allowedUsers: string[]) => {
+    const response = await call("/connections/mcp/guarded", "PUT", { allowedUsers });
+
+    return { status: response.status, body: await response.json() };
+  };
+
+  expect(await access(["U0123ABCD", "@Octocat", "github:u0123abcd", "slack:T0WORKER", ""])).toEqual(
+    {
+      status: 200,
+      body: {
+        ok: true,
+        allowedUsers: ["slack:U0123ABCD", "github:octocat", "github:u0123abcd", "slack:T0WORKER"],
+      },
+    },
+  );
+
+  const allowed = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const entry = (await new McpConnections(state.storage).servers()).guarded!;
+
+    return [
+      ["slack:U0123ABCD"],
+      ["github:octocat"],
+      // A GitHub sender whose login spells a listed Slack ID, and the reverse, get nothing.
+      ["github:u0123abcd0"],
+      [githubIdentity("U0123ABCD")],
+      [slackIdentity("OCTOCAT")],
+    ].map((identity) => mcpUserAllowed(entry, identity));
+  });
+
+  expect(allowed).toEqual([true, true, false, true, false]);
+
+  await access(["slack:U0123ABCD"]);
+  expect(
+    await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+      mcpUserAllowed((await new McpConnections(state.storage).servers()).guarded!, [
+        githubIdentity("u0123abcd"),
+      ]),
+    ),
+  ).toBe(false);
+
+  // A lone @ names no one: refused, and the restriction stays.
+  for (const users of [["@"], ["github:"], ["slack:u0123"]])
+    expect((await access(users)).status).toBe(400);
+  expect(
+    await runInDurableObject(
+      env.AGENT.getByName("owner"),
+      async (_, state) => (await new McpConnections(state.storage).servers()).guarded?.allowedUsers,
+    ),
+  ).toEqual(["slack:U0123ABCD"]);
 });
 
 it("runs against a cached server without waiting for one whose listing stalls", async () => {

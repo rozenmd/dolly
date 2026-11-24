@@ -595,7 +595,7 @@ function ConnectTokenDialog({
 }
 
 const ACCESS_HELP =
-  "Slack member IDs (like U0123ABCD) or GitHub logins, separated by commas or new lines. Slack and GitHub sessions get this server only when the person who started them is listed; your web sessions always do. Leave empty to let every session use it.";
+  "Slack member IDs (like U0123ABCD) or GitHub logins (like @octocat), separated by commas or new lines; write slack:… or github:… to be explicit. Slack and GitHub sessions get this server only when the person who started them is listed; your web sessions always do. Leave empty to let every session use it.";
 
 /** Who may use a server: its `allowedUsers`, saved with PUT /api/connections/mcp/:name. */
 function AccessDialog({

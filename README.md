@@ -18,7 +18,7 @@ It runs on the ChatGPT or Claude subscription you already pay for. You don't nee
 
 - Let it check back on its own: agents schedule their own follow-ups and wait on CI. "Push it and tell me when checks pass" is one prompt.
 
-- Bring your tools: add remote MCP servers (Linear, Sentry, your own) in Settings > Connections, signing in with OAuth or an API key. Or paste a server's plain URL (no tokens or query string) into a session and ask Dolly to add it; you still sign in yourself, and remove servers, in Settings. Sessions use them in code mode, as opencode does: the model writes a short program that searches and calls the servers' tools and returns only what it needs. Slack and GitHub sessions get them too, unless you restrict a server to listed Slack member IDs or GitHub logins, as Opensession's `allowedUsers` does; read-only reviews never do. Servers must use HTTPS, and their credentials stay in the Worker.
+- Bring your tools: add remote MCP servers (Linear, Sentry, your own) in Settings > Connections, signing in with OAuth or an API key. Or paste a server's plain URL (no tokens or query string) into a session and ask Dolly to add it; you still sign in yourself, and remove servers, in Settings. Sessions use them in code mode, as opencode does: the model writes a short program that searches and calls the servers' tools and returns only what it needs. Slack and GitHub sessions get them too, unless you restrict a server to listed Slack member IDs or GitHub logins (kept apart, so one never matches the other), as Opensession's `allowedUsers` does; read-only reviews never do. Servers must use HTTPS, and their credentials stay in the Worker.
 
 ## Ask for proof
 

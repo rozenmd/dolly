@@ -40,6 +40,20 @@ type DeliveryResult =
 
 type Child = { id: ConversationId; model: string; content: string; taskId: TaskId<DeliveryResult> };
 
+/**
+ * The top-level session a spawned one descends from, written at spawn. Prompt sections read only
+ * documents, so they find the session's Slack or GitHub thread (and its MCP access) through this.
+ */
+export const SessionRoot = defineDoc<{ root: ConversationId | null }>({
+  kind: "app.session-root",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ root: null }),
+  checkpointWhen: () => false,
+});
+
 const Children = defineDoc<{
   children: Record<string, Child>;
   deliveries: Record<
@@ -193,6 +207,7 @@ export class Coordination {
         }
 
         if (depth >= MAX_DEPTH) return { error: "Nesting limit reached (3 child levels)" };
+        const root = ancestor?.id ?? parent;
 
         const anchor = await tx.createTask(Anchor, null, {
           ownership: { kind: "conversation" },
@@ -203,6 +218,7 @@ export class Coordination {
         await configure(tx, child.id, {
           model: { provider: modelProvider(model), modelId: model },
         });
+        (await tx.doc(SessionRoot, child.id)).root = root;
         const parentWorkspace = await tx.doc(ConversationWorkspace, parent);
 
         if (parentWorkspace.config) {

@@ -430,13 +430,14 @@ it("runs a /dolly command on the owner's default model, with the MCP servers its
         type: "http",
         id: "sentry-1",
         url: "https://mcp.sentry.example/mcp",
-        allowedUsers: ["Trusted"],
+        allowedUsers: ["github:trusted"],
       },
       stripe: {
         type: "http",
         id: "stripe-1",
         url: "https://mcp.stripe.example/mcp",
-        allowedUsers: ["U0SOMEONE"],
+        // The sender's login as a Slack ID: another person, so no match.
+        allowedUsers: ["slack:TRUSTED"],
       },
     });
   });

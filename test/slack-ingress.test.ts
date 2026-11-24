@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { Harness } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { env } from "cloudflare:workers";
@@ -717,7 +718,8 @@ it("gives a Slack thread open MCP servers, and restricted ones only when its sta
 
   for (const [name, allowedUsers] of [
     ["linear", []],
-    ["secret", ["USOMEONE", "octocat"]],
+    // `github:uowner` spells the starter's Slack ID as a GitHub login: it must not match.
+    ["secret", ["USOMEONE", "octocat", "github:uowner"]],
   ] as const)
     expect(
       (
@@ -748,7 +750,7 @@ it("gives a Slack thread open MCP servers, and restricted ones only when its sta
 
   // Listing UOWNER opens `secret` to threads UOWNER starts.
   expect(
-    (await api("/connections/mcp/secret", "PUT", { allowedUsers: ["@uowner", " octocat "] }))
+    (await api("/connections/mcp/secret", "PUT", { allowedUsers: ["UOWNER", " @octocat "] }))
       .status,
   ).toBe(200);
   expect(
@@ -757,7 +759,7 @@ it("gives a Slack thread open MCP servers, and restricted ones only when its sta
         await SELF.fetch("https://worker/api/connections", { headers })
       ).json<{ mcpServers: { name: string; allowedUsers: string[] }[] }>()
     ).mcpServers.find((server) => server.name === "secret")?.allowedUsers,
-  ).toEqual(["uowner", "octocat"]);
+  ).toEqual(["slack:UOWNER", "github:octocat"]);
 
   expect((await post("/slack/events", dm("600.1", "<@UBOT> ping both again"))).status).toBe(200);
   await expect.poll(replies, { timeout: 15_000 }).toHaveLength(4);
@@ -766,4 +768,70 @@ it("gives a Slack thread open MCP servers, and restricted ones only when its sta
   expect(JSON.stringify(session[0])).toContain("secret (Secret");
   expect(JSON.stringify(session[2])).toContain("pong from secret");
   expect(JSON.stringify(requests)).not.toContain("secret-key");
+}, 30_000);
+
+it("shows a session a Slack thread spawns only the MCP servers the thread's starter may use", async () => {
+  // Names of their own: storage outlives earlier tests' servers.
+  const { posted } = fakeServices("{}");
+  const base = vi.mocked(fetch).getMockImplementation()!;
+  const childSystems: string[] = [];
+  let parentTurns = 0;
+
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    const parsed = new URL(String(url));
+
+    if (parsed.hostname === "api.anthropic.com" && !String(init?.body).includes("claude-haiku")) {
+      const body = Schema.decodeUnknownSync(
+        Schema.Struct({ system: Schema.Unknown, messages: Schema.Array(Schema.Unknown) }),
+      )(JSON.parse(String(init?.body)));
+
+      if (JSON.stringify(body.messages[0]).includes("child ping")) {
+        childSystems.push(JSON.stringify(body.system));
+
+        return base(url, init);
+      }
+
+      parentTurns += 1;
+
+      if (parentTurns === 1) {
+        await base(url, init);
+
+        return claudeToolUse("spawn_task", { content: "child ping" }, "toolu_spawn");
+      }
+    }
+
+    return base(url, init);
+  });
+
+  const added: string[] = [];
+
+  for (const [name, allowedUsers] of [
+    ["notes", []],
+    ["vault", ["USOMEONE"]],
+  ] as const) {
+    const response = await SELF.fetch("https://worker/api/connections/mcp", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        name,
+        url: `https://mcp.${name}.example/mcp`,
+        headers: { Authorization: `Bearer ${name}-key` },
+        allowedUsers,
+      }),
+    });
+
+    added.push(`${response.status} ${await response.text()}`);
+  }
+
+  expect(added).toEqual(['200 {"ok":true}', '200 {"ok":true}']);
+
+  expect((await post("/slack/events", dm("700.1", "<@UBOT> delegate this"))).status).toBe(200);
+  await expect
+    .poll(() => posted.filter((call) => call.method === "chat.postMessage"), { timeout: 15_000 })
+    .toHaveLength(2);
+  await expect.poll(() => childSystems.length, { timeout: 15_000 }).toBeGreaterThan(0);
+
+  expect(childSystems[0]).toContain("notes (Notes");
+  expect(childSystems[0]).not.toContain("vault (Vault");
+  expect(childSystems[0]).not.toContain("mcp.vault.example");
 }, 30_000);

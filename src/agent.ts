@@ -34,7 +34,7 @@ import * as Schema from "effect/Schema";
 import * as Predicate from "effect/Predicate";
 import { historyPage, promptIndex, promptWindow } from "./transcript-window";
 import { compactionSettings } from "./compaction";
-import { Coordination, coordinationTasks, indexSession } from "./coordination";
+import { Coordination, coordinationTasks, indexSession, SessionRoot } from "./coordination";
 import { Scheduler, SCHEDULE_TOOL_NAMES, scheduleTasks } from "./schedule";
 import { CI_WAIT_TOOL_NAMES, CiWaiter } from "./ci-wait";
 import {
@@ -200,6 +200,7 @@ import {
 } from "./connections-tool";
 import {
   AddMcpServer,
+  githubIdentity,
   McpAccessInput,
   McpConnections,
   type McpIdentity,
@@ -209,6 +210,7 @@ import {
   mcpToolDescription,
   MCP_REFUSAL,
   MCP_UNAVAILABLE_PROMPT,
+  slackIdentity,
 } from "./mcp";
 import { attempt, rpc, OperationError } from "./operations";
 import type { Env } from "./env";
@@ -1110,21 +1112,26 @@ export class Agent extends DurableObject<Env> {
         ),
         section("papercuts", () => papercutsPrompt),
         section("mcp-servers", async ({ read, conversationId }, context) => {
-          // Snapshots only: a section cannot commit. The tool itself runs the full check.
-          const [workspace, github, slack, automation] = await Promise.all([
+          // Snapshots only: a section cannot commit, so a spawned session finds its top-level
+          // one through SessionRoot. The tool itself runs the full check (mcpScope).
+          const [workspace, github, slack, automation, spawned] = await Promise.all([
             read.snapshot(ConversationWorkspace, conversationId, context),
             read.snapshot(GitHubThreads, context),
             read.snapshot(SlackThreads, context),
             read.snapshot(AutomationRunDoc, conversationId, context),
+            read.snapshot(SessionRoot, conversationId, context),
           ]);
 
+          // Spawned automation sessions carry the run's own record (inheritAutomationRun).
           const allow = automation?.run?.mcpServers;
 
           if (isReadOnly(workspace) || allow?.length === 0) return MCP_UNAVAILABLE_PROMPT;
 
           return await this.mcp.promptSection({
             allow,
-            identity: allow ? "owner" : await this.mcpIdentity(conversationId, github, slack),
+            identity: allow
+              ? "owner"
+              : await this.mcpIdentity(spawned?.root ?? conversationId, github, slack),
           });
         }),
       ],
@@ -2395,12 +2402,8 @@ export class Agent extends DurableObject<Env> {
 
     if (root === undefined) return false;
 
-    const [own, rootRun] = await Promise.all([
-      this.harness.snapshot(AutomationRunDoc, id, BACKGROUND_CONTEXT),
-      this.harness.snapshot(AutomationRunDoc, root, BACKGROUND_CONTEXT),
-    ]);
-
-    const run = own?.run ?? rootRun?.run;
+    // Spawned automation sessions carry the run's own record (inheritAutomationRun).
+    const run = (await this.harness.snapshot(AutomationRunDoc, id, BACKGROUND_CONTEXT))?.run;
 
     if (run) return run.mcpServers.length ? { allow: run.mcpServers, identity: "owner" } : false;
 
@@ -3674,12 +3677,14 @@ export class Agent extends DurableObject<Env> {
 
       const login = profile ? slackMember(profile, slackThread.creator)?.github : null;
 
-      return login ? [slackThread.creator, login] : [slackThread.creator];
+      const slack = slackIdentity(slackThread.creator);
+
+      return login ? [slack, githubIdentity(login)] : [slack];
     }
 
     const githubThread = Object.values(github?.threads ?? {}).find((thread) => thread.id === root);
 
-    if (githubThread) return githubThread.creator ? [githubThread.creator] : [];
+    if (githubThread) return githubThread.creator ? [githubIdentity(githubThread.creator)] : [];
 
     return "owner";
   }
