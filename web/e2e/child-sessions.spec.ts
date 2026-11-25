@@ -1,5 +1,6 @@
 import { expect, test } from "./browser";
-import { childReportMessage } from "../../src/child-report-message";
+import { workerReportMessage } from "../../src/child-report-message";
+import { sessionWaitMessage } from "../../src/ci-wait-message";
 
 // Spawned sessions join their root's workspace and are reached from their parent.
 const now = Date.now();
@@ -74,14 +75,19 @@ const spawnCall = (id: string, content: string) => ({
   type: "toolCall",
   id: `call-${id}`,
   name: "spawn_task",
-  arguments: { content },
+  arguments: { prompt: content },
 });
 
 const spawnResult = (id: string) => ({
   role: "toolResult",
   toolCallId: `call-${id}`,
   toolName: "spawn_task",
-  content: [{ type: "text", text: JSON.stringify({ id, model: "gpt-6-sol" }) }],
+  content: [
+    {
+      type: "text",
+      text: `Spawned task \`${id}\` — /session/${id}\nMetadata: model=gpt-6-sol · createdAt=2026-01-01T00:00:00.000Z. It runs in the background.`,
+    },
+  ],
 });
 
 const rootTranscript = {
@@ -118,16 +124,29 @@ const rootTranscript = {
       model: [
         {
           role: "user",
-          content: childReportMessage({
+          content: workerReportMessage({
             child: "sdk",
-            outcome: "answered",
-            headline: "Bumped the SDK to 4.2",
-            task: "Bump the SDK",
-            reply: "Bumped the SDK to 4.2. The tests pass; I'm confident.",
-            evidence: "- Branch: dolly/session-sdk in octocat/project\n- Tool calls: 7",
-            working: "1 other child session: flaky (Investigate the flaky test)",
+            message: "Bumped the SDK to 4.2. The tests pass; I'm confident.",
+            evidence:
+              "— evidence for `sdk` (computed by the server, not written by the worker) —\nstate: running · branch dolly/session-sdk of octocat/project · 3 turn(s)\ngit: commit, push",
           }),
           timestamp: now - 30_000,
+        },
+      ],
+    },
+    {
+      id: 5,
+      kind: "pi.user",
+      model: [
+        {
+          role: "user",
+          content: sessionWaitMessage("7", {
+            outcome: "finished",
+            headline: 'Session `sdk` ("Bump the SDK") is idle (turn finished).',
+            detail: "Last assistant message (tail):\nBumped the SDK to 4.2.",
+            prompt: "Read what the session reported and decide the next step.",
+          }),
+          timestamp: now - 29_500,
         },
       ],
     },
@@ -288,9 +307,17 @@ test("shows a child's report as a card that opens the child", async ({ page }) =
 
   await report.locator("summary").click();
   await expect(report).toContainText("Bumped the SDK to 4.2. The tests pass; I'm confident.");
-  await expect(report).toContainText("Computed from its transcript");
-  await expect(report).toContainText("Branch: dolly/session-sdk in octocat/project");
-  await expect(report).toContainText("Still working: 1 other child session");
+  await expect(report).toContainText("Computed by the server from its transcript");
+  await expect(report).toContainText(
+    "state: running · branch dolly/session-sdk of octocat/project · 3 turn(s)",
+  );
+  await expect(report).not.toContainText("— evidence for");
+
+  // The session_turn wait that woke the parent is a notice too.
+  const wake = page.getByRole("group", { name: "Session wait result", exact: true });
+  await expect(wake).toContainText('Session sdk ("Bump the SDK") is idle (turn finished).');
+  await wake.locator("summary").click();
+  await expect(wake).toContainText("Bumped the SDK to 4.2.");
 
   if (shots) await page.screenshot({ path: `${shots}/desktop-report.png` });
 
@@ -312,4 +339,34 @@ test("hides spawned sessions from the mobile sidebar too", async ({ page }) => {
 
   await expect(workspaces.locator(".workspace-row")).toHaveCount(2);
   await expect(workspaces).not.toContainText("Investigate the flaky test");
+});
+
+test("turns coordinator mode on for the open session from the model menu", async ({ page }) => {
+  const settings: unknown[] = [];
+
+  await page.route("**/api/sessions/root/settings", (route) => {
+    const body = route.request().postDataJSON();
+    settings.push(body);
+    sessions = sessions.map((session) =>
+      session.id === "root" ? { ...session, ...body } : session,
+    );
+
+    return route.fulfill({ json: body });
+  });
+  await expect(page.getByText("The SDK bump is merged.")).toBeVisible();
+
+  await page.getByRole("button", { name: /GPT-6 Sol/ }).click();
+  const toggle = page.getByRole("menuitemcheckbox", { name: /Coordinator/ });
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await expect(toggle).toContainText("Delegate work to child sessions");
+
+  if (shots) await page.screenshot({ path: `${shots}/desktop-coordinator.png` });
+
+  await toggle.click();
+  // Like Auto-fallback, the switch flips in place and the menu stays open.
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  expect(settings).toEqual([{ coordinator: true }]);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  expect(settings).toEqual([{ coordinator: true }, { coordinator: false }]);
 });

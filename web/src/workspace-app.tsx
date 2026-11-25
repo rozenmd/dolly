@@ -62,7 +62,12 @@ type SessionChange = {
   thinkingLevel?: string;
   speed?: Speed;
   autoFallback?: boolean;
+  /** Coordinator mode, per session; not a default for new sessions. */
+  coordinator?: boolean;
 };
+
+/** The model settings new sessions start with. */
+type DefaultSettings = Required<Omit<SessionChange, "coordinator">>;
 
 export function WorkspaceApp() {
   const [auth, setAuth] = useState<AuthState | null>(null);
@@ -654,6 +659,7 @@ export function WorkspaceApp() {
         thinkingLevel: previous.thinkingLevel,
         speed: previous.speed,
         autoFallback: previous.autoFallback,
+        coordinator: previous.coordinator,
       });
       setError(
         cause instanceof Error
@@ -666,7 +672,7 @@ export function WorkspaceApp() {
   }
 
   /** Makes the open session's model settings the defaults for new sessions. */
-  async function saveDefaults(settings: Required<SessionChange>) {
+  async function saveDefaults(settings: DefaultSettings) {
     try {
       setDefaults(await defaultModel(settings));
     } catch (cause) {
@@ -696,6 +702,7 @@ export function WorkspaceApp() {
         effort={settings.thinkingLevel}
         speed={settings.speed}
         autoFallback={settings.autoFallback}
+        coordinator={current.coordinator ?? false}
         placement="above"
         isDefault={atDefault}
         atDefault={atDefault}
@@ -711,6 +718,7 @@ export function WorkspaceApp() {
         onEffort={(thinkingLevel) => void configure({ thinkingLevel })}
         onSpeed={(speed) => void configure({ speed })}
         onAutoFallback={(autoFallback) => void configure({ autoFallback })}
+        onCoordinator={(coordinator) => void configure({ coordinator })}
         onSetDefault={() => void saveDefaults(settings)}
         onReset={
           defaults

@@ -276,10 +276,7 @@ it("inherits Claude for child agents and redacts setup tokens from transcript an
   expect(await (await call(`/sessions/${parent.id}/children/${child.id}`)).text()).not.toContain(
     token,
   );
-  // The child's report reaches the parent, redacted like the rest of its transcript.
-  await expect
-    .poll(async () => (await call(`/sessions/${parent.id}`)).text(), { timeout: 4000 })
-    .toContain("[Child report");
+  // The child reports with send_to_session itself; nothing of its answer leaks into the parent.
   expect(await (await call(`/sessions/${parent.id}`)).text()).not.toContain(token);
   expect(
     (

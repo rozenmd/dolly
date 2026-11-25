@@ -1,7 +1,7 @@
 import type { PromptIndex } from "../../../src/transcript";
 import { parseScheduledMessage } from "../../../src/schedule-message";
 import { parseCiWaitMessage } from "../../../src/ci-wait-message";
-import { parseChildReportMessage } from "../../../src/child-report-message";
+import { parseSessionMessage, type SessionMessage } from "../../../src/child-report-message";
 import type { Step, Turn } from "./api";
 
 /**
@@ -139,15 +139,22 @@ function reply(turn: Turn) {
   return "";
 }
 
+/** A session's message as the rail's one line: what kind it is, then its first words. */
+function sessionMessagePreview(message: SessionMessage) {
+  if (message.kind === "message") return `Message: ${message.text}`;
+
+  return `${message.failed ? "Failed" : "Report"}: ${message.text}`;
+}
+
 /** A prompt as the rail's one line: what it was about, or its screenshots when it has no words. */
 function promptPreview(text: string, images = 0) {
-  // A scheduled prompt previews as what it asks, a CI wake-up or child report as its outcome, not their labels.
-  const report = parseChildReportMessage(text);
+  // A scheduled prompt previews as what it asks, a wake-up as its outcome and a session's message as its words, not their labels.
+  const delivered = parseSessionMessage(text);
 
   const body =
     parseScheduledMessage(text)?.prompt ??
-    parseCiWaitMessage(text)?.headline ??
-    (report ? `${report.task}: ${report.headline}` : text);
+    parseCiWaitMessage(text)?.headline.replaceAll("`", "") ??
+    (delivered ? sessionMessagePreview(delivered) : text);
 
   const line = clamp(flatten(dropLeadingQuote(body)), MAX_PREVIEW);
 
@@ -163,10 +170,10 @@ export function railMarks(turns: readonly Turn[]): RailMark[] {
   return turns.flatMap((turn) => {
     if (!turn.prompt) return [];
 
-    const report = turn.prompt.childReport;
+    const delivered = turn.prompt.sessionMessage;
 
-    const preview = report
-      ? promptPreview(`${report.task}: ${report.headline}`)
+    const preview = delivered
+      ? promptPreview(sessionMessagePreview(delivered))
       : promptPreview(turn.prompt.text, turn.prompt.images);
 
     if (!preview) return [];

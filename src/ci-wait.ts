@@ -10,7 +10,9 @@ import {
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
-import { ciWaitMessage, type CiWaitOutcome } from "./ci-wait-message";
+import { ciWaitMessage, sessionWaitMessage, type CiWaitOutcome } from "./ci-wait-message";
+import { isWorking, pendingDelivery } from "./coordination";
+import { lastReply, tail } from "./child-report";
 import type {
   CiCheck,
   CiWorkflowRun,
@@ -28,7 +30,7 @@ import type { CiEvent } from "./github-webhook";
  * new turn, exactly once.
  */
 
-export const CI_WAIT_TOOL_NAMES = ["wait_for", "cancel_wait"] as const;
+export const CI_WAIT_TOOL_NAMES = ["wait_for", "wait_status", "cancel_wait"] as const;
 
 const MINUTE = 60_000;
 const DEFAULT_TIMEOUT_MINUTES = 120;
@@ -102,16 +104,60 @@ type PollState = {
 
 type WaitResult = { outcome: CiWaitOutcome };
 
+/** Another session whose turn end a session_turn wait watches. */
+type SessionTarget = { kind: "session_turn"; sessionId: ConversationId };
+
+type SessionWaitInput = {
+  target: SessionTarget;
+  prompt: string;
+  createdAt: number;
+  deadlineAt: number;
+};
+
+/** How a watched session's turn ended. */
+type TurnOutcome = "idle" | "failed" | "cancelled" | "missing" | "timed_out";
+
+/** What a session_turn wait needs from the sessions it may watch. */
+export type SessionWatch = {
+  /** The session `caller` may watch by `id`, or why not. */
+  reach(
+    caller: ConversationId,
+    id: string,
+    context: Context,
+  ): Promise<{ target: ConversationId } | { error: string }>;
+  title(id: ConversationId): Promise<string | undefined>;
+};
+
+const SESSION_TURN_SCAN_ENTRIES = 60;
+
+/** Tail of the target's last assistant message carried in the wake-up. */
+const LAST_MESSAGE_TAIL_CHARS = 4_000;
+
 /** A session's wait as the agent's tools and the owner's composer see it. */
 export type CiWaitView = {
   id: string;
+  /** What the wait watches: CI, or another session's turn. */
+  kind: "ci" | "session_turn";
   waiting_on: string;
   timeout: string;
   next_poll: string;
   last_seen?: string;
 };
 
-type CurrentWait = {
+type CurrentWait = CiCurrentWait | SessionCurrentWait;
+
+type SessionCurrentWait = {
+  taskId: TaskId<WaitResult>;
+  target: SessionTarget;
+  prompt: string;
+  createdAt: number;
+  deadlineAt: number;
+  nextPollAt: number;
+};
+
+const isCiWait = (wait: CurrentWait): wait is CiCurrentWait => wait.target.kind !== "session_turn";
+
+type CiCurrentWait = {
   taskId: TaskId<WaitResult>;
   target: CiTarget;
   prompt: string;
@@ -151,7 +197,9 @@ const iso = (at: number) => new Date(at).toISOString();
 
 const short = (sha: string) => sha.slice(0, 7);
 
-export function describeTarget(target: CiTarget) {
+export function describeTarget(target: CiTarget | SessionTarget) {
+  if (target.kind === "session_turn") return `session ${target.sessionId}'s turn`;
+
   if (target.kind === "pr_checks") return `${target.repository}#${target.number} checks`;
 
   if ("runId" in target) return `${target.repository} Actions run ${target.runId}`;
@@ -401,7 +449,7 @@ function timedOut(input: WaitInput, state: PollState, now: number): Decision {
 }
 
 /** Whether a CI event concerns a wait: its PR, the head it last saw, or its run. */
-function matches(wait: CurrentWait, event: CiEvent) {
+function matches(wait: CiCurrentWait, event: CiEvent) {
   const target = wait.target;
   const poll = wait.poll;
 
@@ -570,7 +618,7 @@ function ciWaitTask(reads: () => CiReads) {
           const current = waits.current;
 
           // Replaced, nudged or cancelled while GitHub answered: never resurrect or deliver it.
-          if (!current || String(current.taskId) !== String(task.id)) {
+          if (!current || !isCiWait(current) || String(current.taskId) !== String(task.id)) {
             delete index.waits[String(task.id)];
 
             return { status: "terminal", outcome: { status: "aborted" } };
@@ -620,9 +668,180 @@ function ciWaitTask(reads: () => CiReads) {
   });
 }
 
+/**
+ * Wait until `target` has no turn running, or the deadline. A first message still being admitted
+ * (spawn_task's delivery) counts as running, so a wait registered right after spawning doesn't wake
+ * before the child has started.
+ */
+async function awaitTurnEnd(
+  harness: Harness,
+  target: ConversationId,
+  deadlineAt: number,
+  now: number,
+  context: Context,
+): Promise<"idle" | "missing" | "timed_out"> {
+  const handle = await harness.conversation(target, context);
+
+  if (!handle) return "missing";
+  const stop = new AbortController();
+
+  const timeout = new Promise<"timed_out">((resolve) => {
+    const timer = setTimeout(() => resolve("timed_out"), Math.max(0, deadlineAt - now));
+    stop.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
+  });
+
+  const settled = (async () => {
+    for (;;) {
+      const pending = await harness.commit((tx) => pendingDelivery(tx, target), context);
+
+      if (pending !== undefined) {
+        await harness.waitForTask(pending, context);
+
+        continue;
+      }
+
+      await handle.waitForIdle(context);
+
+      if (!(await harness.commit((tx) => isWorking(tx, target), context))) return "idle" as const;
+    }
+  })();
+
+  // The loser keeps waiting until this invocation's context ends; its rejection then means nothing.
+  settled.catch(() => {});
+
+  try {
+    return await Promise.race([settled, timeout]);
+  } finally {
+    stop.abort();
+  }
+}
+
+const TURN_OUTCOME: Record<TurnOutcome, { wake: CiWaitOutcome; describe: string }> = {
+  idle: { wake: "finished", describe: "idle (turn finished)" },
+  failed: { wake: "failed", describe: "failed (the run ended on an error)" },
+  cancelled: { wake: "closed", describe: "cancelled" },
+  missing: { wake: "closed", describe: "no longer visible" },
+  timed_out: { wake: "timed_out", describe: "still running when the wait timed out" },
+};
+
+/** The self-contained wake-up for a session_turn wait: what happened, and what it last said. */
+async function sessionTurnWake(
+  harness: Harness,
+  sessions: SessionWatch | undefined,
+  target: ConversationId,
+  watched: "idle" | "missing" | "timed_out",
+  context: Context,
+) {
+  const conversation = await harness.conversation(target, context);
+
+  const page = conversation
+    ? await conversation.entries(
+        { order: "descending" },
+        SESSION_TURN_SCAN_ENTRIES,
+        undefined,
+        context,
+      )
+    : undefined;
+
+  const entries = [...(page?.items ?? [])].reverse();
+
+  const assistant = entries
+    .flatMap((entry) => entry.model ?? [])
+    .findLast((message) => message.role === "assistant");
+
+  const stopped = assistant?.role === "assistant" ? assistant.stopReason : undefined;
+
+  const outcome: TurnOutcome =
+    watched !== "idle"
+      ? watched
+      : stopped === "error"
+        ? "failed"
+        : stopped === "aborted"
+          ? "cancelled"
+          : "idle";
+
+  const title = (await sessions?.title(target))?.trim();
+  const label = title ? `Session \`${target}\` ("${title}")` : `Session \`${target}\``;
+  const headline = `${label} is ${TURN_OUTCOME[outcome].describe}.`;
+  const lines: string[] = [];
+
+  if (outcome === "failed" && assistant?.role === "assistant" && assistant.errorMessage)
+    lines.push(`Error: ${assistant.errorMessage.slice(0, 500)}`);
+
+  const last = lastReply(entries);
+
+  lines.push(
+    last
+      ? `Last assistant message (tail):\n${tail(last, LAST_MESSAGE_TAIL_CHARS)}`
+      : "It has not written an assistant message yet.",
+  );
+
+  lines.push(`Use task_status with id \`${target}\` for more of the transcript.`);
+
+  return { outcome: TURN_OUTCOME[outcome].wake, headline, detail: lines.join("\n\n") };
+}
+
+function sessionTurnTask(getHarness: () => Harness, sessions: () => SessionWatch | undefined) {
+  return defineTask<SessionWaitInput, { phase: "watch" }, WaitResult>({
+    name: "app.session-turn-wait",
+    version: 1,
+    initial: () => ({ phase: "watch" }),
+    phases: {
+      watch: async (task, runtime, context) => {
+        const harness = getHarness();
+        const target = task.input.target.sessionId;
+
+        const watched = await awaitTurnEnd(
+          harness,
+          target,
+          task.input.deadlineAt,
+          runtime.now(),
+          context,
+        );
+
+        const wake = await sessionTurnWake(harness, sessions(), target, watched, context);
+        const conversation = await runtime.conversation(runtime.conversationId, context);
+
+        if (!conversation) throw new Error("Session wait conversation missing");
+
+        await runtime.commit(async (tx) => {
+          const waits = await tx.doc(CiWaits, runtime.conversationId);
+
+          // Replaced or cancelled while it watched: never resurrect or deliver it.
+          if (String(waits.current?.taskId) !== String(task.id))
+            return { status: "terminal", outcome: { status: "aborted" } };
+
+          delete waits.current;
+
+          await conversation.submit(tx, {
+            type: "input",
+            content: sessionWaitMessage(String(task.id), { ...wake, prompt: task.input.prompt }),
+            requestId: `session-wait:${task.id}`,
+            whenBusy: "steer",
+          });
+
+          return {
+            status: "terminal",
+            outcome: { status: "completed", result: { outcome: wake.outcome } },
+          };
+        }, context);
+      },
+    },
+    abort: (task, runtime, context) =>
+      runtime.commit(async (tx) => {
+        const waits = await tx.doc(CiWaits, runtime.conversationId);
+
+        if (String(waits.current?.taskId) === String(task.id)) delete waits.current;
+
+        return { status: "terminal", outcome: { status: "aborted" } };
+      }, context),
+  });
+}
+
 type WaitForInput = {
-  kind: "pr_checks" | "workflow_run";
-  repository: string;
+  kind: "pr_checks" | "workflow_run" | "session_turn";
+  repository?: string;
+  session_id?: string;
   number?: number;
   run_id?: number;
   workflow?: string;
@@ -633,6 +852,7 @@ type WaitForInput = {
 
 export class CiWaiter {
   readonly task: ReturnType<typeof ciWaitTask>;
+  readonly sessionTask: ReturnType<typeof sessionTurnTask>;
 
   constructor(
     private readonly getHarness: () => Harness,
@@ -640,8 +860,11 @@ export class CiWaiter {
     /** Same rule as agent-scheduled prompts: only sessions started from the web app. */
     private readonly allowed: (conversationId: ConversationId) => Promise<boolean>,
     private readonly now: () => number = Date.now,
+    /** The sessions a session_turn wait may watch; without it, only CI waits exist. */
+    private readonly sessions?: () => SessionWatch,
   ) {
     this.task = ciWaitTask(reads);
+    this.sessionTask = sessionTurnTask(getHarness, () => this.sessions?.());
   }
 
   private get harness() {
@@ -649,7 +872,7 @@ export class CiWaiter {
   }
 
   private target(input: WaitForInput): { target: CiTarget } | { error: string } {
-    const repository = input.repository.trim();
+    const repository = input.repository?.trim() ?? "";
 
     if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) return { error: "repository must be owner/name" };
 
@@ -673,11 +896,85 @@ export class CiWaiter {
     return { target: { kind: "workflow_run", repository, workflow, ref } };
   }
 
+  /**
+   * A session_turn wait: wake when `session_id`'s current turn ends. Unlike CI waits it is open to
+   * every session, since a child may wait on its own children; which sessions it may watch is the
+   * same rule as task_status.
+   */
+  private async waitForSession(
+    conversationId: ConversationId,
+    input: WaitForInput,
+    context: Context,
+  ) {
+    const sessions = this.sessions?.();
+    const id = input.session_id?.trim() ?? "";
+
+    if (!sessions) return { error: "session_turn waits are not available here" };
+
+    if (!id) return { error: "session_turn needs session_id, the session to watch" };
+    const reached = await sessions.reach(conversationId, id, context);
+
+    if ("error" in reached) return { error: reached.error };
+    const target = reached.target;
+
+    if (String(target) === String(conversationId))
+      return { error: "A session can't wait for its own turn to end" };
+
+    const now = this.now();
+    const minutes = input.timeout_minutes ?? DEFAULT_TIMEOUT_MINUTES;
+    const conversation = await this.harness.conversation(conversationId, context);
+
+    if (!conversation) return { error: "Session not found" };
+
+    const registered = await conversation.commit(async (tx) => {
+      // Task reads come before the commit's first table write.
+      const working = await isWorking(tx, target);
+      const waits = await tx.doc(CiWaits, conversationId);
+      const previous = waits.current?.taskId;
+
+      const input_: SessionWaitInput = {
+        target: { kind: "session_turn", sessionId: target },
+        prompt:
+          input.prompt?.trim() ||
+          "Read what the session reported and decide the next step: follow up with send_to_session, start other work, or tell the owner what changed, linking the session rather than pasting its transcript.",
+        createdAt: now,
+        deadlineAt: now + minutes * MINUTE,
+      };
+
+      const taskId = await tx.createTask(this.sessionTask, input_, {
+        ownership: { kind: "conversation" },
+        background: true,
+      });
+
+      waits.current = { taskId, ...input_, nextPollAt: input_.deadlineAt };
+
+      if (previous) delete (await tx.doc(CiWaitIndex)).waits[String(previous)];
+
+      return { previous, taskId, working };
+    }, context);
+
+    if (registered.previous)
+      await this.harness.abortTask(registered.previous, context).catch(() => {});
+
+    return {
+      id: String(registered.taskId),
+      waiting_on: describeTarget({ kind: "session_turn", sessionId: target }),
+      now: registered.working
+        ? `when session ${target} finishes its turn (timeout ${iso(now + minutes * MINUTE)})`
+        : `right away: session ${target} is not running`,
+      timeout: iso(now + minutes * MINUTE),
+      replaced: registered.previous !== undefined,
+      note: "Now write the human a concise status message and end this turn. If this turn only re-armed a wait after a wake that changed nothing, one short line is enough. Do not poll or sleep; this session will be triggered automatically. One wait per session; calling wait_for again replaces it.",
+    };
+  }
+
   async waitFor(
     conversationId: ConversationId,
     input: WaitForInput,
     context: Context = BACKGROUND_CONTEXT,
   ) {
+    if (input.kind === "session_turn") return this.waitForSession(conversationId, input, context);
+
     if (!(await this.allowed(conversationId)))
       return { error: "CI waits are only available in sessions started from the web app" };
     const parsed = this.target(input);
@@ -816,7 +1113,7 @@ export class CiWaiter {
         const waits = await tx.doc(CiWaits, entry.conversationId);
         const current = waits.current;
 
-        if (!current || String(current.taskId) !== id) return undefined;
+        if (!current || !isCiWait(current) || String(current.taskId) !== id) return undefined;
 
         if (current.nextPollAt - now < NUDGE_MIN_MS || !matches(current, event)) return undefined;
 
@@ -859,12 +1156,13 @@ export class CiWaiter {
 
     const result: CiWaitView = {
       id: String(wait.taskId),
+      kind: isCiWait(wait) ? "ci" : "session_turn",
       waiting_on: describeTarget(wait.target),
       timeout: iso(wait.deadlineAt),
       next_poll: iso(wait.nextPollAt),
     };
 
-    if (wait.poll?.lastSummary) result.last_seen = wait.poll.lastSummary;
+    if (isCiWait(wait) && wait.poll?.lastSummary) result.last_seen = wait.poll.lastSummary;
 
     return result;
   }
@@ -872,7 +1170,7 @@ export class CiWaiter {
   async cancel(conversationId: ConversationId, context: Context = BACKGROUND_CONTEXT) {
     const wait = await this.current(conversationId, context);
 
-    if (!wait) return { error: "No CI wait is active in this session" };
+    if (!wait) return { error: "No background wait is registered for this session." };
     const waits = await this.harness.snapshot(CiWaits, conversationId, context);
 
     if (waits?.current) await this.harness.abortTask(waits.current.taskId, context);
@@ -889,10 +1187,11 @@ export class CiWaiter {
       defineTool({
         name: "wait_for",
         description:
-          "Wait for CI without holding the turn, then end your turn. Use it instead of sleep or polling after pushing: kind pr_checks watches a pull request's checks (repository owner/name, number); kind workflow_run watches one GitHub Actions run, by run_id or by workflow (file name such as release.yml) plus ref (branch, tag or commit sha), so it can be registered right after a push or tag before the run exists. The Worker polls GitHub and wakes this session with the result as a new message: on the first failed check (so fixing can start while slower checks run), when everything settles, when the PR closes or merges, or at the timeout (default 120 minutes, max 1440). Checks waiting on a person (an approval) never wake it. A re-armed wait for the same PR or run doesn't wake again until something changes. prompt is what to do when woken. One wait per session: calling it again replaces the current one. Opening a pull request (github or workspace open_pull_request) already registers a pr_checks wait for it when none is active; its result says so as ciWait, so just end your turn. Only in sessions started from the web app.",
+          "End this turn cleanly and wake this same session later without sleeping in a tool call: register the wait, write the owner a normal status message and end your turn. A session_turn wait wakes when ANOTHER session's turn ends (it goes idle, fails, or is cancelled); the wake-up carries that session's final state and last assistant message, so use it after spawn_task or send_to_session instead of guessing a delay (session_id: a task you spawned, your parent, or in sessions started from the web app any session). An already idle target wakes you right away. For CI, use it instead of sleep or polling after pushing: kind pr_checks watches a pull request's checks (repository owner/name, number); kind workflow_run watches one GitHub Actions run, by run_id or by workflow (file name such as release.yml) plus ref (branch, tag or commit sha), so it can be registered right after a push or tag before the run exists. The Worker polls GitHub and wakes this session with the result as a new message: on the first failed check (so fixing can start while slower checks run), when everything settles, when the PR closes or merges, or at the timeout (default 120 minutes, max 1440). Checks waiting on a person (an approval) never wake it. A re-armed wait for the same PR or run doesn't wake again until something changes. prompt is what to do when woken. One wait per session: calling it again replaces the current one. Opening a pull request (github or workspace open_pull_request) already registers a pr_checks wait for it when none is active; its result says so as ciWait, so just end your turn. CI waits only in sessions started from the web app.",
         parameters: obj({
-          kind: oneOf(["pr_checks", "workflow_run"]),
-          repository: str({ description: "owner/name" }),
+          kind: oneOf(["pr_checks", "workflow_run", "session_turn"]),
+          repository: opt(str({ description: "owner/name, for pr_checks and workflow_run" })),
+          session_id: opt(str({ description: "The session to watch, for session_turn" })),
           number: opt(int({ minimum: 1, description: "Pull request number, for pr_checks" })),
           run_id: opt(int({ minimum: 1, description: "Actions run id, for workflow_run" })),
           workflow: opt(str({ description: "Workflow file name or id, for workflow_run" })),
@@ -905,8 +1204,21 @@ export class CiWaiter {
         execute: (input, api, context) => reply(this.waitFor(api.conversationId, input, context)),
       }),
       defineTool({
+        name: "wait_status",
+        description: "Inspect the background wait registered by this session.",
+        parameters: obj({}),
+        replay: "safe",
+        execute: (_, api, context) =>
+          reply(
+            this.current(api.conversationId, context).then(
+              (wait) => wait ?? { note: "No background wait is registered for this session." },
+            ),
+          ),
+      }),
+      defineTool({
         name: "cancel_wait",
-        description: "Cancel this session's CI wait, if one is active.",
+        description:
+          "Cancel this session's registered background wait. This does not stop a currently running turn.",
         parameters: obj({}),
         replay: "unsafe",
         executionMode: "sequential",

@@ -87,11 +87,12 @@ export const SessionSettings = Schema.Struct({
   thinkingLevel: Schema.optional(ThinkingLevel),
   speed: Schema.optional(Speed),
   autoFallback: Schema.optional(Schema.Boolean),
+  coordinator: Schema.optional(Schema.Boolean),
 }).check(
   Schema.makeFilter((settings) =>
     Object.values(settings).some((value) => value !== undefined)
       ? undefined
-      : "Expected model, thinkingLevel, speed or autoFallback",
+      : "Expected model, thinkingLevel, speed, autoFallback or coordinator",
   ),
 );
 
@@ -113,4 +114,8 @@ export const ChildMessage = Schema.Struct({
 export const ChildRequest = Schema.Struct({
   ...ChildMessage.fields,
   model: Schema.optional(SessionModel),
+  mode: Schema.optional(Schema.Literals(["ask", "code", "scratch"])),
+  repo: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(201))),
+  branch: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200))),
+  isolatedWorktree: Schema.optional(Schema.Boolean),
 });

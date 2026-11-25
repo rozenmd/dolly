@@ -309,36 +309,39 @@ function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number
           now={now}
         />
       )}
-      {turn.prompt?.childReport && (
-        <ChildReportNotice
+      {turn.prompt?.sessionMessage && (
+        <SessionMessageNotice
           id={turn.id}
-          report={turn.prompt.childReport}
-          session={thread?.(turn.prompt.childReport.child)}
+          message={turn.prompt.sessionMessage}
+          session={thread?.(turn.prompt.sessionMessage.session)}
           deliveredAt={turn.prompt.at}
           now={now}
           onOpen={onOpenThread}
         />
       )}
-      {turn.prompt && !turn.prompt.scheduled && !turn.prompt.ciWait && !turn.prompt.childReport && (
-        <article className="prompt" aria-label="user message">
-          {turn.prompt.at !== undefined && (
-            <div className="prompt-meta">
-              <time dateTime={new Date(turn.prompt.at).toISOString()}>
-                {ago(turn.prompt.at, now)}
-              </time>
-              <span>You</span>
-            </div>
-          )}
-          <div className="prompt-bubble">
-            <Prose text={turn.prompt.text} />
-            {Boolean(turn.prompt.images) && (
-              <p className="prompt-images">
-                📎 {turn.prompt.images} screenshot{turn.prompt.images === 1 ? "" : "s"} attached
-              </p>
+      {turn.prompt &&
+        !turn.prompt.scheduled &&
+        !turn.prompt.ciWait &&
+        !turn.prompt.sessionMessage && (
+          <article className="prompt" aria-label="user message">
+            {turn.prompt.at !== undefined && (
+              <div className="prompt-meta">
+                <time dateTime={new Date(turn.prompt.at).toISOString()}>
+                  {ago(turn.prompt.at, now)}
+                </time>
+                <span>You</span>
+              </div>
             )}
-          </div>
-        </article>
-      )}
+            <div className="prompt-bubble">
+              <Prose text={turn.prompt.text} />
+              {Boolean(turn.prompt.images) && (
+                <p className="prompt-images">
+                  📎 {turn.prompt.images} screenshot{turn.prompt.images === 1 ? "" : "s"} attached
+                </p>
+              )}
+            </div>
+          </article>
+        )}
       {turn.items.length > 0 && <WorkLog turn={turn} now={now} />}
       {spawned.length > 0 && onOpenThread && (
         <div className="thread-cards">
@@ -448,7 +451,7 @@ function CiWaitNotice({
     <details
       className="scheduled-notice ci-wait-notice"
       data-outcome={wake.outcome}
-      aria-label="CI wait result"
+      aria-label={wake.kind === "session_turn" ? "Session wait result" : "CI wait result"}
       {...disclosure}
     >
       <summary>
@@ -468,39 +471,45 @@ function CiWaitNotice({
 }
 
 /**
- * A child session reported back: what it said, as a notice rather than a bubble, since the owner
- * didn't type it. Its reply and the facts Dolly computed from its transcript are one click away.
+ * Another session's send_to_session: a worker reporting back, the server's notice that a worker's
+ * run died, or a session's message. A notice rather than a bubble, since the owner didn't type it;
+ * its words and the facts the server computed from the worker's transcript are one click away.
  */
-function ChildReportNotice({
+function SessionMessageNotice({
   id,
-  report,
+  message,
   session,
   deliveredAt,
   now,
   onOpen,
 }: {
   id: string;
-  report: NonNullable<NonNullable<Turn["prompt"]>["childReport"]>;
+  message: NonNullable<NonNullable<Turn["prompt"]>["sessionMessage"]>;
   session?: ThreadCardSession;
   deliveredAt?: number;
   now: number;
   onOpen?: (id: string) => void;
 }) {
   const disclosure = useDisclosure(`child-report-${id}`, false);
-  const Icon = report.outcome === "answered" ? UsersIcon : ExclamationTriangleIcon;
-  const name = session?.title ?? report.task;
+  const failed = message.kind === "report" && message.failed;
+  const outcome = message.kind === "message" ? "message" : failed ? "failed" : "answered";
+  const Icon = failed ? ExclamationTriangleIcon : UsersIcon;
+  const name = session?.title ?? message.session;
+  const label = message.kind === "message" ? "Message from" : failed ? "Failed" : "Report";
 
   return (
     <details
       className="scheduled-notice child-report-notice"
-      data-outcome={report.outcome}
-      aria-label="child session report"
+      data-outcome={outcome}
+      aria-label={message.kind === "message" ? "session message" : "child session report"}
       {...disclosure}
     >
       <summary>
         <Icon aria-hidden="true" />
         <span className="scheduled-title">
-          {report.outcome === "answered" ? "Report" : "Stopped"}: {name}
+          {label}
+          {message.kind === "message" ? " " : ": "}
+          {name}
         </span>
         {deliveredAt !== undefined && (
           <time dateTime={new Date(deliveredAt).toISOString()}>{ago(deliveredAt, now)}</time>
@@ -508,16 +517,19 @@ function ChildReportNotice({
         <ChevronRightIcon className="disclosure" />
       </summary>
       <div className="scheduled-body">
-        <Prose text={report.reply} />
-        {report.evidence && (
+        <Prose text={message.text} />
+        {message.kind === "report" && message.evidence && (
           <div className="child-report-facts">
-            <p className="child-report-label">Computed from its transcript</p>
-            <Prose text={report.evidence} />
+            <p className="child-report-label">Computed by the server from its transcript</p>
+            <pre className="child-report-evidence">{evidenceBody(message.evidence)}</pre>
           </div>
         )}
-        {report.working && <p className="ci-wait-next">Still working: {report.working}</p>}
         {onOpen && (
-          <button type="button" className="child-report-open" onClick={() => onOpen(report.child)}>
+          <button
+            type="button"
+            className="child-report-open"
+            onClick={() => onOpen(message.session)}
+          >
             Open {name}
           </button>
         )}
@@ -525,6 +537,9 @@ function ChildReportNotice({
     </details>
   );
 }
+
+/** The evidence block without its header line, which the label above already says. */
+const evidenceBody = (evidence: string) => evidence.split("\n").slice(1).join("\n");
 
 /** A spawned session, live from the polled session list, opening it on click. */
 function ThreadCard({

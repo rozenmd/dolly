@@ -745,7 +745,7 @@ it("cancel_wait stops delivery, and bad targets fail in the turn", async () => {
     expect.stringContaining("workflow_run needs run_id, or workflow"),
     expect.stringContaining('"waiting_on":"example/project#8 checks"'),
     expect.stringContaining('"state":"cancelled"'),
-    expect.stringContaining("No CI wait is active"),
+    expect.stringContaining("No background wait is registered for this session."),
   ]);
 
   for (const ms of [20_000, 60_000, 120_000]) await at(ms);

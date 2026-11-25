@@ -1,92 +1,92 @@
 /**
- * The message a child session's report arrives as in its parent. The label tells the model the
- * turn is a report from a session it delegated to, not something the owner typed; the web app
- * reads it back to show the turn as a report card instead of a user bubble. Shared by the Worker
- * and the web app.
+ * Messages one session sends another. A Dolly transcript has no author per message, so each is
+ * labelled: the label tells the model the turn came from a session, not from something the owner
+ * typed, and the web app reads it back to show the turn as a card instead of a user bubble. Shared
+ * by the Worker and the web app.
+ *
+ * - A worker report: a child's send_to_session to its own parent, with the evidence block the
+ *   server appended (child-report.ts).
+ * - A failure notice: the server telling a parent that a child's run died without reporting back.
+ * - A session message: any other send_to_session, such as a parent's follow-up to its child.
  */
-const LABEL = /^\[Child report ([^\s:\]]+): ([^\n\]]+)\]\n\n/;
+const LABEL = /^\[(Worker report|Message from session) ([^\s:\]]+)(?:: (failed))?\]\n\n/;
 
-export const CHILD_REPORT_OUTCOMES = ["answered", "stopped"] as const;
+const EVIDENCE = "\n\n— evidence for `";
 
-export type ChildReportOutcome = (typeof CHILD_REPORT_OUTCOMES)[number];
+export type SessionMessage =
+  | {
+      kind: "report";
+      /** The reporting child session's id. */
+      session: string;
+      /** The run died and the server, not the child, wrote this. */
+      failed: boolean;
+      /** The child's own words, or the failure notice. */
+      text: string;
+      /** The server-computed evidence block; empty when there is none. */
+      evidence: string;
+    }
+  | { kind: "message"; session: string; text: string };
 
-const REPLY = "\n\nReply:\n";
-
-const EVIDENCE =
-  "\n\nEvidence (computed by Dolly from the child's transcript, not written by it):\n";
-
-const WORKING = "\n\nStill working: ";
-const NEXT = "\n\nNext: ";
-
-export type ChildReport = {
-  /** The child session's id. */
-  child: string;
-  outcome: ChildReportOutcome;
-  headline: string;
-  /** What the child was asked to do, in one line. */
-  task: string;
-  /** The child's own words: its final reply, or why it stopped. */
-  reply: string;
-  /** Facts computed from the child's transcript, one per line. */
-  evidence: string;
-  /** Other children of the parent still working, in one line; empty when none. */
-  working: string;
-  next: string;
-};
-
-const oneLine = (text: string) => text.replaceAll(/[\n\]]/g, " ").trim();
-
-export function childReportMessage(report: Omit<ChildReport, "next">) {
-  const next =
-    report.outcome === "answered"
-      ? `Decide the next step: follow up with send_to_session (id ${report.child}), start other work, or tell the owner what changed, in a sentence or two, linking the child session rather than pasting its transcript. If other children are still working and nothing here needs action yet, reply in one short line and end your turn; their reports arrive the same way.`
-      : `The child stopped without finishing its turn. Look with task_status (id ${report.child}), then follow up with send_to_session, or do the work here.`;
-
+/** A worker's report to its parent: its words, then the server's evidence. */
+export function workerReportMessage(input: { child: string; message: string; evidence: string }) {
   return [
-    `[Child report ${report.child}: ${report.outcome} · ${oneLine(report.headline)}]\n\n`,
-    `A child session you started with spawn_task finished its turn. This is system context, not a message from the user.\n\nTask: ${oneLine(report.task)}`,
-    `${REPLY}${report.reply.trim() || "(no reply)"}`,
-    report.evidence.trim() ? `${EVIDENCE}${report.evidence.trim()}` : "",
-    report.working.trim() ? `${WORKING}${oneLine(report.working)}` : "",
-    `${NEXT}${next}`,
-  ].join("");
+    `[Worker report ${input.child}]`,
+    `Worker session \`${input.child}\`, which you spawned, reported back with send_to_session. It is a message from that session, not from the user.`,
+    input.message.trim(),
+    input.evidence.trim(),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
-/** The report behind a delivered message, or undefined for an ordinary one. */
-export function parseChildReportMessage(text: string): ChildReport | undefined {
+/** The server's notice that a worker's run ended in error without a report. */
+export function workerFailureMessage(input: { child: string; error: string; evidence: string }) {
+  return [
+    `[Worker report ${input.child}: failed]`,
+    [
+      `Worker task \`${input.child}\` ended in error without reporting back.`,
+      `error: ${input.error.slice(0, 300)}`,
+      `Inspect with task_status("${input.child}"), or resume it with send_to_session.`,
+    ].join("\n"),
+    input.evidence.trim(),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/** Any other agent-authored delivery: it drives the target's next turn but is not the owner's. */
+export function sessionNoticeMessage(input: { from: string; relation: string; message: string }) {
+  return [
+    `[Message from session ${input.from}]`,
+    `${input.relation} \`${input.from}\` sent this with send_to_session. It is a message from that session, not from the user.`,
+    input.message.trim(),
+  ].join("\n\n");
+}
+
+/** The session message behind a delivered turn, or undefined for an ordinary one. */
+export function parseSessionMessage(text: string): SessionMessage | undefined {
   const match = LABEL.exec(text);
 
   if (!match) return undefined;
 
-  const label = match[2] ?? "";
-  const split = label.indexOf(" · ");
-  const outcome = CHILD_REPORT_OUTCOMES.find((value) => value === label.slice(0, split));
-
-  if (split < 0 || !outcome) return undefined;
-
+  const session = match[2] ?? "";
+  // The first paragraph is the fixed attribution line; the sender's words follow it.
   const body = text.slice(match[0].length);
-  const reply = body.indexOf(REPLY);
-  const next = body.lastIndexOf(NEXT);
+  const start = body.indexOf("\n\n");
+  const words = start < 0 ? "" : body.slice(start + 2);
 
-  if (reply < 0 || next < reply) return undefined;
+  if (match[1] === "Message from session") return { kind: "message", session, text: words };
 
-  // The reply is the child's own text, so the sections after it are found from the end.
-  const working = body.lastIndexOf(WORKING, next);
-  const evidence = body.lastIndexOf(EVIDENCE, working > reply ? working : next);
-  const replyEnd = [evidence, working, next].find((at) => at > reply) ?? next;
-  const task = body.slice(0, reply).split("\n\nTask: ")[1] ?? "";
+  const failed = match[3] === "failed";
+  // The notice's own lines are its text when the server wrote it.
+  const content = failed ? body : words;
+  const evidence = content.lastIndexOf(EVIDENCE);
 
   return {
-    child: match[1] ?? "",
-    outcome,
-    headline: label.slice(split + 3),
-    task,
-    reply: body.slice(reply + REPLY.length, replyEnd),
-    evidence:
-      evidence > reply
-        ? body.slice(evidence + EVIDENCE.length, working > evidence ? working : next)
-        : "",
-    working: working > reply ? body.slice(working + WORKING.length, next) : "",
-    next: body.slice(next + NEXT.length),
+    kind: "report",
+    session,
+    failed,
+    text: (evidence < 0 ? content : content.slice(0, evidence)).trim(),
+    evidence: evidence < 0 ? "" : content.slice(evidence + 2).trim(),
   };
 }

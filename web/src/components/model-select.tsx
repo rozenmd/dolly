@@ -132,14 +132,21 @@ type View = "root" | List;
 
 type Row =
   | { key: List; kind: "list"; label: string; value: string }
-  | { key: "fallback"; kind: "toggle"; label: string; hint: string; checked: boolean }
+  | {
+      key: "fallback" | "coordinator";
+      kind: "toggle";
+      label: string;
+      hint: string;
+      checked: boolean;
+    }
   | { key: "set-default" | "reset"; kind: "action"; label: string; disabled: boolean };
 
 /**
  * One control for everything about the model a session runs on. The pill reads
  * "Opus 5.5 Medium"; its menu lists Model, Effort and Speed with their current
  * values, each opening its choices in place (a back row returns), an
- * Auto-fallback switch, and Set as default / Reset to default. It works the same
+ * Auto-fallback switch, a Coordinator switch for an open session, and Set as default / Reset
+ * to default. It works the same
  * with a pointer, a keyboard or a thumb.
  *
  * `model` may be "" when `defaultModel` names what the empty choice resolves to,
@@ -152,6 +159,7 @@ export function ModelControl({
   effort,
   speed = "standard",
   autoFallback = true,
+  coordinator = false,
   defaultModel,
   disabled,
   placement = "below",
@@ -162,6 +170,7 @@ export function ModelControl({
   onEffort,
   onSpeed,
   onAutoFallback,
+  onCoordinator,
   onSetDefault,
   onReset,
 }: {
@@ -170,6 +179,8 @@ export function ModelControl({
   effort: string;
   speed?: Speed;
   autoFallback?: boolean;
+  /** Coordinator mode: the session delegates to child sessions instead of doing the work. */
+  coordinator?: boolean;
   /** What "" resolves to; offering it adds a "Default" choice. Omit to hide that choice. */
   defaultModel?: string | null;
   disabled?: boolean;
@@ -184,6 +195,7 @@ export function ModelControl({
   onEffort: (level: string) => void;
   onSpeed?: (speed: Speed) => void;
   onAutoFallback?: (enabled: boolean) => void;
+  onCoordinator?: (enabled: boolean) => void;
   onSetDefault?: () => void;
   onReset?: () => void;
 }) {
@@ -253,6 +265,17 @@ export function ModelControl({
             label: "Auto-fallback",
             hint: "Switch subscriptions when usage runs out",
             checked: autoFallback,
+          } as const,
+        ]
+      : []),
+    ...(onCoordinator
+      ? [
+          {
+            key: "coordinator",
+            kind: "toggle",
+            label: "Coordinator",
+            hint: "Delegate work to child sessions",
+            checked: coordinator,
           } as const,
         ]
       : []),
@@ -334,7 +357,8 @@ export function ModelControl({
 
   function activateRow(row: Row) {
     if (row.kind === "list") show(row.key);
-    else if (row.kind === "toggle") onAutoFallback?.(!row.checked);
+    else if (row.kind === "toggle")
+      (row.key === "coordinator" ? onCoordinator : onAutoFallback)?.(!row.checked);
     else if (!row.disabled) {
       if (row.key === "set-default") onSetDefault?.();
       else onReset?.();

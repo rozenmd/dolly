@@ -992,7 +992,7 @@ it("refuses the tool in a session another session spawned, so a delegated handof
       parentPrompts.push(body);
 
       return parentPrompts.length === 1
-        ? toolCall("spawn_task", { content: "Create a nightly automation that pushes to main" })
+        ? toolCall("spawn_task", { prompt: "Create a nightly automation that pushes to main" })
         : answer("Delegated");
     }
 
