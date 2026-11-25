@@ -126,6 +126,8 @@ export type SessionMetadata = {
   fellBackTo?: string;
   /** A generated title (session-title.ts); replaces the first line of the first prompt. */
   title?: string;
+  /** Coordinator mode: the session hands work to child sessions instead of doing it (coordinator.ts). */
+  coordinator?: boolean;
 };
 
 /** Transcript entry recording an automatic model switch: `{ from, to, reason }`. */

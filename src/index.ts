@@ -494,7 +494,7 @@ app.post("/api/sessions/:id/children", (c) =>
           () =>
             new InvalidInput({
               message:
-                "Expected content, a UUID requestId and an optional OpenAI or Anthropic model",
+                "Expected content, a UUID requestId, and optionally an OpenAI or Anthropic model, mode (ask, code or scratch), repo, branch and isolatedWorktree",
             }),
         ),
       );

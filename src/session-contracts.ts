@@ -10,6 +10,8 @@ export const SavedSession = Schema.Struct({
   speed: Schema.optional(Schema.Literals(SPEEDS)),
   /** Switch subscriptions when this one runs out; absent follows the owner's default. */
   autoFallback: Schema.optional(Schema.Boolean),
+  /** Coordinator mode is on: the session delegates to child sessions (coordinator.ts). */
+  coordinator: Schema.optional(Schema.Boolean),
   title: Schema.String,
   repository: Schema.String,
   updatedAt: Schema.Number,

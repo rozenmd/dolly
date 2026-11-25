@@ -385,10 +385,7 @@ export class Coordination {
 
     if (parent === undefined) return undefined;
 
-    const record = findChild(
-      await this.harness.snapshot(Children, parent, BACKGROUND_CONTEXT),
-      id,
-    );
+    const record = findChild(await this.harness.snapshot(Children, parent, BACKGROUND_CONTEXT), id);
 
     return record ? title(record.content) : undefined;
   };
@@ -580,8 +577,7 @@ export class Coordination {
       this.harness.conversation(target, context),
     );
 
-    if (!conversation)
-      return { ok: false as const, error: `No session with id \`${input.id}\`.` };
+    if (!conversation) return { ok: false as const, error: `No session with id \`${input.id}\`.` };
 
     // The facts are snapshotted at send time, so a redelivery repeats what the worker sent.
     const content = reached.parent
@@ -719,17 +715,15 @@ export class Coordination {
 
     if (!conversation) return { ok: false as const, error: `No task/session with id \`${id}\`.` };
 
-    const [entries, workspace, working, parent, agent, named] = yield* attempt(
-      "session.read",
-      () =>
-        Promise.all([
-          readTranscript(this.harness, target, EVIDENCE_SCAN_ENTRIES, context),
-          this.harness.snapshot(ConversationWorkspace, target, context),
-          this.harness.commit((tx) => isWorking(tx, target), context),
-          this.harness.commit((tx) => parentOf(tx, target), context),
-          conversation.agent(context),
-          reached.child ? Promise.resolve(title(reached.child.content)) : this.deps.title?.(target),
-        ]),
+    const [entries, workspace, working, parent, agent, named] = yield* attempt("session.read", () =>
+      Promise.all([
+        readTranscript(this.harness, target, EVIDENCE_SCAN_ENTRIES, context),
+        this.harness.snapshot(ConversationWorkspace, target, context),
+        this.harness.commit((tx) => isWorking(tx, target), context),
+        this.harness.commit((tx) => parentOf(tx, target), context),
+        conversation.agent(context),
+        reached.child ? Promise.resolve(title(reached.child.content)) : this.deps.title?.(target),
+      ]),
     );
 
     const facts = evidenceFromTranscript(entries);
