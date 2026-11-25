@@ -114,7 +114,7 @@ type SessionWaitInput = {
   deadlineAt: number;
 };
 
-/** How a watched session's turn ended, after OpenSession's session_turn outcomes. */
+/** How a watched session's turn ended. */
 type TurnOutcome = "idle" | "failed" | "cancelled" | "missing" | "timed_out";
 
 /** What a session_turn wait needs from the sessions it may watch. */
@@ -722,7 +722,7 @@ const TURN_OUTCOME: Record<TurnOutcome, { wake: CiWaitOutcome; describe: string 
   timed_out: { wake: "timed_out", describe: "still running when the wait timed out" },
 };
 
-/** The self-contained wake-up for a session_turn wait, after OpenSession's. */
+/** The self-contained wake-up for a session_turn wait: what happened, and what it last said. */
 async function sessionTurnWake(
   harness: Harness,
   sessions: SessionWatch | undefined,

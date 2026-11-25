@@ -113,6 +113,7 @@ it("sends Claude every tool's arguments as root properties", async () => {
     "retitle_session",
     "list_children",
     "list_scheduled_prompts",
+    "wait_status",
     "cancel_wait",
   ]);
 
