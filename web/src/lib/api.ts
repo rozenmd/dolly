@@ -356,7 +356,8 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
         prompt.ciWait = {
           kind: wake.kind,
           outcome: wake.outcome,
-          headline: wake.headline,
+          // Backticks mark ids for the model; the notice shows them as plain text.
+          headline: wake.headline.replaceAll("`", ""),
           trigger: wake.trigger,
         };
 

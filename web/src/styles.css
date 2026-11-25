@@ -1748,7 +1748,8 @@ code.summary-label {
   overflow-y: auto;
   outline: none;
 }
-.model-control-row {
+/* Qualified so the generic .picker-option height later in the file doesn't win. */
+.picker-option.model-control-row {
   min-height: 40px;
 }
 .model-control-value {
@@ -1785,7 +1786,7 @@ code.summary-label {
   margin: 6px -6px;
   background: rgb(255 255 255 / 8%);
 }
-.model-control-toggle {
+.picker-option.model-control-toggle {
   min-height: 52px;
 }
 .model-control-text {

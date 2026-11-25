@@ -128,7 +128,7 @@ describe("session transcript", () => {
       ciWait: {
         kind: "session_turn",
         outcome: "finished",
-        headline: "Session `sdk` is idle (turn finished).",
+        headline: "Session sdk is idle (turn finished).",
         trigger: "Last assistant message (tail):\nDone.\n\nTwo paragraphs.",
       },
     });

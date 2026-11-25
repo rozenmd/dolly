@@ -153,7 +153,7 @@ function promptPreview(text: string, images = 0) {
 
   const body =
     parseScheduledMessage(text)?.prompt ??
-    parseCiWaitMessage(text)?.headline ??
+    parseCiWaitMessage(text)?.headline.replaceAll("`", "") ??
     (delivered ? sessionMessagePreview(delivered) : text);
 
   const line = clamp(flatten(dropLeadingQuote(body)), MAX_PREVIEW);

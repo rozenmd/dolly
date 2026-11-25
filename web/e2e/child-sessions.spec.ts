@@ -315,7 +315,7 @@ test("shows a child's report as a card that opens the child", async ({ page }) =
 
   // The session_turn wait that woke the parent is a notice too.
   const wake = page.getByRole("group", { name: "Session wait result", exact: true });
-  await expect(wake).toContainText('Session `sdk` ("Bump the SDK") is idle (turn finished).');
+  await expect(wake).toContainText('Session sdk ("Bump the SDK") is idle (turn finished).');
   await wake.locator("summary").click();
   await expect(wake).toContainText("Bumped the SDK to 4.2.");
 
