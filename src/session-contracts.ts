@@ -46,6 +46,11 @@ export const SavedSession = Schema.Struct({
   /** The agent has live, non-background work in progress. */
   running: Schema.optional(Schema.Boolean),
   /**
+   * What a running session is doing now, in one line worded like its transcript step ("Editing
+   * checkout.tsx", "Running pnpm test"; tool-activity.ts). Absent unless running.
+   */
+  activity: Schema.optional(Schema.String),
+  /**
    * The latest pull request this session opened. GitHub's state, title and diff
    * size are added when known; the session summary card shows them.
    */

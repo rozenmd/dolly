@@ -30,6 +30,8 @@ const fixture = [
     updatedAt: now - 1_000,
     archived: false,
     running: true,
+    // What it is doing now, which the server reads from its live run.
+    activity: "Editing checkout.tsx",
   },
   {
     id: "sdk",
@@ -159,7 +161,7 @@ const rootTranscript = {
   docs: {},
 };
 
-// The working thread: its latest step is an edit, which its card shows.
+// The working thread, as its thread view reads it: its latest step is an edit.
 const flakyTranscript = {
   entries: [
     {
@@ -210,11 +212,13 @@ function transcriptFor(id = "") {
 let sessions: typeof fixture = [];
 let updates: unknown[] = [];
 let messages: { session: string; content?: string; requestId?: string }[] = [];
+let transcriptReads: string[] = [];
 
 test.beforeEach(async ({ page }) => {
   sessions = structuredClone(fixture);
   updates = [];
   messages = [];
+  transcriptReads = [];
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -235,8 +239,11 @@ test.beforeEach(async ({ page }) => {
 
     const transcript = /^\/api\/sessions\/([^/]+)$/.exec(path);
 
-    if (transcript && route.request().method() === "GET")
+    if (transcript && route.request().method() === "GET") {
+      transcriptReads.push(transcript[1]);
+
       return route.fulfill({ json: transcriptFor(transcript[1]) });
+    }
 
     if (path.startsWith("/api/sessions/") && route.request().method() === "PUT") {
       const id = path.split("/").at(-1);
@@ -325,6 +332,8 @@ test("keeps spawned sessions out of the sidebar and shows them with their parent
   await expect(cards).toHaveCount(2);
   await expect(cards.first()).toContainText("Working · Editing checkout.tsx");
   await expect(cards.last()).toContainText("Merged #42");
+  // The step comes from the session list; the card never reads the working thread's transcript.
+  expect(transcriptReads).not.toContain("flaky");
 
   // On a wide window a thread opens beside the conversation, in the summary card.
   await cards.first().click();

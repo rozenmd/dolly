@@ -1,6 +1,12 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Harness, TaskGraph } from "@earendil-works/pi-durable";
+import {
+  LiveDoc,
+  type ConversationId,
+  type Harness,
+  type TaskGraph,
+} from "@earendil-works/pi-durable";
 import { exceptionDetails } from "./diagnostics";
+import { liveStepKey, sessionActivity } from "./session-activity";
 
 /** Hibernation tag for sidebar sockets, apart from the per-session transcript streams. */
 const TAG = "sessions";
@@ -21,14 +27,43 @@ function liveConversations(graph: TaskGraph) {
   return [...live].sort().join(",");
 }
 
+/** Conversations with any non-background task, whose live doc the feed watches for activity. */
+function busyConversations(graph: TaskGraph) {
+  const busy = new Map<string, ConversationId>();
+
+  for (const task of Object.values(graph.tasks))
+    if (!task.background) busy.set(String(task.conversationId), task.conversationId);
+
+  return busy;
+}
+
+/** At most one activity announcement in this window, for all sessions together. */
+export const ACTIVITY_THROTTLE_MS = 2_000;
+
+/** A busy session's live doc watch and the activity last seen for it. */
+type Watched = {
+  id: ConversationId;
+  stop: () => void;
+  key?: string;
+  text?: string | undefined;
+};
+
 /**
  * Tells open sidebars that the session list changed, so they refetch at once instead of on their
  * next poll. Sockets hibernate, so an idle tab does not keep the Durable Object awake. Running
- * dots follow the task graph, which is watched only while a sidebar listens.
+ * dots follow the task graph, which is watched only while a sidebar listens. Each busy session's
+ * live doc is watched too: when its step may have moved (session-activity.ts liveStepKey), its
+ * activity is checked and, if the text changed, announced. Activity announcements are coalesced
+ * feed-wide, since each one makes every sidebar refetch the whole list: at most one per
+ * ACTIVITY_THROTTLE_MS, trailing, folding every session that moved meanwhile.
  */
 export class SessionsFeed {
   private graph?: Promise<void>;
   private stopGraph?: () => Promise<void>;
+  private readonly watched = new Map<string, Watched>();
+  private readonly dirty = new Set<string>();
+  private activityTimer?: ReturnType<typeof setTimeout> | undefined;
+  private activityAnnounced = 0;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -88,6 +123,7 @@ export class SessionsFeed {
     };
 
     let live = liveConversations(watch.value);
+    this.watchBusy(busyConversations(watch.value));
 
     watch.start(async (call) => {
       if (call.kind !== "value") return;
@@ -99,12 +135,117 @@ export class SessionsFeed {
       }
 
       const next = liveConversations(call.value);
+      this.watchBusy(busyConversations(call.value));
 
       if (next === live) return;
       live = next;
       this.changed();
     });
 
-    await watch.closed;
+    try {
+      await watch.closed;
+    } finally {
+      for (const key of this.watched.keys()) this.unwatch(key);
+      clearTimeout(this.activityTimer);
+      this.activityTimer = undefined;
+    }
+  }
+
+  /** Watch the live docs of sessions that became busy, and stop those that settled. */
+  private watchBusy(busy: Map<string, ConversationId>) {
+    for (const key of this.watched.keys()) if (!busy.has(key)) this.unwatch(key);
+
+    for (const [key, id] of busy) if (!this.watched.has(key)) void this.watchLive(key, id);
+  }
+
+  private async watchLive(key: string, id: ConversationId) {
+    let stopped = false;
+
+    const entry: Watched = {
+      id,
+      stop: () => {
+        stopped = true;
+      },
+    };
+
+    this.watched.set(key, entry);
+
+    // What the list already shows when it starts, learned without an announcement.
+    void sessionActivity(this.harness(), id, [])
+      .then((text) => {
+        entry.text = text;
+      })
+      .catch(() => {});
+
+    const watch = await this.harness()
+      .watchDoc(LiveDoc, id, BACKGROUND_CONTEXT)
+      .catch(() => undefined);
+
+    if (!watch) return;
+
+    if (stopped || this.watched.get(key) !== entry) {
+      void watch.stop();
+
+      return;
+    }
+
+    entry.stop = () => void watch.stop();
+    entry.key = liveStepKey(watch.value);
+
+    watch.start(async (call) => {
+      if (call.kind !== "value" || this.watched.get(key) !== entry) return;
+
+      const next = liveStepKey(call.value);
+
+      if (next === entry.key) return;
+      entry.key = next;
+      this.activityMoved(key);
+    });
+  }
+
+  private unwatch(key: string) {
+    this.watched.get(key)?.stop();
+    this.watched.delete(key);
+    this.dirty.delete(key);
+  }
+
+  /** A session's step may have moved: check it with the others in the next feed-wide window. */
+  private activityMoved(key: string) {
+    this.dirty.add(key);
+
+    if (this.activityTimer) return;
+
+    const wait = Math.max(0, this.activityAnnounced + ACTIVITY_THROTTLE_MS - Date.now());
+
+    this.activityTimer = setTimeout(() => {
+      this.activityTimer = undefined;
+      void this.checkActivity();
+    }, wait);
+  }
+
+  private async checkActivity() {
+    const moved = [...this.dirty].flatMap((key) => {
+      const entry = this.watched.get(key);
+
+      return entry ? [entry] : [];
+    });
+
+    this.dirty.clear();
+
+    // Compared in memory only and never sent, so it needs no redaction here; the list redacts.
+    const changes = await Promise.all(
+      moved.map(async (entry) => {
+        const text = await sessionActivity(this.harness(), entry.id, []).catch(() => entry.text);
+
+        if (text === entry.text) return false;
+        entry.text = text;
+
+        return true;
+      }),
+    );
+
+    if (!changes.includes(true)) return;
+    this.activityAnnounced = Date.now();
+    this.changed();
   }
 }

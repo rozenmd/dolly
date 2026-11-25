@@ -137,6 +137,7 @@ export function WorkspaceApp() {
         // The open session streams live state; others rely on the polled list.
         running: item.id === selected && snapshot ? running : Boolean(item.running),
         pullRequest: item.pullRequest,
+        activity: item.activity,
         automationRun: item.automationRun?.name,
         parentId: item.parentId,
         kept: item.kept,
