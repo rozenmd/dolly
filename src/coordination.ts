@@ -2,11 +2,15 @@ import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context"
 import {
   AssistantEntry,
   configure,
+  type ConversationHandle,
   defineDoc,
   defineTool,
   type ToolExecutionResult,
   defineTask,
   type ConversationId,
+  type Cursor,
+  type EntryId,
+  type EntryRecord,
   type Harness,
   type TaskId,
   type ToolRegistration,
@@ -18,10 +22,43 @@ import * as Schema from "effect/Schema";
 import { ConversationWorkspace } from "./workspace";
 import { SessionModel, modelProvider, ChildRequest, ChildMessage } from "./models";
 import { attempt } from "./operations";
+import { childReportMessage } from "./child-report-message";
+import {
+  childEvidence,
+  formatChildEvidence,
+  lastReply,
+  tail,
+  workerBriefing,
+} from "./child-report";
+
+/**
+ * Child sessions. A session delegates self-contained work with spawn_task and ends its turn; it is
+ * never held open waiting. Each message to a child (its task, a follow-up, or a report from one of
+ * its own children) is delivered by a background task that waits for the child's turn to end and
+ * then reports back: the child's final reply, with facts computed from its transcript attached, as
+ * a new message in the parent. A child that is itself waiting on children reports once they are
+ * done, so a parent hears from each subtree once its work settles.
+ */
 
 export const MAX_DEPTH = 3;
-export const MAX_CHILDREN = 8;
-export const MAX_DELIVERIES = 32;
+
+/** Children working at once: those with a message they haven't finished a turn on. */
+export const MAX_WORKING = 8;
+
+/** Children one session may start over its lifetime. */
+export const MAX_CHILDREN = 32;
+
+/** Messages queued for one child that it hasn't answered yet. */
+export const MAX_PENDING = 8;
+
+/** Settled message receipts kept for request deduplication. */
+const KEPT_RECEIPTS = 64;
+
+/** How much of a child's final reply a report carries. */
+const REPLY_MAX_CHARS = 8_000;
+
+/** How much of a child's transcript one report reads for evidence. */
+const EVIDENCE_SCAN_ENTRIES = 2_000;
 
 /** Pi's ownership edges are authoritative for ancestry and recursive cancellation. */
 export const SessionIndex = defineDoc<{ ids: Record<string, ConversationId> }>({
@@ -32,20 +69,42 @@ export const SessionIndex = defineDoc<{ ids: Record<string, ConversationId> }>({
   checkpointWhen: () => false,
 });
 
-type DeliveryInput = { childId: ConversationId; content: string };
+type DeliveryInput = {
+  childId: ConversationId;
+  content: string;
+  /** The session the child reports back to; absent on deliveries made before reports existed. */
+  parentId?: ConversationId;
+};
 
 type DeliveryResult =
   | { status: "answered"; text: string }
   | { status: "unanswered"; reason: string };
 
-type Child = { id: ConversationId; model: string; content: string; taskId: TaskId<DeliveryResult> };
+type Child = {
+  id: ConversationId;
+  model: string;
+  /** The task as the parent wrote it, without the worker briefing. */
+  content: string;
+  taskId: TaskId<DeliveryResult>;
+  /** The answer entry last reported, so two messages answered together report once. */
+  reported?: string;
+  /** The newest entry a report has covered: the next report's evidence starts after it. */
+  reportedThrough?: EntryId;
+  /** How the child's last turn ended, for status reads. */
+  last?: { outcome: "answered" | "stopped"; reason?: string; at: number };
+};
+
+type Delivery = {
+  id: TaskId<DeliveryResult>;
+  childId: ConversationId;
+  content: string;
+  /** Not yet answered: the child is working on it. */
+  pending?: true;
+};
 
 const Children = defineDoc<{
   children: Record<string, Child>;
-  deliveries: Record<
-    string,
-    { id: TaskId<DeliveryResult>; childId: ConversationId; content: string }
-  >;
+  deliveries: Record<string, Delivery>;
 }>({
   kind: "app.children",
   version: 1,
@@ -55,6 +114,8 @@ const Children = defineDoc<{
   initial: () => ({ children: {}, deliveries: {} }),
   checkpointWhen: () => false,
 });
+
+type ChildrenState = { children: Record<string, Child>; deliveries: Record<string, Delivery> };
 
 // A completed background anchor retains the child ownership edge without keeping the parent busy.
 const Anchor = defineTask<null, { phase: "done" }, null>({
@@ -72,7 +133,66 @@ const Anchor = defineTask<null, { phase: "done" }, null>({
     runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
 });
 
-const Delivery = defineTask<DeliveryInput, { phase: "deliver" }, DeliveryResult>({
+const findChild = (state: ChildrenState, id: ConversationId | string) =>
+  Object.values(state.children).find((child) => String(child.id) === String(id));
+
+const working = (state: ChildrenState) =>
+  new Set(
+    Object.values(state.deliveries)
+      .filter((delivery) => delivery.pending)
+      .map((delivery) => String(delivery.childId)),
+  );
+
+const title = (content: string) => content.trim().split("\n")[0]?.slice(0, 80) ?? "";
+
+/** Marks a delivery answered and forgets old receipts beyond what deduplication needs. */
+function settle(state: ChildrenState, id: TaskId<DeliveryResult>) {
+  for (const [key, delivery] of Object.entries(state.deliveries))
+    if (String(delivery.id) === String(id)) {
+      // Reports between sessions have no request to deduplicate against.
+      if (key.startsWith("report:")) delete state.deliveries[key];
+      else delete delivery.pending;
+    }
+
+  const settled = Object.entries(state.deliveries).filter(
+    ([key, delivery]) => !delivery.pending && !key.startsWith("spawn:"),
+  );
+
+  for (const [key] of settled.slice(0, Math.max(0, settled.length - KEPT_RECEIPTS)))
+    delete state.deliveries[key];
+}
+
+/** A span of a conversation's transcript, oldest first, bounded. */
+async function readSpan(
+  read: (
+    query: { minEntryId?: EntryId; maxEntryId?: EntryId; order: "ascending" },
+    limit: number,
+    cursor: Cursor | undefined,
+  ) => Promise<{ items: readonly EntryRecord[]; next?: Cursor }>,
+  after: EntryId | undefined,
+  through: EntryId | undefined,
+) {
+  const items: EntryRecord[] = [];
+  let cursor: Cursor | undefined;
+
+  const query = {
+    order: "ascending" as const,
+    ...(after !== undefined && { minEntryId: after }),
+    ...(through !== undefined && { maxEntryId: through }),
+  };
+
+  do {
+    const page = await read(query, 200, cursor);
+
+    // The range is inclusive; the entry the last report covered is not news.
+    items.push(...page.items.filter((entry) => entry.id !== after));
+    cursor = page.next;
+  } while (cursor && items.length < EVIDENCE_SCAN_ENTRIES);
+
+  return items.slice(-EVIDENCE_SCAN_ENTRIES);
+}
+
+const DeliveryTask = defineTask<DeliveryInput, { phase: "deliver" }, DeliveryResult>({
   name: "app.child-delivery",
   version: 1,
   initial: () => ({ phase: "deliver" }),
@@ -80,44 +200,75 @@ const Delivery = defineTask<DeliveryInput, { phase: "deliver" }, DeliveryResult>
     deliver: (task, runtime, context) =>
       Effect.runPromise(
         Effect.gen(function* () {
-          const child = yield* attempt("child.open", () =>
-            runtime.conversation(task.input.childId, context),
-          );
+          const { childId, parentId } = task.input;
+
+          const child = yield* attempt("child.open", () => runtime.conversation(childId, context));
 
           if (!child) return yield* Effect.die("Child conversation missing");
 
+          // A working child takes the message into its current turn; an idle one starts a turn.
           const submission = yield* attempt("child.submit", () =>
             child.submit(
               {
                 type: "input",
                 content: task.input.content,
                 requestId: `delivery:${task.id}`,
-                whenBusy: "followUp",
+                whenBusy: "steer",
               },
               context,
             ),
           );
 
           const settled = yield* attempt("child.wait", () => submission.wait(context));
+
+          const answer =
+            settled.type === "input" && settled.status === "done" ? settled.answer : undefined;
+
+          // The span since the last report, read before the commit: committed entries don't change.
+          const before = parentId
+            ? yield* attempt("children.read", () => runtime.snapshot(Children, parentId, context))
+            : undefined;
+
+          const span = parentId
+            ? yield* attempt("child.entries", () =>
+                readSpan(
+                  (query, limit, cursor) => runtime.entries(query, limit, cursor, context),
+                  before ? findChild(before, childId)?.reportedThrough : undefined,
+                  answer,
+                ),
+              )
+            : [];
+
+          const parent = parentId
+            ? yield* attempt("parent.open", () => runtime.conversation(parentId, context))
+            : undefined;
+
           yield* attempt("child.settle", () =>
             runtime.commit(async (tx) => {
-              let result: DeliveryResult;
+              const answered =
+                answer === undefined ? undefined : await tx.entry(AssistantEntry, answer);
 
-              if (settled.status === "unanswered")
-                result = { status: "unanswered", reason: settled.reason };
-              else if (settled.type === "input") {
-                const entry = await tx.entry(AssistantEntry, settled.answer);
+              const result: DeliveryResult =
+                settled.status === "unanswered"
+                  ? { status: "unanswered", reason: settled.reason }
+                  : answer === undefined
+                    ? { status: "unanswered", reason: "Unexpected submission type" }
+                    : {
+                        status: "answered",
+                        text: lastReply(answered ? [answered] : []).slice(0, 16_384),
+                      };
 
-                const text = (entry?.model ?? [])
-                  .flatMap((message) =>
-                    message.role === "assistant"
-                      ? message.content.flatMap((part) => (part.type === "text" ? [part.text] : []))
-                      : [],
-                  )
-                  .join("\n");
-
-                result = { status: "answered", text: text.slice(0, 16_384) };
-              } else result = { status: "unanswered", reason: "Unexpected submission type" };
+              if (parentId)
+                await report(tx, {
+                  task: task.id,
+                  parentId,
+                  childId,
+                  parent,
+                  result,
+                  answer,
+                  span,
+                  now: runtime.now(),
+                });
 
               return { status: "terminal", outcome: { status: "completed", result } };
             }, context),
@@ -126,14 +277,146 @@ const Delivery = defineTask<DeliveryInput, { phase: "deliver" }, DeliveryResult>
         { signal: context.abortSignal },
       ),
   },
-  abort: (_, runtime, context) =>
-    runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
+  abort: (task, runtime, context) =>
+    runtime.commit(async (tx) => {
+      // A stopped message no longer counts as work, so the parent's own report isn't held up.
+      if (task.input.parentId) {
+        const state = await tx.doc(Children, task.input.parentId);
+        settle(state, task.id);
+        const child = findChild(state, task.input.childId);
+
+        if (child) child.last = { outcome: "stopped", reason: "aborted", at: runtime.now() };
+      }
+
+      return { status: "terminal", outcome: { status: "aborted" } };
+    }, context),
 });
 
-export const coordinationTasks = [Anchor, Delivery];
+/**
+ * Settle one delivery and, when the child's work has settled (none of its own children are still
+ * working), send its report to the parent: straight into a top-level parent, or through another
+ * delivery into a parent that is itself a child, so that parent's answer reports upward in turn.
+ */
+async function report(
+  tx: Tx,
+  input: {
+    task: TaskId<DeliveryResult>;
+    parentId: ConversationId;
+    childId: ConversationId;
+    parent: ConversationHandle | undefined;
+    result: DeliveryResult;
+    answer: EntryId | undefined;
+    span: readonly EntryRecord[];
+    now: number;
+  },
+) {
+  const state = await tx.doc(Children, input.parentId);
+  settle(state, input.task);
+  const child = findChild(state, input.childId);
+
+  if (!child) return;
+
+  // Stopping is the owner's or the parent's own doing; it isn't news to report.
+  if (input.result.status === "unanswered" && input.result.reason === "aborted") {
+    child.last = { outcome: "stopped", reason: "aborted", at: input.now };
+
+    return;
+  }
+
+  child.last =
+    input.result.status === "answered"
+      ? { outcome: "answered", at: input.now }
+      : { outcome: "stopped", reason: input.result.reason, at: input.now };
+
+  const key = input.answer === undefined ? `task:${input.task}` : String(input.answer);
+
+  if (child.reported === key) return;
+
+  // The child still has messages to answer (a follow-up, or a report from its own child), or is
+  // waiting on children of its own: it reports once all of that has settled, covering it all.
+  if (working(state).has(String(input.childId))) return;
+
+  if (working(await tx.doc(Children, input.childId)).size > 0) return;
+
+  child.reported = key;
+  const newest = input.span.at(-1)?.id;
+
+  if (newest !== undefined) child.reportedThrough = newest;
+  const workspace = (await tx.doc(ConversationWorkspace, input.childId)).config;
+  const reply = lastReply(input.span);
+
+  const others = [...working(state)].flatMap((id) => {
+    if (id === String(input.childId)) return [];
+    const other = findChild(state, id);
+
+    return [other ? `${id} (${title(other.content)})` : id];
+  });
+
+  const content = childReportMessage({
+    child: String(input.childId),
+    outcome: input.result.status === "answered" ? "answered" : "stopped",
+    headline:
+      input.result.status === "answered"
+        ? (reply
+            .split("\n")
+            .find((line) => line.trim())
+            ?.trim()
+            .slice(0, 100) ?? "finished")
+        : `stopped: ${input.result.reason}`,
+    task: title(child.content),
+    reply:
+      input.result.status === "answered"
+        ? tail(reply, REPLY_MAX_CHARS)
+        : `The child's turn ended without an answer (${input.result.reason}).${reply ? `\n\nIts last message:\n${tail(reply, REPLY_MAX_CHARS)}` : ""}`,
+    evidence: formatChildEvidence(childEvidence(input.span), {
+      repository: workspace?.repository,
+      branch: workspace?.branch,
+    }),
+    working: others.length
+      ? `${others.length} other child session${others.length === 1 ? "" : "s"}: ${others.join(", ")}`
+      : "",
+  });
+
+  const grandparent = (await tx.conversation(input.parentId))?.owner?.conversationId;
+
+  if (grandparent === undefined) {
+    await input.parent?.submit(tx, {
+      type: "input",
+      content,
+      requestId: `child-report:${input.task}`,
+      whenBusy: "followUp",
+    });
+
+    return;
+  }
+
+  // The parent is a child too: deliver the report like any message, so its answer reports upward.
+  const taskId = await tx.createTask(
+    DeliveryTask,
+    { childId: input.parentId, content, parentId: grandparent },
+    { conversationId: input.parentId, ownership: { kind: "conversation" }, background: true },
+  );
+
+  (await tx.doc(Children, grandparent)).deliveries[`report:${taskId}`] = {
+    id: taskId,
+    childId: input.parentId,
+    content: "",
+    pending: true,
+  };
+}
+
+export const coordinationTasks = [Anchor, DeliveryTask];
 
 export async function indexSession(tx: Tx, id: ConversationId) {
   (await tx.doc(SessionIndex)).ids[id] = id;
+}
+
+export type ChildState = "working" | "idle" | "stopped";
+
+function childState(state: ChildrenState, child: Child): ChildState {
+  if (working(state).has(String(child.id))) return "working";
+
+  return child.last?.outcome === "stopped" ? "stopped" : "idle";
 }
 
 export class Coordination {
@@ -175,15 +458,17 @@ export class Coordination {
           const existing = state.children[key];
 
           return existing.content === input.content && existing.model === model
-            ? { id: String(existing.id), model: existing.model, taskId: String(existing.taskId) }
+            ? { id: String(existing.id), model: existing.model }
             : { error: "requestId already used with different content or model" };
         }
 
         if (Object.keys(state.children).length >= MAX_CHILDREN)
-          return { error: "Child limit reached (8 per session)" };
+          return { error: `Child limit reached (${MAX_CHILDREN} per session)` };
 
-        if (Object.keys(state.deliveries).length >= MAX_DELIVERIES)
-          return { error: "Delivery limit reached (32 per session)" };
+        if (working(state).size >= MAX_WORKING)
+          return {
+            error: `${MAX_WORKING} child sessions are already working. Wait for a report, or stop one with cancel_task.`,
+          };
         let depth = 0;
         let ancestor = await tx.conversation(parent);
 
@@ -192,7 +477,10 @@ export class Coordination {
           ancestor = await tx.conversation(ancestor.owner.conversationId);
         }
 
-        if (depth >= MAX_DEPTH) return { error: "Nesting limit reached (3 child levels)" };
+        if (depth >= MAX_DEPTH)
+          return {
+            error: `Nesting limit reached (${MAX_DEPTH} child levels). Do the work here instead of delegating further.`,
+          };
 
         const anchor = await tx.createTask(Anchor, null, {
           ownership: { kind: "conversation" },
@@ -205,17 +493,23 @@ export class Coordination {
         });
         const parentWorkspace = await tx.doc(ConversationWorkspace, parent);
 
-        if (parentWorkspace.config) {
-          const childWorkspace = await tx.doc(ConversationWorkspace, child.id);
-          childWorkspace.config = {
-            ...parentWorkspace.config,
-            branch: `dolly/session-${child.id}`,
-          };
-        }
+        const config = parentWorkspace.config && {
+          ...parentWorkspace.config,
+          branch: `dolly/session-${child.id}`,
+        };
+
+        if (config) (await tx.doc(ConversationWorkspace, child.id)).config = config;
+
+        const briefing = workerBriefing({
+          repository: config?.repository,
+          branch: config?.branch,
+        });
+
+        const content = `${input.content}\n\n${briefing}`;
 
         const taskId = await tx.createTask(
-          Delivery,
-          { childId: child.id, content: input.content },
+          DeliveryTask,
+          { childId: child.id, content, parentId: parent },
           {
             conversationId: child.id,
             ownership: { kind: "conversation" },
@@ -228,9 +522,10 @@ export class Coordination {
           id: taskId,
           childId: child.id,
           content: input.content,
+          pending: true,
         };
 
-        return { id: String(child.id), model, taskId: String(taskId) };
+        return { id: String(child.id), model };
       }, context),
     );
   });
@@ -245,7 +540,7 @@ export class Coordination {
     return yield* attempt("child.message", () =>
       this.harness.commit(async (tx) => {
         const state = await tx.doc(Children, parent);
-        const child = Object.values(state.children).find((value) => String(value.id) === childId);
+        const child = findChild(state, childId);
 
         if (!child) return { error: "Not a direct child of this session" };
         const key = `send:${input.requestId}`;
@@ -254,16 +549,22 @@ export class Coordination {
           const existing = state.deliveries[key];
 
           return existing.childId === child.id && existing.content === input.content
-            ? { taskId: String(existing.id) }
+            ? { id: String(child.id), sent: true }
             : { error: "requestId already used with different target or content" };
         }
 
-        if (Object.keys(state.deliveries).length >= MAX_DELIVERIES)
-          return { error: "Delivery limit reached (32 per session)" };
+        const pending = Object.values(state.deliveries).filter(
+          (delivery) => delivery.pending && delivery.childId === child.id,
+        ).length;
+
+        if (pending >= MAX_PENDING)
+          return {
+            error: `${MAX_PENDING} messages to this child are still unanswered. Wait for its report.`,
+          };
 
         const taskId = await tx.createTask(
-          Delivery,
-          { childId: child.id, content: input.content },
+          DeliveryTask,
+          { childId: child.id, content: input.content, parentId: parent },
           {
             conversationId: child.id,
             ownership: { kind: "conversation" },
@@ -271,9 +572,14 @@ export class Coordination {
           },
         );
 
-        state.deliveries[key] = { id: taskId, childId: child.id, content: input.content };
+        state.deliveries[key] = {
+          id: taskId,
+          childId: child.id,
+          content: input.content,
+          pending: true,
+        };
 
-        return { taskId: String(taskId) };
+        return { id: String(child.id), sent: true };
       }, context),
     );
   });
@@ -283,46 +589,77 @@ export class Coordination {
       this.harness.snapshot(Children, parent, BACKGROUND_CONTEXT),
     );
 
+    const current = state ?? { children: {}, deliveries: {} };
+
     return {
-      children: Object.values(state?.children ?? {}).map(({ id, model, taskId }) => ({
-        id: String(id),
-        model,
-        taskId: String(taskId),
+      children: Object.values(current.children).map((child) => ({
+        id: String(child.id),
+        model: child.model,
+        title: title(child.content),
+        state: childState(current, child),
       })),
     };
   });
 
-  receipt = Effect.fn("Coordination.receipt")(function* (
+  /** A direct child as it stands: working or not, its latest reply and what it did since its last report. */
+  status = Effect.fn("Coordination.status")(function* (
     this: Coordination,
     parent: ConversationId,
-    taskId: string,
-    wait: boolean,
+    childId: string,
     context = BACKGROUND_CONTEXT,
   ) {
-    const state = yield* attempt("deliveries.read", () =>
+    const state = yield* attempt("children.read", () =>
       this.harness.snapshot(Children, parent, context),
     );
 
-    const delivery = Object.values(state?.deliveries ?? {}).find(
-      (value) => String(value.id) === taskId,
+    const current = state ?? { children: {}, deliveries: {} };
+    const child = findChild(current, childId);
+
+    if (!child) return { error: "Not a direct child of this session" };
+
+    const conversation = yield* attempt("child.open", () =>
+      this.harness.conversation(child.id, context),
     );
 
-    if (!delivery) return { error: "Task not found in this session" };
+    if (!conversation) return { error: "Child session not found" };
 
-    const task = yield* attempt("delivery.status", () =>
-      wait
-        ? this.harness.waitForTask(delivery.id, context)
-        : this.harness.getTask(delivery.id, context),
+    const span = yield* attempt("child.entries", () =>
+      readSpan(
+        (query, limit, cursor) => conversation.entries(query, limit, cursor, context),
+        child.reportedThrough,
+        undefined,
+      ),
     );
 
-    if (!task) return { error: "Task not found" };
+    // The latest reply may predate the last report, so it comes from the transcript's end.
+    const recent = yield* attempt("child.recent", () =>
+      conversation.entries({ order: "descending" }, 50, undefined, context),
+    );
+
+    const workspace = yield* attempt("child.workspace", () =>
+      this.harness.snapshot(ConversationWorkspace, child.id, context),
+    );
+
+    const pending = Object.values(current.deliveries).filter(
+      (delivery) => delivery.pending && delivery.childId === child.id,
+    ).length;
 
     return {
-      taskId: String(task.id),
-      childId: String(delivery.childId),
-      status: task.state.status,
-      outcome: task.state.status === "terminal" ? task.state.outcome.status : undefined,
-      result: task.state.status === "terminal" ? task.state.outcome.result : undefined,
+      id: String(child.id),
+      model: child.model,
+      title: title(child.content),
+      state: childState(current, child),
+      ...(pending && { unanswered_messages: pending }),
+      ...(child.last && {
+        last_turn: child.last.reason
+          ? `${child.last.outcome} (${child.last.reason})`
+          : child.last.outcome,
+      }),
+      latest_reply: tail(lastReply([...recent.items].reverse()), 4_000) || undefined,
+      since_last_report: formatChildEvidence(childEvidence(span), {
+        repository: workspace?.config?.repository,
+        branch: workspace?.config?.branch,
+      }),
     };
   });
 
@@ -336,9 +673,7 @@ export class Coordination {
       this.harness.snapshot(Children, parent, context),
     );
 
-    const child = Object.values(state?.children ?? {}).find(
-      (value) => String(value.id) === childId,
-    );
+    const child = state ? findChild(state, childId) : undefined;
 
     if (!child) return { error: "Not a direct child of this session" };
 
@@ -349,7 +684,7 @@ export class Coordination {
     if (conversation)
       yield* attempt("child.abort", () => conversation.abort(context, { background: true }));
 
-    return { state: "aborted" };
+    return { id: String(child.id), state: "stopped" };
   });
 
   tools(): ToolRegistration[] {
@@ -363,11 +698,13 @@ export class Coordination {
         { signal: context.abortSignal },
       );
 
+    const noted = <A extends object>(result: A, note: string) =>
+      "error" in result ? result : { ...result, note };
+
     return [
       defineTool({
         name: "spawn_task",
-        description:
-          "Start a child agent with its own sandbox. Returns id and taskId immediately. Inherits your model unless model is supplied. Limits: 3 child levels, 8 children per session. Use wait_for_task for its answer.",
+        description: `Start a child session for a self-contained task, in its own sandbox, and return at once with its id. Write the task so it stands alone: goal, context, constraints, acceptance criteria and what to report. The child reports back here as a new message when its turn ends (once its own children have answered): its final reply, plus facts Dolly computed from its transcript (files written, commands run, failures, commits, pushes and pull requests). So end your turn after spawning instead of polling or sleeping. Inherits your model unless model is supplied. Limits: ${MAX_DEPTH} child levels, ${MAX_WORKING} children working at once, ${MAX_CHILDREN} per session.`,
         parameters: obj({ content: str({ minLength: 1, maxLength: 32_768 }), model: opt(str()) }),
         replay: "safe",
         executionMode: "sequential",
@@ -376,14 +713,22 @@ export class Coordination {
             Schema.decodeUnknownEffect(ChildRequest)({
               ...input,
               requestId: `tool:${api.taskId}`,
-            }).pipe(Effect.flatMap((parsed) => this.spawn(api.conversationId, parsed, context))),
+            }).pipe(
+              Effect.flatMap((parsed) => this.spawn(api.conversationId, parsed, context)),
+              Effect.map((result) =>
+                noted(
+                  result,
+                  "The child is working in the background and reports back here when its turn ends. End your turn now unless you have other work to do; don't poll. Follow up with send_to_session, look in with task_status, stop it with cancel_task.",
+                ),
+              ),
+            ),
             context,
           ),
       }),
       defineTool({
         name: "send_to_session",
         description:
-          "Send a follow-up to a direct child. Returns a taskId; use wait_for_task for the answer.",
+          "Send a follow-up to one of your direct children (id from spawn_task or list_children). A working child gets it in its current turn; an idle one starts a new turn. Its answer reports back here like the first one, so end your turn instead of polling.",
         parameters: obj({ id: str(), content: str({ minLength: 1, maxLength: 32_768 }) }),
         replay: "safe",
         executionMode: "sequential",
@@ -394,38 +739,35 @@ export class Coordination {
               id,
               { content, requestId: `tool:${api.taskId}` },
               context,
+            ).pipe(
+              Effect.map((result) =>
+                noted(result, "Sent. The child reports back here when its turn ends."),
+              ),
             ),
             context,
           ),
       }),
       defineTool({
-        name: "wait_for_task",
-        description:
-          "Wait for one of your child delivery tasks to finish and return its answer or failure. Survives restarts. Does not wait on unrelated sessions.",
-        parameters: obj({ taskId: str() }),
-        replay: "safe",
-        execute: ({ taskId }, api, context) =>
-          reply(this.receipt(api.conversationId, taskId, true, context), context),
-      }),
-      defineTool({
         name: "list_children",
-        description: "List your direct children's ids, models and initial taskIds.",
+        description:
+          "List your direct children: id, model, task title, and whether each is working, idle or stopped.",
         parameters: obj({}),
         replay: "safe",
         execute: (_, api, context) => reply(this.list(api.conversationId), context),
       }),
       defineTool({
         name: "task_status",
-        description: "Get a child delivery task's durable status and answer without waiting.",
-        parameters: obj({ taskId: str() }),
+        description:
+          "Look in on a direct child without waiting: whether it is working, its latest reply, and what it has done since its last report (files written, commands run, failures, commits, pushes and pull requests).",
+        parameters: obj({ id: str() }),
         replay: "safe",
-        execute: ({ taskId }, api, context) =>
-          reply(this.receipt(api.conversationId, taskId, false, context), context),
+        execute: ({ id }, api, context) =>
+          reply(this.status(api.conversationId, id, context), context),
       }),
       defineTool({
         name: "cancel_task",
         description:
-          "Stop a direct child, its pending deliveries and all descendants. The child can receive new messages afterwards.",
+          "Stop a direct child, its unanswered messages and all its descendants. Stopped work sends no report. The child can receive new messages afterwards.",
         parameters: obj({ id: str() }),
         replay: "unsafe",
         executionMode: "sequential",

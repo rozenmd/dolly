@@ -4054,7 +4054,7 @@ export class Agent extends DurableObject<Env> {
   spawnChild(
     id: string,
     input: typeof ChildRequest.Type,
-  ): Promise<{ id: string; model: string; taskId: string } | { error: string } | undefined> {
+  ): Promise<{ id: string; model: string } | { error: string } | undefined> {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
         const parsed = yield* Schema.decodeUnknownEffect(ChildRequest)(input);
@@ -4086,7 +4086,7 @@ export class Agent extends DurableObject<Env> {
     id: string,
     childId: string,
     input: typeof ChildMessage.Type,
-  ): Promise<{ taskId: string } | { error: string } | undefined> {
+  ): Promise<{ id: string; sent: boolean } | { error: string } | undefined> {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
         const parsed = yield* Schema.decodeUnknownEffect(ChildMessage)(input);
@@ -4115,27 +4115,24 @@ export class Agent extends DurableObject<Env> {
     );
   }
 
-  childTask(id: string, taskId: string) {
+  /** A direct child's status, for the HTTP API; reply text is redacted like transcripts. */
+  childStatus(id: string, childId: string) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
         const parent = yield* this.conversation(id);
 
         if (Option.isNone(parent)) return undefined;
 
-        const receipt = yield* new Coordination(() => this.harness).receipt(
-          parent.value.id,
-          taskId,
-          false,
-        );
+        const status = yield* new Coordination(() => this.harness).status(parent.value.id, childId);
 
+        if ("error" in status) return status;
         const secrets = yield* this.credentials.secrets;
 
-        return "result" in receipt && receipt.result?.status === "answered"
-          ? {
-              ...receipt,
-              result: { ...receipt.result, text: redact(receipt.result.text, secrets) },
-            }
-          : receipt;
+        return {
+          ...status,
+          latest_reply: status.latest_reply && redact(status.latest_reply, secrets),
+          since_last_report: redact(status.since_last_report, secrets),
+        };
       }),
     );
   }

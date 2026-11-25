@@ -34,8 +34,8 @@ function makeAgentApi(env: Env) {
       (id: string, childId: string, input: typeof ChildMessage.Type) =>
         rpc("agent.child.send", async () => await agent.sendChild(id, childId, input)),
     ),
-    childTask: Effect.fn("AgentApi.childTask")((id: string, taskId: string) =>
-      rpc("agent.child.task", async () => await agent.childTask(id, taskId)),
+    childStatus: Effect.fn("AgentApi.childStatus")((id: string, childId: string) =>
+      rpc("agent.child.status", async () => await agent.childStatus(id, childId)),
     ),
     transcript: Effect.fn("AgentApi.transcript")((id: string) =>
       rpc("agent.transcript", async () => await agent.transcript(id)),

@@ -1,4 +1,5 @@
 import { expect, test } from "./browser";
+import { childReportMessage } from "../../src/child-report-message";
 
 // Spawned sessions join their root's workspace and are reached from their parent.
 const now = Date.now();
@@ -80,9 +81,7 @@ const spawnResult = (id: string) => ({
   role: "toolResult",
   toolCallId: `call-${id}`,
   toolName: "spawn_task",
-  content: [
-    { type: "text", text: JSON.stringify({ id, model: "gpt-6-sol", taskId: `task-${id}` }) },
-  ],
+  content: [{ type: "text", text: JSON.stringify({ id, model: "gpt-6-sol" }) }],
 });
 
 const rootTranscript = {
@@ -112,6 +111,30 @@ const rootTranscript = {
           timestamp: now - 58_000,
         },
       ],
+    },
+    {
+      id: 3,
+      kind: "pi.user",
+      model: [
+        {
+          role: "user",
+          content: childReportMessage({
+            child: "sdk",
+            outcome: "answered",
+            headline: "Bumped the SDK to 4.2",
+            task: "Bump the SDK",
+            reply: "Bumped the SDK to 4.2. The tests pass; I'm confident.",
+            evidence: "- Branch: dolly/session-sdk in octocat/project\n- Tool calls: 7",
+            working: "1 other child session: flaky (Investigate the flaky test)",
+          }),
+          timestamp: now - 30_000,
+        },
+      ],
+    },
+    {
+      id: 4,
+      kind: "pi.assistant",
+      model: [{ role: "assistant", content: "The SDK bump is merged.", timestamp: now - 29_000 }],
     },
   ],
   docs: {},
@@ -253,6 +276,26 @@ test("keeps spawned sessions out of the sidebar and shows them with their parent
   await expect(
     page.getByRole("heading", { name: "Coordinate the release", exact: true }),
   ).toBeVisible();
+});
+
+test("shows a child's report as a card that opens the child", async ({ page }) => {
+  await expect(page.getByText("The SDK bump is merged.")).toBeVisible();
+
+  // The report is a notice, not a message the owner typed.
+  const report = page.getByRole("group", { name: "child session report", exact: true });
+  await expect(report).toContainText("Report: Bump the SDK");
+  await expect(page.getByText("Bumped the SDK to 4.2. The tests pass")).not.toBeVisible();
+
+  await report.locator("summary").click();
+  await expect(report).toContainText("Bumped the SDK to 4.2. The tests pass; I'm confident.");
+  await expect(report).toContainText("Computed from its transcript");
+  await expect(report).toContainText("Branch: dolly/session-sdk in octocat/project");
+  await expect(report).toContainText("Still working: 1 other child session");
+
+  if (shots) await page.screenshot({ path: `${shots}/desktop-report.png` });
+
+  await report.getByRole("button", { name: "Open Bump the SDK", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Bump the SDK", exact: true })).toBeVisible();
 });
 
 test("hides spawned sessions from the mobile sidebar too", async ({ page }) => {

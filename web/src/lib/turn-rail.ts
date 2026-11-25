@@ -1,6 +1,7 @@
 import type { PromptIndex } from "../../../src/transcript";
 import { parseScheduledMessage } from "../../../src/schedule-message";
 import { parseCiWaitMessage } from "../../../src/ci-wait-message";
+import { parseChildReportMessage } from "../../../src/child-report-message";
 import type { Step, Turn } from "./api";
 
 /**
@@ -140,8 +141,14 @@ function reply(turn: Turn) {
 
 /** A prompt as the rail's one line: what it was about, or its screenshots when it has no words. */
 function promptPreview(text: string, images = 0) {
-  // A scheduled prompt previews as what it asks and a CI wake-up as its outcome, not their labels.
-  const body = parseScheduledMessage(text)?.prompt ?? parseCiWaitMessage(text)?.headline ?? text;
+  // A scheduled prompt previews as what it asks, a CI wake-up or child report as its outcome, not their labels.
+  const report = parseChildReportMessage(text);
+
+  const body =
+    parseScheduledMessage(text)?.prompt ??
+    parseCiWaitMessage(text)?.headline ??
+    (report ? `${report.task}: ${report.headline}` : text);
+
   const line = clamp(flatten(dropLeadingQuote(body)), MAX_PREVIEW);
 
   return line || (images === 1 ? "Screenshot" : images ? `${images} screenshots` : "");
@@ -156,7 +163,11 @@ export function railMarks(turns: readonly Turn[]): RailMark[] {
   return turns.flatMap((turn) => {
     if (!turn.prompt) return [];
 
-    const preview = promptPreview(turn.prompt.text, turn.prompt.images);
+    const report = turn.prompt.childReport;
+
+    const preview = report
+      ? promptPreview(`${report.task}: ${report.headline}`)
+      : promptPreview(turn.prompt.text, turn.prompt.images);
 
     if (!preview) return [];
 

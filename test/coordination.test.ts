@@ -4,22 +4,19 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import { headers, signIn } from "./session";
+import { parseChildReportMessage } from "../src/child-report-message";
 
 let roots: string[] = [];
 
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
-const Created = Schema.Struct({ id: Schema.String, model: Schema.String, taskId: Schema.String });
+const Created = Schema.Struct({ id: Schema.String, model: Schema.String });
 
-const Receipt = Schema.Struct({
-  status: Schema.String,
-  outcome: Schema.optional(Schema.String),
-  result: Schema.optional(
-    Schema.Struct({
-      status: Schema.String,
-      text: Schema.optional(Schema.String),
-      reason: Schema.optional(Schema.String),
-    }),
-  ),
+const Status = Schema.Struct({
+  id: Schema.String,
+  state: Schema.Literals(["working", "idle", "stopped"]),
+  last_turn: Schema.optional(Schema.String),
+  latest_reply: Schema.optional(Schema.String),
+  since_last_report: Schema.String,
 });
 
 type CodexOutput =
@@ -63,6 +60,58 @@ function answer(text = "Child answer") {
   });
 }
 
+function toolCall(name: string, args: Record<string, string>, id = name) {
+  return sse({
+    type: "function_call",
+    id: `fc_${id}`,
+    call_id: `call_${id}`,
+    name,
+    arguments: JSON.stringify(args),
+  });
+}
+
+/** A model request that never answers until its request is aborted. */
+function blocked(init: RequestInit | undefined, onAbort?: () => void) {
+  return new Promise<Response>((_, reject) => {
+    init?.signal?.addEventListener(
+      "abort",
+      () => {
+        onAbort?.();
+        reject(new DOMException("Aborted", "AbortError"));
+      },
+      { once: true },
+    );
+  });
+}
+
+const ModelRequest = Schema.fromJsonString(
+  Schema.Struct({ model: Schema.String, input: Schema.Array(Schema.Unknown) }),
+);
+
+const ToolOutput = Schema.Struct({
+  type: Schema.Literals(["function_call_output"]),
+  output: Schema.String,
+});
+
+/** The model request a mocked fetch received: its model, its first user message and tool outputs. */
+async function modelRequest(init: RequestInit | undefined) {
+  const request = Schema.decodeUnknownSync(ModelRequest)(
+    new TextDecoder().decode(new Uint8Array(await new Response(init?.body).arrayBuffer())),
+  );
+
+  const serialized = JSON.stringify(request.input);
+
+  const first = JSON.stringify(
+    request.input.find((item) => JSON.stringify(item).includes('"role":"user"')) ?? "",
+  );
+
+  const outputs = request.input.flatMap((item) =>
+    Option.toArray(Schema.decodeUnknownOption(ToolOutput)(item)).map((output) => output.output),
+  );
+
+  return { model: request.model, serialized, first, outputs };
+}
+
 async function post(path: string, body: Record<string, string | undefined>) {
   return SELF.fetch(`https://worker/api/sessions/${path}`, {
     method: "POST",
@@ -91,14 +140,56 @@ async function spawn(parent: string, content = "Child prompt", model?: string) {
   return Schema.decodeUnknownSync(Created)(await response.json());
 }
 
-async function receipt(parent: string, taskId: string) {
-  const response = await SELF.fetch(`https://worker/api/sessions/${parent}/tasks/${taskId}`, {
+async function status(parent: string, child: string) {
+  const response = await SELF.fetch(`https://worker/api/sessions/${parent}/children/${child}`, {
     headers,
   });
 
   expect(response.status).toBe(200);
 
-  return Schema.decodeUnknownSync(Receipt)(await response.json());
+  return Schema.decodeUnknownSync(Status)(await response.json());
+}
+
+const idle = (parent: string, child: string) =>
+  expect.poll(async () => (await status(parent, child)).state, { timeout: 4000 }).toBe("idle");
+
+/** The child reports that arrived in a session, oldest first. */
+async function reports(id: string) {
+  const transcript = await (
+    await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })
+  ).json<{ entries: { kind: string; model?: { role: string; content: unknown }[] }[] }>();
+
+  return transcript.entries.flatMap((entry) =>
+    (entry.model ?? []).flatMap((message) => {
+      if (message.role !== "user") return [];
+
+      const text = Schema.is(Schema.String)(message.content)
+        ? message.content
+        : JSON.stringify(message.content);
+
+      const report = parseChildReportMessage(text);
+
+      return report ? [report] : [];
+    }),
+  );
+}
+
+async function userMessages(id: string) {
+  const transcript = await (
+    await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })
+  ).json<{ entries: { kind: string; model?: { role: string; content: unknown }[] }[] }>();
+
+  return transcript.entries.flatMap((entry) =>
+    (entry.model ?? []).flatMap((message) =>
+      message.role === "user"
+        ? [
+            Schema.is(Schema.String)(message.content)
+              ? message.content
+              : JSON.stringify(message.content),
+          ]
+        : [],
+    ),
+  );
 }
 
 beforeEach(async () => {
@@ -121,7 +212,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-it("creates children atomically, deduplicates concurrent requests, persists receipts and scopes messaging", async () => {
+it("creates children atomically, deduplicates requests, reports back and scopes messaging", async () => {
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
   const parent = await root();
   const body = { content: "Child prompt", model: "gpt-6-sol", requestId: crypto.randomUUID() };
@@ -134,24 +225,44 @@ it("creates children atomically, deduplicates concurrent requests, persists rece
   expect(responses.map((response) => response.status)).toEqual([202, 202]);
   const child = Schema.decodeUnknownSync(Created)(await responses[0].json());
   expect(await responses[1].json()).toEqual(child);
-  await expect.poll(async () => (await receipt(parent, child.taskId)).status).toBe("terminal");
-  expect(await receipt(parent, child.taskId)).toMatchObject({
-    outcome: "completed",
-    result: { status: "answered", text: "Child answer" },
+  await idle(parent, child.id);
+  expect(await status(parent, child.id)).toMatchObject({
+    last_turn: "answered",
+    latest_reply: "Child answer",
   });
-  expect(fetch).toHaveBeenCalledTimes(1);
+
+  // The child's answer arrives in the parent as a report, which the parent then answers.
+  await expect.poll(async () => (await reports(parent)).length).toBe(1);
+  expect((await reports(parent))[0]).toMatchObject({
+    child: child.id,
+    outcome: "answered",
+    headline: "Child answer",
+    task: "Child prompt",
+    reply: "Child answer",
+  });
+  expect((await reports(parent))[0]?.evidence).toContain("- Tool calls: 0");
+  await expect.poll(() => fetch.mock.calls.length).toBe(2);
+
+  // The child was told it is a worker and that its final reply is its report.
+  const [first] = await userMessages(child.id);
+  expect(first).toContain("Child prompt");
+  expect(first).toContain("You are a child session that another Dolly session (your parent)");
+  expect(first).toContain("Your final reply is your report.");
+
   expect((await post(`${parent}/children`, { ...body, content: "Changed" })).status).toBe(409);
   await abortAllDurableObjects();
   expect(await (await post(`${parent}/children`, body)).json()).toEqual(child);
   expect(
     await (await SELF.fetch(`https://worker/api/sessions/${parent}/children`, { headers })).json(),
-  ).toEqual({ children: [child] });
+  ).toEqual({
+    children: [{ ...child, title: "Child prompt", state: "idle" }],
+  });
   expect((await SELF.fetch(`https://worker/api/sessions/${child.id}`, { headers })).status).toBe(
     200,
   );
   const other = await root();
   expect(
-    (await SELF.fetch(`https://worker/api/sessions/${other}/tasks/${child.taskId}`, { headers }))
+    (await SELF.fetch(`https://worker/api/sessions/${other}/children/${child.id}`, { headers }))
       .status,
   ).toBe(404);
   expect(
@@ -164,13 +275,16 @@ it("creates children atomically, deduplicates concurrent requests, persists rece
   ).toBe(409);
   const followUp = { content: "More", requestId: crypto.randomUUID() };
   const sent = await post(`${parent}/children/${child.id}/messages`, followUp);
-  const delivery = await sent.json<{ taskId: string }>();
+  const delivery = await sent.json<{ id: string; sent: boolean }>();
   expect(sent.status).toBe(202);
+  expect(delivery).toEqual({ id: child.id, sent: true });
   expect(await (await post(`${parent}/children/${child.id}/messages`, followUp)).json()).toEqual(
     delivery,
   );
-  await expect.poll(async () => (await receipt(parent, delivery.taskId)).status).toBe("terminal");
-  expect(fetch).toHaveBeenCalledTimes(2);
+
+  // A follow-up reports back like the first message, once.
+  await expect.poll(async () => (await reports(parent)).length).toBe(2);
+  await expect.poll(() => fetch.mock.calls.length).toBe(4);
 });
 
 it("starts root and child generations after repeated object eviction", async () => {
@@ -187,7 +301,9 @@ it("starts root and child generations after repeated object eviction", async () 
     });
 
     expect(response.status).toBe(202);
-    await expect.poll(async () => (await receipt(parent, child.taskId)).status).toBe("terminal");
+    await idle(parent, child.id);
+    await expect.poll(async () => (await reports(parent)).length).toBe(cycle + 1);
+    // The owner's prompt and the report each get an answer.
     await expect
       .poll(async () => {
         const transcript = await SELF.fetch(`https://worker/api/sessions/${parent}`, { headers });
@@ -195,21 +311,25 @@ it("starts root and child generations after repeated object eviction", async () 
 
         return text.split('"kind":"pi.assistant"').length - 1;
       })
-      .toBe(cycle + 1);
+      .toBe(2 * (cycle + 1));
   }
 
-  expect(fetch).toHaveBeenCalledTimes(6);
+  expect(fetch).toHaveBeenCalledTimes(9);
 });
 
-it("enforces depth and width limits on the server, including after recovery", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+it("enforces depth and working-children limits on the server, including after recovery", async () => {
+  let block = false;
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) =>
+    block ? blocked(init) : answer(),
+  );
   const parent = await root();
   let current = parent;
 
   for (let depth = 0; depth < 3; depth++) {
     const child = await spawn(current, "Child prompt", depth === 0 ? "gpt-6-sol" : undefined);
     expect(child.model).toBe("gpt-6-sol");
-    await expect.poll(async () => (await receipt(current, child.taskId)).status).toBe("terminal");
+    await idle(current, child.id);
     current = child.id;
   }
 
@@ -221,89 +341,66 @@ it("enforces depth and width limits on the server, including after recovery", as
   });
 
   expect(rejected.status).toBe(409);
-  expect(await rejected.json()).toEqual({ error: "Nesting limit reached (3 child levels)" });
+  expect(await rejected.json()).toEqual({
+    error:
+      "Nesting limit reached (3 child levels). Do the work here instead of delegating further.",
+  });
 
-  for (let count = 1; count < 8; count++) {
-    const child = await spawn(parent);
-    await expect.poll(async () => (await receipt(parent, child.taskId)).status).toBe("terminal");
-  }
+  // Children that are still working count against the limit; finished ones don't.
+  block = true;
+  const wide = await root();
 
+  for (let count = 0; count < 8; count++) await spawn(wide);
+
+  const busy = await post(`${wide}/children`, {
+    content: "Too wide",
+    requestId: crypto.randomUUID(),
+  });
+
+  expect(busy.status).toBe(409);
+  expect(await busy.json()).toEqual({
+    error: "8 child sessions are already working. Wait for a report, or stop one with cancel_task.",
+  });
+
+  await abortAllDurableObjects();
   expect(
-    (await post(`${parent}/children`, { content: "Too wide", requestId: crypto.randomUUID() }))
+    (await post(`${wide}/children`, { content: "Still too wide", requestId: crypto.randomUUID() }))
       .status,
   ).toBe(409);
 });
 
 it.each([false, true])(
-  "lets the model spawn, await and consume a child result (restart=%s)",
+  "lets the model spawn, end its turn and act on the child's report (restart=%s)",
   async (restart) => {
     let recovered = !restart;
     let childModel = "";
+    const parentRequests: string[] = [];
+
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
-      const encoded = new Uint8Array(await new Response(init?.body).arrayBuffer());
-
-      const bytes = encoded;
-
-      const request = Schema.decodeUnknownSync(
-        Schema.fromJsonString(
-          Schema.Struct({ model: Schema.String, input: Schema.Array(Schema.Unknown) }),
-        ),
-      )(new TextDecoder().decode(bytes));
-
-      const serialized = JSON.stringify(request.input);
+      const request = await modelRequest(init);
 
       if (request.model === "gpt-6-sol") {
         childModel = request.model;
 
-        if (!recovered)
-          return new Promise<Response>((_, reject) => {
-            init?.signal?.addEventListener(
-              "abort",
-              () => reject(new DOMException("Aborted", "AbortError")),
-              { once: true },
-            );
-          });
+        if (!recovered) return blocked(init);
 
         return answer("Delegated result");
       }
 
-      const outputs = request.input.flatMap((item) =>
-        Option.toArray(
-          Schema.decodeUnknownOption(
-            Schema.Struct({
-              type: Schema.Literals(["function_call_output"]),
-              output: Schema.String,
-            }),
-          )(item),
-        ),
-      );
+      parentRequests.push(request.serialized);
 
-      const toolOutput = outputs.at(-1);
+      if (request.serialized.includes("[Child report"))
+        return request.serialized.includes("Delegated result")
+          ? answer("Parent consumed delegated result")
+          : answer("Report without the result");
 
-      if (!toolOutput)
-        return sse({
-          type: "function_call",
-          id: "fc_spawn",
-          call_id: "call_spawn",
-          name: "spawn_task",
-          arguments: JSON.stringify({ content: "Child job", model: "gpt-6-sol" }),
-        });
+      if (!request.outputs.length)
+        return toolCall("spawn_task", { content: "Child job", model: "gpt-6-sol" });
 
-      if (serialized.includes("Delegated result"))
-        return answer("Parent consumed delegated result");
-      const parsed = Schema.decodeUnknownSync(Schema.Struct({ output: Schema.String }))(toolOutput);
+      // The spawn returned at once; the parent ends its turn instead of waiting.
+      expect(request.outputs.at(-1)).toContain("reports back here when its turn ends");
 
-      const task = Schema.decodeUnknownSync(
-        Schema.fromJsonString(Schema.Struct({ taskId: Schema.String })),
-      )(parsed.output);
-
-      return sse({
-        type: "function_call",
-        id: "fc_wait",
-        call_id: "call_wait",
-        name: "wait_for_task",
-        arguments: JSON.stringify({ taskId: task.taskId }),
-      });
+      return answer("Delegated; I'll act on its report.");
     });
     const parent = await root();
     expect(
@@ -315,14 +412,15 @@ it.each([false, true])(
       ).status,
     ).toBe(202);
 
+    // The parent's turn ends while the child still works: nothing holds it open.
+    await expect
+      .poll(
+        async () => (await SELF.fetch(`https://worker/api/sessions/${parent}`, { headers })).text(),
+        { timeout: 4000 },
+      )
+      .toContain("Delegated; I'll act on its report.");
+
     if (restart) {
-      await expect
-        .poll(
-          async () =>
-            (await SELF.fetch(`https://worker/api/sessions/${parent}`, { headers })).text(),
-          { timeout: 2000 },
-        )
-        .toContain('"name":"wait_for_task","arguments":');
       await expect.poll(() => childModel).toBe("gpt-6-sol");
       recovered = true;
       await abortAllDurableObjects();
@@ -335,47 +433,130 @@ it.each([false, true])(
       )
       .toContain("Parent consumed delegated result");
     expect(childModel).toBe("gpt-6-sol");
+    expect(await reports(parent)).toHaveLength(1);
 
     const listing = await (
       await SELF.fetch(`https://worker/api/sessions/${parent}/children`, { headers })
     ).json<{ children: { id: string }[] }>();
 
     expect(listing.children).toHaveLength(1);
-
-    const childTranscript = await (
-      await SELF.fetch(`https://worker/api/sessions/${listing.children[0].id}`, { headers })
-    ).json<{ entries: { kind: string }[] }>();
-
-    expect(childTranscript.entries.filter((entry) => entry.kind === "pi.user")).toHaveLength(1);
+    expect(
+      (await userMessages(listing.children[0]?.id ?? "")).filter((text) =>
+        text.includes("Child job"),
+      ),
+    ).toHaveLength(1);
   },
 );
 
+it("caps the children one session starts over its lifetime", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+  const parent = await root();
+
+  for (let count = 0; count < 32; count++) {
+    const child = await spawn(parent, `Child ${count}`);
+    await idle(parent, child.id);
+  }
+
+  const rejected = await post(`${parent}/children`, {
+    content: "One too many",
+    requestId: crypto.randomUUID(),
+  });
+
+  expect(rejected.status).toBe(409);
+  expect(await rejected.json()).toEqual({ error: "Child limit reached (32 per session)" });
+}, 30000);
+
+it("attaches failures a tool reported to the report", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    const request = await modelRequest(init);
+
+    if (request.serialized.includes("[Child report")) return answer("Noted");
+
+    // The child's call fails argument validation, then it answers.
+    return request.outputs.length
+      ? answer("Couldn't stop it")
+      : toolCall("cancel_task", { id: "missing", extra: "x" });
+  });
+
+  const parent = await root();
+  const child = await spawn(parent, "Stop the stray job");
+  await expect.poll(async () => (await reports(parent)).length, { timeout: 4000 }).toBe(1);
+  const [report] = await reports(parent);
+
+  expect(report).toMatchObject({ child: child.id, reply: "Couldn't stop it" });
+  expect(report?.evidence).toContain("- Failures a tool reported (1):");
+  expect(report?.evidence).toContain("  - cancel_task");
+  expect(report?.evidence).toContain("- Tool calls: 1");
+});
+
+it("reports a grandchild's work through its parent once, after the grandchild answers", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    const request = await modelRequest(init);
+
+    if (request.first.includes("Grandchild job")) return answer("Grandchild result");
+
+    if (request.first.includes("Child job")) {
+      if (request.serialized.includes("[Child report")) return answer("Child summary");
+
+      if (!request.outputs.length) return toolCall("spawn_task", { content: "Grandchild job" });
+
+      return answer("Waiting on my child");
+    }
+
+    return answer("Root acknowledged");
+  });
+
+  const parent = await root();
+  const child = await spawn(parent, "Child job");
+
+  await expect.poll(async () => (await reports(parent)).length, { timeout: 6000 }).toBe(1);
+
+  const [report] = await reports(parent);
+
+  // The child's interim reply ("Waiting on my child") isn't reported; its summary is.
+  expect(report).toMatchObject({ child: child.id, reply: "Child summary" });
+  expect(report?.evidence).toContain("- Tool calls: 1");
+
+  const children = await (
+    await SELF.fetch(`https://worker/api/sessions/${child.id}/children`, { headers })
+  ).json<{ children: { id: string }[] }>();
+
+  const grandchild = children.children[0]?.id ?? "";
+  expect(await reports(child.id)).toMatchObject([
+    { child: grandchild, reply: "Grandchild result" },
+  ]);
+  await idle(parent, child.id);
+  expect(await reports(parent)).toHaveLength(1);
+}, 15000);
+
 it.each(["child", "root"])(
-  "recursively aborts children and queued deliveries from %s",
+  "recursively aborts children and queued messages from %s, without reporting",
   async (target) => {
     // Finish provider initialization before introducing intentionally blocked requests.
-    let blocked = false;
+    let block = false;
     let aborted = 0;
     let started = 0;
+
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
-      if (!blocked) return answer();
+      if (!block) return answer();
       started++;
 
-      return new Promise<Response>((_, reject) => {
-        init?.signal?.addEventListener(
-          "abort",
-          () => {
-            aborted++;
-            reject(new DOMException("Aborted", "AbortError"));
-          },
-          { once: true },
-        );
-      });
+      return blocked(init, () => aborted++);
     });
     const parent = await root();
     const child = await spawn(parent);
-    await expect.poll(async () => (await receipt(parent, child.taskId)).status).toBe("terminal");
-    blocked = true;
+    await idle(parent, child.id);
+    await expect.poll(async () => (await reports(parent)).length).toBe(1);
+    // The parent answers its report before anything blocks.
+    await expect
+      .poll(
+        async () =>
+          (
+            await (await SELF.fetch(`https://worker/api/sessions/${parent}`, { headers })).text()
+          ).split('"kind":"pi.assistant"').length - 1,
+      )
+      .toBe(1);
+    block = true;
     const grandchild = await spawn(child.id);
     await expect.poll(() => started).toBe(1);
 
@@ -384,40 +565,35 @@ it.each(["child", "root"])(
       requestId: crypto.randomUUID(),
     });
 
-    const message = await sent.json<{ taskId: string }>();
+    expect(sent.status).toBe(202);
     await expect.poll(() => started).toBe(2);
+    expect((await status(parent, child.id)).state).toBe("working");
 
-    const queued = await post(`${parent}/children/${child.id}/messages`, {
-      content: "Queued",
-      requestId: crypto.randomUUID(),
-    });
-
-    const queuedMessage = await queued.json<{ taskId: string }>();
     expect((await post(`${target === "child" ? child.id : parent}/abort`, {})).status).toBe(200);
     expect(aborted).toBe(2);
-    await expect
-      .poll(async () => (await receipt(parent, queuedMessage.taskId)).status)
-      .toBe("terminal");
-    expect((await receipt(parent, message.taskId)).outcome).toBe("aborted");
-    expect((await receipt(child.id, grandchild.taskId)).outcome).toBe("aborted");
+    await expect.poll(async () => (await status(parent, child.id)).state).toBe("stopped");
+    expect((await status(child.id, grandchild.id)).state).toBe("stopped");
     expect(started).toBe(2);
-    blocked = false;
+    expect(await reports(parent)).toHaveLength(1);
+    block = false;
 
     const resumed = await post(`${parent}/children/${child.id}/messages`, {
       content: "New work",
       requestId: crypto.randomUUID(),
     });
 
-    const next = await resumed.json<{ taskId: string }>();
-    await expect
-      .poll(async () => (await receipt(parent, next.taskId)).result?.text)
-      .toBe("Child answer");
+    expect(resumed.status).toBe(202);
+    await idle(parent, child.id);
+    expect((await status(parent, child.id)).latest_reply).toBe("Child answer");
+    await expect.poll(async () => (await reports(parent)).length).toBe(2);
   },
 );
 
-it("bounds child message deliveries and validates authenticated HTTP inputs", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-    answer(`Bearer abc ${access} test-refresh`),
+it("bounds unanswered messages per child and validates and redacts HTTP inputs", async () => {
+  let block = false;
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) =>
+    block ? blocked(init) : answer(`Bearer abc ${access} test-refresh`),
   );
   const parent = await root();
 
@@ -430,65 +606,67 @@ it("bounds child message deliveries and validates authenticated HTTP inputs", as
   }
 
   const child = await spawn(parent);
-  await expect.poll(async () => (await receipt(parent, child.taskId)).status).toBe("terminal");
-  const result = JSON.stringify(await receipt(parent, child.taskId));
+  await idle(parent, child.id);
+  const result = JSON.stringify(await status(parent, child.id));
   expect(result).toContain("Bearer [redacted]");
   expect(result).not.toContain(access);
   expect(result).not.toContain("test-refresh");
 
-  for (let count = 1; count < 32; count++) {
+  block = true;
+
+  for (let count = 0; count < 8; count++) {
     const response = await post(`${parent}/children/${child.id}/messages`, {
-      content: "Next",
+      content: `Next ${count}`,
       requestId: crypto.randomUUID(),
     });
 
     expect(response.status).toBe(202);
-    const task = await response.json<{ taskId: string }>();
-    await expect.poll(async () => (await receipt(parent, task.taskId)).status).toBe("terminal");
   }
 
-  expect(
-    (
-      await post(`${parent}/children/${child.id}/messages`, {
-        content: "Over budget",
-        requestId: crypto.randomUUID(),
-      })
-    ).status,
-  ).toBe(409);
+  const over = await post(`${parent}/children/${child.id}/messages`, {
+    content: "Over budget",
+    requestId: crypto.randomUUID(),
+  });
+
+  expect(over.status).toBe(409);
+  expect(await over.json()).toEqual({
+    error: "8 messages to this child are still unanswered. Wait for its report.",
+  });
 });
 
 it.each([
-  { rounds: 21, result: { status: "answered", text: "Finished after 21 tool turns" } },
+  { rounds: 21, reply: "Finished after 21 tool turns" },
   // Runs are unbounded (agent.ts clears stored turn limits), so long tool loops still answer.
-  { rounds: 100, result: { status: "answered", text: "Finished after 100 tool turns" } },
+  { rounds: 100, reply: "Finished after 100 tool turns" },
 ])(
-  "settles a child correctly after $rounds tool turns",
-  async ({ rounds, result }) => {
+  "reports a child correctly after $rounds tool turns",
+  async ({ rounds, reply }) => {
     let turns = 0;
 
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+      const request = await modelRequest(init);
+
+      if (request.serialized.includes("[Child report")) return answer("Noted");
+
       if (turns === rounds) return answer(`Finished after ${rounds} tool turns`);
       turns++;
 
-      return sse({
-        type: "function_call",
-        id: `fc_status_${turns}`,
-        call_id: `call_status_${turns}`,
-        name: "task_status",
-        arguments: JSON.stringify({ taskId: "missing" }),
-      });
+      return toolCall("task_status", { id: "missing" }, `status_${turns}`);
     });
     const parent = await root();
     const child = await spawn(parent);
     // A hundred real durable tool/generation turns need headroom under parallel CI load.
     await expect
-      .poll(async () => (await receipt(parent, child.taskId)).status, { timeout: 10000 })
-      .toBe("terminal");
-    expect(await receipt(parent, child.taskId)).toMatchObject({
-      outcome: "completed",
-      result,
+      .poll(async () => (await status(parent, child.id)).state, { timeout: 10000 })
+      .toBe("idle");
+    expect(await status(parent, child.id)).toMatchObject({
+      last_turn: "answered",
+      latest_reply: reply,
     });
     expect(turns).toBe(rounds);
+    await expect.poll(async () => (await reports(parent)).length, { timeout: 4000 }).toBe(1);
+    expect((await reports(parent))[0]).toMatchObject({ reply });
+    expect((await reports(parent))[0]?.evidence).toContain(`- Tool calls: ${rounds}`);
   },
   15000,
 );
@@ -497,11 +675,9 @@ it("lists spawned sessions with their parent and persists keeping one in the sid
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
   const parent = await root();
   const child = await spawn(parent, "Investigate the flaky test\nDetails");
-  await expect.poll(async () => (await receipt(parent, child.taskId)).status).toBe("terminal");
+  await idle(parent, child.id);
   const grandchild = await spawn(child.id, "Read the logs");
-  await expect
-    .poll(async () => (await receipt(child.id, grandchild.taskId)).status)
-    .toBe("terminal");
+  await idle(child.id, grandchild.id);
 
   const list = async () => {
     const response = await SELF.fetch("https://worker/api/sessions", { headers });

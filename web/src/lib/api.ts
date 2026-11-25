@@ -13,6 +13,7 @@ import {
 import { SPEEDS, type Speed } from "../../../src/model-capabilities";
 import { parseScheduledMessage } from "../../../src/schedule-message";
 import { parseCiWaitMessage, type CiWaitOutcome } from "../../../src/ci-wait-message";
+import { parseChildReportMessage, type ChildReport } from "../../../src/child-report-message";
 
 export { Snapshot } from "../../../src/transcript";
 
@@ -152,6 +153,8 @@ export type Turn = {
     scheduled?: { id: string; at: number };
     /** A CI wait's wake-up, written for the model: shown as a notice of its outcome. */
     ciWait?: { outcome: CiWaitOutcome; headline: string; trigger: string };
+    /** A child session's report, written for the model: shown as a card linking the child. */
+    childReport?: Omit<ChildReport, "next">;
   };
   items: TurnItem[];
   answer?: { id: string; text: string };
@@ -333,11 +336,17 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
       const text = messageText(message);
       const scheduled = parseScheduledMessage(text);
       const wake = parseCiWaitMessage(text);
+      const report = parseChildReportMessage(text);
 
       const prompt: NonNullable<Turn["prompt"]> = {
-        text: scheduled?.prompt ?? wake?.prompt ?? text,
+        text: scheduled?.prompt ?? wake?.prompt ?? report?.reply ?? text,
         at: message.timestamp,
       };
+
+      if (report) {
+        const { next: _next, ...shown } = report;
+        prompt.childReport = shown;
+      }
 
       if (scheduled) prompt.scheduled = { id: scheduled.id, at: scheduled.at };
 

@@ -2774,6 +2774,58 @@ label.connection-row {
   font-size: 13px;
 }
 
+/* A child session's report: the same notice, its reply first, then the computed facts. */
+.child-report-notice > summary {
+  max-width: 100%;
+}
+.child-report-notice .scheduled-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.child-report-notice > summary > svg {
+  flex: none;
+}
+.child-report-notice[data-outcome="answered"] > summary > svg:first-child {
+  color: var(--blue);
+}
+.child-report-notice[data-outcome="stopped"] > summary > svg:first-child {
+  color: var(--red);
+}
+.child-report-notice[data-outcome="answered"] .scheduled-body {
+  border-left-color: var(--line);
+}
+.child-report-notice[data-outcome="stopped"] .scheduled-body {
+  border-left-color: var(--red);
+}
+.child-report-facts {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+.child-report-label {
+  margin: 0 0 4px;
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 500;
+}
+.child-report-open {
+  margin-top: 10px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.child-report-open:hover {
+  background: var(--surface-hover);
+}
+
 /* "Send later" in the composer, anchored to the composer so it fits a phone too. */
 .composer {
   position: relative;

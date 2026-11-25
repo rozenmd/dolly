@@ -530,16 +530,16 @@ app.post("/api/sessions/:id/children/:childId/messages", (c) =>
   ),
 );
 
-app.get("/api/sessions/:id/tasks/:taskId", (c) =>
+app.get("/api/sessions/:id/children/:childId", (c) =>
   handle(
     c,
     Effect.gen(function* () {
       const agent = yield* AgentApi;
-      const result = yield* agent.childTask(c.req.param("id"), c.req.param("taskId"));
+      const result = yield* agent.childStatus(c.req.param("id"), c.req.param("childId"));
 
       return result && !("error" in result)
         ? c.json(result)
-        : c.json({ error: "Task not found" }, 404);
+        : c.json({ error: "Child session not found" }, 404);
     }),
   ),
 );

@@ -28,6 +28,7 @@ import {
   CommandLineIcon,
   DocumentDuplicateIcon,
   DocumentTextIcon,
+  ExclamationTriangleIcon,
   EyeIcon,
   FolderIcon,
   PencilIcon,
@@ -308,7 +309,17 @@ function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number
           now={now}
         />
       )}
-      {turn.prompt && !turn.prompt.scheduled && !turn.prompt.ciWait && (
+      {turn.prompt?.childReport && (
+        <ChildReportNotice
+          id={turn.id}
+          report={turn.prompt.childReport}
+          session={thread?.(turn.prompt.childReport.child)}
+          deliveredAt={turn.prompt.at}
+          now={now}
+          onOpen={onOpenThread}
+        />
+      )}
+      {turn.prompt && !turn.prompt.scheduled && !turn.prompt.ciWait && !turn.prompt.childReport && (
         <article className="prompt" aria-label="user message">
           {turn.prompt.at !== undefined && (
             <div className="prompt-meta">
@@ -451,6 +462,65 @@ function CiWaitNotice({
       <div className="scheduled-body">
         <Prose text={wake.trigger} />
         {prompt && <p className="ci-wait-next">Then: {prompt}</p>}
+      </div>
+    </details>
+  );
+}
+
+/**
+ * A child session reported back: what it said, as a notice rather than a bubble, since the owner
+ * didn't type it. Its reply and the facts Dolly computed from its transcript are one click away.
+ */
+function ChildReportNotice({
+  id,
+  report,
+  session,
+  deliveredAt,
+  now,
+  onOpen,
+}: {
+  id: string;
+  report: NonNullable<NonNullable<Turn["prompt"]>["childReport"]>;
+  session?: ThreadCardSession;
+  deliveredAt?: number;
+  now: number;
+  onOpen?: (id: string) => void;
+}) {
+  const disclosure = useDisclosure(`child-report-${id}`, false);
+  const Icon = report.outcome === "answered" ? UsersIcon : ExclamationTriangleIcon;
+  const name = session?.title ?? report.task;
+
+  return (
+    <details
+      className="scheduled-notice child-report-notice"
+      data-outcome={report.outcome}
+      aria-label="child session report"
+      {...disclosure}
+    >
+      <summary>
+        <Icon aria-hidden="true" />
+        <span className="scheduled-title">
+          {report.outcome === "answered" ? "Report" : "Stopped"}: {name}
+        </span>
+        {deliveredAt !== undefined && (
+          <time dateTime={new Date(deliveredAt).toISOString()}>{ago(deliveredAt, now)}</time>
+        )}
+        <ChevronRightIcon className="disclosure" />
+      </summary>
+      <div className="scheduled-body">
+        <Prose text={report.reply} />
+        {report.evidence && (
+          <div className="child-report-facts">
+            <p className="child-report-label">Computed from its transcript</p>
+            <Prose text={report.evidence} />
+          </div>
+        )}
+        {report.working && <p className="ci-wait-next">Still working: {report.working}</p>}
+        {onOpen && (
+          <button type="button" className="child-report-open" onClick={() => onOpen(report.child)}>
+            Open {name}
+          </button>
+        )}
       </div>
     </details>
   );
@@ -705,7 +775,6 @@ const toolIcons = new Map(
     preview: EyeIcon,
     spawn_task: UsersIcon,
     send_to_session: UsersIcon,
-    wait_for_task: UsersIcon,
     list_children: UsersIcon,
     task_status: UsersIcon,
     cancel_task: UsersIcon,

@@ -14,7 +14,7 @@ It runs on the ChatGPT or Claude subscription you already pay for. You don't nee
 
 - Start from anywhere: use the web app, a Slack DM or @-mention, or comment `/dolly fix the failing test` on a pull request. Add the **Review pull requests** automation in Settings > Automations and Dolly reviews each new PR and each push with inline comments, with a prompt and model you choose; findings on a PR a Dolly session opened go back to that session to fix. Your sessions show up on every device you sign in from.
 
-- Direct a team: agents can start child agents, each in its own sandbox, and wait for their results.
+- Direct a team: agents can start child sessions, each in its own sandbox, and end their turn; each child reports back with its reply and facts computed from its transcript.
 
 - Let it check back on its own: agents schedule their own follow-ups and wait on CI. "Push it and tell me when checks pass" is one prompt.
 
