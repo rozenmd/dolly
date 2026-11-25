@@ -363,10 +363,10 @@ test("turns coordinator mode on for the open session from the model menu", async
   if (shots) await page.screenshot({ path: `${shots}/desktop-coordinator.png` });
 
   await toggle.click();
+  // Like Auto-fallback, the switch flips in place and the menu stays open.
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
   expect(settings).toEqual([{ coordinator: true }]);
-  await page.getByRole("button", { name: /GPT-6 Sol/ }).click();
-  await expect(page.getByRole("menuitemcheckbox", { name: /Coordinator/ })).toHaveAttribute(
-    "aria-checked",
-    "true",
-  );
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  expect(settings).toEqual([{ coordinator: true }, { coordinator: false }]);
 });
