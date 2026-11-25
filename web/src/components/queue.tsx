@@ -17,8 +17,8 @@ const sameOrder = (a: readonly QueuedMessage[], b: readonly QueuedMessage[]) =>
   a.length === b.length && a.every((item, index) => item.id === b[index]?.id);
 
 /**
- * Messages waiting for the running turn to finish. They go to the agent together as its next
- * turn, in this order. Each can be edited back into the composer (text the owner typed), deleted,
+ * Messages waiting for the running turn to finish. They go to the agent one turn each, in this
+ * order. Each can be edited back into the composer (text the owner typed), deleted,
  * or sent now: folded into the running turn at its next step. Drag a row's handle to reorder, or
  * focus the handle and use the arrow keys.
  */
@@ -54,6 +54,15 @@ export function MessageQueue({
     if (draggingNow.current === undefined) setLocal(null);
   }, [serverOrder]);
 
+  // A drag in progress when the queue goes away stops listening.
+  const stopDrag = useRef<() => void>(undefined);
+
+  useEffect(() => () => stopDrag.current?.(), []);
+
+  // The drag's window listeners outlive the render that started them; they commit through this.
+  const latest = useRef({ commit });
+  latest.current = { commit };
+
   if (queued.length === 0) return null;
 
   const reorderable = queued.length > 1 && !disabled;
@@ -74,33 +83,47 @@ export function MessageQueue({
   function start(event: PointerEvent<HTMLButtonElement>, id: number) {
     if (!reorderable || event.button !== 0) return;
     event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    stopDrag.current?.();
+
+    // Followed on the window, not by capturing the pointer on the handle: moving the row in the
+    // DOM drops pointer capture, so the release would never reach the handle and never save.
+    let order = shown;
+
+    const onMove = (move: globalThis.PointerEvent) => {
+      // The row whose middle the pointer has passed sets the dragged row's new place.
+      const index = order.filter((item) => {
+        if (item.id === id) return false;
+        const rect = rows.current.get(item.id)?.getBoundingClientRect();
+
+        return rect !== undefined && move.clientY > rect.top + rect.height / 2;
+      }).length;
+
+      const next = moved(order, id, index);
+
+      if (sameOrder(next, order)) return;
+      order = next;
+      setLocal(next);
+    };
+
+    const stop = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+      stopDrag.current = undefined;
+    };
+
+    const onEnd = () => {
+      stop();
+      setDragging(undefined);
+      latest.current.commit(order);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
+    stopDrag.current = stop;
     setDragging(id);
-    setLocal(shown);
-  }
-
-  function move(event: PointerEvent<HTMLButtonElement>) {
-    if (dragging === undefined || !local) return;
-
-    // The row whose middle the pointer has passed sets the dragged row's new place.
-    const others = local.filter((item) => item.id !== dragging);
-
-    const index = others.filter((item) => {
-      const rect = rows.current.get(item.id)?.getBoundingClientRect();
-
-      return rect !== undefined && event.clientY > rect.top + rect.height / 2;
-    }).length;
-
-    const next = moved(local, dragging, index);
-
-    if (!sameOrder(next, local)) setLocal(next);
-  }
-
-  function end() {
-    if (dragging === undefined) return;
-    setDragging(undefined);
-
-    if (local) commit(local);
+    setLocal(order);
   }
 
   function key(event: KeyboardEvent<HTMLButtonElement>, id: number) {
@@ -137,9 +160,6 @@ export function MessageQueue({
                 aria-label={`Reorder: ${index + 1} of ${shown.length}`}
                 title="Drag to reorder"
                 onPointerDown={(event) => start(event, item.id)}
-                onPointerMove={move}
-                onPointerUp={end}
-                onPointerCancel={end}
                 onKeyDown={(event) => key(event, item.id)}
               >
                 <Bars2Icon aria-hidden="true" />

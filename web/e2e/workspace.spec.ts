@@ -240,6 +240,7 @@ test("edits, deletes, reorders and steers queued messages, and stops on Escape t
   const deleted: number[] = [];
   let aborts = 0;
   let next = 50;
+  let refuseEdit = false;
 
   const remove = (id: number) => {
     const item = items.find((candidate) => candidate.id === id);
@@ -299,6 +300,9 @@ test("edits, deletes, reorders and steers queued messages, and stops on Escape t
 
     const edit = /^\/api\/sessions\/queue-session\/queue\/(\d+)\/edit$/.exec(path);
 
+    if (edit && refuseEdit)
+      return route.fulfill({ status: 409, json: { error: "This message is no longer queued" } });
+
     if (edit) {
       const item = remove(Number(edit[1]));
 
@@ -348,8 +352,16 @@ test("edits, deletes, reorders and steers queued messages, and stops on Escape t
   await expect(rows.nth(2).getByRole("button", { name: "Edit in composer" })).toHaveCount(0);
   await expect(rows.nth(2).getByRole("button", { name: "Delete queued message" })).toHaveCount(1);
 
-  // Edit moves the text back into the composer and out of the queue.
+  // Edit puts the text in the draft first; a refusal takes it back out.
   await field.fill("Draft");
+  refuseEdit = true;
+  await rows.nth(0).getByRole("button", { name: "Edit in composer" }).click();
+  await expect(page.getByRole("alert")).toContainText("no longer queued");
+  await expect(field).toHaveValue("Draft");
+  await expect(queue).toContainText("Run the tests");
+  refuseEdit = false;
+
+  // Edit moves the text back into the composer and out of the queue.
   await rows.nth(1).getByRole("button", { name: "Edit in composer" }).click();
   await expect(field).toHaveValue("Draft\n\nUpdate the README");
   await expect(queue).toContainText("2 messages queued");
@@ -382,6 +394,23 @@ test("edits, deletes, reorders and steers queued messages, and stops on Escape t
   await queue.getByRole("button", { name: "Reorder: 2 of 2" }).press("ArrowUp");
   await expect.poll(() => orders).toEqual([[50, 41]]);
   await expect(queue.getByRole("listitem").nth(0)).toContainText("Then lint");
+
+  // Dragging a handle down past the next row, then releasing off the handles, still saves.
+  await queue.getByRole("button", { name: "Reorder: 1 of 2" }).evaluate((handle) => {
+    const rect = handle.getBoundingClientRect();
+    const below = handle.closest("li")!.nextElementSibling!.getBoundingClientRect();
+    const at = (x: number, y: number) => ({ bubbles: true, button: 0, clientX: x, clientY: y });
+    handle.dispatchEvent(new PointerEvent("pointerdown", at(rect.left + 2, rect.top + 2)));
+    window.dispatchEvent(new PointerEvent("pointermove", at(rect.left + 2, below.bottom - 2)));
+    document.body.dispatchEvent(new PointerEvent("pointerup", at(rect.left + 300, below.bottom)));
+  });
+  await expect
+    .poll(() => orders)
+    .toEqual([
+      [50, 41],
+      [41, 50],
+    ]);
+  await expect(queue.getByRole("listitem").nth(1)).toContainText("Then lint");
 
   // The send button's menu makes Enter steer, and hands queueing to Ctrl+Enter.
   await field.fill("Swap");

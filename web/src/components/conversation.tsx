@@ -927,8 +927,11 @@ export function Composer({
   /** Messages waiting for the next turn; steers already show in the conversation. */
   queued: readonly QueuedMessage[];
   onSteerQueued: (id: number) => void;
-  /** Withdraws a queued message and resolves with its text, or undefined when it couldn't. */
-  onEditQueued: (id: number) => Promise<string | undefined>;
+  /**
+   * Withdraws a queued message for editing: "refused" when the server answered that it can't (it
+   * was already delivered, or isn't the owner's text), "unknown" when no answer came back.
+   */
+  onEditQueued: (id: number) => Promise<"withdrawn" | "refused" | "unknown">;
   onDeleteQueued: (id: number) => void;
   onReorderQueue: (order: readonly number[]) => Promise<boolean>;
   /** Changes as the conversation moves, so "send later" picks up schedules the agent makes. */
@@ -941,7 +944,6 @@ export function Composer({
     requestId: string;
     session: string;
     attachments: readonly Attachment[];
-    steer: boolean;
   } | null>(null);
 
   const [images, setImages] = useState<Record<string, Attachment[]>>({});
@@ -1043,15 +1045,22 @@ export function Composer({
   }
 
   async function edit(id: number) {
-    const text = await onEditQueued(id);
+    const item = queued.find((candidate) => candidate.id === id);
 
-    if (text === undefined) return;
-    setDrafts((values) => {
-      const current = values[draftKey] ?? "";
+    if (!item) return;
 
-      return { ...values, [draftKey]: current.trim() ? `${current}\n\n${text}` : text };
-    });
+    // The text goes into the draft before the server withdraws it, so a lost response never
+    // loses the message. Only a definite refusal takes it back out.
+    const before = drafts[draftKey] ?? "";
+    const after = before.trim() ? `${before}\n\n${item.text}` : item.text;
+
+    setDrafts((values) => ({ ...values, [draftKey]: after }));
     field.current?.focus();
+
+    if ((await onEditQueued(id)) !== "refused") return;
+    setDrafts((values) =>
+      values[draftKey] === after ? { ...values, [draftKey]: before } : values,
+    );
   }
 
   async function submit(steer: boolean) {
@@ -1060,13 +1069,14 @@ export function Composer({
     const requestId =
       retry?.content === content &&
       retry.session === draftKey &&
-      retry.steer === steer &&
       retry.attachments.length === attachments.length &&
       retry.attachments.every((image, index) => image.id === attachments[index]?.id)
         ? retry.requestId
         : crypto.randomUUID();
 
-    setRetry({ content, requestId, session: draftKey, attachments, steer });
+    // A retry of the same draft reuses its request ID even if queue/steer changed meanwhile (the run
+    // ended, or another key was used), so a send the server already took is never taken twice.
+    setRetry({ content, requestId, session: draftKey, attachments });
 
     if (await onSend(content, requestId, attachments, steer)) {
       setDrafts((values) => ({ ...values, [draftKey]: "" }));

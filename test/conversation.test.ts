@@ -156,7 +156,7 @@ it("promotes the original queued input atomically without duplication or crossin
   }
 });
 
-it("steers, withdraws, edits and reorders queued messages, then delivers the queue as one turn", async () => {
+it("steers, withdraws, edits and reorders queued messages, then delivers the queue in its new order", async () => {
   let release!: (body: string) => void;
 
   const blocked = new Promise<string>((resolve) => {
@@ -285,7 +285,7 @@ it("steers, withdraws, edits and reorders queued messages, then delivers the que
       { id: a, mode: "followUp" },
     ]);
 
-    // Answer the first turn: the steer and every queued follow-up go to the model together.
+    // Answer the first turn: the steer joins, and the head of the reordered queue runs next.
     const message = {
       type: "message",
       id: "msg_test",
@@ -316,17 +316,22 @@ it("steers, withdraws, edits and reorders queued messages, then delivers the que
     );
 
     await expect.poll(() => requests.length).toBe(2);
-    expect(await inbox()).toEqual([]);
+
+    // One queued message per turn: the rest wait, in the order the owner chose.
+    await expect.poll(inbox).toEqual([
+      { id: b, mode: "followUp" },
+      { id: a, mode: "followUp" },
+    ]);
 
     const next = requests[1]!;
 
-    const order = ["Review feedback", "B: second queued", "Use pnpm", "A: first queued"].map(
-      (text) => next.indexOf(text),
-    );
+    const order = ["Review feedback", "Use pnpm"].map((text) => next.indexOf(text));
 
     expect(order.every((index) => index >= 0)).toBe(true);
     expect([...order].sort((x, y) => x - y)).toEqual(order);
 
+    expect(next).not.toContain("B: second queued");
+    expect(next).not.toContain("A: first queued");
     expect(next).not.toContain("Never mind this one");
     expect(next).not.toContain("Fix the typo");
   } finally {

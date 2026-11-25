@@ -32,6 +32,7 @@ import {
   promptIndex,
   readSessions,
   request,
+  RequestError,
   SavedSession,
   SessionUpdateResult,
   Snapshot,
@@ -52,9 +53,6 @@ import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-s
 import { useSessionSummary } from "./lib/session-summary";
 import { usePhone } from "./components/threads";
 import { workspaceMain, workspaceOf, workspaceRows, workspaceTabs } from "./lib/workspaces";
-
-/** A queued message taken back into the composer. */
-const QueuedEdit = Schema.fromJsonString(Schema.Struct({ content: Schema.String }));
 
 const cacheStorageKey = "dolly.sessions.cache.v1";
 const decodeUpdate = Schema.decodeUnknownSync(Schema.fromJsonString(SessionUpdateResult));
@@ -840,16 +838,16 @@ export function WorkspaceApp() {
     setError("");
 
     try {
-      const result = await request(
-        `/sessions/${encodeURIComponent(selected)}/queue/${submissionId}/edit`,
-        {},
-      );
+      await request(`/sessions/${encodeURIComponent(selected)}/queue/${submissionId}/edit`, {});
 
-      return Schema.decodeUnknownSync(QueuedEdit)(result).content;
+      return "withdrawn" as const;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not edit the queued message.");
 
-      return undefined;
+      // A 4xx is the server's answer that nothing was withdrawn; anything else may have been.
+      return cause instanceof RequestError && cause.status >= 400 && cause.status < 500
+        ? ("refused" as const)
+        : ("unknown" as const);
     } finally {
       setPending(false);
     }

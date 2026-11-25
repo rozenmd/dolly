@@ -1206,8 +1206,6 @@ export class Agent extends DurableObject<Env> {
             compaction: compactionSettings(models.getModels()),
             // Every waiting steer joins at the next boundary, not one per step.
             steeringMode: "all",
-            // Messages queued behind a run are delivered together as its next turn, not one turn each.
-            followUpMode: "all",
           },
           conversationCreated: async (tx, conversation) => {
             await indexSession(tx, conversation.id);
