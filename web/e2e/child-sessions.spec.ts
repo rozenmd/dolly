@@ -342,7 +342,13 @@ test("keeps spawned sessions out of the sidebar and shows them with their parent
     "Try a longer timeout",
   );
 
-  // Retrying the same text reuses its request ID, so the server can't run it twice.
+  // Retrying the same text reuses its request ID, so the server can't run it twice, even after
+  // the thread was closed and reopened.
+  await peek.getByRole("button", { name: "Threads", exact: true }).click();
+  await cards.first().click();
+  await expect(peek.getByRole("textbox", { name: "Message this thread" })).toHaveValue(
+    "Try a longer timeout",
+  );
   await peek.getByRole("button", { name: "Send to thread", exact: true }).click();
   await expect(peek.getByRole("textbox", { name: "Message this thread" })).toHaveValue("");
   const [first, second] = messages;

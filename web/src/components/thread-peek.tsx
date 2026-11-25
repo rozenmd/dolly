@@ -162,31 +162,36 @@ export function ThreadPeek({
 /** Unsent replies by thread, kept while the thread view switches between threads. */
 const drafts = new Map<string, string>();
 
+/**
+ * Each thread's last failed send, kept beside its draft: retrying the same text reuses its request
+ * ID, even after the thread view was closed and reopened, so a message the server accepted before
+ * the connection dropped is not run twice.
+ */
+const retries = new Map<string, { content: string; requestId: string }>();
+
 /** The box under a thread: a message goes straight to the thread's agent, as if typed in it. */
 function ThreadReply({ id }: { id: string }) {
   const [text, setText] = useState(() => drafts.get(id) ?? "");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-  // The last failed send: retrying the same text reuses its request ID, so a message the server
-  // accepted before the connection dropped is not run twice.
-  const [retry, setRetry] = useState<{ content: string; requestId: string }>();
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     const content = text.trim();
 
     if (!content || pending) return;
+    const retry = retries.get(id);
     const requestId = retry?.content === content ? retry.requestId : crypto.randomUUID();
     setPending(true);
     setError("");
 
     try {
       await request(`/sessions/${encodeURIComponent(id)}/messages`, { content, requestId });
-      setRetry(undefined);
+      retries.delete(id);
       drafts.delete(id);
       setText("");
     } catch (cause) {
-      setRetry({ content, requestId });
+      retries.set(id, { content, requestId });
       setError(cause instanceof Error ? cause.message : "Could not send the message.");
     } finally {
       setPending(false);
