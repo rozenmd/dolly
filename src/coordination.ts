@@ -304,11 +304,34 @@ const DeliveryTask = defineTask<DeliveryInput, { phase: "deliver" }, DeliveryRes
           child.last = { outcome: "stopped", reason: "aborted", at: runtime.now() };
           delete child.held;
         }
+
+        await release(tx, task.input.parentId);
       }
 
       return { status: "terminal", outcome: { status: "aborted" } };
     }, context),
 });
+
+/**
+ * Releases holds a stopped subtree left behind: a child held for its own children's reports gets
+ * none once their work is stopped, so when `id` has nothing left working, it no longer counts as
+ * working in its parent, and so on up the chain.
+ */
+async function release(tx: Tx, id: ConversationId) {
+  let current = id;
+
+  for (let depth = 0; depth <= MAX_DEPTH; depth++) {
+    if (working(await tx.doc(Children, current)).size > 0) return;
+    const owner = (await tx.conversation(current))?.owner?.conversationId;
+
+    if (owner === undefined) return;
+    const child = findChild(await tx.doc(Children, owner), current);
+
+    if (!child?.held) return;
+    delete child.held;
+    current = owner;
+  }
+}
 
 /**
  * Settle one delivery and, when the child's work has settled (none of its own children are still
@@ -715,6 +738,17 @@ export class Coordination {
 
     if (conversation)
       yield* attempt("child.abort", () => conversation.abort(context, { background: true }));
+
+    // A held child has no live task of its own to abort, so its slot is released here.
+    yield* attempt("child.stopped", () =>
+      this.harness.commit(async (tx) => {
+        const current = findChild(await tx.doc(Children, parent), childId);
+
+        if (!current) return;
+        delete current.held;
+        current.last = { outcome: "stopped", reason: "aborted", at: Date.now() };
+      }, context),
+    );
 
     return { id: String(child.id), state: "stopped" };
   });

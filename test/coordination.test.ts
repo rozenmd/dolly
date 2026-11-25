@@ -569,6 +569,40 @@ it("holds a subtree's report until its deepest child answers, even when a middle
   expect(await reports(parent)).toHaveLength(1);
 }, 20000);
 
+it("releases a held child's working slot when its subtree is stopped", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    const request = await modelRequest(init);
+
+    if (request.first.includes("Deep job")) return blocked(init);
+
+    if (request.first.includes("Middle job"))
+      return request.outputs.length
+        ? answer("Middle waiting")
+        : toolCall("spawn_task", { content: "Deep job" });
+
+    return answer("Root acknowledged");
+  });
+
+  const parent = await root();
+  const middle = await spawn(parent, "Middle job");
+
+  // The middle child ended its turn but is held for its own child, so it still counts as working.
+  await expect
+    .poll(async () =>
+      (
+        await (await SELF.fetch(`https://worker/api/sessions/${middle.id}`, { headers })).text()
+      ).includes("Middle waiting"),
+    )
+    .toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  expect((await status(parent, middle.id)).state).toBe("working");
+
+  // Stopping it from its own page stops the deep child, and with it the hold.
+  expect((await post(`${middle.id}/abort`, {})).status).toBe(200);
+  await expect.poll(async () => (await status(parent, middle.id)).state).not.toBe("working");
+  expect(await reports(parent)).toHaveLength(0);
+});
+
 it("reports a grandchild's work through its parent once, after the grandchild answers", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
     const request = await modelRequest(init);

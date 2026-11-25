@@ -28,6 +28,9 @@ const CallArgs = Schema.Struct({
 
 type Call = { name: string; args: typeof CallArgs.Type };
 
+/** A refusal Dolly's tools return as output, such as a push without a checkout. */
+const Refusal = Schema.fromJsonString(Schema.Struct({ error: Schema.String }));
+
 /** The shell tool's JSON result. */
 const ShellResult = Schema.fromJsonString(
   Schema.Struct({
@@ -173,7 +176,10 @@ export function childEvidence(entries: readonly EntryRecord[]): ChildEvidence {
         ? shellOutcome(text)
         : { exitCode: undefined, output: "" };
 
+    const refusal = Schema.decodeUnknownOption(Refusal)(text.slice(text.indexOf("{")));
+
     if (message.isError) failed = clipError(text);
+    else if (Option.isSome(refusal)) failed = clipError(refusal.value.error);
     else if (outcome.exitCode !== undefined && outcome.exitCode !== 0)
       failed = `exited ${outcome.exitCode}: ${clipError(outcome.output)}`;
 
