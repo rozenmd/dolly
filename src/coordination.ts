@@ -797,6 +797,7 @@ export class Coordination {
 
       if (parent === undefined) return "no-parent";
       const now = this.now();
+
       const record = findChild(
         await this.harness.snapshot(Children, parent, BACKGROUND_CONTEXT),
         child,
