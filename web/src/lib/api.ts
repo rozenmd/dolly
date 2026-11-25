@@ -13,6 +13,7 @@ import {
 import { SPEEDS, type Speed } from "../../../src/model-capabilities";
 import { parseScheduledMessage } from "../../../src/schedule-message";
 import { parseCiWaitMessage, type CiWaitOutcome } from "../../../src/ci-wait-message";
+import { parseSessionMessage, type SessionMessage } from "../../../src/child-report-message";
 
 export { Snapshot } from "../../../src/transcript";
 
@@ -150,8 +151,15 @@ export type Turn = {
     images?: number;
     /** Delivered by a schedule rather than typed: shown as a notice, not the owner's bubble. */
     scheduled?: { id: string; at: number };
-    /** A CI wait's wake-up, written for the model: shown as a notice of its outcome. */
-    ciWait?: { outcome: CiWaitOutcome; headline: string; trigger: string };
+    /** A wait's wake-up (CI or another session's turn), written for the model: shown as a notice of its outcome. */
+    ciWait?: {
+      kind: "ci" | "session_turn";
+      outcome: CiWaitOutcome;
+      headline: string;
+      trigger: string;
+    };
+    /** Another session's send_to_session (a worker's report, or a session's message): shown as a card linking it. */
+    sessionMessage?: SessionMessage;
   };
   items: TurnItem[];
   answer?: { id: string; text: string };
@@ -333,16 +341,25 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
       const text = messageText(message);
       const scheduled = parseScheduledMessage(text);
       const wake = parseCiWaitMessage(text);
+      const delivered = parseSessionMessage(text);
 
       const prompt: NonNullable<Turn["prompt"]> = {
-        text: scheduled?.prompt ?? wake?.prompt ?? text,
+        text: scheduled?.prompt ?? wake?.prompt ?? delivered?.text ?? text,
         at: message.timestamp,
       };
+
+      if (delivered) prompt.sessionMessage = delivered;
 
       if (scheduled) prompt.scheduled = { id: scheduled.id, at: scheduled.at };
 
       if (wake)
-        prompt.ciWait = { outcome: wake.outcome, headline: wake.headline, trigger: wake.trigger };
+        prompt.ciWait = {
+          kind: wake.kind,
+          outcome: wake.outcome,
+          // Backticks mark ids for the model; the notice shows them as plain text.
+          headline: wake.headline.replaceAll("`", ""),
+          trigger: wake.trigger,
+        };
 
       const images = Schema.is(Schema.String)(message.content)
         ? 0
@@ -561,6 +578,7 @@ export type ApiBody = {
   thinkingLevel?: string | null;
   speed?: Speed | null;
   autoFallback?: boolean | null;
+  coordinator?: boolean;
   /** A session's repository; `null` clears an automation's. */
   workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] } | null;
   repository?: string;

@@ -239,7 +239,7 @@ it("inherits Claude for child agents and redacts setup tokens from transcript an
   });
 
   expect(response.status).toBe(202);
-  const child = await response.json<{ id: string; model: string; taskId: string }>();
+  const child = await response.json<{ id: string; model: string }>();
   expect(child.model).toBe("claude-haiku-5-5");
   await expect
     .poll(async () => (await call(`/sessions/${child.id}`)).text(), { timeout: 4000 })
@@ -269,13 +269,15 @@ it("inherits Claude for child agents and redacts setup tokens from transcript an
   }
 
   await expect
-    .poll(async () => (await call(`/sessions/${parent.id}/tasks/${child.taskId}`)).text(), {
+    .poll(async () => (await call(`/sessions/${parent.id}/children/${child.id}`)).text(), {
       timeout: 4000,
     })
     .toContain("Claude child answered");
-  expect(await (await call(`/sessions/${parent.id}/tasks/${child.taskId}`)).text()).not.toContain(
+  expect(await (await call(`/sessions/${parent.id}/children/${child.id}`)).text()).not.toContain(
     token,
   );
+  // The child reports with send_to_session itself; nothing of its answer leaks into the parent.
+  expect(await (await call(`/sessions/${parent.id}`)).text()).not.toContain(token);
   expect(
     (
       await call(`/sessions/${parent.id}/children`, "POST", {

@@ -114,6 +114,7 @@ function entries(start: number) {
 
 type Wait = {
   id: string;
+  kind?: "ci" | "session_turn";
   waiting_on: string;
   timeout: string;
   next_poll: string;
@@ -201,6 +202,27 @@ test("while the agent waits on CI, the composer says on what, and the owner can 
   await strip.getByRole("button", { name: "Stop waiting on CI" }).click();
   await expect(strip).toHaveCount(0);
   expect(cancelled).toEqual(["33"]);
+});
+
+test("while the agent waits on another session's turn, the strip says so and when it times out", async ({
+  page,
+}) => {
+  const { cancelled } = await open(page, {
+    id: "34",
+    kind: "session_turn",
+    waiting_on: "session sdk's turn",
+    timeout: new Date(Date.now() + 90 * 60_000).toISOString(),
+    next_poll: new Date(Date.now() + 90 * 60_000).toISOString(),
+  });
+
+  const strip = page.getByRole("region", { name: "Waiting on a session" });
+  await expect(strip).toContainText("Waiting on session sdk's turn");
+  await expect(strip).toContainText(/wakes when its turn ends · times out in \d+m/);
+  await expect(strip).not.toContainText("next check");
+
+  await strip.getByRole("button", { name: "Stop waiting on the session" }).click();
+  await expect(strip).toHaveCount(0);
+  expect(cancelled).toEqual(["34"]);
 });
 
 test("there's no CI strip when nothing is being waited on", async ({ page }) => {

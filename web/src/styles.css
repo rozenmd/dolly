@@ -1748,7 +1748,8 @@ code.summary-label {
   overflow-y: auto;
   outline: none;
 }
-.model-control-row {
+/* Qualified so the generic .picker-option height later in the file doesn't win. */
+.picker-option.model-control-row {
   min-height: 40px;
 }
 .model-control-value {
@@ -1785,7 +1786,7 @@ code.summary-label {
   margin: 6px -6px;
   background: rgb(255 255 255 / 8%);
 }
-.model-control-toggle {
+.picker-option.model-control-toggle {
   min-height: 52px;
 }
 .model-control-text {
@@ -2772,6 +2773,66 @@ label.connection-row {
   margin: 8px 0 0;
   color: var(--muted);
   font-size: 13px;
+}
+
+/* A child session's report: the same notice, its reply first, then the computed facts. */
+.child-report-notice > summary {
+  max-width: 100%;
+}
+.child-report-notice .scheduled-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.child-report-notice > summary > svg {
+  flex: none;
+}
+.child-report-notice[data-outcome="answered"] > summary > svg:first-child {
+  color: var(--blue);
+}
+.child-report-notice[data-outcome="failed"] > summary > svg:first-child {
+  color: var(--red);
+}
+.child-report-notice[data-outcome="answered"] .scheduled-body {
+  border-left-color: var(--line);
+}
+.child-report-notice[data-outcome="failed"] .scheduled-body {
+  border-left-color: var(--red);
+}
+.child-report-facts {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+.child-report-evidence {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.child-report-label {
+  margin: 0 0 4px;
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 500;
+}
+.child-report-open {
+  margin-top: 10px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.child-report-open:hover {
+  background: var(--surface-hover);
 }
 
 /* "Send later" in the composer, anchored to the composer so it fits a phone too. */

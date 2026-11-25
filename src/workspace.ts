@@ -64,6 +64,12 @@ export type WorkspaceState = {
    * whatever the model asks for, since its prompt carries other people's PR comments.
    */
   reviewTarget?: { repository: string; number: number; sha: string };
+  /**
+   * The conversation whose checkouts this one works in: a child session spawned to share its
+   * parent's checkout (spawn_task without isolatedWorktree) uses the parent's sandboxes, so it
+   * sees and builds on the parent's uncommitted work instead of a fresh clone.
+   */
+  sharedWith?: string;
 };
 
 export const ConversationWorkspace = defineDoc<WorkspaceState>({
@@ -244,10 +250,12 @@ export const READ_ONLY_REFUSAL =
 
 /** The sandbox that holds `config`'s checkout in this conversation. */
 function sandboxFor(state: WorkspaceState | null | undefined, config: WorkspaceConfig, id: string) {
+  const owner = state?.sharedWith ?? id;
+
   const base =
     config.repository === state?.config?.repository
-      ? id
-      : `${id}:repo:${config.repository.toLowerCase()}`;
+      ? owner
+      : `${owner}:repo:${config.repository.toLowerCase()}`;
 
   return state?.pin ? `${base}@${state.pin}` : base;
 }

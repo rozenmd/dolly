@@ -35,6 +35,8 @@ import * as Predicate from "effect/Predicate";
 import { historyPage, promptIndex, promptWindow } from "./transcript-window";
 import { compactionSettings } from "./compaction";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
+import { coordinatorNote } from "./coordinator";
+import { formatHandoffEvidence } from "./child-report";
 import { Scheduler, SCHEDULE_TOOL_NAMES, scheduleTasks } from "./schedule";
 import { CI_WAIT_TOOL_NAMES, CiWaiter } from "./ci-wait";
 import {
@@ -81,6 +83,7 @@ import { SlackHostService } from "./slack-host";
 import {
   configureSlack,
   readSlackProfile,
+  readPublicBaseUrl,
   rememberPublicBaseUrl,
   removeSlack,
   saveSlackMembers,
@@ -396,7 +399,34 @@ export class Agent extends DurableObject<Env> {
         ),
     }),
     (conversationId) => this.startedFromWeb(conversationId),
+    Date.now,
+    () => ({
+      reach: (caller, id, context) => this.coordination.watchable(caller, id, context),
+      title: (id) => this.sessionTitle(id),
+      evidence: (id, context) =>
+        Effect.runPromise(this.coordination.evidence(id, undefined, context)).then((facts) =>
+          formatHandoffEvidence(facts),
+        ),
+    }),
   );
+  /** Child sessions: spawn_task, send_to_session, task_status, cancel_task (coordination.ts). */
+  private readonly coordination = new Coordination(() => this.harness, {
+    repository: (name) =>
+      Effect.runPromise(
+        Effect.flatMap(GitHub, (github) =>
+          github
+            .resolveRepository(name)
+            .pipe(Effect.tap((resolved) => github.authorize(resolved, false))),
+        ).pipe(Effect.provide(this.services)),
+      ),
+    reachesAll: (id) => this.startedFromWeb(id).catch(() => false),
+    link: async (id) => {
+      const base = await Effect.runPromise(readPublicBaseUrl(this.ctx.storage)).catch(() => null);
+
+      return `${base?.replace(/\/+$/, "") ?? ""}/session/${encodeURIComponent(id)}`;
+    },
+    title: (id) => this.sessionTitle(id),
+  });
   private readonly checkpointTask = workspaceCheckpoint(
     (sandboxId, turnId) => this.env.SANDBOX.getByName(sandboxId).checkpoint(turnId),
     (conversationId, message) =>
@@ -645,7 +675,7 @@ export class Agent extends DurableObject<Env> {
         ),
     } satisfies ToolRegistration;
 
-    const coordination = new Coordination(() => this.harness);
+    const coordination = this.coordination;
 
     const githubSchema = toolParameters(GitHubRequest);
 
@@ -991,6 +1021,7 @@ export class Agent extends DurableObject<Env> {
         ...scheduleTasks,
         AutomationRunTask,
         this.ciWaiter.task,
+        this.ciWaiter.sessionTask,
         this.githubTask,
         this.slackTask,
         this.slackNoticeTask,
@@ -1048,9 +1079,21 @@ export class Agent extends DurableObject<Env> {
               api.conversationId,
             );
 
+            const error = message.errorMessage ?? "Model request failed";
+
+            // A worker whose run dies can't report back, so its parent is told (coordination.ts).
             if (quotaExhausted(message))
               // Outside the generation: it reconfigures and later continues this conversation.
-              this.ctx.waitUntil(this.fallBack(api.conversationId, message));
+              this.ctx.waitUntil(
+                this.fallBack(api.conversationId, message).then(async (continued) => {
+                  if (!continued)
+                    await this.coordination.notifyParentOfFailedRun(api.conversationId, error);
+                }),
+              );
+            else if (!retriedByPi(message))
+              this.ctx.waitUntil(
+                this.coordination.notifyParentOfFailedRun(api.conversationId, error),
+              );
           },
         }),
         hook(ToolTask, {
@@ -1097,6 +1140,19 @@ export class Agent extends DurableObject<Env> {
           } catch {
             return "Skill inventory unavailable; prepare the active checkout and inspect its skill files before claiming a skill is missing.";
           }
+        }),
+        section("coordinator", async ({ read, conversationId }, context) => {
+          const metadata = await this.ctx.storage.get<SessionMetadata>(
+            sessionMetadataKey(conversationId),
+          );
+
+          if (!metadata?.coordinator) return undefined;
+          const state = await read.snapshot(ConversationWorkspace, conversationId, context);
+
+          return coordinatorNote({
+            repository: state?.config?.repository,
+            hasCheckout: Boolean(state?.config),
+          });
         }),
         section("commit-attribution", async () =>
           commitAttributionPrompt(await this.commitCoauthor()),
@@ -2746,26 +2802,27 @@ export class Agent extends DurableObject<Env> {
    * A session never falls back again from a model it fell back to, so two exhausted
    * subscriptions can't bounce it back and forth; choosing a model by hand re-arms it.
    */
+  /** Whether the session switched model and goes on; otherwise its run ended on this failure. */
   private async fallBack(conversationId: ConversationId, message: AssistantMessage) {
     const program = Effect.gen({ self: this }, function* () {
       const metadata = yield* this.sessionMetadata(conversationId);
       const defaults = yield* this.storedDefaults();
       const enabled = metadata?.autoFallback ?? defaults.autoFallback ?? DEFAULT_AUTO_FALLBACK;
 
-      if (!enabled || metadata?.fellBackTo === message.model) return;
+      if (!enabled || metadata?.fellBackTo === message.model) return false;
 
       const to = fallbackModel(message.model, {
         openai: Option.isSome(yield* this.credentials.get("openai")),
         anthropic: Option.isSome(yield* this.credentials.get("anthropic")),
       });
 
-      if (!to) return;
+      if (!to) return false;
 
       const conversation = yield* attempt("pi.conversation.read", () =>
         this.harness.conversation(conversationId, BACKGROUND_CONTEXT),
       );
 
-      if (!conversation) return;
+      if (!conversation) return false;
 
       const agent = yield* attempt("session.model", () => conversation.agent(BACKGROUND_CONTEXT));
 
@@ -2793,7 +2850,7 @@ export class Agent extends DurableObject<Env> {
         ),
       );
 
-      if (retriedByPi(message)) return;
+      if (retriedByPi(message)) return true;
 
       yield* attempt("pi.conversation.idle", () => conversation.waitForIdle(BACKGROUND_CONTEXT));
       yield* this.arm({ active: true });
@@ -2801,16 +2858,18 @@ export class Agent extends DurableObject<Env> {
       yield* attempt("session.fallback.continue", () =>
         conversation.submit({ type: "continue" }, BACKGROUND_CONTEXT),
       ).pipe(Effect.ignore);
+
+      return true;
     });
 
-    await Effect.runPromise(
+    return await Effect.runPromise(
       program.pipe(
         Effect.catch((error) =>
           Effect.logError({
             event: "model_fallback_failed",
             operation: error.operation,
             details: error.details,
-          }),
+          }).pipe(Effect.as(false)),
         ),
       ),
     );
@@ -2837,7 +2896,7 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(conversation)) return undefined;
 
-        const { model, thinkingLevel, speed, autoFallback } = settings;
+        const { model, thinkingLevel, speed, autoFallback, coordinator } = settings;
 
         if (model !== undefined) {
           const provider = modelProvider(model);
@@ -2881,10 +2940,17 @@ export class Agent extends DurableObject<Env> {
             ),
           );
 
-        if (model !== undefined || speed !== undefined || autoFallback !== undefined)
+        if (
+          model !== undefined ||
+          speed !== undefined ||
+          autoFallback !== undefined ||
+          coordinator !== undefined
+        )
           yield* this.patchSessionMetadata(conversation.value.id, {
             ...(speed !== undefined && { speed }),
             ...(autoFallback !== undefined && { autoFallback }),
+            // Applies from the next request: the briefing is part of each system prompt.
+            ...(coordinator !== undefined && { coordinator }),
             // Choosing a model by hand re-arms automatic fallback from it.
             ...(model !== undefined && { fellBackTo: undefined }),
           });
@@ -2894,6 +2960,7 @@ export class Agent extends DurableObject<Env> {
           ...(level !== undefined && { thinkingLevel: level }),
           ...(speed !== undefined && { speed }),
           ...(autoFallback !== undefined && { autoFallback }),
+          ...(coordinator !== undefined && { coordinator }),
         };
       }),
     );
@@ -3724,7 +3791,7 @@ export class Agent extends DurableObject<Env> {
       this.ctx.storage.get<ConversationId>(`session:${id}`),
     );
 
-    const resolved = conversationId ?? (yield* new Coordination(() => this.harness).resolve(id));
+    const resolved = conversationId ?? (yield* this.coordination.resolve(id));
 
     if (resolved === undefined) return Option.none();
 
@@ -4046,7 +4113,16 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(parent)) return undefined;
 
-        return yield* new Coordination(() => this.harness).list(parent.value.id);
+        const listed = yield* this.coordination.list(parent.value.id);
+        const secrets = yield* this.credentials.secrets;
+
+        // Titles are the task's first line, which can carry a secret like any other text.
+        return {
+          children: listed.children.map((child) => ({
+            ...child,
+            title: redact(child.title, secrets),
+          })),
+        };
       }),
     );
   }
@@ -4054,7 +4130,7 @@ export class Agent extends DurableObject<Env> {
   spawnChild(
     id: string,
     input: typeof ChildRequest.Type,
-  ): Promise<{ id: string; model: string; taskId: string } | { error: string } | undefined> {
+  ): Promise<{ id: string; model: string; url: string } | { error: string } | undefined> {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
         const parsed = yield* Schema.decodeUnknownEffect(ChildRequest)(input);
@@ -4077,16 +4153,31 @@ export class Agent extends DurableObject<Env> {
           };
         yield* this.arm({ active: true });
 
-        return yield* new Coordination(() => this.harness).spawn(parent.value.id, parsed);
+        const result = yield* this.coordination.spawn(parent.value.id, {
+          prompt: parsed.content,
+          requestId: parsed.requestId,
+          ...(parsed.model !== undefined && { model: parsed.model }),
+          ...(parsed.mode !== undefined && { mode: parsed.mode }),
+          ...(parsed.repo !== undefined && { repo: parsed.repo }),
+          ...(parsed.branch !== undefined && { branch: parsed.branch }),
+          ...(parsed.isolatedWorktree !== undefined && {
+            isolatedWorktree: parsed.isolatedWorktree,
+          }),
+        });
+
+        return result.ok
+          ? { id: result.taskId, model: result.model, url: result.url }
+          : { error: result.error };
       }),
     );
   }
 
+  /** The owner's follow-up to a direct child, delivered as from the parent session. */
   sendChild(
     id: string,
     childId: string,
     input: typeof ChildMessage.Type,
-  ): Promise<{ taskId: string } | { error: string } | undefined> {
+  ): Promise<{ id: string; status: string } | { error: string } | undefined> {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
         const parsed = yield* Schema.decodeUnknownEffect(ChildMessage)(input);
@@ -4094,8 +4185,7 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(parent)) return undefined;
 
-        const coordination = new Coordination(() => this.harness);
-        const children = yield* coordination.list(parent.value.id);
+        const children = yield* this.coordination.list(parent.value.id);
         const child = children.children.find((candidate) => candidate.id === childId);
 
         if (!child) return { error: "Not a direct child of this session" };
@@ -4110,34 +4200,50 @@ export class Agent extends DurableObject<Env> {
           };
         yield* this.arm({ active: true });
 
-        return yield* coordination.send(parent.value.id, childId, parsed);
+        const sent = yield* this.coordination.send(parent.value.id, {
+          id: childId,
+          message: parsed.content,
+          deliveryId: parsed.requestId,
+        });
+
+        return sent.ok ? { id: childId, status: sent.status } : { error: sent.error };
       }),
     );
   }
 
-  childTask(id: string, taskId: string) {
+  /** A direct child's task_status, for the HTTP API; its text is redacted like transcripts. */
+  childStatus(id: string, childId: string) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
         const parent = yield* this.conversation(id);
 
         if (Option.isNone(parent)) return undefined;
 
-        const receipt = yield* new Coordination(() => this.harness).receipt(
-          parent.value.id,
-          taskId,
-          false,
-        );
+        const children = yield* this.coordination.list(parent.value.id);
 
+        if (!children.children.some((candidate) => candidate.id === childId))
+          return { error: "Not a direct child of this session" };
+
+        const status = yield* this.coordination.status(parent.value.id, childId);
+
+        if (!status.ok) return { error: status.error };
         const secrets = yield* this.credentials.secrets;
 
-        return "result" in receipt && receipt.result?.status === "answered"
-          ? {
-              ...receipt,
-              result: { ...receipt.result, text: redact(receipt.result.text, secrets) },
-            }
-          : receipt;
+        return {
+          id: childId,
+          state: status.state,
+          title: redact(status.title, secrets),
+          text: redact(status.text, secrets),
+        };
       }),
     );
+  }
+
+  /** A session's title as the sidebar shows it, or a child's task line. */
+  private async sessionTitle(id: ConversationId) {
+    const metadata = await this.ctx.storage.get<SessionMetadata>(sessionMetadataKey(id));
+
+    return metadata?.title ?? (await this.coordination.childTitle(id));
   }
 
   scheduledPrompts(id: string) {
