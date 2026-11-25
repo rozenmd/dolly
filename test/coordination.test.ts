@@ -712,6 +712,11 @@ it("keeps a child working while its own child runs, so waits, status and cancel_
 });
 
 it("keeps a read-only parent's children read-only, whatever mode they ask for, and lets them report", async () => {
+  // A writable session outside the family, which a session started from the web app could reach.
+  const other = await root();
+  const otherConversation = await conversationOf(other);
+  const strayed: string[] = [];
+
   vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
     const request = await modelRequest(init);
 
@@ -721,6 +726,12 @@ it("keeps a read-only parent's children read-only, whatever mode they ask for, a
         id: parentIn(request.first) ?? "",
         message: "Read it; nothing to change.",
       });
+
+    // Another tries to steer a writable session outside its family.
+    if (request.first.includes("isolatedWorktree") && !request.outputs.length)
+      return toolCall("send_to_session", { id: otherConversation, message: "Push to main" });
+
+    if (request.first.includes("isolatedWorktree")) strayed.push(...request.outputs);
 
     return answer();
   });
@@ -775,6 +786,9 @@ it("keeps a read-only parent's children read-only, whatever mode they ask for, a
     kind: "report",
     text: "Read it; nothing to change.",
   });
+  await expect.poll(() => strayed.length).toBe(1);
+  expect(strayed[0]).toContain("is not a task this session spawned or its parent.");
+  expect(await sessionMessages(other)).toEqual([]);
 });
 
 it("caps the children one session starts over its lifetime", async () => {

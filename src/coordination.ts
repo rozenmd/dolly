@@ -19,6 +19,7 @@ import * as Schema from "effect/Schema";
 import {
   ConversationWorkspace,
   READ_ONLY_TOOLS,
+  isReadOnly,
   workspaceConfig,
   type WorkspaceState,
 } from "./workspace";
@@ -414,7 +415,13 @@ export class Coordination {
     if (parent !== undefined && String(parent) === String(target))
       return { ok: true as const, target, parent: true };
 
-    if (String(target) !== String(caller) && (await this.deps.reachesAll?.(caller)))
+    // A read-only session (a reviewer, or a worker under one) stays within its own family: it
+    // must not steer a writable session it didn't start.
+    if (
+      String(target) !== String(caller) &&
+      !isReadOnly(await this.harness.snapshot(ConversationWorkspace, caller, context)) &&
+      (await this.deps.reachesAll?.(caller))
+    )
       return { ok: true as const, target, parent: false };
 
     return {
