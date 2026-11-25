@@ -36,6 +36,7 @@ import { historyPage, promptIndex, promptWindow } from "./transcript-window";
 import { compactionSettings } from "./compaction";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
 import { coordinatorNote } from "./coordinator";
+import { formatHandoffEvidence } from "./child-report";
 import { Scheduler, SCHEDULE_TOOL_NAMES, scheduleTasks } from "./schedule";
 import { CI_WAIT_TOOL_NAMES, CiWaiter } from "./ci-wait";
 import {
@@ -402,6 +403,10 @@ export class Agent extends DurableObject<Env> {
     () => ({
       reach: (caller, id, context) => this.coordination.watchable(caller, id, context),
       title: (id) => this.sessionTitle(id),
+      evidence: (id, context) =>
+        Effect.runPromise(this.coordination.evidence(id, undefined, context)).then((facts) =>
+          formatHandoffEvidence(facts),
+        ),
     }),
   );
   /** Child sessions: spawn_task, send_to_session, task_status, cancel_task (coordination.ts). */

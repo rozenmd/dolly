@@ -445,6 +445,10 @@ it("lets the model spawn, wait with session_turn, and get the worker's report wi
   expect(wake?.headline).toBe(`Session \`${child}\` ("Child job") is idle (turn finished).`);
   expect(wake?.trigger).toContain("Last assistant message (tail):\nChild finished");
   expect(wake?.trigger).toContain(`Use task_status with id \`${child}\``);
+  // The wake carries the server's facts too, so waiting alone is enough.
+  expect(wake?.trigger).toContain(
+    `— evidence for \`${child}\` (computed by the server, not written by the worker) —\nstate: done · no repository checkout · 1 turn(s)`,
+  );
   expect(wake?.prompt).toContain("Read what the session reported");
 }, 20000);
 
@@ -594,10 +598,35 @@ it("enforces the spawn depth and working-children limits on the server, includin
   });
 
   // Children that are still working count against the limit; finished ones don't.
-  block = true;
   const wide = await root();
+  const done = await spawn(wide, "Done already");
+  await idle(wide, done.id);
+  block = true;
+  const busy = [];
 
-  for (let count = 0; count < 8; count++) await spawn(wide, `Busy ${count}`);
+  for (let count = 0; count < 8; count++) busy.push(await spawn(wide, `Busy ${count}`));
+
+  // A follow-up that would start the idle child's run takes a ninth slot, so it's refused too;
+  // steering a child that already holds a slot is not.
+  const restart = await post(`${wide}/children/${done.id}/messages`, {
+    content: "More work",
+    requestId: crypto.randomUUID(),
+  });
+
+  expect(restart.status).toBe(409);
+  expect(await restart.json()).toEqual({
+    error:
+      "8 child sessions are already working. Wait for one with wait_for kind session_turn, or stop one with cancel_task.",
+  });
+  expect(await childState(wide, done.id)).toBe("idle");
+
+  const steer = await post(`${wide}/children/${busy[0]?.id}/messages`, {
+    content: "Also this",
+    requestId: crypto.randomUUID(),
+  });
+
+  expect(steer.status).toBe(202);
+  expect(await steer.json()).toEqual({ id: busy[0]?.id, status: "steered" });
 
   const over = await post(`${wide}/children`, {
     content: "One too many",
@@ -615,6 +644,112 @@ it("enforces the spawn depth and working-children limits on the server, includin
     (await post(`${wide}/children`, { content: "Still too wide", requestId: crypto.randomUUID() }))
       .status,
   ).toBe(409);
+});
+
+it("keeps a child working while its own child runs, so waits, status and cancel_task see the subtree", async () => {
+  const deepAborted: string[] = [];
+  // Every tool output the root's model has seen, as of its newest request.
+  let seen: readonly string[] = [];
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    const request = await modelRequest(init);
+
+    if (request.first.includes("Deep job")) return blocked(init, () => deepAborted.push("deep"));
+
+    if (request.first.includes("Middle job"))
+      return request.outputs.length
+        ? answer("Middle waiting")
+        : toolCall("spawn_task", { prompt: "Deep job" }, "spawn_deep");
+
+    seen = request.outputs;
+
+    if (request.last.includes("[Session wait")) return answer("Ack");
+
+    const watch = /WATCH=(\w+)/.exec(request.last)?.[1];
+    const cancel = /CANCEL=(\w+)/.exec(request.last)?.[1];
+
+    if (request.recent.length) return answer("Done");
+
+    if (watch) return toolCall("wait_for", { kind: "session_turn", session_id: watch }, "wait");
+
+    if (cancel) return toolCall("cancel_task", { taskId: cancel }, "cancel");
+
+    return answer("Hi");
+  });
+
+  const parent = await root();
+  const middle = await spawn(parent, "Middle job");
+
+  // The middle child's own turn ends with an interim reply while the deep child still runs.
+  await expect.poll(async () => (await userMessages(middle.id)).length, { timeout: 4000 }).toBe(1);
+  await expect
+    .poll(async () => (await status(parent, middle.id)).text, { timeout: 4000 })
+    .toContain("• assistant: Middle waiting");
+
+  expect(await childState(parent, middle.id)).toBe("running");
+  expect((await status(parent, middle.id)).state).toBe("running");
+
+  // A session_turn wait on the middle child doesn't wake on its interim reply.
+  await post(`${parent}/messages`, {
+    content: `WATCH=${middle.id}`,
+    requestId: crypto.randomUUID(),
+  });
+  await expect.poll(() => seen.length, { timeout: 4000 }).toBe(1);
+  expect(seen[0]).toContain(`"now":"when session ${middle.id} finishes its turn`);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  expect(await sessionWakes(parent)).toEqual([]);
+
+  // cancel_task reaches the running deep child; then the wait wakes.
+  await post(`${parent}/messages`, {
+    content: `CANCEL=${middle.id}`,
+    requestId: crypto.randomUUID(),
+  });
+  await expect.poll(() => seen.length, { timeout: 4000 }).toBe(2);
+  expect(seen[1]).toBe(`Cancelled task \`${middle.id}\`.`);
+  expect(deepAborted).toEqual(["deep"]);
+  await expect.poll(() => childState(parent, middle.id)).toBe("idle");
+  await expect.poll(async () => (await sessionWakes(parent)).length, { timeout: 4000 }).toBe(1);
+});
+
+it("keeps a read-only parent's children read-only, whatever mode they ask for", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+  const parent = await root({ repository: "octocat/project", ref: "main" });
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const harness = agent["harness"];
+    const id = await agent["ctx"].storage.get<ConversationId>(`session:${parent}`);
+
+    if (!id) throw new Error("Session missing");
+
+    // As a pinned pull request review is.
+    await harness.commit(async (tx) => {
+      const state = await tx.doc(ConversationWorkspace, id);
+
+      if (state.config) state.config.readOnly = true;
+    }, BACKGROUND_CONTEXT);
+  });
+
+  for (const options of [{}, { isolatedWorktree: true }, { mode: "scratch" }]) {
+    const child = await spawn(parent, `Child ${JSON.stringify(options)}`, undefined, options);
+
+    expect((await workspaceOf(child.id))?.config).toMatchObject({
+      repository: "octocat/project",
+      ref: "main",
+      readOnly: true,
+    });
+
+    const tools = await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+      const harness = agent["harness"];
+      const index = await harness.snapshot(SessionIndex, BACKGROUND_CONTEXT);
+      const id = index?.ids[child.id];
+
+      if (!id) throw new Error("Session missing");
+      const conversation = await harness.conversation(id, BACKGROUND_CONTEXT);
+
+      return (await conversation?.agent(BACKGROUND_CONTEXT))?.tools.map((tool) => tool.name);
+    });
+
+    expect(tools).toEqual(["shell", "read_file", "github", "workspace", "papercuts", "dolly"]);
+  }
 });
 
 it("caps the children one session starts over its lifetime", async () => {

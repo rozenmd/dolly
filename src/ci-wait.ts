@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { ciWaitMessage, sessionWaitMessage, type CiWaitOutcome } from "./ci-wait-message";
-import { isWorking, pendingDelivery } from "./coordination";
+import { pendingDelivery, subtreeOf, workingIn } from "./coordination";
 import { lastReply, tail } from "./child-report";
 import type {
   CiCheck,
@@ -126,6 +126,8 @@ export type SessionWatch = {
     context: Context,
   ): Promise<{ target: ConversationId } | { error: string }>;
   title(id: ConversationId): Promise<string | undefined>;
+  /** The facts of its work the server computes from its transcript, as a worker's report carries. */
+  evidence?(id: ConversationId, context: Context): Promise<string>;
 };
 
 const SESSION_TURN_SCAN_ENTRIES = 60;
@@ -669,13 +671,16 @@ function ciWaitTask(reads: () => CiReads) {
 }
 
 /**
- * Wait until `target` has no turn running, or the deadline. A first message still being admitted
- * (spawn_task's delivery) counts as running, so a wait registered right after spawning doesn't wake
- * before the child has started.
+ * Wait until neither `target` nor any session under it has a turn running, or the deadline: a
+ * session whose own turn ended while a child it spawned still runs is still working on its task.
+ * A first message still being admitted (spawn_task's delivery) counts as running, so a wait
+ * registered right after spawning doesn't wake before the child has started. `waiter`, the
+ * session that waits, never counts.
  */
 async function awaitTurnEnd(
   harness: Harness,
   target: ConversationId,
+  waiter: ConversationId,
   deadlineAt: number,
   now: number,
   context: Context,
@@ -692,7 +697,14 @@ async function awaitTurnEnd(
 
   const settled = (async () => {
     for (;;) {
-      const pending = await harness.commit((tx) => pendingDelivery(tx, target), context);
+      const ids = (await subtreeOf(harness, target, context)).filter(
+        (id) => String(id) !== String(waiter),
+      );
+
+      const working = await harness.commit((tx) => workingIn(tx, ids), context);
+
+      if (working === undefined) return "idle" as const;
+      const pending = await harness.commit((tx) => pendingDelivery(tx, working), context);
 
       if (pending !== undefined) {
         await harness.waitForTask(pending, context);
@@ -700,9 +712,11 @@ async function awaitTurnEnd(
         continue;
       }
 
-      await handle.waitForIdle(context);
+      const session = await harness.conversation(working, context);
 
-      if (!(await harness.commit((tx) => isWorking(tx, target), context))) return "idle" as const;
+      if (!session) return "missing" as const;
+
+      await session.waitForIdle(context);
     }
   })();
 
@@ -776,6 +790,13 @@ async function sessionTurnWake(
       : "It has not written an assistant message yet.",
   );
 
+  // The same facts a report carries, so waiting is enough even if the worker never reported.
+  if (outcome !== "missing") {
+    const evidence = await sessions?.evidence?.(target, context).catch(() => undefined);
+
+    if (evidence) lines.push(evidence);
+  }
+
   lines.push(`Use task_status with id \`${target}\` for more of the transcript.`);
 
   return { outcome: TURN_OUTCOME[outcome].wake, headline, detail: lines.join("\n\n") };
@@ -794,6 +815,7 @@ function sessionTurnTask(getHarness: () => Harness, sessions: () => SessionWatch
         const watched = await awaitTurnEnd(
           harness,
           target,
+          runtime.conversationId,
           task.input.deadlineAt,
           runtime.now(),
           context,
@@ -926,9 +948,13 @@ export class CiWaiter {
 
     if (!conversation) return { error: "Session not found" };
 
+    const subtree = (await subtreeOf(this.harness, target, context)).filter(
+      (session) => String(session) !== String(conversationId),
+    );
+
     const registered = await conversation.commit(async (tx) => {
       // Task reads come before the commit's first table write.
-      const working = await isWorking(tx, target);
+      const working = (await workingIn(tx, subtree)) !== undefined;
       const waits = await tx.doc(CiWaits, conversationId);
       const previous = waits.current?.taskId;
 

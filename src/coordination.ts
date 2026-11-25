@@ -1,5 +1,6 @@
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import {
+  AgentDoc,
   configure,
   defineDoc,
   defineTask,
@@ -15,7 +16,12 @@ import {
 import { bool, int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { ConversationWorkspace, workspaceConfig, type WorkspaceState } from "./workspace";
+import {
+  ConversationWorkspace,
+  READ_ONLY_TOOLS,
+  workspaceConfig,
+  type WorkspaceState,
+} from "./workspace";
 import { SessionModel, modelProvider } from "./models";
 import { attempt } from "./operations";
 import {
@@ -62,6 +68,8 @@ const BEACON_THROTTLE_MS = 10 * 60_000;
 const EVIDENCE_SCAN_ENTRIES = 2_000;
 
 export type ChildMode = "ask" | "code" | "scratch";
+
+const WORKING_LIMIT = `${MAX_WORKING} child sessions are already working. Wait for one with wait_for kind session_turn, or stop one with cancel_task.`;
 
 /** Pi's ownership edges are authoritative for ancestry and recursive cancellation. */
 export const SessionIndex = defineDoc<{ ids: Record<string, ConversationId> }>({
@@ -185,6 +193,29 @@ export async function isWorking(tx: Tx, id: ConversationId) {
   }
 
   return false;
+}
+
+/**
+ * A session and every session under it, from each one's own Children doc. A session whose turn
+ * ended while a child it spawned is still running is still working on its task.
+ */
+export async function subtreeOf(harness: Harness, id: ConversationId, context: Context) {
+  const ids = [id];
+
+  for (let index = 0; index < ids.length; index++) {
+    const state = await harness.snapshot(Children, ids[index], context);
+
+    for (const child of Object.values(state?.children ?? {})) ids.push(child.id);
+  }
+
+  return ids;
+}
+
+/** The first of `ids` that is working, if any. Task reads: before the commit's first table write. */
+export async function workingIn(tx: Tx, ids: readonly ConversationId[]) {
+  for (const id of ids) if (await isWorking(tx, id)) return id;
+
+  return undefined;
 }
 
 /** The first message still being admitted to a conversation, if any. */
@@ -330,6 +361,26 @@ export class Coordination {
     return this.deps.now?.() ?? Date.now();
   }
 
+  /** Each direct child of `parent` with the sessions under it, keyed by child id. */
+  private async subtrees(parent: ConversationId | undefined, context: Context) {
+    const subtrees = new Map<string, ConversationId[]>();
+
+    if (parent === undefined) return subtrees;
+    const state = await this.harness.snapshot(Children, parent, context);
+
+    for (const child of Object.values(state?.children ?? {}))
+      subtrees.set(String(child.id), await subtreeOf(this.harness, child.id, context));
+
+    return subtrees;
+  }
+
+  /** Whether a session or any session under it is working. */
+  private async subtreeWorking(id: ConversationId, context: Context) {
+    const ids = await subtreeOf(this.harness, id, context);
+
+    return (await this.harness.commit((tx) => workingIn(tx, ids), context)) !== undefined;
+  }
+
   private async link(id: string) {
     return this.deps.link ? await this.deps.link(id) : `/session/${encodeURIComponent(id)}`;
   }
@@ -457,6 +508,7 @@ export class Coordination {
     }
 
     const now = this.now();
+    const subtrees = yield* attempt("children.subtrees", () => this.subtrees(parent, context));
 
     const created = yield* attempt("child.create", () =>
       conversation.commit(async (tx): Promise<SpawnResult> => {
@@ -492,13 +544,9 @@ export class Coordination {
         let working = 0;
 
         for (const child of Object.values(state.children))
-          if (await isWorking(tx, child.id)) working++;
+          if (await workingIn(tx, subtrees.get(String(child.id)) ?? [child.id])) working++;
 
-        if (working >= MAX_WORKING)
-          return {
-            ok: false,
-            error: `${MAX_WORKING} child sessions are already working. Wait for one with wait_for kind session_turn, or stop one with cancel_task.`,
-          };
+        if (working >= MAX_WORKING) return { ok: false, error: WORKING_LIMIT };
 
         const anchor = await tx.createTask(Anchor, null, {
           ownership: { kind: "conversation" },
@@ -522,6 +570,10 @@ export class Coordination {
         });
 
         if (workspace) Object.assign(await tx.doc(ConversationWorkspace, child.id), workspace);
+
+        // A read-only parent's children get its tool allowlist too.
+        if (parentWorkspace?.config?.readOnly)
+          (await tx.doc(AgentDoc, child.id)).tools = [...READ_ONLY_TOOLS];
 
         await tx.createTask(
           Delivery,
@@ -594,9 +646,22 @@ export class Coordination {
 
     const now = this.now();
 
+    // A follow-up that starts an idle child's run takes one of the parent's working slots.
+    const subtrees = yield* attempt("children.subtrees", () =>
+      this.subtrees(reached.child ? caller : undefined, context),
+    );
+
     const status = yield* attempt("target.deliver", () =>
       conversation.commit(async (tx) => {
-        const busy = await isWorking(tx, target);
+        const busy = await workingIn(tx, subtrees.get(String(target)) ?? [target]);
+
+        if (!busy && reached.child) {
+          let working = 0;
+
+          for (const ids of subtrees.values()) if (await workingIn(tx, ids)) working++;
+
+          if (working >= MAX_WORKING) return "full" as const;
+        }
 
         await conversation.submit(tx, {
           type: "input",
@@ -614,6 +679,8 @@ export class Coordination {
         return busy ? ("steered" as const) : ("started" as const);
       }, context),
     );
+
+    if (status === "full") return { ok: false as const, error: WORKING_LIMIT };
 
     return {
       ok: true as const,
@@ -644,9 +711,7 @@ export class Coordination {
 
     const working =
       state ??
-      ((yield* attempt("session.working", () =>
-        this.harness.commit((tx) => isWorking(tx, id), context),
-      ))
+      ((yield* attempt("session.working", () => this.subtreeWorking(id, context)))
         ? "running"
         : facts.lastRunError
           ? "error"
@@ -679,10 +744,7 @@ export class Coordination {
     const children = Object.values(state?.children ?? {});
 
     const working = yield* attempt("children.working", () =>
-      this.harness.commit(
-        async (tx) => Promise.all(children.map((child) => isWorking(tx, child.id))),
-        BACKGROUND_CONTEXT,
-      ),
+      Promise.all(children.map((child) => this.subtreeWorking(child.id, BACKGROUND_CONTEXT))),
     );
 
     return {
@@ -719,7 +781,7 @@ export class Coordination {
       Promise.all([
         readTranscript(this.harness, target, EVIDENCE_SCAN_ENTRIES, context),
         this.harness.snapshot(ConversationWorkspace, target, context),
-        this.harness.commit((tx) => isWorking(tx, target), context),
+        this.subtreeWorking(target, context),
         this.harness.commit((tx) => parentOf(tx, target), context),
         conversation.agent(context),
         reached.child ? Promise.resolve(title(reached.child.content)) : this.deps.title?.(target),
@@ -769,19 +831,29 @@ export class Coordination {
 
     const target = reached.target;
 
+    // A child whose own turn ended while one of its children still runs is still cancellable,
+    // and cancelling it stops every session under it.
+    const ids = yield* attempt("target.subtree", () => subtreeOf(this.harness, target, context));
+
     const working = yield* attempt("target.working", () =>
-      this.harness.commit((tx) => isWorking(tx, target), context),
+      Promise.all(
+        ids.map((session) => this.harness.commit((tx) => isWorking(tx, session), context)),
+      ),
     );
 
-    if (!working)
+    if (!working.some(Boolean))
       return `Nothing to cancel on \`${id}\` (idle, done, or an external run this server doesn't own).`;
 
-    const conversation = yield* attempt("target.open", () =>
-      this.harness.conversation(target, context),
-    );
+    for (const [index, session] of ids.entries()) {
+      if (!working[index]) continue;
 
-    if (conversation)
-      yield* attempt("target.abort", () => conversation.abort(context, { background: true }));
+      const conversation = yield* attempt("target.open", () =>
+        this.harness.conversation(session, context),
+      );
+
+      if (conversation)
+        yield* attempt("target.abort", () => conversation.abort(context, { background: true }));
+    }
 
     return `Cancelled task \`${id}\`.`;
   });
@@ -1008,12 +1080,18 @@ function childWorkspace(input: {
 }): ChildPlacement {
   const parentConfig = input.parent?.config;
 
-  if (input.mode === "scratch" || !input.repository) return { checkout: { kind: "none" } };
+  // A read-only parent (such as a pull request reviewer) can't grant write access through a
+  // child: whatever the mode or repository, the child gets a read-only checkout, never none.
+  const inherited = parentConfig?.readOnly === true;
+  const repository = input.repository ?? (inherited ? parentConfig.repository : undefined);
+
+  if ((input.mode === "scratch" && !inherited) || !repository)
+    return { checkout: { kind: "none" } };
 
   const ref = input.sameRepository && parentConfig ? parentConfig.ref : "HEAD";
 
-  if (input.mode === "ask") {
-    const config = workspaceConfig({ repository: input.repository, ref }, input.childId, {
+  if (input.mode === "ask" || inherited) {
+    const config = workspaceConfig({ repository, ref }, input.childId, {
       readOnly: true,
     });
 
@@ -1047,7 +1125,7 @@ function childWorkspace(input: {
     };
 
   const config = {
-    ...workspaceConfig({ repository: input.repository, ref }, input.childId),
+    ...workspaceConfig({ repository, ref }, input.childId),
     ...(input.sameRepository && parentConfig && { networkHosts: parentConfig.networkHosts }),
     ...(input.branch !== undefined && { branch: input.branch }),
   };
