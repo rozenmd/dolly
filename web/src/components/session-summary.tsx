@@ -10,16 +10,12 @@ import {
 } from "@heroicons/react/24/outline";
 import type { SavedSession } from "../lib/api";
 import type { SessionSummary as SummaryState } from "../lib/session-summary";
-import {
-  groupThreads,
-  THREAD_STATE_LABEL,
-  threadState,
-  threadStatusLine,
-} from "../lib/session-threads";
-import { ago } from "../lib/time";
+import { threadState } from "../lib/session-threads";
 import { effortName, modelName } from "./model-select";
 import { PullRequestIcon } from "./sidebar";
 import { IconButton, RepoBadge } from "./ui";
+import { ThreadGroups, type ThreadSession } from "./threads";
+import { ThreadPeek } from "./thread-peek";
 
 export const sessionSummaryId = "session-summary";
 
@@ -30,23 +26,14 @@ const PULL_HEADLINES = {
   closed: "Closed",
 } as const;
 
-export type ThreadRow = {
-  id: string;
-  title: string;
-  updatedAt: number;
-  running: boolean;
-  pullRequest?: SavedSession["pullRequest"];
-};
-
-/** The threads a session handed work to, grouped by where they stand (opensession's Threads panel). */
+/** The threads a session handed work to, grouped by where they stand. */
 function ThreadsBand({
   threads,
   onOpen,
 }: {
-  threads: readonly ThreadRow[];
+  threads: readonly ThreadSession[];
   onOpen: (id: string) => void;
 }) {
-  const now = Date.now();
   const shipped = threads.filter((thread) => threadState(thread) === "shipped").length;
 
   return (
@@ -57,31 +44,7 @@ function ThreadsBand({
           {shipped} shipped · {threads.length - shipped} open
         </span>
       </h2>
-      {groupThreads(threads).map((group) => (
-        <section
-          key={group.state}
-          className="thread-group"
-          aria-label={THREAD_STATE_LABEL[group.state]}
-        >
-          <h3>
-            {THREAD_STATE_LABEL[group.state]} <span>{group.threads.length}</span>
-          </h3>
-          <ul className="thread-list">
-            {group.threads.map((thread) => (
-              <li key={thread.id}>
-                <button type="button" className="thread-row" onClick={() => onOpen(thread.id)}>
-                  <span className={`thread-dot ${group.state}`} aria-hidden="true" />
-                  <span className="thread-text">
-                    <span className="thread-title">{thread.title}</span>
-                    <span className="thread-status">{threadStatusLine(thread)}</span>
-                  </span>
-                  <span className="thread-time">{ago(thread.updatedAt, now)}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ))}
+      <ThreadGroups threads={threads} onOpen={onOpen} />
     </section>
   );
 }
@@ -155,13 +118,22 @@ export function SessionSummaryCard({
   failure,
   threads,
   onOpenThread,
+  peek,
+  onPeek,
+  lookup,
 }: {
   summary: SummaryState;
   session: SavedSession;
   running: boolean;
   failure?: string;
-  threads: readonly ThreadRow[];
+  threads: readonly ThreadSession[];
+  /** Open a thread as its own page. */
   onOpenThread: (id: string) => void;
+  /** The thread open inside the card, if any. */
+  peek?: string;
+  /** Open a thread inside the card, or go back to the card's summary with undefined. */
+  onPeek: (id: string | undefined) => void;
+  lookup: (id: string) => ThreadSession | undefined;
 }) {
   const [copied, setCopied] = useState(false);
   const { setOpen, standing } = summary;
@@ -204,6 +176,24 @@ export function SessionSummaryCard({
       document.removeEventListener("keydown", onKey);
     };
   }, [standing, setOpen]);
+
+  if (peek)
+    return (
+      <aside
+        id={sessionSummaryId}
+        className={`session-summary thread-open ${standing ? "standing" : "overlay"}`}
+        aria-label="Session summary"
+      >
+        <ThreadPeek
+          id={peek}
+          session={lookup(peek)}
+          lookup={lookup}
+          onBack={() => onPeek(undefined)}
+          onOpenFull={onOpenThread}
+          onOpenThread={onPeek}
+        />
+      </aside>
+    );
 
   return (
     <aside
@@ -265,7 +255,7 @@ export function SessionSummaryCard({
           }
         />
       )}
-      {threads.length > 0 && <ThreadsBand threads={threads} onOpen={onOpenThread} />}
+      {threads.length > 0 && <ThreadsBand threads={threads} onOpen={onPeek} />}
       <h2 className="summary-section">Session</h2>
       {session.repository && (
         <Row
