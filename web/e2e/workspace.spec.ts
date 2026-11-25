@@ -231,7 +231,8 @@ test("edits, deletes, reorders and steers queued messages, and stops on Escape t
 
   let items: Item[] = [
     { id: 41, mode: "followUp", content: "Run the tests" },
-    { id: 42, mode: "followUp", content: "Update the README" },
+    // Snapshots are redacted; Edit returns the text as typed.
+    { id: 42, mode: "followUp", content: "Update the README with Bearer [redacted]" },
     { id: 43, mode: "followUp", content: "Review feedback" },
   ];
 
@@ -306,7 +307,9 @@ test("edits, deletes, reorders and steers queued messages, and stops on Escape t
     if (edit) {
       const item = remove(Number(edit[1]));
 
-      return route.fulfill({ json: { content: item?.content ?? "" } });
+      const original = item?.id === 42 ? "Update the README with Bearer abc" : item?.content;
+
+      return route.fulfill({ json: { content: original ?? "" } });
     }
 
     const withdraw = /^\/api\/sessions\/queue-session\/queue\/(\d+)$/.exec(path);
@@ -363,7 +366,7 @@ test("edits, deletes, reorders and steers queued messages, and stops on Escape t
 
   // Edit moves the text back into the composer and out of the queue.
   await rows.nth(1).getByRole("button", { name: "Edit in composer" }).click();
-  await expect(field).toHaveValue("Draft\n\nUpdate the README");
+  await expect(field).toHaveValue("Draft\n\nUpdate the README with Bearer abc");
   await expect(queue).toContainText("2 messages queued");
   await expect(queue).not.toContainText("Update the README");
 

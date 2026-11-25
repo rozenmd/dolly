@@ -928,10 +928,11 @@ export function Composer({
   queued: readonly QueuedMessage[];
   onSteerQueued: (id: number) => void;
   /**
-   * Withdraws a queued message for editing: "refused" when the server answered that it can't (it
+   * Withdraws a queued message for editing and resolves with its original text, or "refused"
+   * when the server answered that it can't (it
    * was already delivered, or isn't the owner's text), "unknown" when no answer came back.
    */
-  onEditQueued: (id: number) => Promise<"withdrawn" | "refused" | "unknown">;
+  onEditQueued: (id: number) => Promise<{ content: string } | "refused" | "unknown">;
   onDeleteQueued: (id: number) => void;
   onReorderQueue: (order: readonly number[]) => Promise<boolean>;
   /** Changes as the conversation moves, so "send later" picks up schedules the agent makes. */
@@ -1057,9 +1058,20 @@ export function Composer({
     setDrafts((values) => ({ ...values, [draftKey]: after }));
     field.current?.focus();
 
-    if ((await onEditQueued(id)) !== "refused") return;
+    const result = await onEditQueued(id);
+
+    if (result === "unknown") return;
+
+    // The preview is redacted like the transcript; the server returns the original text.
+    const restored =
+      result === "refused"
+        ? before
+        : before.trim()
+          ? `${before}\n\n${result.content}`
+          : result.content;
+
     setDrafts((values) =>
-      values[draftKey] === after ? { ...values, [draftKey]: before } : values,
+      values[draftKey] === after ? { ...values, [draftKey]: restored } : values,
     );
   }
 

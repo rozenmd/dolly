@@ -54,6 +54,9 @@ import { useSessionSummary } from "./lib/session-summary";
 import { usePhone } from "./components/threads";
 import { workspaceMain, workspaceOf, workspaceRows, workspaceTabs } from "./lib/workspaces";
 
+/** A queued message taken back into the composer, as the owner typed it (unredacted). */
+const QueuedEdit = Schema.fromJsonString(Schema.Struct({ content: Schema.String }));
+
 const cacheStorageKey = "dolly.sessions.cache.v1";
 const decodeUpdate = Schema.decodeUnknownSync(Schema.fromJsonString(SessionUpdateResult));
 const decodeSessions = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(SavedSession)));
@@ -838,9 +841,12 @@ export function WorkspaceApp() {
     setError("");
 
     try {
-      await request(`/sessions/${encodeURIComponent(selected)}/queue/${submissionId}/edit`, {});
+      const result = await request(
+        `/sessions/${encodeURIComponent(selected)}/queue/${submissionId}/edit`,
+        {},
+      );
 
-      return "withdrawn" as const;
+      return Schema.decodeUnknownSync(QueuedEdit)(result);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not edit the queued message.");
 
