@@ -711,8 +711,19 @@ it("keeps a child working while its own child runs, so waits, status and cancel_
   await expect.poll(async () => (await sessionWakes(parent)).length, { timeout: 4000 }).toBe(1);
 });
 
-it("keeps a read-only parent's children read-only, whatever mode they ask for", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+it("keeps a read-only parent's children read-only, whatever mode they ask for, and lets them report", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    const request = await modelRequest(init);
+
+    // The first child reports back the way its briefing says to.
+    if (request.first.includes("Child {}") && !request.outputs.length)
+      return toolCall("send_to_session", {
+        id: parentIn(request.first) ?? "",
+        message: "Read it; nothing to change.",
+      });
+
+    return answer();
+  });
   const parent = await root({ repository: "octocat/project", ref: "main" });
   await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
     const harness = agent["harness"];
@@ -748,8 +759,22 @@ it("keeps a read-only parent's children read-only, whatever mode they ask for", 
       return (await conversation?.agent(BACKGROUND_CONTEXT))?.tools.map((tool) => tool.name);
     });
 
-    expect(tools).toEqual(["shell", "read_file", "github", "workspace", "papercuts", "dolly"]);
+    expect(tools).toEqual([
+      "shell",
+      "read_file",
+      "github",
+      "workspace",
+      "papercuts",
+      "dolly",
+      "send_to_session",
+    ]);
   }
+
+  await expect.poll(async () => (await sessionMessages(parent)).length).toBe(1);
+  expect((await sessionMessages(parent))[0]).toMatchObject({
+    kind: "report",
+    text: "Read it; nothing to change.",
+  });
 });
 
 it("caps the children one session starts over its lifetime", async () => {

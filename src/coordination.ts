@@ -571,9 +571,10 @@ export class Coordination {
 
         if (workspace) Object.assign(await tx.doc(ConversationWorkspace, child.id), workspace);
 
-        // A read-only parent's children get its tool allowlist too.
+        // A read-only parent's children get its tool allowlist too, plus send_to_session so they
+        // can report back as their briefing says; it only delivers messages, never writes.
         if (parentWorkspace?.config?.readOnly)
-          (await tx.doc(AgentDoc, child.id)).tools = [...READ_ONLY_TOOLS];
+          (await tx.doc(AgentDoc, child.id)).tools = [...READ_ONLY_TOOLS, "send_to_session"];
 
         await tx.createTask(
           Delivery,
