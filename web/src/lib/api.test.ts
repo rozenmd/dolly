@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import type { Live } from "../../../src/transcript";
+import { sessionNoticeMessage, workerReportMessage } from "../../../src/child-report-message";
+import { sessionWaitMessage } from "../../../src/ci-wait-message";
 import { readSessions, Snapshot, turnsFromSnapshot, sessionBody, queueFromSnapshot } from "./api";
+import { spawnedThreadId } from "./session-threads";
 
 describe("queued messages", () => {
   it("reads durable inputs in order, including steering state, but not queued writes", () => {
@@ -76,6 +79,76 @@ describe("new session context", () => {
 });
 
 describe("session transcript", () => {
+  it("shows another session's messages and session waits as notices, not the owner's prompts", () => {
+    const user = (id: number, content: string) => ({
+      id,
+      kind: "pi.user",
+      model: [{ role: "user", content, timestamp: id }],
+    });
+
+    const evidence =
+      "— evidence for `sdk` (computed by the server, not written by the worker) —\nstate: running · no repository checkout · 2 turn(s)";
+
+    const snapshot = Schema.decodeUnknownSync(Snapshot)({
+      entries: [
+        user(1, workerReportMessage({ child: "sdk", message: "Bumped the SDK.", evidence })),
+        user(
+          2,
+          sessionNoticeMessage({
+            from: "root",
+            relation: "Your parent session",
+            message: "Also the docs",
+          }),
+        ),
+        user(
+          3,
+          sessionWaitMessage("42", {
+            outcome: "finished",
+            headline: "Session `sdk` is idle (turn finished).",
+            detail: "Last assistant message (tail):\nDone.\n\nTwo paragraphs.",
+            prompt: "Decide the next step.",
+          }),
+        ),
+      ],
+      docs: {},
+    });
+
+    const [report, message, wake] = turnsFromSnapshot(snapshot).map((turn) => turn.prompt);
+
+    expect(report).toMatchObject({
+      text: "Bumped the SDK.",
+      sessionMessage: { kind: "report", session: "sdk", failed: false, evidence },
+    });
+    expect(message).toMatchObject({
+      text: "Also the docs",
+      sessionMessage: { kind: "message", session: "root", text: "Also the docs" },
+    });
+    expect(wake).toMatchObject({
+      text: "Decide the next step.",
+      ciWait: {
+        kind: "session_turn",
+        outcome: "finished",
+        headline: "Session `sdk` is idle (turn finished).",
+        trigger: "Last assistant message (tail):\nDone.\n\nTwo paragraphs.",
+      },
+    });
+  });
+
+  it("reads the spawned session from spawn_task's text result and from older JSON results", () => {
+    expect(
+      spawnedThreadId(
+        "spawn_task",
+        "done",
+        "Spawned task `abc` — https://x/session/abc\nMetadata: …",
+      ),
+    ).toBe("abc");
+    expect(spawnedThreadId("spawn_task", "done", '{"id":"old","model":"gpt-6-sol"}')).toBe("old");
+    expect(
+      spawnedThreadId("spawn_task", "done", "Child limit reached (32 per session)"),
+    ).toBeNull();
+    expect(spawnedThreadId("spawn_task", "running", "Spawned task `abc`")).toBeNull();
+  });
+
   it("renders only validated private screenshot references from tool results", () => {
     const hash = "a".repeat(64);
 

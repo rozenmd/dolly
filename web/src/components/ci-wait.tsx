@@ -5,6 +5,12 @@ import { cancelCiWait, ciWait, type CiWait } from "../lib/ci-wait";
 
 const REFRESH_MS = 15_000;
 
+function timeout(at: number, now: number) {
+  const minutes = Math.round((at - now) / 60_000);
+
+  return minutes < 1 ? "times out now" : `times out in ${minutes}m`;
+}
+
 function countdown(at: number, now: number) {
   const seconds = Math.round((at - now) / 1000);
 
@@ -14,8 +20,9 @@ function countdown(at: number, now: number) {
 }
 
 /**
- * Above the composer while the agent waits on CI with wait_for: what it's watching, what the last
- * check saw, and a way to stop waiting. The wait itself runs in the Worker; nothing here polls GitHub.
+ * Above the composer while the agent waits with wait_for, on CI or on another session's turn: what
+ * it's watching, what the last check saw, and a way to stop waiting. The wait itself runs in the
+ * Worker; nothing here polls GitHub.
  */
 export function CiWaitStrip({ session, activity }: { session: string; activity: number }) {
   const [wait, setWait] = useState<CiWait | null>(null);
@@ -50,6 +57,7 @@ export function CiWaitStrip({ session, activity }: { session: string; activity: 
   useEffect(() => setWait(null), [session]);
 
   if (!wait) return null;
+  const sessionTurn = wait.kind === "session_turn";
 
   async function cancel() {
     setCancelling(true);
@@ -65,14 +73,19 @@ export function CiWaitStrip({ session, activity }: { session: string; activity: 
   }
 
   return (
-    <section className="ci-wait-strip" aria-label="Waiting on CI">
+    <section
+      className="ci-wait-strip"
+      aria-label={sessionTurn ? "Waiting on a session" : "Waiting on CI"}
+    >
       <CheckBadgeIcon className="ci-wait-strip-icon" aria-hidden="true" />
       <div className="ci-wait-strip-text">
         <p>
           Waiting on <strong>{wait.waiting_on}</strong>
         </p>
         <p className="ci-wait-strip-seen">
-          {countdown(Date.parse(wait.next_poll), now)}
+          {sessionTurn
+            ? `wakes when its turn ends · ${timeout(Date.parse(wait.timeout), now)}`
+            : countdown(Date.parse(wait.next_poll), now)}
           {wait.last_seen && ` · last seen ${wait.last_seen}`}
         </p>
       </div>
@@ -80,7 +93,7 @@ export function CiWaitStrip({ session, activity }: { session: string; activity: 
         type="button"
         className="queue-steer ci-wait-cancel"
         disabled={cancelling}
-        aria-label="Stop waiting on CI"
+        aria-label={sessionTurn ? "Stop waiting on the session" : "Stop waiting on CI"}
         title="Stop waiting: the agent won't be woken by this wait"
         onClick={() => void cancel()}
       >

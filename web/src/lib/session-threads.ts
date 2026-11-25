@@ -130,9 +130,18 @@ export function groupThreads<T extends Thread>(threads: readonly T[]) {
 
 const Spawned = Schema.fromJsonString(Schema.Struct({ id: Schema.String }));
 
-/** The child a finished spawn_task call started, read from its JSON result. */
+const SPAWNED = /^Spawned task `([^`]+)`/;
+
+/**
+ * The child a finished spawn_task call started, read from its result: "Spawned task `<id>` — …",
+ * or the JSON `{id}` that sessions recorded before.
+ */
 export function spawnedThreadId(name: string, status: string, output: string): string | null {
   if (name !== "spawn_task" || status !== "done") return null;
 
-  return Option.getOrNull(Schema.decodeUnknownOption(Spawned)(output))?.id ?? null;
+  return (
+    SPAWNED.exec(output)?.[1] ??
+    Option.getOrNull(Schema.decodeUnknownOption(Spawned)(output))?.id ??
+    null
+  );
 }

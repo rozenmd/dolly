@@ -136,6 +136,8 @@ const LAST_MESSAGE_TAIL_CHARS = 4_000;
 /** A session's wait as the agent's tools and the owner's composer see it. */
 export type CiWaitView = {
   id: string;
+  /** What the wait watches: CI, or another session's turn. */
+  kind: "ci" | "session_turn";
   waiting_on: string;
   timeout: string;
   next_poll: string;
@@ -1154,6 +1156,7 @@ export class CiWaiter {
 
     const result: CiWaitView = {
       id: String(wait.taskId),
+      kind: isCiWait(wait) ? "ci" : "session_turn",
       waiting_on: describeTarget(wait.target),
       timeout: iso(wait.deadlineAt),
       next_poll: iso(wait.nextPollAt),

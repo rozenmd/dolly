@@ -2790,13 +2790,13 @@ label.connection-row {
 .child-report-notice[data-outcome="answered"] > summary > svg:first-child {
   color: var(--blue);
 }
-.child-report-notice[data-outcome="stopped"] > summary > svg:first-child {
+.child-report-notice[data-outcome="failed"] > summary > svg:first-child {
   color: var(--red);
 }
 .child-report-notice[data-outcome="answered"] .scheduled-body {
   border-left-color: var(--line);
 }
-.child-report-notice[data-outcome="stopped"] .scheduled-body {
+.child-report-notice[data-outcome="failed"] .scheduled-body {
   border-left-color: var(--red);
 }
 .child-report-facts {
@@ -2805,6 +2805,14 @@ label.connection-row {
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: 13px;
+}
+.child-report-evidence {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .child-report-label {
   margin: 0 0 4px;
