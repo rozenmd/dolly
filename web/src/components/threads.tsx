@@ -4,7 +4,6 @@ import * as Schema from "effect/Schema";
 import { request, Snapshot, turnsFromSnapshot, type SavedSession } from "../lib/api";
 import {
   groupThreads,
-  latestStep,
   replyGist,
   THREAD_STATE_LABEL,
   threadState,
@@ -20,6 +19,8 @@ export type ThreadSession = {
   updatedAt: number;
   running: boolean;
   pullRequest?: SavedSession["pullRequest"];
+  /** What a working thread is doing now ("Editing checkout.tsx"), from the session list. */
+  activity?: string | undefined;
 };
 
 const decodeSnapshot = Schema.decodeUnknownSync(Schema.fromJsonString(Snapshot));
@@ -44,44 +45,6 @@ export function usePhone() {
     () => window.matchMedia(phoneQuery).matches,
     () => false,
   );
-}
-
-/** How often a working thread's card re-reads its latest step. */
-const ACTIVITY_POLL_MS = 5_000;
-
-/**
- * What a working thread is doing right now, in one line ("Editing checkout.tsx"). Read from its
- * transcript only while it works and the page is visible; null otherwise and before the first read.
- */
-export function useThreadActivity(id: string, working: boolean): string | null {
-  const [activity, setActivity] = useState<{ id: string; text: string }>();
-
-  useEffect(() => {
-    if (!working) return;
-    let live = true;
-
-    const read = () => {
-      if (document.visibilityState !== "visible") return;
-
-      void readTurns(id)
-        .then((turns) => {
-          const text = latestStep(turns);
-
-          if (live && text) setActivity({ id, text });
-        })
-        .catch(() => {});
-    };
-
-    read();
-    const timer = window.setInterval(read, ACTIVITY_POLL_MS);
-
-    return () => {
-      live = false;
-      window.clearInterval(timer);
-    };
-  }, [id, working]);
-
-  return working && activity?.id === id ? activity.text : null;
 }
 
 /** Gists by `id:updatedAt`, so a thread is read again only after it moved. Shared by every row. */
@@ -191,7 +154,7 @@ function ThreadCard({
   onOpen: (id: string) => void;
 }) {
   const state = session ? threadState(session) : undefined;
-  const activity = useThreadActivity(id, state === "working");
+  const activity = state === "working" ? session?.activity : undefined;
   const title = session?.title || "Thread";
   const status = session ? threadStatusLine(session) : "Starting";
 

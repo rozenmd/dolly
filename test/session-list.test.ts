@@ -377,3 +377,147 @@ it("marks sessions with an in-flight agent turn as running", async () => {
     .poll(async () => (await list()).find((session) => session.id === id)?.running)
     .toBe(false);
 });
+
+/** Arguments of the calls this file's model fake makes. */
+type CallArguments = { prompt?: string; in_minutes?: number; url?: string };
+
+/** A Codex model response of one function call, as the ChatGPT backend streams it. */
+function functionCall(id: string, name: string, input: CallArguments) {
+  const item = {
+    type: "function_call",
+    id: `fc_${id}`,
+    call_id: `call_${id}`,
+    name,
+    arguments: JSON.stringify(input),
+  };
+
+  const events = [
+    { type: "response.created", response: { id: "resp_test", status: "in_progress", output: [] } },
+    { type: "response.output_item.done", output_index: 0, item },
+    {
+      type: "response.completed",
+      response: {
+        id: "resp_test",
+        status: "completed",
+        output: [item],
+        usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+      },
+    },
+  ];
+
+  return new Response(
+    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  );
+}
+
+it("says what a running session is doing, redacted, and tells open sidebars when it moves", async () => {
+  const refresh = "fixture-refresh-credential";
+  const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
+  const page = "https://docs.example.com/rollout";
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("credential:openai", {
+      type: "oauth",
+      access,
+      refresh,
+      expires: Date.now() + 3_600_000,
+    });
+  });
+
+  let answerSecond!: () => void;
+  let servePage!: () => void;
+  const second = new Promise<void>((resolve) => (answerSecond = resolve));
+  const served = new Promise<void>((resolve) => (servePage = resolve));
+  let asked = 0;
+  let fetching = false;
+
+  // The model asks for a schedule_prompt call, then (once the test lets it) a web_fetch of a page
+  // the test holds open, then fails, which ends the run.
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const request = new Request(input, init);
+
+    if (request.url === page) {
+      fetching = true;
+      await served;
+
+      return new Response("Rolled out.", { headers: { "content-type": "text/plain" } });
+    }
+
+    const body = await request.text();
+    asked += 1;
+
+    if (body.includes("call_second"))
+      return Response.json({ error: { message: "Model unavailable" } }, { status: 400 });
+
+    if (body.includes("call_first")) {
+      await second;
+
+      return functionCall("second", "web_fetch", { url: page });
+    }
+
+    return functionCall("first", "schedule_prompt", {
+      prompt: `Deploy with ${refresh}`,
+      in_minutes: 60,
+    });
+  });
+
+  const created = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
+  const { id } = await created.json<{ id: string }>();
+
+  const feedResponse = await SELF.fetch("https://worker/api/events", {
+    headers: { ...headers, Upgrade: "websocket", Origin: "https://worker" },
+  });
+
+  expect(feedResponse.status).toBe(101);
+  const feed = feedResponse.webSocket!;
+  let announced = 0;
+  feed.addEventListener("message", (event) => {
+    expect(event.data).toBe(JSON.stringify({ type: "sessions" }));
+    announced += 1;
+  });
+  feed.accept();
+
+  const session = async () => (await list()).find((item) => item.id === id);
+
+  try {
+    const sent = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content: "Ship it", requestId: crypto.randomUUID() }),
+    });
+
+    expect(sent.status).toBe(202);
+
+    // The tool call's arguments are redacted before they are summarised, like titles.
+    await expect
+      .poll(async () => (await session())?.activity)
+      .toBe("schedule_prompt in 1h · Deploy with [redacted]");
+    expect(await session()).toMatchObject({ running: true });
+
+    // The next generation is waiting on the model: its start has been announced already, and
+    // nothing else the list shows changes until the model answers with the next call.
+    await expect.poll(() => asked).toBe(2);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const before = announced;
+    answerSecond();
+
+    await expect.poll(() => fetching).toBe(true);
+    await expect.poll(() => announced, { timeout: 5_000 }).toBeGreaterThan(before);
+    expect(await session()).toMatchObject({ running: true, activity: "Reading the web" });
+
+    // Unchanged activity is not announced again.
+    const settled = announced;
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(announced).toBe(settled);
+
+    servePage();
+    await expect.poll(async () => (await session())?.running).toBe(false);
+    // Only running sessions say what they are doing.
+    expect((await session())?.activity).toBeUndefined();
+  } finally {
+    answerSecond();
+    servePage();
+    feed.close();
+  }
+});
