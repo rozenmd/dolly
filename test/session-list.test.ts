@@ -381,40 +381,109 @@ it("marks sessions with an in-flight agent turn as running", async () => {
 /** Arguments of the calls this file's model fake makes. */
 type CallArguments = { prompt?: string; in_minutes?: number; url?: string };
 
-/** A Codex model response of one function call, as the ChatGPT backend streams it. */
-function functionCall(id: string, name: string, input: CallArguments) {
-  const item = {
-    type: "function_call",
-    id: `fc_${id}`,
-    call_id: `call_${id}`,
-    name,
-    arguments: JSON.stringify(input),
+type Call = { id: string; name: string; input: CallArguments };
+
+const callItem = ({ id, name, input }: Call) => ({
+  type: "function_call",
+  id: `fc_${id}`,
+  call_id: `call_${id}`,
+  name,
+  arguments: JSON.stringify(input),
+});
+
+/** One Responses API stream event: its type and that type's fields. */
+type StreamEvent = {
+  type: string;
+  output_index?: number;
+  item?: ReturnType<typeof callItem>;
+  delta?: string;
+  arguments?: string;
+  response?: {
+    id: string;
+    status: string;
+    output: ReturnType<typeof callItem>[];
+    usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
   };
+};
 
-  const events = [
-    { type: "response.created", response: { id: "resp_test", status: "in_progress", output: [] } },
-    { type: "response.output_item.done", output_index: 0, item },
-    {
-      type: "response.completed",
-      response: {
-        id: "resp_test",
-        status: "completed",
-        output: [item],
-        usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
-      },
+const sseEvent = (event: StreamEvent) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+
+const created = {
+  type: "response.created",
+  response: { id: "resp_test", status: "in_progress", output: [] },
+};
+
+function completed(output: ReturnType<typeof callItem>[]) {
+  return {
+    type: "response.completed",
+    response: {
+      id: "resp_test",
+      status: "completed",
+      output,
+      usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
     },
-  ];
-
-  return new Response(
-    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
-    { headers: { "Content-Type": "text/event-stream" } },
-  );
+  };
 }
 
-it("says what a running session is doing, redacted, and tells open sidebars when it moves", async () => {
-  const refresh = "fixture-refresh-credential";
+/** A Codex model response of one or more function calls, as the ChatGPT backend streams it. */
+function functionCalls(...calls: Call[]) {
+  const items = calls.map(callItem);
+
+  const events = [
+    created,
+    ...items.map((item, index) => ({
+      type: "response.output_item.done",
+      output_index: index,
+      item,
+    })),
+    completed(items),
+  ];
+
+  return new Response(events.map(sseEvent).join(""), {
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+/**
+ * A response that starts streaming one call once `start` settles, holds it half written, and
+ * finishes it once `finish` settles: the step is in the live doc before any tool task exists.
+ */
+function streamedCall(call: Call, start: Promise<void>, finish: Promise<void>) {
+  const item = callItem(call);
+  const encoder = new TextEncoder();
+
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: StreamEvent) => controller.enqueue(encoder.encode(sseEvent(event)));
+      send(created);
+      await start;
+      send({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { ...item, arguments: "" },
+      });
+      send({
+        type: "response.function_call_arguments.delta",
+        output_index: 0,
+        delta: item.arguments.slice(0, -2),
+      });
+      await finish;
+      send({
+        type: "response.function_call_arguments.done",
+        output_index: 0,
+        arguments: item.arguments,
+      });
+      send({ type: "response.output_item.done", output_index: 0, item });
+      send(completed([item]));
+      controller.close();
+    },
+  });
+
+  return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
+}
+
+async function connectOpenAI(refresh: string) {
   const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
-  const page = "https://docs.example.com/rollout";
 
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("credential:openai", {
@@ -424,16 +493,60 @@ it("says what a running session is doing, redacted, and tells open sidebars when
       expires: Date.now() + 3_600_000,
     });
   });
+}
 
-  let answerSecond!: () => void;
+/** An open sidebar socket, counting the "refetch the list" messages it gets. */
+async function openFeed() {
+  const response = await SELF.fetch("https://worker/api/events", {
+    headers: { ...headers, Upgrade: "websocket", Origin: "https://worker" },
+  });
+
+  expect(response.status).toBe(101);
+  const socket = response.webSocket!;
+  const feed = { announced: 0, close: () => socket.close() };
+
+  socket.addEventListener("message", (event) => {
+    expect(event.data).toBe(JSON.stringify({ type: "sessions" }));
+    feed.announced += 1;
+  });
+  socket.accept();
+
+  return feed;
+}
+
+async function startSession(content: string) {
+  const response = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
+  const { id } = await response.json<{ id: string }>();
+
+  const sent = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ content, requestId: crypto.randomUUID() }),
+  });
+
+  expect(sent.status).toBe(202);
+
+  return id;
+}
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+it("says what a running session is doing, redacted, and tells open sidebars when it moves", async () => {
+  const refresh = "fixture-refresh-credential";
+  const page = "https://docs.example.com/rollout";
+  await connectOpenAI(refresh);
+
+  let startStreaming!: () => void;
+  let finishStreaming!: () => void;
   let servePage!: () => void;
-  const second = new Promise<void>((resolve) => (answerSecond = resolve));
+  const streaming = new Promise<void>((resolve) => (startStreaming = resolve));
+  const streamed = new Promise<void>((resolve) => (finishStreaming = resolve));
   const served = new Promise<void>((resolve) => (servePage = resolve));
   let asked = 0;
   let fetching = false;
 
-  // The model asks for a schedule_prompt call, then (once the test lets it) a web_fetch of a page
-  // the test holds open, then fails, which ends the run.
+  // The model asks for a schedule_prompt call, then streams a web_fetch call that the test holds
+  // half written, of a page the test holds open, then fails, which ends the run.
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
 
@@ -450,45 +563,25 @@ it("says what a running session is doing, redacted, and tells open sidebars when
     if (body.includes("call_second"))
       return Response.json({ error: { message: "Model unavailable" } }, { status: 400 });
 
-    if (body.includes("call_first")) {
-      await second;
+    if (body.includes("call_first"))
+      return streamedCall(
+        { id: "second", name: "web_fetch", input: { url: page } },
+        streaming,
+        streamed,
+      );
 
-      return functionCall("second", "web_fetch", { url: page });
-    }
-
-    return functionCall("first", "schedule_prompt", {
-      prompt: `Deploy with ${refresh}`,
-      in_minutes: 60,
+    return functionCalls({
+      id: "first",
+      name: "schedule_prompt",
+      input: { prompt: `Deploy with ${refresh}`, in_minutes: 60 },
     });
   });
 
-  const created = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
-  const { id } = await created.json<{ id: string }>();
-
-  const feedResponse = await SELF.fetch("https://worker/api/events", {
-    headers: { ...headers, Upgrade: "websocket", Origin: "https://worker" },
-  });
-
-  expect(feedResponse.status).toBe(101);
-  const feed = feedResponse.webSocket!;
-  let announced = 0;
-  feed.addEventListener("message", (event) => {
-    expect(event.data).toBe(JSON.stringify({ type: "sessions" }));
-    announced += 1;
-  });
-  feed.accept();
-
+  const feed = await openFeed();
+  const id = await startSession("Ship it");
   const session = async () => (await list()).find((item) => item.id === id);
 
   try {
-    const sent = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ content: "Ship it", requestId: crypto.randomUUID() }),
-    });
-
-    expect(sent.status).toBe(202);
-
     // The tool call's arguments are redacted before they are summarised, like titles.
     await expect
       .poll(async () => (await session())?.activity)
@@ -496,28 +589,118 @@ it("says what a running session is doing, redacted, and tells open sidebars when
     expect(await session()).toMatchObject({ running: true });
 
     // The next generation is waiting on the model: its start has been announced already, and
-    // nothing else the list shows changes until the model answers with the next call.
+    // nothing else the list shows changes until the model streams the next call.
     await expect.poll(() => asked).toBe(2);
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const before = announced;
-    answerSecond();
+    await pause(500);
+    const before = feed.announced;
+    startStreaming();
 
-    await expect.poll(() => fetching).toBe(true);
-    await expect.poll(() => announced, { timeout: 5_000 }).toBeGreaterThan(before);
+    // A call still streaming is announced from the live doc, before any tool task exists.
+    await expect.poll(() => feed.announced, { timeout: 5_000 }).toBeGreaterThan(before);
     expect(await session()).toMatchObject({ running: true, activity: "Reading the web" });
+    expect(fetching).toBe(false);
+
+    finishStreaming();
+    await expect.poll(() => fetching).toBe(true);
 
     // Unchanged activity is not announced again.
-    const settled = announced;
-    await new Promise((resolve) => setTimeout(resolve, 2_500));
-    expect(announced).toBe(settled);
+    const settled = feed.announced;
+    await pause(2_500);
+    expect(feed.announced).toBe(settled);
+    expect(await session()).toMatchObject({ running: true, activity: "Reading the web" });
 
     servePage();
     await expect.poll(async () => (await session())?.running).toBe(false);
     // Only running sessions say what they are doing.
     expect((await session())?.activity).toBeUndefined();
   } finally {
-    answerSecond();
+    startStreaming();
+    finishStreaming();
     servePage();
     feed.close();
   }
-});
+}, 30_000);
+
+it("keeps a round's running call in reach and folds several sessions' moves into one announcement", async () => {
+  await connectOpenAI("fixture-refresh-credential");
+
+  let release!: () => void;
+  let servePages!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const served = new Promise<void>((resolve) => (servePages = resolve));
+  const tags = ["alpha", "beta", "gamma"];
+  const waiting = new Set<string>();
+  const fetching = new Set<string>();
+
+  // Each session asks for five calls in one round, waits on the model until the test releases
+  // it, then fetches a page the test holds open, then fails, which ends its run.
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const request = new Request(input, init);
+    const page = /^https:\/\/docs\.example\.com\/(\w+)$/.exec(request.url);
+
+    if (page?.[1]) {
+      fetching.add(page[1]);
+      await served;
+
+      return new Response("Done.", { headers: { "content-type": "text/plain" } });
+    }
+
+    const body = await request.text();
+    const tag = tags.find((candidate) => body.includes(`Task ${candidate}`)) ?? "";
+
+    if (body.includes(`call_${tag}_fetch`))
+      return Response.json({ error: { message: "Model unavailable" } }, { status: 400 });
+
+    if (body.includes(`call_${tag}_5`)) {
+      waiting.add(tag);
+      await released;
+
+      return functionCalls({
+        id: `${tag}_fetch`,
+        name: "web_fetch",
+        input: { url: `https://docs.example.com/${tag}` },
+      });
+    }
+
+    return functionCalls(
+      ...[1, 2, 3, 4, 5].map((hours) => ({
+        id: `${tag}_${hours}`,
+        name: "schedule_prompt",
+        input: { prompt: `${tag} ${hours}`, in_minutes: hours * 60 },
+      })),
+    );
+  });
+
+  const feed = await openFeed();
+  const ids = await Promise.all(tags.map((tag) => startSession(`Task ${tag}`)));
+
+  const activities = async () => {
+    const sessions = await list();
+
+    return ids.map((id) => sessions.find((session) => session.id === id)?.activity);
+  };
+
+  try {
+    // Five results landed after the round's assistant entry; its last call is still found.
+    await expect.poll(() => waiting.size).toBe(3);
+    expect(await activities()).toEqual(tags.map((tag) => `schedule_prompt in 5h · ${tag} 5`));
+
+    await pause(2_500);
+    const before = feed.announced;
+    release();
+
+    // Three sessions move at once: one feed-wide announcement, then quiet.
+    await expect.poll(() => fetching.size).toBe(3);
+    await expect.poll(() => feed.announced, { timeout: 5_000 }).toBeGreaterThan(before);
+    await pause(2_500);
+    expect(feed.announced - before).toBeLessThanOrEqual(2);
+    expect(await activities()).toEqual(tags.map(() => "Reading the web"));
+
+    servePages();
+    await expect.poll(async () => (await list()).every((session) => !session.running)).toBe(true);
+  } finally {
+    release();
+    servePages();
+    feed.close();
+  }
+}, 30_000);
