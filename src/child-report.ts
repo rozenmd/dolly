@@ -3,14 +3,20 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 /**
- * What a child session actually did, computed by Dolly from its transcript instead of summarized
- * by the child. A child reports back in prose, which is the right carrier for judgement (did this
- * meet the bar, what is still uncertain) and the wrong one for facts: the first thing a summary
- * drops is what was tried and failed. The transcript already holds the facts, so they are attached
- * to the report mechanically, and the child is asked only for what can't be computed.
+ * What a worker session actually did, computed by Dolly from its transcript instead of summarized
+ * by the worker.
  *
- * Honesty about what is known: a failed tool call sets `isError`, and the shell tool reports its
- * exit code, so failures listed here are ones a tool reported. Nothing here claims a check passed.
+ * A spawned child reports back to its parent in prose (send_to_session). Prose is the right carrier
+ * for judgement (did this meet the bar, what am I unsure about) and the wrong one for facts: the
+ * first thing a summary drops is what was tried and failed. The transcript already holds the
+ * facts, so send_to_session appends this block when a child reports to its parent, task_status
+ * renders it on demand, and the worker's briefing asks it only for what can't be computed.
+ *
+ * Honesty about what is known: a failed tool call sets `isError`, and the shell tool and the
+ * workspace's git actions report an exit code, so the failures listed here are ones a tool
+ * reported. There is no git diff: reading one would wake the child's sandbox for a status read, so
+ * the files listed are the ones the transcript shows being written. Nothing here claims a check
+ * passed.
  */
 
 type PiMessage = NonNullable<EntryRecord["model"]>[number];
@@ -40,35 +46,49 @@ const ShellResult = Schema.fromJsonString(
   }),
 );
 
-export type ChildFailure = {
+export type EvidenceFailure = {
+  /** Tool that reported it, such as "shell" or "edit_file". */
   tool: string;
+  /** What it was doing: the command, the file path. */
   what: string;
-  error: string;
-  /** The same call ran again later without failing. */
+  /** The error text, head and tail. */
+  errorTail: string;
+  /** The same call was later retried and did not fail. */
   laterPassed: boolean;
 };
 
-export type ChildEvidence = {
+export type EvidenceState = "running" | "waiting" | "done" | "error";
+
+export type HandoffEvidence = {
+  sessionId: string;
+  state: EvidenceState;
+  lastRunError?: string;
+  branch?: string;
+  repository?: string;
+  /** The child works in its parent's checkout, so the files include the parent's own edits. */
+  shared?: boolean;
+  pr?: string;
   files: string[];
+  failures: EvidenceFailure[];
+  /** Distinct command heads the worker ran (no pass/fail claim). */
   commands: string[];
-  failures: ChildFailure[];
-  /** Commits, pushes and pull requests, in order. */
-  shipped: string[];
-  toolCalls: number;
+  /** Commits and pushes that succeeded, in order. */
+  git: string[];
+  turns: number;
 };
 
 const MAX_FILES = 20;
-const MAX_COMMANDS = 12;
 const MAX_FAILURES = 5;
+const MAX_COMMANDS = 12;
 const ERROR_HEAD = 200;
 const ERROR_TAIL = 400;
 
-/** The evidence block's ceiling: a report must inform the parent, not refill its context. */
+/** Hard ceiling on the appended block: a handoff must inform the parent, not refill its context. */
 export const EVIDENCE_MAX_CHARS = 4_000;
 
 const PULL_URL = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
 
-/** Both ends of an error: the first line says what failed, the last the verdict. */
+/** Keep both ends of an error: the first line usually says what failed, the last the verdict. */
 export function clipError(body: string) {
   const text = body.replace(/\s+/g, " ").trim();
 
@@ -86,11 +106,10 @@ export function commandHead(command: string) {
   return text.split(" ").filter(Boolean).slice(0, 2).join(" ").slice(0, 60);
 }
 
-function resultText(message: PiMessage & { role: "toolResult" }) {
-  return message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
-}
+const textOf = (content: readonly { type: string; text?: string }[]) =>
+  content.flatMap((block) => (block.type === "text" && block.text ? [block.text] : [])).join("\n");
 
-/** A shell result's exit code and the output worth quoting when it failed. */
+/** A shell or git result's exit code and the output worth quoting when it failed. */
 function shellOutcome(text: string) {
   // Restore notices may precede the JSON result.
   const parsed = Schema.decodeUnknownOption(ShellResult)(text.slice(text.indexOf("{")));
@@ -128,21 +147,32 @@ function subject(call: Call | undefined) {
   return "";
 }
 
-/** Evidence from the messages of a span of a child's transcript, oldest first. */
-export function childEvidence(entries: readonly EntryRecord[]): ChildEvidence {
+/** The messages of a transcript span, oldest first. */
+const messagesOf = (entries: readonly EntryRecord[]): PiMessage[] =>
+  entries.flatMap((entry) => entry.model ?? []);
+
+/** The facts a transcript holds: failures the tools reported, commands run, files, git and PR. */
+export function evidenceFromTranscript(entries: readonly EntryRecord[]) {
   const calls = new Map<string, Call>();
-  const files = new Set<string>();
-  const commands = new Set<string>();
-  const failures: ChildFailure[] = [];
-  const shipped: string[] = [];
-  let toolCalls = 0;
+  const files: string[] = [];
+  const commands: string[] = [];
+  const raw: (EvidenceFailure & { key: string })[] = [];
+  const passed = new Set<string>();
+  const git: string[] = [];
+  let pr: string | undefined;
+  let turns = 0;
+  let lastRunError: string | undefined;
 
-  const messages = entries.flatMap((entry) => entry.model ?? []);
+  for (const message of messagesOf(entries)) {
+    if (message.role === "user") turns += 1;
 
-  for (const message of messages) {
-    if (message.role === "assistant")
+    if (message.role === "assistant") {
+      // Only the newest answer decides whether the last run ended on an error.
+      lastRunError =
+        message.stopReason === "error" ? message.errorMessage || "Model request failed" : undefined;
+
       for (const block of message.content)
-        if (block.type === "toolCall") {
+        if (block.type === "toolCall")
           calls.set(block.id, {
             name: block.name,
             args: Option.getOrElse(
@@ -150,117 +180,143 @@ export function childEvidence(entries: readonly EntryRecord[]): ChildEvidence {
               () => ({}),
             ),
           });
-          toolCalls += 1;
-        }
+    }
 
     if (message.role !== "toolResult") continue;
     const call = calls.get(message.toolCallId);
-    const name = call?.name ?? message.toolName;
+    const tool = call?.name ?? message.toolName;
     const what = subject(call);
-    const text = resultText(message);
-    let failed: string | undefined;
+    const key = `${tool}::${what}`;
+    const text = textOf(message.content);
 
-    if (name === "shell") {
-      const command = call?.args.command;
+    if (tool === "shell" && call?.args.command) {
+      const head = commandHead(call.args.command);
 
-      if (command) {
-        const head = commandHead(command);
-
-        if (head) commands.add(head);
-      }
+      if (head && !commands.includes(head)) commands.push(head);
     }
 
     // Shell commands and the workspace's git actions report a command's exit code as output.
     const outcome =
-      name === "shell" || name === "workspace"
+      tool === "shell" || tool === "workspace"
         ? shellOutcome(text)
         : { exitCode: undefined, output: "" };
 
     const refusal = Schema.decodeUnknownOption(Refusal)(text.slice(text.indexOf("{")));
+    let failed: string | undefined;
 
     if (message.isError) failed = clipError(text);
     else if (Option.isSome(refusal)) failed = clipError(refusal.value.error);
     else if (outcome.exitCode !== undefined && outcome.exitCode !== 0)
       failed = `exited ${outcome.exitCode}: ${clipError(outcome.output)}`;
 
-    // A call that failed and later ran the same way without failing.
-    if (!failed) {
-      for (const failure of failures)
-        if (failure.tool === name && failure.what === what) failure.laterPassed = true;
-    } else failures.push({ tool: name, what, error: failed, laterPassed: false });
+    if (failed) {
+      raw.push({ tool, what, errorTail: failed, laterPassed: false, key });
 
-    if (failed) continue;
+      continue;
+    }
+
+    passed.add(key);
     const path = call?.args.path;
 
-    if ((name === "write_file" || name === "edit_file") && path) files.add(path);
+    if ((tool === "write_file" || tool === "edit_file") && path && !files.includes(path))
+      files.push(path);
 
     const action = call?.args.action;
     const summary = call?.args.message?.split("\n")[0]?.slice(0, 80);
 
-    if (name === "workspace" && (action === "commit" || action === "push"))
-      shipped.push(action === "commit" && summary ? `commit "${summary}"` : action);
+    if (tool === "workspace" && (action === "commit" || action === "push"))
+      git.push(action === "commit" && summary ? `commit "${summary}"` : action);
 
-    if ((name === "github" || name === "workspace") && text.includes('"pull_request"')) {
-      const url = PULL_URL.exec(text)?.[0];
-
-      if (url && !shipped.includes(`pull request ${url}`)) shipped.push(`pull request ${url}`);
-    }
+    if ((tool === "github" || tool === "workspace") && text.includes('"pull_request"'))
+      pr = PULL_URL.exec(text)?.[0] ?? pr;
   }
 
-  // Unresolved failures first: they are what the parent most needs to see.
-  const ordered = [
-    ...failures.filter((failure) => !failure.laterPassed),
-    ...failures.filter((failure) => failure.laterPassed),
-  ];
+  // Identical repeated failures once, newest first, marking those a later attempt got past: the
+  // dead end is still recorded, honestly.
+  const byKey = new Map<string, EvidenceFailure>();
+
+  for (const failure of raw.reverse()) {
+    if (byKey.has(failure.key)) continue;
+
+    byKey.set(failure.key, {
+      tool: failure.tool,
+      what: failure.what,
+      errorTail: failure.errorTail,
+      laterPassed: passed.has(failure.key),
+    });
+  }
 
   return {
-    files: [...files],
-    commands: [...commands],
-    failures: ordered,
-    shipped,
-    toolCalls,
+    files,
+    failures: [...byKey.values()],
+    commands,
+    git,
+    turns,
+    ...(pr !== undefined && { pr }),
+    ...(lastRunError !== undefined && { lastRunError }),
   };
 }
 
-const list = (items: readonly string[], max: number) =>
-  items.length > max
-    ? `${items.slice(0, max).join(", ")} (+${items.length - max} more)`
-    : items.join(", ");
+/**
+ * Render the evidence for a model. Per-section caps rather than one global truncation, so the
+ * last section can't be swallowed whole; the block is meant to cost a parent about 15 lines.
+ */
+export function formatHandoffEvidence(evidence: HandoffEvidence, options: { title?: string } = {}) {
+  const lines = [
+    options.title ??
+      `— evidence for \`${evidence.sessionId}\` (computed by the server, not written by the worker) —`,
+  ];
 
-/** The evidence block of a report, one fact per line, within `EVIDENCE_MAX_CHARS`. */
-export function formatChildEvidence(
-  evidence: ChildEvidence,
-  where: { repository?: string; branch?: string },
-) {
-  const lines: string[] = [];
+  const meta = [`state: ${evidence.state}`];
 
-  if (where.branch)
-    lines.push(`- Branch: ${where.branch}${where.repository ? ` in ${where.repository}` : ""}`);
-  else lines.push("- No repository checkout");
+  if (evidence.branch)
+    meta.push(
+      `branch ${evidence.branch}${evidence.repository ? ` of ${evidence.repository}` : ""}`,
+    );
+  else meta.push("no repository checkout");
 
-  lines.push(
-    `- Files written: ${evidence.files.length ? list(evidence.files, MAX_FILES) : "none"}`,
-    `- Commands run: ${evidence.commands.length ? list(evidence.commands, MAX_COMMANDS) : "none"}`,
-  );
+  meta.push(`${evidence.turns} turn(s)`);
+  lines.push(meta.join(" · "));
 
-  const shown = evidence.failures.slice(0, MAX_FAILURES);
+  if (evidence.lastRunError) lines.push(`run error: ${evidence.lastRunError.slice(0, 300)}`);
 
-  if (shown.length) {
-    lines.push(`- Failures a tool reported (${evidence.failures.length}):`);
+  if (evidence.pr) lines.push(`PR: ${evidence.pr}`);
 
-    for (const failure of shown)
+  if (evidence.files.length) {
+    const label = evidence.shared
+      ? "files written (checkout SHARED with the parent; the parent may have edited them too)"
+      : "files written";
+
+    lines.push(`${label}: ${evidence.files.length} file(s)`);
+
+    for (const file of evidence.files.slice(0, MAX_FILES)) lines.push(`  ${file}`);
+
+    if (evidence.files.length > MAX_FILES)
+      lines.push(`  … +${evidence.files.length - MAX_FILES} more`);
+  }
+
+  if (evidence.git.length) lines.push(`git: ${evidence.git.join(", ")}`);
+
+  const failures = evidence.failures.slice(0, MAX_FAILURES);
+
+  if (failures.length) {
+    lines.push(`failures the tools reported (${failures.length}):`);
+
+    for (const failure of failures) {
       lines.push(
-        `  - ${failure.tool}${failure.what ? ` \`${failure.what}\`` : ""}${failure.laterPassed ? " (a later identical call succeeded)" : ""}: ${failure.error}`,
+        `  ✗ ${failure.tool}: ${failure.what}${failure.laterPassed ? "  [a later attempt got past this]" : ""}`,
       );
 
-    if (evidence.failures.length > shown.length)
-      lines.push(`  - +${evidence.failures.length - shown.length} more`);
-  } else lines.push("- Failures a tool reported: none");
+      if (failure.errorTail) lines.push(`    ${failure.errorTail}`);
+    }
+  }
 
-  lines.push(
-    `- Commits, pushes and pull requests: ${evidence.shipped.length ? evidence.shipped.join("; ") : "none"}`,
-    `- Tool calls: ${evidence.toolCalls}`,
-  );
+  if (evidence.commands.length) {
+    lines.push(`commands run: ${evidence.commands.slice(0, MAX_COMMANDS).join(", ")}`);
+    lines.push(
+      "(a shell command that exited non-zero is listed under failures; treat 'commands run' as executed, not as passed.)",
+    );
+  }
 
   const text = lines.join("\n");
 
@@ -269,18 +325,15 @@ export function formatChildEvidence(
 
 /** The text of the last assistant message in a span that has any. */
 export function lastReply(entries: readonly EntryRecord[]) {
-  const messages = entries.flatMap((entry) => entry.model ?? []);
+  const messages = messagesOf(entries);
 
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
 
     if (message?.role !== "assistant") continue;
+    const text = textOf(message.content).trim();
 
-    const text = message.content
-      .flatMap((block) => (block.type === "text" ? [block.text] : []))
-      .join("\n");
-
-    if (text.trim()) return text.trim();
+    if (text) return text;
   }
 
   return "";
@@ -293,15 +346,37 @@ export function tail(text: string, max: number) {
   return `[… ${text.length - max} earlier characters omitted …]\n${text.slice(-max)}`;
 }
 
-/** Appended to a child's first message: what it is, and that its final reply is its report. */
-export function workerBriefing(input: { repository?: string; branch?: string }) {
-  const where = input.branch
-    ? `You work in your own sandbox, on branch ${input.branch}${input.repository ? ` of ${input.repository}` : ""}, checked out fresh: you can't see the parent's unpushed changes.`
-    : "You work in your own sandbox.";
+export type ChildCheckout =
+  | { kind: "shared"; repository: string; branch: string }
+  | { kind: "isolated"; repository: string; branch: string; ref: string }
+  | { kind: "read-only"; repository: string; ref: string }
+  | { kind: "none" };
 
+/** Where a child works, for its briefing. Dolly's sandboxes differ from host worktrees, so say so. */
+function checkoutNote(checkout: ChildCheckout) {
+  switch (checkout.kind) {
+    case "shared":
+      return `You share your parent's checkout of ${checkout.repository} (the same sandbox, on branch ${checkout.branch}): you see its uncommitted changes and it sees yours, so don't reset or rewrite work you didn't make.`;
+    case "isolated":
+      return `You work in your own checkout of ${checkout.repository} on branch ${checkout.branch}, cloned fresh from ${checkout.ref}: you can't see the parent's unpushed changes.`;
+    case "read-only":
+      return `You have a read-only checkout of ${checkout.repository} at ${checkout.ref}: investigate and report, don't try to change files, commit or push.`;
+    case "none":
+      return "You have no repository checkout.";
+  }
+}
+
+/** A child's first message: the task, then what it is and how it reports back. */
+export function buildChildSessionPrompt(input: {
+  prompt: string;
+  parentSessionId: string;
+  checkout: ChildCheckout;
+}) {
   return [
-    "---",
-    `You are a child session that another Dolly session (your parent) started for the task above. Keep to it: do the requested investigation or change, run relevant checks when practical, and don't widen the scope or make product or taste decisions unless asked. ${where} Later messages in this session may be follow-ups from that parent session.`,
-    "Your final reply is your report. Dolly sends it to the parent session automatically when your turn ends and none of your own child sessions are still working, so don't message the parent yourself. Facts are attached to it from your transcript (files written, commands run, failures a tool reported, commits, pushes and pull requests), so don't list them. Write what can't be computed: whether the result meets the task's acceptance criteria and how sure you are, what you tried that didn't work and why you dropped it, assumptions you made, what's still uncertain, and follow-ups needed.",
+    input.prompt.trim(),
+    `You are a worker session delegated by another Dolly session. Keep the work narrow: execute the requested investigation/implementation, run relevant checks when practical, and do not broaden scope or make product/taste decisions unless explicitly asked. ${checkoutNote(input.checkout)}`,
+    // The facts (files written, commands run, tool failures, PR, turns) are appended to the
+    // report mechanically, so the model is asked for the part a server cannot compute.
+    `When finished — as your LAST action, after any commit/PR — report back to the parent/orchestrator session \`${input.parentSessionId}\` with the send_to_session tool. A factual evidence block (files changed, commands run, tool failures, PR, usage) is appended to your report automatically: do not re-list those. Write what the server cannot compute: whether the result meets the acceptance criteria and how confident you are, what you tried that did NOT work and why you abandoned it, assumptions you made, remaining uncertainty, and follow-ups needed.`,
   ].join("\n\n");
 }
