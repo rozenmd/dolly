@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { expect, test, type Page } from "./browser";
 import type { Live } from "../../src/transcript";
 import type { DefaultModel } from "../src/lib/api";
@@ -114,9 +115,11 @@ for (const width of [1280, 320]) {
 test.beforeEach(async ({ page }) => {
   const updates = new Set<() => Promise<void>>();
   page.on("requestfinished", (request) => {
+    const path = new URL(request.url()).pathname;
+
     if (
-      request.method() === "POST" &&
-      /\/(messages|abort|steer)$/.test(new URL(request.url()).pathname)
+      (request.method() === "POST" && /\/(messages|abort|steer|edit)$/.test(path)) ||
+      (["PUT", "DELETE"].includes(request.method()) && /\/queue(\/\d+)?$/.test(path))
     )
       for (const update of updates) void update();
   });
@@ -201,7 +204,9 @@ test("queues a message while running and promotes it with Send now, including af
   });
   await page.goto("/", { waitUntil: "networkidle" });
   await page.getByLabel("Message your agent").fill("Use pnpm instead");
-  await page.getByRole("button", { name: "Queue message", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Queue until the current turn finishes", exact: true })
+    .click();
   const queue = page.getByRole("region", { name: "Queued messages" });
   await expect(queue).toContainText("Use pnpm instead");
   await expect(page.getByLabel("Message your agent")).toHaveValue("");
@@ -210,10 +215,226 @@ test("queues a message while running and promotes it with Send now, including af
   await queue.getByRole("button", { name: "Send now", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Try again");
   await queue.getByRole("button", { name: "Send now", exact: true }).click();
-  await expect(queue).toContainText("Sending after the current step");
-  await expect(queue.getByRole("button", { name: "Send now", exact: true })).toHaveCount(0);
+  // A steer leaves the queue and waits in the conversation for the turn's next step.
+  await expect(queue).toHaveCount(0);
+  const steering = page.getByRole("article", { name: "steering message" });
+  await expect(steering).toContainText("Use pnpm instead");
+  await expect(steering).toContainText("Sending after the current step");
   expect(submissions).toBe(1);
   expect(promotions).toBe(2);
+});
+
+test("edits, deletes, reorders and steers queued messages, and stops on Escape twice", async ({
+  page,
+}) => {
+  type Item = { id: number; mode: string; content: string };
+
+  let items: Item[] = [
+    { id: 41, mode: "followUp", content: "Run the tests" },
+    // Snapshots are redacted; Edit returns the text as typed.
+    { id: 42, mode: "followUp", content: "Update the README with Bearer [redacted]" },
+    { id: 43, mode: "followUp", content: "Review feedback" },
+  ];
+
+  const sent: { content: string; steer?: boolean }[] = [];
+  const orders: number[][] = [];
+  const deleted: number[] = [];
+  let aborts = 0;
+  let next = 50;
+  let refuseEdit = false;
+
+  const remove = (id: number) => {
+    const item = items.find((candidate) => candidate.id === id);
+    items = items.filter((candidate) => candidate.id !== id);
+
+    return item;
+  };
+
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+
+    if (path === "/api/sessions")
+      return route.fulfill({
+        json: [
+          {
+            id: "queue-session",
+            model: "gpt-6-luna",
+            title: "Queue",
+            repository: "",
+            updatedAt: 1,
+          },
+        ],
+      });
+
+    if (path === "/api/auth") return route.fulfill({ json: signedIn });
+
+    if (path === "/api/auth/chatgpt") return route.fulfill({ json: { state: "connected" } });
+
+    if (path === "/api/auth/anthropic") return route.fulfill({ json: { connected: false } });
+
+    if (path === "/api/sessions/queue-session/messages") {
+      const body = Schema.decodeUnknownSync(
+        Schema.Struct({ content: Schema.String, steer: Schema.optional(Schema.Boolean) }),
+      )(route.request().postDataJSON());
+
+      sent.push({ content: body.content, steer: body.steer });
+      items.push({ id: next, mode: body.steer ? "steer" : "followUp", content: body.content });
+
+      return route.fulfill({ status: 202, json: { submissionId: next++ } });
+    }
+
+    if (path === "/api/sessions/queue-session/queue" && method === "PUT") {
+      const { order } = Schema.decodeUnknownSync(
+        Schema.Struct({ order: Schema.Array(Schema.Number) }),
+      )(route.request().postDataJSON());
+
+      orders.push([...order]);
+      const byId = new Map(items.map((item) => [item.id, item]));
+      items = [
+        ...order.map((id) => byId.get(id)!),
+        ...items.filter((item) => item.mode === "steer"),
+      ];
+
+      return route.fulfill({ json: { state: "reordered" } });
+    }
+
+    const edit = /^\/api\/sessions\/queue-session\/queue\/(\d+)\/edit$/.exec(path);
+
+    if (edit && refuseEdit)
+      return route.fulfill({ status: 409, json: { error: "This message is no longer queued" } });
+
+    if (edit) {
+      const item = remove(Number(edit[1]));
+
+      const original = item?.id === 42 ? "Update the README with Bearer abc" : item?.content;
+
+      return route.fulfill({ json: { content: original ?? "" } });
+    }
+
+    const withdraw = /^\/api\/sessions\/queue-session\/queue\/(\d+)$/.exec(path);
+
+    if (withdraw && method === "DELETE") {
+      deleted.push(Number(withdraw[1]));
+      remove(Number(withdraw[1]));
+
+      return route.fulfill({ json: { state: "withdrawn" } });
+    }
+
+    if (path === "/api/sessions/queue-session/abort") {
+      aborts++;
+
+      return route.fulfill({ status: 202, json: {} });
+    }
+
+    if (path === "/api/sessions/queue-session")
+      return route.fulfill({
+        json: {
+          entries: [
+            { id: 1, kind: "pi.user", model: [{ role: "user", content: "Original task" }] },
+          ],
+          docs: {
+            "pi.live": { run: {} },
+            "pi.inbox": { items },
+            "app.owner-inputs": { submissions: [41, 42, ...sent.map((_, index) => 50 + index)] },
+          },
+        },
+      });
+
+    return route.fulfill({ json: {} });
+  });
+
+  await page.goto("/", { waitUntil: "networkidle" });
+  const queue = page.getByRole("region", { name: "Queued messages" });
+  const field = page.getByLabel("Message your agent");
+  await expect(queue).toContainText("3 messages queued");
+
+  // Only text the owner typed offers Edit; every message can be deleted or sent now.
+  const rows = queue.getByRole("listitem");
+  await expect(rows.nth(0).getByRole("button", { name: "Edit in composer" })).toHaveCount(1);
+  await expect(rows.nth(2).getByRole("button", { name: "Edit in composer" })).toHaveCount(0);
+  await expect(rows.nth(2).getByRole("button", { name: "Delete queued message" })).toHaveCount(1);
+
+  // Edit puts the text in the draft first; a refusal takes it back out.
+  await field.fill("Draft");
+  refuseEdit = true;
+  await rows.nth(0).getByRole("button", { name: "Edit in composer" }).click();
+  await expect(page.getByRole("alert")).toContainText("no longer queued");
+  await expect(field).toHaveValue("Draft");
+  await expect(queue).toContainText("Run the tests");
+  refuseEdit = false;
+
+  // Edit moves the text back into the composer and out of the queue.
+  await rows.nth(1).getByRole("button", { name: "Edit in composer" }).click();
+  await expect(field).toHaveValue("Draft\n\nUpdate the README with Bearer abc");
+  await expect(queue).toContainText("2 messages queued");
+  await expect(queue).not.toContainText("Update the README");
+
+  // Delete withdraws it.
+  await field.fill("");
+  await queue
+    .getByRole("listitem")
+    .nth(1)
+    .getByRole("button", { name: "Delete queued message" })
+    .click();
+  await expect(queue).toContainText("1 message queued");
+  expect(deleted).toEqual([43]);
+
+  // Enter queues while the agent works; Ctrl+Enter steers into the running turn.
+  await field.fill("Then lint");
+  await field.press("Enter");
+  await expect(queue).toContainText("Then lint");
+  await field.fill("Use pnpm");
+  await field.press("Control+Enter");
+  await expect(page.getByRole("article", { name: "steering message" })).toContainText("Use pnpm");
+  await expect(queue).not.toContainText("Use pnpm");
+  expect(sent).toEqual([
+    { content: "Then lint", steer: false },
+    { content: "Use pnpm", steer: true },
+  ]);
+
+  // The handle reorders from the keyboard.
+  await queue.getByRole("button", { name: "Reorder: 2 of 2" }).press("ArrowUp");
+  await expect.poll(() => orders).toEqual([[50, 41]]);
+  await expect(queue.getByRole("listitem").nth(0)).toContainText("Then lint");
+
+  // Dragging a handle down past the next row, then releasing off the handles, still saves.
+  await queue.getByRole("button", { name: "Reorder: 1 of 2" }).evaluate((handle) => {
+    const rect = handle.getBoundingClientRect();
+    const below = handle.closest("li")!.nextElementSibling!.getBoundingClientRect();
+    const at = (x: number, y: number) => ({ bubbles: true, button: 0, clientX: x, clientY: y });
+    handle.dispatchEvent(new PointerEvent("pointerdown", at(rect.left + 2, rect.top + 2)));
+    window.dispatchEvent(new PointerEvent("pointermove", at(rect.left + 2, below.bottom - 2)));
+    document.body.dispatchEvent(new PointerEvent("pointerup", at(rect.left + 300, below.bottom)));
+  });
+  await expect
+    .poll(() => orders)
+    .toEqual([
+      [50, 41],
+      [41, 50],
+    ]);
+  await expect(queue.getByRole("listitem").nth(1)).toContainText("Then lint");
+
+  // The send button's menu makes Enter steer, and hands queueing to Ctrl+Enter.
+  await field.fill("Swap");
+  const send = page.getByRole("button", { name: "Queue until the current turn finishes" });
+  await send.dispatchEvent("contextmenu");
+  await page.getByRole("menuitemradio", { name: /Steer into running turn/ }).click();
+  await expect(
+    page.getByRole("button", { name: "Steer into the running turn", exact: true }),
+  ).toHaveCount(1);
+  await field.press("Control+Enter");
+  await expect(queue).toContainText("Swap");
+  expect(sent.at(-1)).toEqual({ content: "Swap", steer: false });
+
+  // Escape twice stops the run; once does not.
+  await field.press("Escape");
+  expect(aborts).toBe(0);
+  await field.press("Escape");
+  await expect.poll(() => aborts).toBe(1);
+
+  // Put the default back for later tests sharing this browser's storage.
+  await page.evaluate(() => localStorage.removeItem("dolly-busy-send"));
 });
 
 test("one composer pill switches the session's model, effort, speed and fallback, rolls back a refusal, and saves and restores defaults", async ({

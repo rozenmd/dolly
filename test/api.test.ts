@@ -30,6 +30,9 @@ describe("Hono Worker in workerd", () => {
       ["sessions/missing/messages", "POST"],
       ["sessions/missing/abort", "POST"],
       ["sessions/missing/queue/1/steer", "POST"],
+      ["sessions/missing/queue/1/edit", "POST"],
+      ["sessions/missing/queue/1", "DELETE"],
+      ["sessions/missing/queue", "PUT"],
       ["sessions/missing/children", "GET"],
       ["sessions/missing/children", "POST"],
       ["sessions/missing/children/child/messages", "POST"],
@@ -67,25 +70,28 @@ describe("Hono Worker in workerd", () => {
     expect(await response.json()).toEqual({ error: "Connect ChatGPT first" });
   });
   it("validates queue IDs and rejects unknown sessions", async () => {
-    for (const id of ["0", "-1", "1.5", "NaN", "9007199254740992"]) {
-      expect(
-        (
-          await SELF.fetch(`https://worker/api/sessions/missing/queue/${id}/steer`, {
-            method: "POST",
-            headers,
-          })
-        ).status,
-      ).toBe(400);
+    const routes = [
+      ["steer", "POST"],
+      ["edit", "POST"],
+      ["", "DELETE"],
+    ] as const;
+
+    for (const [action, method] of routes) {
+      const url = (id: string) =>
+        `https://worker/api/sessions/missing/queue/${id}${action ? `/${action}` : ""}`;
+
+      for (const id of ["0", "-1", "1.5", "NaN", "9007199254740992"])
+        expect((await SELF.fetch(url(id), { method, headers })).status).toBe(400);
+
+      expect((await SELF.fetch(url("1"), { method, headers })).status).toBe(404);
     }
 
-    expect(
-      (
-        await SELF.fetch("https://worker/api/sessions/missing/queue/1/steer", {
-          method: "POST",
-          headers,
-        })
-      ).status,
-    ).toBe(404);
+    const reorder = (body: string) =>
+      SELF.fetch("https://worker/api/sessions/missing/queue", { method: "PUT", headers, body });
+
+    expect((await reorder(JSON.stringify({ order: [0] }))).status).toBe(400);
+    expect((await reorder("not json")).status).toBe(400);
+    expect((await reorder(JSON.stringify({ order: [1, 2] }))).status).toBe(404);
   });
   it("checks the sidebar feed's WebSocket upgrade and origin", async () => {
     const url = "https://worker/api/events";

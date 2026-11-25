@@ -43,6 +43,8 @@ const PromptMessage = Schema.Struct({
   content: Schema.Trim.check(Schema.isMaxLength(32_768)),
   requestId: Message.fields.requestId,
   images: Schema.optional(Schema.Array(PromptImage).check(Schema.isMaxLength(MAX_IMAGES))),
+  /** While a run is working: join it at its next step boundary instead of queueing for the next turn. */
+  steer: Schema.optional(Schema.Boolean),
 }).check(
   Schema.makeFilter((message) =>
     message.content.length > 0 || (message.images?.length ?? 0) > 0
@@ -674,6 +676,7 @@ app.post("/api/sessions/:id/messages", (c) =>
         parsed.content,
         parsed.requestId,
         parsed.images,
+        parsed.steer,
       );
 
       if (!result) return c.json({ error: "Session not found" }, 404);
@@ -683,13 +686,20 @@ app.post("/api/sessions/:id/messages", (c) =>
   ),
 );
 
+/** A queued submission's ID from the path, or undefined when it isn't a positive integer. */
+function queuedSubmission(c: Context<{ Bindings: Env }>) {
+  const submissionId = Number(c.req.param("submissionId"));
+
+  return Number.isSafeInteger(submissionId) && submissionId > 0 ? submissionId : undefined;
+}
+
 app.post("/api/sessions/:id/queue/:submissionId/steer", (c) =>
   handle(
     c,
     Effect.gen(function* () {
-      const submissionId = Number(c.req.param("submissionId"));
+      const submissionId = queuedSubmission(c);
 
-      if (!Number.isSafeInteger(submissionId) || submissionId <= 0)
+      if (submissionId === undefined)
         return c.json({ error: "Expected a positive submission ID" }, 400);
 
       const agent = yield* AgentApi;
@@ -698,6 +708,69 @@ app.post("/api/sessions/:id/queue/:submissionId/steer", (c) =>
       if (!result) return c.json({ error: "Session not found" }, 404);
 
       return c.json(result, "error" in result ? 409 : 202);
+    }),
+  ),
+);
+
+app.delete("/api/sessions/:id/queue/:submissionId", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const submissionId = queuedSubmission(c);
+
+      if (submissionId === undefined)
+        return c.json({ error: "Expected a positive submission ID" }, 400);
+
+      const agent = yield* AgentApi;
+      const result = yield* agent.withdrawQueued(c.req.param("id"), submissionId);
+
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 409 : 200);
+    }),
+  ),
+);
+
+app.post("/api/sessions/:id/queue/:submissionId/edit", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const submissionId = queuedSubmission(c);
+
+      if (submissionId === undefined)
+        return c.json({ error: "Expected a positive submission ID" }, 400);
+
+      const agent = yield* AgentApi;
+      const result = yield* agent.editQueued(c.req.param("id"), submissionId);
+
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 409 : 200);
+    }),
+  ),
+);
+
+const QueueOrder = Schema.Struct({
+  order: Schema.Array(Schema.Int.check(Schema.isGreaterThan(0))).check(Schema.isMaxLength(500)),
+});
+
+app.put("/api/sessions/:id/queue", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const parsed = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(QueueOrder)),
+        Effect.mapError(
+          () => new InvalidInput({ message: "Expected an order of positive submission IDs" }),
+        ),
+      );
+
+      const agent = yield* AgentApi;
+      const result = yield* agent.reorderQueue(c.req.param("id"), parsed.order);
+
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 409 : 200);
     }),
   ),
 );

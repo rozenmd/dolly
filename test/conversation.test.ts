@@ -156,6 +156,190 @@ it("promotes the original queued input atomically without duplication or crossin
   }
 });
 
+it("steers, withdraws, edits and reorders queued messages, then delivers the queue in its new order", async () => {
+  let release!: (body: string) => void;
+
+  const blocked = new Promise<string>((resolve) => {
+    release = resolve;
+  });
+
+  const requests: string[] = [];
+
+  const model = vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    requests.push(await new Response(init?.body).text());
+
+    return Response.json({ error: { message: "Model unavailable" } }, { status: 400 });
+  });
+
+  model.mockImplementationOnce(async (_, init) => {
+    requests.push(await new Response(init?.body).text());
+
+    return new Response(await blocked, { headers: { "Content-Type": "text/event-stream" } });
+  });
+
+  const create = async () => {
+    const response = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
+
+    return (await response.json<{ id: string }>()).id;
+  };
+
+  const id = await create();
+  const other = await create();
+
+  const send = async (content: string, steer?: boolean) => {
+    const response = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content, requestId: crypto.randomUUID(), steer }),
+    });
+
+    expect(response.status).toBe(202);
+
+    return (await response.json<{ submissionId: number }>()).submissionId;
+  };
+
+  const queue = (session: string, path: string, method: string, body?: string) =>
+    SELF.fetch(`https://worker/api/sessions/${session}/queue${path}`, { method, headers, body });
+
+  const reorder = (order: readonly (number | string)[]) =>
+    queue(id, "", "PUT", JSON.stringify({ order }));
+
+  const inbox = () =>
+    runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+      const conversationId = (await state.storage.get<ConversationId>(`session:${id}`))!;
+      const value = await agent["harness"].snapshot(InboxDoc, conversationId, BACKGROUND_CONTEXT);
+
+      return value?.items.map((item) => ({ id: item.id, mode: item.mode })) ?? [];
+    });
+
+  try {
+    const first = await send("Work on this");
+    await expect.poll(() => requests.length).toBe(1);
+
+    const a = await send("A: first queued");
+    const b = await send("B: second queued");
+    const dropped = await send("Never mind this one");
+    const edited = await send("Fix the typo");
+    const steered = await send("Use pnpm", true);
+
+    // Another sender's message (a handoff, a schedule) is queued but not the owner's to edit.
+    const foreign = await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+      const conversationId = (await state.storage.get<ConversationId>(`session:${id}`))!;
+      const conversation = await agent["harness"].conversation(conversationId, BACKGROUND_CONTEXT);
+
+      const submission = await conversation!.submit(
+        { type: "input", content: "Review feedback", whenBusy: "followUp" },
+        BACKGROUND_CONTEXT,
+      );
+
+      return Number(submission.id);
+    });
+
+    expect(await inbox()).toEqual([
+      { id: a, mode: "followUp" },
+      { id: b, mode: "followUp" },
+      { id: dropped, mode: "followUp" },
+      { id: edited, mode: "followUp" },
+      { id: steered, mode: "steer" },
+      { id: foreign, mode: "followUp" },
+    ]);
+
+    // The browser's snapshot names the owner's own messages while some are queued.
+    const snapshot = await (
+      await SELF.fetch(`https://worker/api/sessions/${id}`, { headers })
+    ).json<{
+      docs: Record<string, { submissions?: number[] }>;
+    }>();
+
+    expect(snapshot.docs["app.owner-inputs"]?.submissions).toEqual(
+      expect.arrayContaining([a, b, dropped, edited, steered]),
+    );
+    expect(snapshot.docs["app.owner-inputs"]?.submissions).not.toContain(foreign);
+
+    // Withdrawing: the running input, another session's view and a repeat are refused.
+    expect((await queue(id, `/${first}`, "DELETE")).status).toBe(409);
+    expect((await queue(other, `/${dropped}`, "DELETE")).status).toBe(409);
+    expect((await queue(id, "/0", "DELETE")).status).toBe(400);
+    expect((await queue(id, `/${dropped}`, "DELETE")).status).toBe(200);
+    expect((await queue(id, `/${dropped}`, "DELETE")).status).toBe(409);
+
+    // Editing takes the owner's text back out of the queue; text they didn't type stays.
+    const refused = await queue(id, `/${foreign}/edit`, "POST");
+    expect(refused.status).toBe(409);
+    const taken = await queue(id, `/${edited}/edit`, "POST");
+    expect(taken.status).toBe(200);
+    expect(await taken.json()).toEqual({ content: "Fix the typo" });
+    expect((await queue(id, `/${edited}/edit`, "POST")).status).toBe(409);
+
+    // Reordering must name exactly the queued follow-ups; steers keep their place.
+    expect((await reorder([b, a])).status).toBe(409);
+    expect((await reorder([b, a, foreign, steered])).status).toBe(409);
+    expect((await reorder([b, b, a])).status).toBe(409);
+    expect((await reorder(["b"])).status).toBe(400);
+    expect((await reorder([foreign, b, a])).status).toBe(200);
+
+    expect(await inbox()).toEqual([
+      { id: foreign, mode: "followUp" },
+      { id: b, mode: "followUp" },
+      { id: steered, mode: "steer" },
+      { id: a, mode: "followUp" },
+    ]);
+
+    // Answer the first turn: the steer joins, and the head of the reordered queue runs next.
+    const message = {
+      type: "message",
+      id: "msg_test",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "Done", annotations: [] }],
+    };
+
+    const events = [
+      {
+        type: "response.created",
+        response: { id: "resp_test", status: "in_progress", output: [] },
+      },
+      { type: "response.output_item.done", output_index: 0, item: message },
+      {
+        type: "response.completed",
+        response: {
+          id: "resp_test",
+          status: "completed",
+          output: [message],
+          usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+        },
+      },
+    ];
+
+    release(
+      events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+    );
+
+    await expect.poll(() => requests.length).toBe(2);
+
+    // One queued message per turn: the rest wait, in the order the owner chose.
+    await expect.poll(inbox).toEqual([
+      { id: b, mode: "followUp" },
+      { id: a, mode: "followUp" },
+    ]);
+
+    const next = requests[1]!;
+
+    const order = ["Review feedback", "Use pnpm"].map((text) => next.indexOf(text));
+
+    expect(order.every((index) => index >= 0)).toBe(true);
+    expect([...order].sort((x, y) => x - y)).toEqual(order);
+
+    expect(next).not.toContain("B: second queued");
+    expect(next).not.toContain("A: first queued");
+    expect(next).not.toContain("Never mind this one");
+    expect(next).not.toContain("Fix the typo");
+  } finally {
+    release("");
+    await SELF.fetch(`https://worker/api/sessions/${id}/abort`, { method: "POST", headers });
+  }
+});
+
 it.each([20, 100])(
   "leaves new and existing conversations without a turn limit (old limit: %s)",
   async (maxTurns) => {

@@ -47,8 +47,14 @@ function makeAgentApi(env: Env) {
       rpc("agent.prompts", async () => await agent.prompts(id, through)),
     ),
     prompt: Effect.fn("AgentApi.prompt")(
-      (id: string, content: string, requestId: string, images?: readonly PromptImage[]) =>
-        rpc("agent.prompt", async () => await agent.prompt(id, content, requestId, images)),
+      (
+        id: string,
+        content: string,
+        requestId: string,
+        images?: readonly PromptImage[],
+        steer?: boolean,
+      ) =>
+        rpc("agent.prompt", async () => await agent.prompt(id, content, requestId, images, steer)),
     ),
     scheduledPrompts: Effect.fn("AgentApi.scheduledPrompts")((id: string) =>
       rpc("agent.schedule.list", async () => await agent.scheduledPrompts(id)),
@@ -72,6 +78,15 @@ function makeAgentApi(env: Env) {
     ),
     steerQueued: Effect.fn("AgentApi.steerQueued")((id: string, submissionId: number) =>
       rpc("agent.queue.steer", async () => await agent.steerQueued(id, submissionId)),
+    ),
+    withdrawQueued: Effect.fn("AgentApi.withdrawQueued")((id: string, submissionId: number) =>
+      rpc("agent.queue.withdraw", async () => await agent.withdrawQueued(id, submissionId)),
+    ),
+    editQueued: Effect.fn("AgentApi.editQueued")((id: string, submissionId: number) =>
+      rpc("agent.queue.edit", async () => await agent.editQueued(id, submissionId)),
+    ),
+    reorderQueue: Effect.fn("AgentApi.reorderQueue")((id: string, order: readonly number[]) =>
+      rpc("agent.queue.reorder", async () => await agent.reorderQueue(id, order)),
     ),
   };
 }

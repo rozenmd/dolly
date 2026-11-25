@@ -72,6 +72,13 @@ import { BROWSER_SESSION_MS, MAX_BROWSER_SESSIONS } from "./browser-workspace";
 import { pullRequestChange, WebhookProfile, WebhookSetup } from "./github-webhook";
 import { STEER_TOOL_SKIP, SteerInterrupts, steerInterrupts, steerQueued } from "./steer-interrupt";
 import {
+  copyInboxItem,
+  editableText,
+  hasQueued,
+  OWNER_INPUTS_DOC,
+  submissionId as queuedId,
+} from "./queue";
+import {
   runCancellable,
   serializeShellResult,
   SHELL_TIMEOUT_DEFAULT_SECONDS,
@@ -3802,7 +3809,17 @@ export class Agent extends DurableObject<Env> {
     );
   });
 
-  prompt(id: string, content: string, requestId: string, images: readonly PromptImage[] = []) {
+  /**
+   * Send the owner's message. While a run is working it queues for the next turn, or with `steer`
+   * joins the running turn at its next step boundary (at once while the model is only thinking).
+   */
+  prompt(
+    id: string,
+    content: string,
+    requestId: string,
+    images: readonly PromptImage[] = [],
+    steer = false,
+  ) {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
         const conversation = yield* this.conversation(id);
@@ -3842,7 +3859,7 @@ export class Agent extends DurableObject<Env> {
                 ? [...(content ? [{ type: "text" as const, text: content }] : []), ...imageBlocks]
                 : content,
               requestId,
-              whenBusy: "followUp",
+              whenBusy: steer ? "steer" : "followUp",
             });
 
             // Every queued message stays the owner's until its run: a follow-up queued behind a
@@ -3852,9 +3869,14 @@ export class Agent extends DurableObject<Env> {
             if (!owner.submissions.includes(id)) owner.submissions.push(id);
             owner.submissions.splice(0, Math.max(0, owner.submissions.length - OWNER_INPUTS_KEPT));
 
-            return { id };
+            const inbox = await tx.doc(InboxDoc, target.id);
+
+            return { id, interrupts: steer && steerInterrupts(inbox) };
           }, BACKGROUND_CONTEXT),
         );
+
+        // A response still only thinking is cut short so the steer is answered now.
+        if (submission.interrupts) this.steerInterrupts.interrupt(String(target.id));
 
         // Restoring pings the sidebar, which also picks up this prompt's new time.
         yield* attempt("session.restore", () => this.archiveSession(id, false));
@@ -3899,6 +3921,147 @@ export class Agent extends DurableObject<Env> {
         );
       }),
     );
+  }
+
+  /**
+   * Withdraw a queued message before the agent sees it. Only inputs still waiting in the inbox
+   * can be withdrawn; one a boundary already placed stays in the conversation.
+   */
+  withdrawQueued(id: string, submissionId: number) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        const target = conversation.value;
+
+        const queued = yield* attempt("pi.queue.read", () =>
+          this.harness.snapshot(InboxDoc, target.id, BACKGROUND_CONTEXT),
+        );
+
+        // Only queued inputs: a queued write (a reset, a handoff) is not the owner's to drop.
+        if (!queued?.items.some((item) => item.id === submissionId && item.mode !== "write"))
+          return { error: "This message is no longer queued" };
+
+        const result = yield* attempt("pi.queue.withdraw", () =>
+          this.harness.abortSubmission(queuedId(submissionId), BACKGROUND_CONTEXT, target.id),
+        );
+
+        return result === "aborted"
+          ? { state: "withdrawn" as const }
+          : { error: "This message is no longer queued" };
+      }),
+    );
+  }
+
+  /**
+   * Take a queued message back into the composer: withdraw it and return its text. Only text the
+   * owner typed here can be taken back; a review handoff, schedule or another session's message
+   * carries text the owner didn't write, and a screenshot can't be restored into a draft.
+   */
+  editQueued(id: string, submissionId: number) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        const target = conversation.value;
+
+        const found = yield* attempt("pi.queue.read", () =>
+          this.harness.commit(async (tx) => {
+            const inbox = await tx.doc(InboxDoc, target.id);
+            const owner = await tx.doc(OwnerInputDoc, target.id);
+            const item = inbox.items.find((candidate) => candidate.id === submissionId);
+
+            if (!item || item.mode === "write") return undefined;
+
+            return {
+              content: editableText(item),
+              owned: owner.submissions.includes(item.id),
+            };
+          }, BACKGROUND_CONTEXT),
+        );
+
+        if (!found) return { error: "This message is no longer queued" };
+
+        if (!found.owned || found.content === undefined)
+          return { error: "Only text you typed can be edited; delete it instead" };
+
+        const result = yield* attempt("pi.queue.withdraw", () =>
+          this.harness.abortSubmission(queuedId(submissionId), BACKGROUND_CONTEXT, target.id),
+        );
+
+        return result === "aborted"
+          ? { content: found.content }
+          : { error: "This message is no longer queued" };
+      }),
+    );
+  }
+
+  /**
+   * Put the queued follow-ups in a new order. `order` must name every queued follow-up exactly
+   * once; steers and writes keep their places, and the follow-ups fill their own slots in the new
+   * order, so the next turn delivers them that way.
+   */
+  reorderQueue(id: string, order: readonly number[]) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        const target = conversation.value;
+
+        return yield* attempt("pi.queue.reorder", () =>
+          this.harness.commit(async (tx) => {
+            const inbox = await tx.doc(InboxDoc, target.id);
+
+            const slots = inbox.items.flatMap((item, index) =>
+              item.mode === "followUp" ? [{ index, item }] : [],
+            );
+
+            const byId = new Map(slots.map(({ item }) => [item.id, item] as const));
+
+            const moved = order.flatMap((submission) => {
+              const item = byId.get(queuedId(submission));
+
+              return item ? [copyInboxItem(item)] : [];
+            });
+
+            // Every queued follow-up, each once, and nothing else.
+            if (
+              moved.length !== order.length ||
+              order.length !== slots.length ||
+              new Set(order).size !== order.length
+            )
+              return { error: "The queue changed. Try again." };
+
+            slots.forEach(({ index }, position) => {
+              inbox.items[index] = moved[position]!;
+            });
+
+            return { state: "reordered" as const };
+          }, BACKGROUND_CONTEXT),
+        );
+      }),
+    );
+  }
+
+  /**
+   * The view with the owner's typed submissions alongside a non-empty queue, so the composer
+   * offers Edit only on messages the owner wrote.
+   */
+  private async withQueueOwners<T extends Pick<ConversationView, "docs">>(
+    conversationId: ConversationId,
+    value: T,
+  ): Promise<T> {
+    if (!hasQueued(value.docs)) return value;
+
+    const owner = await this.harness.snapshot(OwnerInputDoc, conversationId, BACKGROUND_CONTEXT);
+
+    return { ...value, docs: { ...value.docs, [OWNER_INPUTS_DOC]: owner ?? { submissions: [] } } };
   }
 
   private serializeTranscript(
@@ -3977,7 +4140,9 @@ export class Agent extends DurableObject<Env> {
     };
 
     const send = async (value: ConversationView) => {
-      const text = await Effect.runPromise(this.serializeTranscript(value));
+      const text = await Effect.runPromise(
+        this.serializeTranscript(await this.withQueueOwners(conversation.id, value)),
+      );
 
       if (!stopped) socket.send(text);
     };
@@ -4067,7 +4232,10 @@ export class Agent extends DurableObject<Env> {
           attempt("pi.watch", async () =>
             conversation.value.watch(BACKGROUND_CONTEXT, await promptWindow(conversation.value)),
           ),
-          (view) => this.serializeTranscript(view.value),
+          (view) =>
+            attempt("pi.queue.owners", () =>
+              this.withQueueOwners(conversation.value.id, view.value),
+            ).pipe(Effect.flatMap((value) => this.serializeTranscript(value))),
           (view) => attempt("pi.watch.stop", () => view.stop()).pipe(Effect.orDie),
         );
       }),

@@ -28,7 +28,16 @@ const QueuedInput = Schema.Struct({
   content: Schema.Union([Schema.String, Schema.Array(Block)]),
 });
 
-export type QueuedMessage = { id: number; text: string; steering: boolean };
+export type QueuedMessage = {
+  id: number;
+  text: string;
+  /** Joining the running turn at its next step boundary, rather than waiting for the next turn. */
+  steering: boolean;
+  /** Text the owner typed here, so it can go back into the composer. */
+  editable: boolean;
+};
+
+const OwnerInputs = Schema.Struct({ submissions: Schema.Array(Schema.Number) });
 
 export function queueFromSnapshot(snapshot: typeof Snapshot.Type): QueuedMessage[] {
   const inbox = Schema.decodeUnknownOption(Schema.Struct({ items: Schema.Array(Schema.Unknown) }))(
@@ -37,16 +46,28 @@ export function queueFromSnapshot(snapshot: typeof Snapshot.Type): QueuedMessage
 
   if (Option.isNone(inbox)) return [];
 
+  const owned = new Set(
+    Option.match(Schema.decodeUnknownOption(OwnerInputs)(snapshot.docs["app.owner-inputs"]), {
+      onNone: () => [],
+      onSome: (value) => value.submissions,
+    }),
+  );
+
   return inbox.value.items.flatMap((item) => {
     const input = Schema.decodeUnknownOption(QueuedInput)(item);
 
     if (Option.isNone(input)) return [];
 
+    const { content } = input.value;
+
     return [
       {
         id: input.value.id,
-        text: queuedText(input.value.content),
+        text: queuedText(content),
         steering: input.value.mode === "steer",
+        editable:
+          owned.has(input.value.id) &&
+          (Schema.is(Schema.String)(content) || content.every((block) => block.type === "text")),
       },
     ];
   });
@@ -473,6 +494,10 @@ export type ApiBody = {
   /** When a scheduled message is sent, as ISO 8601. */
   at?: string;
   images?: readonly { mimeType: string; data: string }[];
+  /** While a run works: join it at its next step instead of queueing for the next turn. */
+  steer?: boolean;
+  /** The queued follow-ups' submission IDs, in their new order. */
+  order?: readonly number[];
   model?: string | null;
   thinkingLevel?: string | null;
   speed?: Speed | null;

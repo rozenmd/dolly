@@ -1057,10 +1057,77 @@ select.input {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.message-queue [role="status"] {
+.message-queue li {
+  gap: 6px;
+  margin: 0 -6px;
+  padding: 0 0 0 6px;
+  border-radius: 8px;
+}
+.message-queue li.dragging {
+  background: rgb(255 255 255 / 6%);
+}
+.queue-handle {
+  display: grid;
   flex-shrink: 0;
-  font-size: 12px;
+  place-items: center;
+  width: 20px;
+  height: 32px;
+  margin-left: -8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  cursor: grab;
+  touch-action: none;
+}
+.queue-handle:hover,
+.queue-handle:focus-visible {
   color: var(--muted);
+}
+li.dragging .queue-handle {
+  cursor: grabbing;
+}
+.queue-handle svg {
+  width: 14px;
+  height: 14px;
+}
+.queue-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+}
+.queue-action {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.queue-action:hover:not(:disabled) {
+  background: rgb(255 255 255 / 6%);
+  color: var(--text);
+}
+.queue-action.danger:hover:not(:disabled) {
+  color: var(--red);
+}
+.queue-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.queue-action svg {
+  width: 16px;
+  height: 16px;
+}
+/* A steer waiting for the running turn's next step: the owner's bubble, not yet delivered. */
+.prompt.pending .prompt-bubble {
+  opacity: 0.6;
 }
 /* The agent is waiting on CI (wait_for): above the composer, like queued messages. */
 .ci-wait-strip {
@@ -1169,6 +1236,35 @@ select.input {
 }
 .round-button.stop {
   background: var(--red);
+}
+.send-control {
+  position: relative;
+  display: flex;
+}
+/* While a run works: queueing waits for the turn to finish, steering joins it. */
+.round-button.send.queue {
+  background: #3a3a3a;
+}
+.round-button.send.steer {
+  background: var(--blue);
+}
+.round-button.send svg {
+  width: 16px;
+  height: 16px;
+}
+.send-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  width: max-content;
+  min-width: 260px;
+  max-width: calc(100vw - 32px);
+  padding: 6px;
+  background: #282828;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgb(0 0 0 / 50%);
 }
 .round-button.stop svg {
   width: 12px;
