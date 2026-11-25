@@ -8,11 +8,11 @@ import {
   useMemo,
   useRef,
   useState,
-  type FormEvent,
   type ReactNode,
   type SyntheticEvent,
 } from "react";
 import {
+  ArrowTurnDownLeftIcon,
   ArrowUpIcon,
   ArrowsRightLeftIcon,
   CheckIcon,
@@ -47,6 +47,16 @@ import { markEntry, railMarks, wholeRail, type RailMark } from "../lib/turn-rail
 import { AttachButton, AttachmentTray, useAttachmentInput } from "./attachments";
 import { ScheduleButton } from "./schedule";
 import { CiWaitStrip } from "./ci-wait";
+import { MessageQueue } from "./queue";
+import {
+  modEnterGlyph,
+  onBusySendChanged,
+  otherBusySend,
+  readBusySend,
+  saveBusySend,
+  type BusySend,
+} from "../lib/busy-send";
+
 import type { Attachment } from "../lib/images";
 import {
   spawnedThreadId,
@@ -54,6 +64,12 @@ import {
   threadState,
   threadStatusLine,
 } from "../lib/session-threads";
+
+/** How long the first Escape of a run stays armed waiting for the second. */
+const ESC_STOP_WINDOW_MS = 1500;
+
+/** How long a touch holds the send button to open its options. */
+const LONG_PRESS_MS = 800;
 
 /** What a thread card shows about a spawned session, from the session list. */
 export type ThreadCardSession = {
@@ -97,6 +113,7 @@ export function Conversation({
   sessionId,
   loading,
   older,
+  steering = [],
   thread,
   onOpenThread,
 }: {
@@ -104,6 +121,8 @@ export function Conversation({
   sessionId: string;
   loading: boolean;
   older?: OlderHistory;
+  /** Messages sent into the running turn that its next step boundary hasn't delivered yet. */
+  steering?: readonly QueuedMessage[];
 } & ThreadLookup) {
   const scroll = useRef<HTMLDivElement>(null);
   const top = useRef<HTMLDivElement>(null);
@@ -183,7 +202,7 @@ export function Conversation({
       // Live updates append below the reader without moving them; measure from here.
       anchor.current.height = element.scrollHeight;
     }
-  }, [turns, before]);
+  }, [turns, before, steering.length]);
 
   // Load earlier messages once the top of the conversation comes near, and again after each page while it
   // stays near (a short page, or a tall window).
@@ -255,6 +274,19 @@ export function Conversation({
               />
             ))}
           </DisclosureChoices.Provider>
+          {steering.map((item) => (
+            <section key={`steer-${item.id}`} className="turn">
+              <article className="prompt pending" aria-label="steering message">
+                <div className="prompt-meta">
+                  <span role="status">Sending after the current step…</span>
+                  <span>You</span>
+                </div>
+                <div className="prompt-bubble">
+                  <Prose text={item.text} />
+                </div>
+              </article>
+            </section>
+          ))}
         </div>
       </div>
       <TurnRail
@@ -907,12 +939,16 @@ export function Composer({
   draftKey,
   queued,
   onSteerQueued,
+  onEditQueued,
+  onDeleteQueued,
+  onReorderQueue,
   activity,
 }: {
   onSend: (
     content: string,
     requestId: string,
     attachments: readonly Attachment[],
+    steer: boolean,
   ) => Promise<boolean>;
   onStop: () => void;
   pending: boolean;
@@ -920,8 +956,13 @@ export function Composer({
   /** The session's model pill (`ModelControl`), owned by the workspace. */
   modelControl: ReactNode;
   draftKey: string;
+  /** Messages waiting for the next turn; steers already show in the conversation. */
   queued: readonly QueuedMessage[];
   onSteerQueued: (id: number) => void;
+  /** Withdraws a queued message and resolves with its text, or undefined when it couldn't. */
+  onEditQueued: (id: number) => Promise<string | undefined>;
+  onDeleteQueued: (id: number) => void;
+  onReorderQueue: (order: readonly number[]) => Promise<boolean>;
   /** Changes as the conversation moves, so "send later" picks up schedules the agent makes. */
   activity: number;
 }) {
@@ -932,34 +973,134 @@ export function Composer({
     requestId: string;
     session: string;
     attachments: readonly Attachment[];
+    steer: boolean;
   } | null>(null);
 
   const [images, setImages] = useState<Record<string, Attachment[]>>({});
   const [attachError, setAttachError] = useState("");
   const content = drafts[draftKey] ?? "";
   const attachments = images[draftKey] ?? [];
+  const field = useRef<HTMLTextAreaElement>(null);
 
   const setAttachments = (next: Attachment[]) =>
     setImages((values) => ({ ...values, [draftKey]: next }));
 
   const input = useAttachmentInput(attachments, setAttachments, setAttachError, pending);
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
+  // While a run works, Enter (and the send button) does the chosen action and ⌘/Ctrl+Enter the other.
+  const [busySend, setBusySend] = useState<BusySend>("queue");
+  const [modifierHeld, setModifierHeld] = useState(false);
+  const [sendMenu, setSendMenu] = useState(false);
+  const sendRoot = useRef<HTMLDivElement>(null);
+  const longPress = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const pressedLong = useRef(false);
 
+  useEffect(() => {
+    setBusySend(readBusySend());
+
+    return onBusySendChanged(setBusySend);
+  }, []);
+
+  useEffect(() => {
+    const sync = (event: KeyboardEvent) => setModifierHeld(event.metaKey || event.ctrlKey);
+    const clear = () => setModifierHeld(false);
+    window.addEventListener("keydown", sync);
+    window.addEventListener("keyup", sync);
+    window.addEventListener("blur", clear);
+
+    return () => {
+      window.removeEventListener("keydown", sync);
+      window.removeEventListener("keyup", sync);
+      window.removeEventListener("blur", clear);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sendMenu) return;
+
+    const onPointer = (event: PointerEvent) => {
+      if (!(event.target instanceof Node) || !sendRoot.current?.contains(event.target))
+        setSendMenu(false);
+    };
+
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSendMenu(false);
+    };
+
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [sendMenu]);
+
+  /** Whether a send made now, with or without the modifier, steers the running turn. */
+  const steers = (modifier: boolean) =>
+    running && (modifier ? otherBusySend(busySend) : busySend) === "steer";
+
+  const steerSend = steers(modifierHeld);
+  const modGlyph = modEnterGlyph();
+
+  function pickBusySend(value: BusySend) {
+    saveBusySend(value);
+    setSendMenu(false);
+  }
+
+  // Escape twice while a run works stops it: the first press arms, a second within the window stops.
+  const escArmed = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => {
+    if (!running) {
+      clearTimeout(escArmed.current);
+      escArmed.current = undefined;
+    }
+  }, [running]);
+
+  useEffect(() => () => clearTimeout(escArmed.current), []);
+
+  function escape() {
+    if (escArmed.current) {
+      clearTimeout(escArmed.current);
+      escArmed.current = undefined;
+      onStop();
+
+      return;
+    }
+
+    escArmed.current = setTimeout(() => {
+      escArmed.current = undefined;
+    }, ESC_STOP_WINDOW_MS);
+  }
+
+  async function edit(id: number) {
+    const text = await onEditQueued(id);
+
+    if (text === undefined) return;
+    setDrafts((values) => {
+      const current = values[draftKey] ?? "";
+
+      return { ...values, [draftKey]: current.trim() ? `${current}\n\n${text}` : text };
+    });
+    field.current?.focus();
+  }
+
+  async function submit(steer: boolean) {
     if ((!content.trim() && !attachments.length) || pending || input.reading) return;
 
     const requestId =
       retry?.content === content &&
       retry.session === draftKey &&
+      retry.steer === steer &&
       retry.attachments.length === attachments.length &&
       retry.attachments.every((image, index) => image.id === attachments[index]?.id)
         ? retry.requestId
         : crypto.randomUUID();
 
-    setRetry({ content, requestId, session: draftKey, attachments });
+    setRetry({ content, requestId, session: draftKey, attachments, steer });
 
-    if (await onSend(content, requestId, attachments)) {
+    if (await onSend(content, requestId, attachments, steer)) {
       setDrafts((values) => ({ ...values, [draftKey]: "" }));
       setImages((values) => ({ ...values, [draftKey]: [] }));
       setAttachError("");
@@ -967,41 +1108,26 @@ export function Composer({
     }
   }
 
+  const hasDraft = Boolean(content.trim() || attachments.length);
+
   return (
     <div className="composer-area">
       <div className={queued.length > 0 ? "composer-shell has-queue" : "composer-shell"}>
         <CiWaitStrip session={draftKey} activity={activity} />
-        {queued.length > 0 && (
-          <section className="message-queue" aria-label="Queued messages">
-            <h2>
-              {queued.length} {queued.length === 1 ? "message" : "messages"} queued
-            </h2>
-            <ul>
-              {queued.map((item) => (
-                <li key={item.id}>
-                  <p title={item.text}>{item.text}</p>
-                  {item.steering ? (
-                    <span role="status">Sending after the current step…</span>
-                  ) : (
-                    <button
-                      type="button"
-                      className="queue-steer"
-                      disabled={pending}
-                      aria-label="Send now"
-                      title="Send now: deliver after the current step instead of waiting for the answer"
-                      onClick={() => onSteerQueued(item.id)}
-                    >
-                      <ArrowUpIcon />
-                    </button>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+        <MessageQueue
+          queued={queued}
+          disabled={pending}
+          onSteer={onSteerQueued}
+          onEdit={(id) => void edit(id)}
+          onDelete={onDeleteQueued}
+          onReorder={onReorderQueue}
+        />
         <form
           className="composer"
-          onSubmit={(event) => void submit(event)}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit(steerSend);
+          }}
           onDragOver={input.onDragOver}
           onDrop={input.onDrop}
         >
@@ -1016,6 +1142,7 @@ export function Composer({
           <Textarea
             id="prompt"
             name="prompt"
+            ref={field}
             rows={1}
             placeholder={running ? "Queue for when it finishes…" : "Ask dolly…"}
             value={content}
@@ -1024,9 +1151,18 @@ export function Composer({
             onChange={(event) => setDrafts({ ...drafts, [draftKey]: event.target.value })}
             onPaste={input.onPaste}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              if (event.nativeEvent.isComposing) return;
+
+              if (event.key === "Escape" && running && !event.repeat) {
                 event.preventDefault();
-                event.currentTarget.form?.requestSubmit();
+                escape();
+
+                return;
+              }
+
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void submit(steers(event.metaKey || event.ctrlKey));
               }
             }}
           />
@@ -1049,25 +1185,98 @@ export function Composer({
               onScheduled={() => setDrafts((values) => ({ ...values, [draftKey]: "" }))}
             />
             {modelControl}
-            {running && !content.trim() && !attachments.length ? (
+            {running && (
               <button
                 type="button"
                 className="round-button stop"
                 aria-label="Stop agent"
+                title="Stop. Interrupts the current turn (Esc twice)"
                 disabled={pending}
                 onClick={onStop}
               >
                 <StopIcon />
               </button>
-            ) : (
-              <button
-                type="submit"
-                className="round-button send"
-                disabled={(!content.trim() && !attachments.length) || pending || input.reading}
-                aria-label={running ? "Queue message" : "Send message"}
-              >
-                <ArrowUpIcon />
-              </button>
+            )}
+            {(!running || hasDraft) && (
+              <div className="send-control" ref={sendRoot}>
+                <button
+                  type="submit"
+                  className={`round-button send${running ? (steerSend ? " steer" : " queue") : ""}`}
+                  disabled={!hasDraft || pending || input.reading}
+                  aria-label={
+                    running
+                      ? steerSend
+                        ? "Steer into the running turn"
+                        : "Queue until the current turn finishes"
+                      : "Send message"
+                  }
+                  title={
+                    running
+                      ? `${steerSend ? "Steer message" : "Queue message"} (${
+                          modifierHeld ? modGlyph : "↵"
+                        }). Right-click or hold for options`
+                      : "Send (↵). Right-click or hold for options"
+                  }
+                  aria-haspopup="menu"
+                  aria-expanded={sendMenu}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setSendMenu(true);
+                  }}
+                  onPointerDown={(event) => {
+                    if (event.pointerType === "mouse") return;
+                    pressedLong.current = false;
+                    clearTimeout(longPress.current);
+                    longPress.current = setTimeout(() => {
+                      pressedLong.current = true;
+                      setSendMenu(true);
+                    }, LONG_PRESS_MS);
+                  }}
+                  onPointerUp={() => clearTimeout(longPress.current)}
+                  onPointerLeave={() => clearTimeout(longPress.current)}
+                  onClick={(event) => {
+                    // A long press opened the menu; it doesn't also send.
+                    if (pressedLong.current) {
+                      event.preventDefault();
+                      pressedLong.current = false;
+                    }
+                  }}
+                >
+                  {running && !steerSend ? <ArrowTurnDownLeftIcon /> : <ArrowUpIcon />}
+                </button>
+                {sendMenu && (
+                  <div className="send-menu" role="menu" aria-label="While the agent is working">
+                    <p className="schedule-heading">While the agent is working</p>
+                    {(["queue", "steer"] as const).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={busySend === value}
+                        className="picker-action"
+                        onClick={() => pickBusySend(value)}
+                      >
+                        {value === "queue" ? (
+                          <ArrowTurnDownLeftIcon className="picker-icon" aria-hidden="true" />
+                        ) : (
+                          <ArrowUpIcon className="picker-icon" aria-hidden="true" />
+                        )}
+                        <span className="picker-label">
+                          {value === "queue"
+                            ? "Queue after run finishes"
+                            : "Steer into running turn"}
+                        </span>
+                        <span className="picker-hint">{busySend === value ? "↵" : modGlyph}</span>
+                        <CheckIcon
+                          className="picker-check"
+                          aria-hidden="true"
+                          style={{ visibility: busySend === value ? "visible" : "hidden" }}
+                        />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </form>

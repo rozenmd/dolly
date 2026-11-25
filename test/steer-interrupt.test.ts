@@ -140,11 +140,11 @@ async function session() {
   const response = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
   const id = (await response.json<{ id: string }>()).id;
 
-  const send = async (content: string) => {
+  const send = async (content: string, steer?: boolean) => {
     const sent = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ content, requestId: crypto.randomUUID() }),
+      body: JSON.stringify({ content, requestId: crypto.randomUUID(), steer }),
     });
 
     expect(sent.status).toBe(202);
@@ -176,53 +176,61 @@ async function session() {
   return { send, steer, messages, live, abort };
 }
 
-it("cuts a thinking-only response short and answers the steer next", async () => {
-  const requests: string[] = [];
-  let thinking!: ReturnType<typeof openStream>;
+it.each(["queued and promoted", "steered from the composer"])(
+  "cuts a thinking-only response short and answers the steer next (%s)",
+  async (how) => {
+    const requests: string[] = [];
+    let thinking!: ReturnType<typeof openStream>;
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-    if (!String(url).includes("/v1/responses")) return Response.json({}, { status: 404 });
-    requests.push(await bodyOf(init));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (!String(url).includes("/v1/responses")) return Response.json({}, { status: 404 });
+      requests.push(await bodyOf(init));
 
-    if (requests.length > 1) return answer("Using pnpm.");
+      if (requests.length > 1) return answer("Using pnpm.");
 
-    thinking = openStream();
-    thinking.write(thinkingStart("resp_thinking", "Planning how to install dependencies with npm"));
+      thinking = openStream();
+      thinking.write(
+        thinkingStart("resp_thinking", "Planning how to install dependencies with npm"),
+      );
 
-    return thinking.response;
-  });
+      return thinking.response;
+    });
 
-  const conversation = await session();
+    const conversation = await session();
 
-  try {
-    await conversation.send("Work on this");
-    await expect.poll(async () => streaming(await conversation.live(), "thinking")).toBe(true);
+    try {
+      await conversation.send("Work on this");
+      await expect.poll(async () => streaming(await conversation.live(), "thinking")).toBe(true);
 
-    const queued = await conversation.send("Actually, use pnpm");
-    expect((await conversation.steer(queued)).status).toBe(202);
+      if (how === "steered from the composer") await conversation.send("Actually, use pnpm", true);
+      else {
+        const queued = await conversation.send("Actually, use pnpm");
+        expect((await conversation.steer(queued)).status).toBe(202);
+      }
 
-    // The upstream response is cancelled, and the next request carries the steer.
-    await expect.poll(() => requests.length).toBe(2);
-    expect(thinking.cancelled).toBe(true);
-    expect(requests[1]).toContain("Actually, use pnpm");
+      // The upstream response is cancelled, and the next request carries the steer.
+      await expect.poll(() => requests.length).toBe(2);
+      expect(thinking.cancelled).toBe(true);
+      expect(requests[1]).toContain("Actually, use pnpm");
 
-    await expect
-      .poll(async () => (await conversation.messages()).at(-1)?.content)
-      .toEqual([expect.objectContaining({ type: "text", text: "Using pnpm." })]);
+      await expect
+        .poll(async () => (await conversation.messages()).at(-1)?.content)
+        .toEqual([expect.objectContaining({ type: "text", text: "Using pnpm." })]);
 
-    const messages = await conversation.messages();
-    const users = messages.filter((message) => message.role === "user").map((m) => m.content);
-    expect(users).toEqual(["Work on this", "Actually, use pnpm"]);
+      const messages = await conversation.messages();
+      const users = messages.filter((message) => message.role === "user").map((m) => m.content);
+      expect(users).toEqual(["Work on this", "Actually, use pnpm"]);
 
-    // The superseded thinking leaves no partial, failure or error behind.
-    const assistants = messages.filter((message) => message.role === "assistant");
-    expect(assistants.map((message) => message.stopReason)).toEqual(["stop", "stop"]);
-    expect(assistants[0]!.content).toEqual([]);
-    expect((await conversation.live()).runFailure).toBeUndefined();
-  } finally {
-    await conversation.abort();
-  }
-});
+      // The superseded thinking leaves no partial, failure or error behind.
+      const assistants = messages.filter((message) => message.role === "assistant");
+      expect(assistants.map((message) => message.stopReason)).toEqual(["stop", "stop"]);
+      expect(assistants[0]!.content).toEqual([]);
+      expect((await conversation.live()).runFailure).toBeUndefined();
+    } finally {
+      await conversation.abort();
+    }
+  },
+);
 
 it("lets a response with a tool call finish, then skips its unstarted calls for the steer", async () => {
   const requests: string[] = [];

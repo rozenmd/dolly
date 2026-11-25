@@ -52,6 +52,9 @@ import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-s
 import { useSessionSummary } from "./lib/session-summary";
 import { workspaceMain, workspaceOf, workspaceRows, workspaceTabs } from "./lib/workspaces";
 
+/** A queued message taken back into the composer. */
+const QueuedEdit = Schema.fromJsonString(Schema.Struct({ content: Schema.String }));
+
 const cacheStorageKey = "dolly.sessions.cache.v1";
 const decodeUpdate = Schema.decodeUnknownSync(Schema.fromJsonString(SessionUpdateResult));
 const decodeSessions = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(SavedSession)));
@@ -119,7 +122,10 @@ export function WorkspaceApp() {
   const summaryShown = Boolean(session && !feed && summary.open);
   const running = Boolean(snapshot && liveFromSnapshot(snapshot)?.run);
   const turns = snapshot ? turnsFromSnapshot(snapshot) : [];
-  const queued = snapshot ? queueFromSnapshot(snapshot) : [];
+  const queue = snapshot ? queueFromSnapshot(snapshot) : [];
+  // Steers show in the conversation as they wait; the composer's queue holds the next turn's messages.
+  const steering = queue.filter((item) => item.steering);
+  const queued = queue.filter((item) => !item.steering);
 
   const rows = connected
     ? sessions.map((item) => ({
@@ -742,7 +748,12 @@ export function WorkspaceApp() {
     setModal(chatgpt === false && !anthropic ? "chatgpt" : "new");
   }
 
-  async function send(content: string, requestId: string, attachments: readonly Attachment[]) {
+  async function send(
+    content: string,
+    requestId: string,
+    attachments: readonly Attachment[],
+    steer: boolean,
+  ) {
     setPending(true);
     setError("");
 
@@ -751,6 +762,7 @@ export function WorkspaceApp() {
         content,
         requestId,
         ...imagesBody(attachments),
+        steer,
       });
       updateSessions((current) =>
         current.map((item) =>
@@ -782,6 +794,58 @@ export function WorkspaceApp() {
       setError(cause instanceof Error ? cause.message : "Could not send the queued message now.");
     } finally {
       setPending(false);
+    }
+  }
+
+  async function deleteQueued(submissionId: number) {
+    setPending(true);
+    setError("");
+
+    try {
+      await request(
+        `/sessions/${encodeURIComponent(selected)}/queue/${submissionId}`,
+        undefined,
+        undefined,
+        "DELETE",
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not delete the queued message.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function editQueued(submissionId: number) {
+    setPending(true);
+    setError("");
+
+    try {
+      const result = await request(
+        `/sessions/${encodeURIComponent(selected)}/queue/${submissionId}/edit`,
+        {},
+      );
+
+      return Schema.decodeUnknownSync(QueuedEdit)(result).content;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not edit the queued message.");
+
+      return undefined;
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function reorderQueue(order: readonly number[]) {
+    setError("");
+
+    try {
+      await request(`/sessions/${encodeURIComponent(selected)}/queue`, { order }, undefined, "PUT");
+
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not reorder the queue.");
+
+      return false;
     }
   }
 
@@ -986,6 +1050,7 @@ export function WorkspaceApp() {
               <>
                 <Conversation
                   turns={turns}
+                  steering={steering}
                   sessionId={session.id}
                   loading={loading}
                   older={{
@@ -1006,6 +1071,9 @@ export function WorkspaceApp() {
                   running={running}
                   queued={queued}
                   onSteerQueued={(id) => void steerQueued(id)}
+                  onEditQueued={editQueued}
+                  onDeleteQueued={(id) => void deleteQueued(id)}
+                  onReorderQueue={reorderQueue}
                   activity={snapshot?.entries.at(-1)?.id ?? 0}
                   modelControl={sessionModelControl(session)}
                 />

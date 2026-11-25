@@ -22,8 +22,37 @@ describe("queued messages", () => {
         },
       }),
     ).toEqual([
-      { id: 2, text: "Next task", steering: false },
-      { id: 4, text: "Correction", steering: true },
+      { id: 2, text: "Next task", steering: false, editable: false },
+      { id: 4, text: "Correction", steering: true, editable: false },
+    ]);
+  });
+
+  it("offers editing only for text the owner typed", () => {
+    expect(
+      queueFromSnapshot({
+        entries: [],
+        docs: {
+          "pi.inbox": {
+            items: [
+              { id: 2, mode: "followUp", content: "Typed" },
+              { id: 3, mode: "followUp", content: "Review feedback" },
+              {
+                id: 4,
+                mode: "followUp",
+                content: [
+                  { type: "text", text: "With a screenshot" },
+                  { type: "image", data: "r2://screenshots/png/abc", mimeType: "image/png" },
+                ],
+              },
+            ],
+          },
+          "app.owner-inputs": { submissions: [2, 4] },
+        },
+      }).map(({ id, editable }) => ({ id, editable })),
+    ).toEqual([
+      { id: 2, editable: true },
+      { id: 3, editable: false },
+      { id: 4, editable: false },
     ]);
   });
 

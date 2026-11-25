@@ -6,6 +6,7 @@ import {
   type Page,
   type SubmissionId,
 } from "@earendil-works/pi-durable";
+import { OWNER_INPUTS_DOC } from "./queue";
 import * as Schema from "effect/Schema";
 import {
   AutomationPatch,
@@ -36,7 +37,7 @@ export const OWNER_INPUTS_KEPT = 50;
  * even once the owner steers after it.
  */
 export const OwnerInputDoc = defineDoc<{ submissions: SubmissionId[] }>({
-  kind: "app.owner-inputs",
+  kind: OWNER_INPUTS_DOC,
   version: 1,
   scope: "conversation",
   history: "latest",
