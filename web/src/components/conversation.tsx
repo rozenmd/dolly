@@ -58,12 +58,8 @@ import {
 } from "../lib/busy-send";
 
 import type { Attachment } from "../lib/images";
-import {
-  spawnedThreadId,
-  THREAD_STATE_LABEL,
-  threadState,
-  threadStatusLine,
-} from "../lib/session-threads";
+import { spawnedThreadId } from "../lib/session-threads";
+import { ThreadCards, type ThreadSession } from "./threads";
 
 /** How long the first Escape of a run stays armed waiting for the second. */
 const ESC_STOP_WINDOW_MS = 1500;
@@ -71,17 +67,8 @@ const ESC_STOP_WINDOW_MS = 1500;
 /** How long a touch holds the send button to open its options. */
 const LONG_PRESS_MS = 800;
 
-/** What a thread card shows about a spawned session, from the session list. */
-export type ThreadCardSession = {
-  id: string;
-  title: string;
-  updatedAt: number;
-  running: boolean;
-  pullRequest?: { number: number; state?: "open" | "draft" | "merged" | "closed" };
-};
-
 type ThreadLookup = {
-  thread?: (id: string) => ThreadCardSession | undefined;
+  thread?: (id: string) => ThreadSession | undefined;
   onOpenThread?: (id: string) => void;
 };
 
@@ -263,17 +250,13 @@ export function Conversation({
           {!loading && turns.length === 0 && (
             <p className="conversation-status">Send a message to start.</p>
           )}
-          <DisclosureChoices.Provider value={choices}>
-            {turns.map((turn) => (
-              <TurnView
-                key={turn.id}
-                turn={turn}
-                now={now}
-                thread={thread}
-                onOpenThread={onOpenThread}
-              />
-            ))}
-          </DisclosureChoices.Provider>
+          <TurnList
+            turns={turns}
+            choices={choices}
+            now={now}
+            thread={thread}
+            onOpenThread={onOpenThread}
+          />
           {steering.map((item) => (
             <section key={`steer-${item.id}`} className="turn">
               <article className="prompt pending" aria-label="steering message">
@@ -317,7 +300,7 @@ function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number
       ? item.steps.flatMap((step) => {
           const id = spawnedThreadId(step.name, step.status, step.output);
 
-          return id ? [{ step: step.id, id }] : [];
+          return id ? [id] : [];
         })
       : [],
   );
@@ -376,11 +359,7 @@ function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number
         )}
       {turn.items.length > 0 && <WorkLog turn={turn} now={now} />}
       {spawned.length > 0 && onOpenThread && (
-        <div className="thread-cards">
-          {spawned.map(({ step, id }) => (
-            <ThreadCard key={step} id={id} session={thread?.(id)} onOpen={onOpenThread} />
-          ))}
-        </div>
+        <ThreadCards ids={[...new Set(spawned)]} lookup={thread} onOpen={onOpenThread} />
       )}
       {turn.answer && (
         <Answer id={turn.answer.id} text={turn.answer.text} at={turn.endedAt} now={now} />
@@ -517,7 +496,7 @@ function SessionMessageNotice({
 }: {
   id: string;
   message: NonNullable<NonNullable<Turn["prompt"]>["sessionMessage"]>;
-  session?: ThreadCardSession;
+  session?: ThreadSession;
   deliveredAt?: number;
   now: number;
   onOpen?: (id: string) => void;
@@ -573,39 +552,6 @@ function SessionMessageNotice({
 /** The evidence block without its header line, which the label above already says. */
 const evidenceBody = (evidence: string) => evidence.split("\n").slice(1).join("\n");
 
-/** A spawned session, live from the polled session list, opening it on click. */
-function ThreadCard({
-  id,
-  session,
-  onOpen,
-}: {
-  id: string;
-  session?: ThreadCardSession;
-  onOpen: (id: string) => void;
-}) {
-  const state = session ? threadState(session) : undefined;
-  const line = session ? threadStatusLine(session) : "";
-
-  return (
-    <button type="button" className="thread-card" onClick={() => onOpen(id)}>
-      <span className={`thread-dot ${state ?? "pending"}`} aria-hidden="true" />
-      <span className="thread-text">
-        <span className="thread-title">{session?.title ?? "Thread"}</span>
-        <span className="thread-status">
-          {state ? (
-            <>
-              <strong>{THREAD_STATE_LABEL[state]}</strong>
-              {line !== THREAD_STATE_LABEL[state] && ` · ${line}`}
-            </>
-          ) : (
-            "Thread"
-          )}
-        </span>
-      </span>
-    </button>
-  );
-}
-
 function failureReason(reason: string) {
   switch (reason) {
     case "model_error":
@@ -629,6 +575,28 @@ function failureReason(reason: string) {
  * when a live message is saved and its turn is rebuilt).
  */
 const DisclosureChoices = createContext<Map<string, boolean>>(new Map());
+
+/** Each turn of a transcript, without the scroller, rail or history loading around it. */
+export function TurnList({
+  turns,
+  choices,
+  now,
+  thread,
+  onOpenThread,
+}: {
+  turns: readonly Turn[];
+  /** Open/closed choices made in this conversation, kept by the caller across remounts. */
+  choices: Map<string, boolean>;
+  now: number;
+} & ThreadLookup) {
+  return (
+    <DisclosureChoices.Provider value={choices}>
+      {turns.map((turn) => (
+        <TurnView key={turn.id} turn={turn} now={now} thread={thread} onOpenThread={onOpenThread} />
+      ))}
+    </DisclosureChoices.Provider>
+  );
+}
 
 /**
  * Disclosure state for a step <details>. It starts in its default state and

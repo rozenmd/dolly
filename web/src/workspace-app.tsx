@@ -50,6 +50,7 @@ import { sessionList } from "./lib/session-list";
 import { automated, belongsInSidebar, rootSession, sessionThreads } from "./lib/session-threads";
 import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-summary";
 import { useSessionSummary } from "./lib/session-summary";
+import { usePhone } from "./components/threads";
 import { workspaceMain, workspaceOf, workspaceRows, workspaceTabs } from "./lib/workspaces";
 
 /** A queued message taken back into the composer. */
@@ -120,6 +121,10 @@ export function WorkspaceApp() {
   const session = connected ? sessions.find((item) => item.id === selected) : undefined;
   const summary = useSessionSummary();
   const summaryShown = Boolean(session && !feed && summary.open);
+  const phone = usePhone();
+  // A thread opened beside the conversation, in the summary card, as { in: session, id: thread }.
+  const [peek, setPeek] = useState<{ in: string; id: string }>();
+  const peeking = summaryShown && !phone && peek?.in === selected ? peek.id : undefined;
   const running = Boolean(snapshot && liveFromSnapshot(snapshot)?.run);
   const turns = snapshot ? turnsFromSnapshot(snapshot) : [];
   const queue = snapshot ? queueFromSnapshot(snapshot) : [];
@@ -483,6 +488,21 @@ export function WorkspaceApp() {
     const main = workspaceMain(sessions, id);
 
     if (main) select(main.id);
+  }
+
+  /**
+   * A thread opens beside the conversation, in the summary card; a phone, with no room beside it,
+   * opens it as its own page.
+   */
+  function openThread(id: string) {
+    if (phone) {
+      select(id);
+
+      return;
+    }
+
+    setPeek({ in: selected, id });
+    summary.setOpen(true);
   }
 
   function select(id: string, list = sessions) {
@@ -930,7 +950,7 @@ export function WorkspaceApp() {
       <main
         id="main-content"
         ref={summary.paneRef}
-        className={`main-panel ${summaryShown && summary.standing ? "summary-standing" : ""}`}
+        className={`main-panel ${summaryShown && summary.standing ? "summary-standing" : ""} ${peeking ? "thread-peeking" : ""}`}
       >
         <header className="workspace-header">
           <div className="breadcrumb">
@@ -1061,7 +1081,7 @@ export function WorkspaceApp() {
                     index: railIndex?.session === session.id ? railIndex.marks : undefined,
                   }}
                   thread={(id) => rows.find((row) => row.id === id)}
-                  onOpenThread={select}
+                  onOpenThread={openThread}
                 />
                 <Composer
                   draftKey={selected}
@@ -1116,6 +1136,9 @@ export function WorkspaceApp() {
               session.id,
             )}
             onOpenThread={select}
+            peek={peeking}
+            onPeek={(id) => (id ? openThread(id) : setPeek(undefined))}
+            lookup={(id) => rows.find((row) => row.id === id)}
           />
         )}
       </main>
