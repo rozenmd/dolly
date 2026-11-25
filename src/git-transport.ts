@@ -158,6 +158,7 @@ export class WorkspaceOutbound extends WorkerEntrypoint<
 
           return exports.SandboxOutbound({ props: { sandbox, port } });
         },
+        (promise) => this.ctx.waitUntil(promise),
       );
 
     if (
