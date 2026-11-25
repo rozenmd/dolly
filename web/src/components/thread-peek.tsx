@@ -154,39 +154,39 @@ export function ThreadPeek({
           )}
         </div>
       </div>
-      <ThreadReply id={id} />
+      <ThreadReply key={id} id={id} />
     </div>
   );
 }
 
+/** Unsent replies by thread, kept while the thread view switches between threads. */
+const drafts = new Map<string, string>();
+
 /** The box under a thread: a message goes straight to the thread's agent, as if typed in it. */
 function ThreadReply({ id }: { id: string }) {
-  const [drafts] = useState(() => new Map<string, string>());
-  const [text, setText] = useState("");
+  const [text, setText] = useState(() => drafts.get(id) ?? "");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-
-  useEffect(() => {
-    setText(drafts.get(id) ?? "");
-    setError("");
-  }, [id, drafts]);
+  // The last failed send: retrying the same text reuses its request ID, so a message the server
+  // accepted before the connection dropped is not run twice.
+  const [retry, setRetry] = useState<{ content: string; requestId: string }>();
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     const content = text.trim();
 
     if (!content || pending) return;
+    const requestId = retry?.content === content ? retry.requestId : crypto.randomUUID();
     setPending(true);
     setError("");
 
     try {
-      await request(`/sessions/${encodeURIComponent(id)}/messages`, {
-        content,
-        requestId: crypto.randomUUID(),
-      });
+      await request(`/sessions/${encodeURIComponent(id)}/messages`, { content, requestId });
+      setRetry(undefined);
       drafts.delete(id);
       setText("");
     } catch (cause) {
+      setRetry({ content, requestId });
       setError(cause instanceof Error ? cause.message : "Could not send the message.");
     } finally {
       setPending(false);
@@ -206,6 +206,8 @@ function ThreadReply({ id }: { id: string }) {
           placeholder="Message this thread"
           rows={1}
           value={text}
+          // Held while sending, so the draft that a successful send clears is the one it sent.
+          readOnly={pending}
           onChange={(event) => {
             setText(event.target.value);
             drafts.set(id, event.target.value);

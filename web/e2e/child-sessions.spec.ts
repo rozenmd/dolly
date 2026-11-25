@@ -226,6 +226,10 @@ test.beforeEach(async ({ page }) => {
     if (message && route.request().method() === "POST") {
       messages.push({ session: message[1], ...route.request().postDataJSON() });
 
+      // The first reply is accepted but its response is lost, as when a connection drops.
+      if (messages.length === 1)
+        return route.fulfill({ status: 503, json: { error: "Connection lost" } });
+
       return route.fulfill({ status: 202, json: { ok: true } });
     }
 
@@ -333,14 +337,26 @@ test("keeps spawned sessions out of the sidebar and shows them with their parent
   // A message typed there goes straight to the thread.
   await peek.getByRole("textbox", { name: "Message this thread" }).fill("Try a longer timeout");
   await peek.getByRole("button", { name: "Send to thread", exact: true }).click();
+  await expect(peek.getByRole("alert")).toContainText("Connection lost");
+  await expect(peek.getByRole("textbox", { name: "Message this thread" })).toHaveValue(
+    "Try a longer timeout",
+  );
+
+  // Retrying the same text reuses its request ID, so the server can't run it twice.
+  await peek.getByRole("button", { name: "Send to thread", exact: true }).click();
   await expect(peek.getByRole("textbox", { name: "Message this thread" })).toHaveValue("");
+  const [first, second] = messages;
   expect(
     messages.map(({ session, content, requestId = "" }) => ({
       session,
       content,
       uuid: /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/.test(requestId),
     })),
-  ).toEqual([{ session: "flaky", content: "Try a longer timeout", uuid: true }]);
+  ).toEqual([
+    { session: "flaky", content: "Try a longer timeout", uuid: true },
+    { session: "flaky", content: "Try a longer timeout", uuid: true },
+  ]);
+  expect(second?.requestId).toBe(first?.requestId);
 
   if (shots) await page.screenshot({ path: `${shots}/desktop-thread.png` });
 

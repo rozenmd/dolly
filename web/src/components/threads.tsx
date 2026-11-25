@@ -92,7 +92,9 @@ const gists = new Map<string, Promise<string | null>>();
  * "Working" until it settles; reading it on every change would cost a transcript read each time.
  */
 export function useThreadGist(thread: ThreadSession, state: ThreadState): string | null {
-  const key = state === "working" ? null : `${thread.id}:${thread.updatedAt}`;
+  // A running thread is still writing its reply even when its state says otherwise (a merged PR
+  // is "shipped" while a follow-up runs), so nothing is cached until it stops.
+  const key = state === "working" || thread.running ? null : `${thread.id}:${thread.updatedAt}`;
   const [gist, setGist] = useState<{ key: string; text: string | null }>();
 
   useEffect(() => {
