@@ -165,13 +165,17 @@ export function childEvidence(entries: readonly EntryRecord[]): ChildEvidence {
 
         if (head) commands.add(head);
       }
+    }
 
-      const outcome = shellOutcome(text);
+    // Shell commands and the workspace's git actions report a command's exit code as output.
+    const outcome =
+      name === "shell" || name === "workspace"
+        ? shellOutcome(text)
+        : { exitCode: undefined, output: "" };
 
-      if (message.isError) failed = clipError(text);
-      else if (outcome.exitCode !== undefined && outcome.exitCode !== 0)
-        failed = `exited ${outcome.exitCode}: ${clipError(outcome.output)}`;
-    } else if (message.isError) failed = clipError(text);
+    if (message.isError) failed = clipError(text);
+    else if (outcome.exitCode !== undefined && outcome.exitCode !== 0)
+      failed = `exited ${outcome.exitCode}: ${clipError(outcome.output)}`;
 
     // A call that failed and later ran the same way without failing.
     if (!failed) {

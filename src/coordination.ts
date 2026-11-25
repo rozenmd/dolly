@@ -90,6 +90,8 @@ type Child = {
   reported?: string;
   /** The newest entry a report has covered: the next report's evidence starts after it. */
   reportedThrough?: EntryId;
+  /** Its report waits for its own children to answer; it counts as working meanwhile. */
+  held?: true;
   /** How the child's last turn ended, for status reads. */
   last?: { outcome: "answered" | "stopped"; reason?: string; at: number };
 };
@@ -136,12 +138,25 @@ const Anchor = defineTask<null, { phase: "done" }, null>({
 const findChild = (state: ChildrenState, id: ConversationId | string) =>
   Object.values(state.children).find((child) => String(child.id) === String(id));
 
-const working = (state: ChildrenState) =>
+/** Children with a message they haven't finished a turn on. */
+const pending = (state: ChildrenState) =>
   new Set(
     Object.values(state.deliveries)
       .filter((delivery) => delivery.pending)
       .map((delivery) => String(delivery.childId)),
   );
+
+/**
+ * Children still working: those with unanswered messages, and those whose report is held until
+ * their own children answer, so a whole subtree counts as working until its deepest child settles.
+ */
+const working = (state: ChildrenState) => {
+  const ids = pending(state);
+
+  for (const child of Object.values(state.children)) if (child.held) ids.add(String(child.id));
+
+  return ids;
+};
 
 const title = (content: string) => content.trim().split("\n")[0]?.slice(0, 80) ?? "";
 
@@ -285,7 +300,10 @@ const DeliveryTask = defineTask<DeliveryInput, { phase: "deliver" }, DeliveryRes
         settle(state, task.id);
         const child = findChild(state, task.input.childId);
 
-        if (child) child.last = { outcome: "stopped", reason: "aborted", at: runtime.now() };
+        if (child) {
+          child.last = { outcome: "stopped", reason: "aborted", at: runtime.now() };
+          delete child.held;
+        }
       }
 
       return { status: "terminal", outcome: { status: "aborted" } };
@@ -319,6 +337,7 @@ async function report(
   // Stopping is the owner's or the parent's own doing; it isn't news to report.
   if (input.result.status === "unanswered" && input.result.reason === "aborted") {
     child.last = { outcome: "stopped", reason: "aborted", at: input.now };
+    delete child.held;
 
     return;
   }
@@ -334,10 +353,15 @@ async function report(
 
   // The child still has messages to answer (a follow-up, or a report from its own child), or is
   // waiting on children of its own: it reports once all of that has settled, covering it all.
-  if (working(state).has(String(input.childId))) return;
+  if (pending(state).has(String(input.childId))) return;
 
-  if (working(await tx.doc(Children, input.childId)).size > 0) return;
+  if (working(await tx.doc(Children, input.childId)).size > 0) {
+    child.held = true;
 
+    return;
+  }
+
+  delete child.held;
   child.reported = key;
   const newest = input.span.at(-1)?.id;
 
@@ -556,6 +580,14 @@ export class Coordination {
         const pending = Object.values(state.deliveries).filter(
           (delivery) => delivery.pending && delivery.childId === child.id,
         ).length;
+
+        const busy = working(state);
+
+        // An idle child given new work becomes a working one, under the same limit as spawning.
+        if (!busy.has(String(child.id)) && busy.size >= MAX_WORKING)
+          return {
+            error: `${MAX_WORKING} child sessions are already working. Wait for a report, or stop one with cancel_task.`,
+          };
 
         if (pending >= MAX_PENDING)
           return {

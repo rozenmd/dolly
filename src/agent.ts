@@ -4046,7 +4046,16 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(parent)) return undefined;
 
-        return yield* new Coordination(() => this.harness).list(parent.value.id);
+        const listed = yield* new Coordination(() => this.harness).list(parent.value.id);
+        const secrets = yield* this.credentials.secrets;
+
+        // Titles are the task's first line, which can carry a secret like any other text.
+        return {
+          children: listed.children.map((child) => ({
+            ...child,
+            title: redact(child.title, secrets),
+          })),
+        };
       }),
     );
   }
@@ -4130,6 +4139,7 @@ export class Agent extends DurableObject<Env> {
 
         return {
           ...status,
+          title: redact(status.title, secrets),
           latest_reply: status.latest_reply && redact(status.latest_reply, secrets),
           since_last_report: redact(status.since_last_report, secrets),
         };

@@ -347,8 +347,11 @@ it("enforces depth and working-children limits on the server, including after re
   });
 
   // Children that are still working count against the limit; finished ones don't.
-  block = true;
+  block = false;
   const wide = await root();
+  const resting = await spawn(wide);
+  await idle(wide, resting.id);
+  block = true;
 
   for (let count = 0; count < 8; count++) await spawn(wide);
 
@@ -359,6 +362,17 @@ it("enforces depth and working-children limits on the server, including after re
 
   expect(busy.status).toBe(409);
   expect(await busy.json()).toEqual({
+    error: "8 child sessions are already working. Wait for a report, or stop one with cancel_task.",
+  });
+
+  // New work for an idle child would make a ninth working child too.
+  const resumed = await post(`${wide}/children/${resting.id}/messages`, {
+    content: "More work",
+    requestId: crypto.randomUUID(),
+  });
+
+  expect(resumed.status).toBe(409);
+  expect(await resumed.json()).toEqual({
     error: "8 child sessions are already working. Wait for a report, or stop one with cancel_task.",
   });
 
@@ -489,6 +503,72 @@ it("attaches failures a tool reported to the report", async () => {
   expect(report?.evidence).toContain("- Tool calls: 1");
 });
 
+it("holds a subtree's report until its deepest child answers, even when a middle child ends first", async () => {
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let middleAnswered = 0;
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    const request = await modelRequest(init);
+
+    if (request.first.includes("Deep job")) {
+      await gate;
+
+      return answer("Deep result");
+    }
+
+    if (request.first.includes("Middle job")) {
+      if (request.serialized.includes("[Child report")) return answer("Middle summary");
+
+      if (!request.outputs.length) return toolCall("spawn_task", { content: "Deep job" });
+      middleAnswered = Date.now();
+
+      return answer("Middle waiting");
+    }
+
+    if (request.first.includes("Top job")) {
+      if (request.serialized.includes("[Child report")) return answer("Top summary");
+
+      if (!request.outputs.length) return toolCall("spawn_task", { content: "Middle job" });
+
+      // The middle child ends its turn before this one does.
+      await expect.poll(() => middleAnswered).toBeGreaterThan(0);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      return answer("Top waiting");
+    }
+
+    return answer("Root acknowledged");
+  });
+
+  const parent = await root();
+  const top = await spawn(parent, "Top job");
+
+  await expect
+    .poll(async () => (await userMessages(top.id)).length + (await status(parent, top.id)).state, {
+      timeout: 6000,
+    })
+    .toBe("1working");
+  await expect
+    .poll(async () =>
+      (
+        await (await SELF.fetch(`https://worker/api/sessions/${top.id}`, { headers })).text()
+      ).includes("Top waiting"),
+    )
+    .toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  // The deepest child still works, so nothing has reached the root yet.
+  expect(await reports(parent)).toHaveLength(0);
+  expect((await status(parent, top.id)).state).toBe("working");
+
+  release();
+  await expect.poll(async () => (await reports(parent)).length, { timeout: 6000 }).toBe(1);
+  expect((await reports(parent))[0]).toMatchObject({ child: top.id, reply: "Top summary" });
+  await idle(parent, top.id);
+  expect(await reports(parent)).toHaveLength(1);
+}, 20000);
+
 it("reports a grandchild's work through its parent once, after the grandchild answers", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
     const request = await modelRequest(init);
@@ -605,9 +685,16 @@ it("bounds unanswered messages per child and validates and redacts HTTP inputs",
     expect((await post(`${parent}/children`, body)).status).toBe(400);
   }
 
-  const child = await spawn(parent);
+  const child = await spawn(parent, `Check this header: Bearer ${access}`);
   await idle(parent, child.id);
   const result = JSON.stringify(await status(parent, child.id));
+
+  const listed = await (
+    await SELF.fetch(`https://worker/api/sessions/${parent}/children`, { headers })
+  ).text();
+
+  expect(listed).toContain("Bearer [redacted]");
+  expect(listed).not.toContain(access);
   expect(result).toContain("Bearer [redacted]");
   expect(result).not.toContain(access);
   expect(result).not.toContain("test-refresh");
