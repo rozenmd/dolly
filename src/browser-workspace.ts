@@ -56,6 +56,7 @@ export async function browserRoute(
   networkHosts: readonly string[],
   leases: BrowserLeases,
   sandboxHost: (port: number) => Fetcher | undefined,
+  waitUntil: (promise: Promise<unknown>) => void,
 ) {
   const url = new URL(request.url);
 
@@ -95,12 +96,22 @@ export async function browserRoute(
       { status: 429 },
     );
 
+  let sessionId: string | undefined;
   let released = false;
 
+  // Close the browser now rather than after keepAlive, and free its lease. Both run after the
+  // relay's sockets close, when the invocation may end, so they must be held by waitUntil.
   const release = () => {
     if (released) return;
     released = true;
-    void leases.releaseBrowser(lease).catch(() => {});
+    const session = sessionId;
+
+    waitUntil(
+      Promise.allSettled([
+        (async () => leases.releaseBrowser(lease))(),
+        (async () => session === undefined || (await browser.closeSession(session)))(),
+      ]),
+    );
   };
 
   try {
@@ -110,6 +121,8 @@ export async function browserRoute(
       guardrails: { allowedDomains: [...networkHosts] },
       outboundByHost: sandbox ? { [SANDBOX_HOST]: sandbox } : {},
     });
+
+    sessionId = connection.sessionId;
 
     const reply = await connection.webSocket.fetch("https://browser-binding.invalid", {
       headers: { Upgrade: "websocket" },
