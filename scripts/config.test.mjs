@@ -74,6 +74,7 @@ test("the sandbox test adapter retains the typed config's container link and ima
   assert.equal(generated.exports.Sandbox.container, config.containers[0].name);
   assert.equal(generated.exports.Sandbox.storage, "sqlite");
   assert.equal(generated.containers.length, 1);
+  assert.equal(generated.exports.ClaudeCode.container, undefined);
   assert.equal(generated.containers[0].scheduling_policy, "durable_object");
   assert.deepEqual(generated.containers[0].images, config.containers[0].images);
   assert.deepEqual(

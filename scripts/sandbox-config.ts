@@ -20,6 +20,11 @@ export async function sandboxTestConfig() {
     containers: result.data.containers?.filter((container) => container.name === "dolly-sandbox"),
   });
 
+  // Its Durable Object stays, unlinked: wrangler rejects a link to a container it doesn't define.
+  const claudeCode = config.exports?.ClaudeCode;
+
+  if (claudeCode?.type === "durable-object") delete claudeCode.container;
+
   // Exercise the backend directly; the separately built HTTP suite covers the web entrypoint.
   config.main = "./src/index.ts";
   delete config.assets;
