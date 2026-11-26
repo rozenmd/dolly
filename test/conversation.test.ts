@@ -5,6 +5,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { configure, InboxDoc, type ConversationId } from "@earendil-works/pi-durable";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 import { Snapshot, Live } from "../src/transcript";
 
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
@@ -37,7 +38,7 @@ it("promotes the original queued input atomically without duplication or crossin
     finish = resolve;
   });
 
-  const model = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+  const model = mockFetch(async () => {
     await next;
 
     return Response.json({ error: { message: "Model unavailable" } }, { status: 400 });
@@ -165,7 +166,7 @@ it("steers, withdraws, edits and reorders queued messages, then delivers the que
 
   const requests: string[] = [];
 
-  const model = vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+  const model = mockFetch(async (_, init) => {
     requests.push(await new Response(init?.body).text());
 
     return Response.json({ error: { message: "Model unavailable" } }, { status: 400 });
@@ -389,7 +390,7 @@ it.each(["gpt-6-luna", "claude-haiku-5-5"])(
     const requests: string[] = [];
     const data = btoa("screenshot payload ".repeat(4000));
 
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    mockFetch(async (_, init) => {
       const encoded = await new Response(init?.body).arrayBuffer();
 
       const bytes = new Uint8Array(encoded);
@@ -472,7 +473,7 @@ it.each(["gpt-6-luna", "claude-haiku-5-5"])(
     const requests: string[] = [];
     const data = btoa("screenshot only ".repeat(100));
 
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    mockFetch(async (_, init) => {
       requests.push(await new Response(init?.body).text());
 
       return Response.json({ error: { message: "Model unavailable" } }, { status: 400 });
@@ -508,7 +509,7 @@ it.each(["gpt-6-luna", "claude-haiku-5-5"])(
 );
 
 it("pushes an initial snapshot and redacted live updates over an authenticated WebSocket", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+  mockFetch(async () =>
     Response.json({ error: { message: "Model unavailable" } }, { status: 400 }),
   );
 
@@ -568,7 +569,7 @@ it("pushes an initial snapshot and redacted live updates over an authenticated W
 });
 
 it("streams over a hibernatable WebSocket that resumes its watch after a wake", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+  mockFetch(async () =>
     Response.json({ error: { message: "Model unavailable" } }, { status: 400 }),
   );
 
@@ -651,7 +652,7 @@ it("streams over a hibernatable WebSocket that resumes its watch after a wake", 
 });
 
 it("retains model failure details in the real transcript and browser live-state contract", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+  mockFetch(async () =>
     Response.json(
       {
         error: {
@@ -716,7 +717,7 @@ it.each([
 ])(
   "runs $expectedModel through the Codex SSE adapter with durable model selection and deduplication",
   async ({ model, expectedModel }) => {
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const fetch = mockFetch(async (url, init) => {
       expect(String(url)).toContain("api.openai.com/v1/responses");
       expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${access}`);
 

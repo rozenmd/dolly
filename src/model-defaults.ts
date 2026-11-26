@@ -126,6 +126,8 @@ export type SessionMetadata = {
   fellBackTo?: string;
   /** A generated title (session-title.ts); replaces the first line of the first prompt. */
   title?: string;
+  /** The automatic title after the first run was tried, so a failure doesn't retry every run. */
+  autoTitled?: boolean;
 };
 
 /** Transcript entry recording an automatic model switch: `{ from, to, reason }`. */

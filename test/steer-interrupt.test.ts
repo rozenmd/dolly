@@ -3,6 +3,7 @@ import { SELF, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 import { Live, Snapshot } from "../src/transcript";
 import { STEER_TOOL_SKIP } from "../src/steer-interrupt";
 
@@ -182,7 +183,7 @@ it.each(["queued and promoted", "steered from the composer"])(
     const requests: string[] = [];
     let thinking!: ReturnType<typeof openStream>;
 
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    mockFetch(async (url, init) => {
       if (!String(url).includes("/v1/responses")) return Response.json({}, { status: 404 });
       requests.push(await bodyOf(init));
 
@@ -237,7 +238,7 @@ it("lets a response with a tool call finish, then skips its unstarted calls for 
   let calling!: ReturnType<typeof openStream>;
   const finished = deferred();
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     // Skipped tools make no requests; anything else is not a model request.
     if (!String(url).includes("/v1/responses")) return Response.json({}, { status: 404 });
     requests.push(await bodyOf(init));
@@ -316,7 +317,7 @@ it("leaves a thinking response running when the steer is queued behind a follow-
   let thinking!: ReturnType<typeof openStream>;
   const finished = deferred();
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     if (!String(url).includes("/v1/responses")) return Response.json({}, { status: 404 });
     requests.push(await bodyOf(init));
 

@@ -10,6 +10,7 @@ import {
   McpServer,
 } from "@modelcontextprotocol/server";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 import { Live, Snapshot } from "../src/transcript";
 import { McpConnections, type McpToolInput } from "../src/mcp";
 import { ImageSink, scriptValue } from "../src/mcp-codemode";
@@ -49,7 +50,7 @@ function network(routes: Record<string, Handler>) {
     redirect: RequestInit["redirect"];
   }[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  mockFetch(async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
 

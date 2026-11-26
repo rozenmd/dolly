@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import { headers, signIn } from "./session";
+import { mockFetch, TEST_TITLE } from "./titles";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { parseSessionMessage } from "../src/child-report-message";
@@ -281,7 +282,7 @@ const parentIn = (first: string) =>
   /report back to the parent\/orchestrator session `([^`]+)`/.exec(first)?.[1];
 
 it("creates children atomically, deduplicates requests, briefs them as workers and scopes HTTP access", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+  mockFetch(async () => answer());
   const parent = await root();
   const parentConversation = await conversationOf(parent);
   const body = { content: "Child prompt", model: "gpt-6-sol", requestId: crypto.randomUUID() };
@@ -363,7 +364,7 @@ it("lets the model spawn, wait with session_turn, and get the worker's report wi
   let waiting = false;
   const outputs: ToolOutputs = {};
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+  mockFetch(async (_, init) => {
     const request = await modelRequest(init);
 
     if (request.first.includes("Child job")) {
@@ -456,7 +457,7 @@ it("wakes a session_turn wait at once for an idle session and refuses unreachabl
   // Every tool output the parent's model has seen, as of its newest request.
   let seen: readonly string[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+  mockFetch(async (_, init) => {
     const request = await modelRequest(init);
 
     if (request.first.includes("Quick job")) return answer("Quick result");
@@ -493,7 +494,7 @@ it("wakes a session_turn wait at once for an idle session and refuses unreachabl
 });
 
 it("tells the parent once when a worker's run dies without reporting back", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+  mockFetch(async (_, init) => {
     const request = await modelRequest(init);
 
     if (request.first.includes("Doomed job"))
@@ -535,7 +536,7 @@ it("tells the parent once when a worker's run dies without reporting back", asyn
 it("lets a parent look in on and cancel a running child with task_status and cancel_task", async () => {
   const outputs: (readonly string[])[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+  mockFetch(async (_, init) => {
     const request = await modelRequest(init);
 
     if (request.first.includes("Slow job")) return blocked(init);
@@ -577,9 +578,7 @@ it("lets a parent look in on and cancel a running child with task_status and can
 it("enforces the spawn depth and working-children limits on the server, including after recovery", async () => {
   let block = false;
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) =>
-    block ? blocked(init) : answer(),
-  );
+  mockFetch(async (_, init) => (block ? blocked(init) : answer()));
   const parent = await root();
   const child = await spawn(parent, "Child prompt", "gpt-6-sol");
   const grandchild = await spawn(child.id);
@@ -651,7 +650,7 @@ it("keeps a child working while its own child runs, so waits, status and cancel_
   // Every tool output the root's model has seen, as of its newest request.
   let seen: readonly string[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+  mockFetch(async (_, init) => {
     const request = await modelRequest(init);
 
     if (request.first.includes("Deep job")) return blocked(init, () => deepAborted.push("deep"));
@@ -717,7 +716,7 @@ it("keeps a read-only parent's children read-only, whatever mode they ask for, a
   const otherConversation = await conversationOf(other);
   const strayed: string[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+  mockFetch(async (_, init) => {
     const request = await modelRequest(init);
 
     // The first child reports back the way its briefing says to.
@@ -792,7 +791,7 @@ it("keeps a read-only parent's children read-only, whatever mode they ask for, a
 });
 
 it("caps the children one session starts over its lifetime", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+  mockFetch(async () => answer());
   const parent = await root();
 
   for (let count = 0; count < 32; count++) await spawn(parent, `Task ${count}`);
@@ -807,7 +806,7 @@ it("caps the children one session starts over its lifetime", async () => {
 }, 20000);
 
 it("shares the parent's checkout by default and isolates it on request", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+  mockFetch(async () => answer());
   const parent = await root({ repository: "octocat/project", ref: "main" });
   const parentConversation = await conversationOf(parent);
   const parentConfig = (await workspaceOf(parentConversation))?.config;
@@ -867,9 +866,7 @@ it("shares the parent's checkout by default and isolates it on request", async (
 });
 
 it("validates and redacts HTTP inputs", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-    answer(`Bearer abc ${access} test-refresh`),
-  );
+  mockFetch(async () => answer(`Bearer abc ${access} test-refresh`));
   const parent = await root();
 
   for (const body of [
@@ -897,7 +894,7 @@ it("validates and redacts HTTP inputs", async () => {
 });
 
 it("starts root and child generations after repeated object eviction", async () => {
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+  const fetch = mockFetch(async () => answer());
   const parent = await root();
 
   for (let cycle = 0; cycle < 3; cycle++) {
@@ -926,7 +923,7 @@ it.each([
   async ({ rounds, reply }) => {
     let turns = 0;
 
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    mockFetch(async () => {
       if (turns === rounds) return answer(reply);
       turns++;
 
@@ -946,7 +943,7 @@ it.each([
 );
 
 it("lists spawned sessions with their parent and persists keeping one in the sidebar", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+  mockFetch(async () => answer());
   const parent = await root();
   const child = await spawn(parent, "Investigate the flaky test\nDetails");
   await idle(parent, child.id);
@@ -967,7 +964,8 @@ it("lists spawned sessions with their parent and persists keeping one in the sid
   expect(sessions.get(parent)).not.toHaveProperty("parentId");
   expect(sessions.get(child.id)).toMatchObject({
     parentId: parent,
-    title: "Investigate the flaky test",
+    // Named after its first run (agent.ts autoTitle), not after its first line.
+    title: TEST_TITLE,
   });
   expect(sessions.get(child.id)).not.toHaveProperty("kept");
   expect(sessions.get(grandchild.id)).toMatchObject({ parentId: child.id });

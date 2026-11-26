@@ -9,6 +9,7 @@ import { GitHub } from "../src/github";
 import { storeImages } from "../src/images";
 import * as Effect from "effect/Effect";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { SavedSession } from "../src/session-contracts";
 
@@ -81,7 +82,7 @@ async function start() {
 
 async function connect() {
   const started = await start();
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(app));
+  mockFetch(async () => Response.json(app));
 
   expect(await callback(`state=${started.state}&code=manifest-code`)).toBe("/");
   vi.restoreAllMocks();
@@ -101,7 +102,7 @@ async function execute(operation: typeof GitHubRequest.Type.operation) {
 it("persists session PR creation without a transcript and retains it after failure and restart", async () => {
   await connect();
   let fail = false;
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  mockFetch(async (input) => {
     const path = new URL(String(input)).pathname;
 
     if (path.endsWith("/installation")) return Response.json({ id: 7 });
@@ -214,7 +215,7 @@ function publicGitHub(options: {
 }) {
   const minted: unknown[] = [];
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  const fetch = mockFetch(async (input, init) => {
     const url = new URL(String(input));
     const auth = new Headers(init?.headers).get("Authorization");
 
@@ -251,7 +252,7 @@ function publicGitHub(options: {
 }
 
 it("reads public files anonymously when no App is connected", async () => {
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  const fetch = mockFetch(async (input, init) => {
     expect(String(input)).toBe(
       "https://api.github.com/repos/tellahq/opensession/contents/src/main.ts?ref=feature%2Fread",
     );
@@ -330,7 +331,7 @@ it.each([403, 429, 500])(
 it("reads large public files a window at a time", async () => {
   const text = Array.from({ length: 5000 }, (_, index) => `line ${index + 1}\n`).join("");
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+  mockFetch(async () =>
     Response.json({
       type: "file",
       path: "README.md",
@@ -369,7 +370,7 @@ it("reads large public files a window at a time", async () => {
 });
 
 it("explains files GitHub will not inline", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+  mockFetch(async () =>
     Response.json({
       type: "file",
       path: "huge.bin",
@@ -406,7 +407,7 @@ it("explains an unset account policy without contacting GitHub or granting any a
 
 it("does not treat empty installation discovery as an access denial for a known repository", async () => {
   await connect();
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  mockFetch(async (input) => {
     const path = new URL(String(input)).pathname;
 
     if (path === "/app/installations") return Response.json([]);
@@ -470,7 +471,7 @@ it("discovers App repositories and durably enrolls them without changing GitHub 
     description: "Example project",
   };
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  const fetch = mockFetch(async (url, init) => {
     const path = new URL(String(url)).pathname;
 
     if (path === "/app/installations")
@@ -627,7 +628,7 @@ it("keeps setup state through eviction, consumes it once and never returns crede
   expect(html).toContain("/organizations/example/settings/apps/new");
   expect(html).not.toContain("private-client-secret");
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  const fetch = mockFetch(async (url, init) => {
     expect(String(url)).toBe("https://api.github.com/app-manifests/manifest-code/conversions");
     expect(init?.redirect).toBe("manual");
     expect(new Headers(init?.headers).has("Authorization")).toBe(false);
@@ -658,7 +659,7 @@ it("keeps setup state through eviction, consumes it once and never returns crede
 it("rejects redirected manifest exchanges without connecting or following the redirect", async () => {
   const started = await start();
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  const fetch = mockFetch(async (url, init) => {
     expect(String(url)).toBe("https://api.github.com/app-manifests/manifest-code/conversions");
     expect(init?.redirect).toBe("manual");
 
@@ -679,9 +680,7 @@ it("rejects redirected manifest exchanges without connecting or following the re
 it("rejects forged, expired, and wrong-owner setup callbacks without connecting", async () => {
   const started = await start();
 
-  const fetch = vi
-    .spyOn(globalThis, "fetch")
-    .mockImplementation(async () => Response.json({ ...app, owner: { login: "other" } }));
+  const fetch = mockFetch(async () => Response.json({ ...app, owner: { login: "other" } }));
 
   expect(await callback(`state=${"x".repeat(43)}&code=bad`)).toContain("already used");
   expect(fetch).not.toHaveBeenCalled();
@@ -700,7 +699,7 @@ it("rejects forged, expired, and wrong-owner setup callbacks without connecting"
 it("mints repository-scoped tokens with a valid App signature and reads UTF-8 files", async () => {
   await connect();
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  const fetch = mockFetch(async (url, init) => {
     const path = new URL(String(url)).pathname;
 
     if (path.endsWith("/installation")) {
@@ -773,7 +772,7 @@ it("creates only feature branches, preserves optimistic file writes, and opens b
   await connect();
   const writes: string[] = [];
   let defaultBranch = "main";
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     const path = new URL(String(url)).pathname;
 
     if (path.endsWith("/installation")) return Response.json({ id: 7 });
@@ -875,7 +874,7 @@ it.each(["x".repeat(32_769), "漢".repeat(16_384), "漢🙂".repeat(65_536), ""]
   async (content) => {
     await connect();
     const writes: unknown[] = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    mockFetch(async (url, init) => {
       const path = new URL(String(url)).pathname;
 
       if (path.endsWith("/installation")) return Response.json({ id: 7 });
@@ -926,7 +925,7 @@ it("rejects expired installation tokens, bounds responses and removes credential
   const operation = { action: "read_file", repository, ref: "main", path: "a.ts" } as const;
   let mode = "expired";
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  const fetch = mockFetch(async (url, init) => {
     const path = new URL(String(url)).pathname;
 
     if (path.includes("/contents/") && !new Headers(init?.headers).has("Authorization"))
@@ -970,7 +969,7 @@ it("runs the registered github tool through Pi and persists its result without A
     });
   });
   let requests = 0;
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+  mockFetch(async (url) => {
     if (new URL(String(url)).pathname === "/app/installations")
       return Response.json([{ id: 7, account: { login: "example" } }]);
 
@@ -1091,7 +1090,7 @@ it("enables ingress in the manifest and configures allowed senders without repla
   const form = await (await SELF.fetch(started.url)).text();
   expect(form).toContain("https://ingress.example/hooks/github");
   expect(form).toContain("issue_comment");
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(app));
+  mockFetch(async () => Response.json(app));
   expect(await callback(`state=${started.state}&code=manifest-code`)).toBe("/");
   vi.restoreAllMocks();
 
@@ -1106,7 +1105,7 @@ it("enables ingress in the manifest and configures allowed senders without repla
 
   let subscribed = true;
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+  const fetch = mockFetch(async (url) => {
     expect(String(url)).toBe("https://api.github.com/app");
 
     return Response.json({
@@ -1214,7 +1213,7 @@ it("discovers repositories across App installations and paginates GitHub's repos
     full_name: `another-owner/project-${i}`,
   }));
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  mockFetch(async (input) => {
     const url = new URL(String(input));
 
     if (url.pathname === "/app/installations")
@@ -1251,7 +1250,7 @@ it("brokers real Worker RPC Git requests without exposing credentials or allowin
   const config = workspaceConfig({ repository: "another-owner/project" }, "42");
   const backendName = crypto.randomUUID();
   let upstream = 0;
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  mockFetch(async (input, init) => {
     const url = new URL(String(input));
 
     if (url.hostname === "github.com") {
@@ -1314,7 +1313,7 @@ it("lets a session push and force-push any branch but the default one", async ()
   const config = workspaceConfig({ repository: "another-owner/project" }, "42");
 
   let upstream = 0;
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  mockFetch(async (input) => {
     const url = new URL(String(input));
 
     if (url.hostname === "github.com") {
@@ -1371,7 +1370,7 @@ it("keeps a read-only session from changing repositories", async () => {
 
   const upstream: string[] = [];
   const api: string[] = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  mockFetch(async (input) => {
     const url = new URL(String(input));
 
     if (url.hostname === "github.com") {
@@ -1518,7 +1517,7 @@ it("skips disallowed installations before minting tokens and continues paginatio
     account: { login: "stranger" },
   }));
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  const fetch = mockFetch(async (input) => {
     const url = new URL(String(input));
 
     if (url.pathname === "/app/installations")
@@ -1552,7 +1551,7 @@ it("skips disallowed installations before minting tokens and continues paginatio
 it("blocks revoked accounts from authenticated reads, writes, and Git transport", async () => {
   await connect();
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  const fetch = mockFetch(async (input, init) => {
     const path = new URL(String(input)).pathname;
 
     if (path.includes("/contents/") && !new Headers(init?.headers).has("Authorization"))
@@ -1646,7 +1645,7 @@ const pullDetails = {
 };
 
 it("reads public pull requests, files, comment threads and checks anonymously", async () => {
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  const fetch = mockFetch(async (url, init) => {
     expect(new Headers(init?.headers).has("Authorization")).toBe(false);
     const { pathname, searchParams } = new URL(String(url));
 
@@ -1791,7 +1790,7 @@ async function serveConversation(conversation: Conversation) {
   await connect();
   const calls = { rest: 0, graphql: 0 };
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+  mockFetch(async (url) => {
     const { pathname, searchParams } = new URL(String(url));
     const page = Number(searchParams.get("page"));
     const size = Number(searchParams.get("per_page"));
@@ -2109,7 +2108,7 @@ it("fails the read rather than returning part of a list GitHub didn't finish sen
 it("posts inline reviews only against the current head and diff, and never approves", async () => {
   await connect();
   const writes: Array<{ path: string; body: unknown }> = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     const path = new URL(String(url)).pathname;
 
     if (path.endsWith("/installation")) return Response.json({ id: 7 });
@@ -2205,7 +2204,7 @@ it("resolves the review thread holding a comment, from any session but a review'
   await connect();
   const resolutions: Query["variables"][] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     const path = new URL(String(url)).pathname;
 
     if (path.endsWith("/installation")) return Response.json({ id: 7 });
@@ -2292,7 +2291,7 @@ it("edits only pull request titles and descriptions through the App, never state
 
   await connect();
   const writes: Array<{ method?: string; path: string; body: unknown }> = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     const path = new URL(String(url)).pathname;
 
     if (path.endsWith("/installation")) return Response.json({ id: 7 });
@@ -2392,7 +2391,7 @@ it("publishes selected screenshots to public R2 and returns markdown without com
   ]);
 
   const writes: Array<{ path: string; body: Record<string, string> }> = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     const path = new URL(String(url)).pathname;
 
     if (path.endsWith("/installation")) return Response.json({ id: 7 });
@@ -2464,7 +2463,7 @@ it.each(["missing", "oversized", "closed", "denied"] as const)(
       );
     const writes: string[] = [];
 
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const fetch = mockFetch(async (url, init) => {
       const path = new URL(String(url)).pathname;
 
       if (path.endsWith("/installation")) return Response.json({ id: 7 });
@@ -2535,7 +2534,7 @@ it("rejects non-screenshot references before publishing", async () => {
 });
 
 it("lists one public directory level anonymously without fetching the recursive tree", async () => {
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  const fetch = mockFetch(async (input) => {
     const url = new URL(String(input));
 
     if (url.pathname === `/repos/${repository}`)
@@ -2622,7 +2621,7 @@ it("reports first-run setup: installations, allowed accounts, enrollment and App
     metadata: "read",
   };
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  const fetch = mockFetch(async (input) => {
     const url = new URL(String(input));
 
     // An older App: no CI events, and checks only readable.
@@ -2706,7 +2705,7 @@ it("reads Actions job logs through a redirect without forwarding the token", asy
 
   const blobs: string[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     const target = new URL(String(url));
     const authorization = new Headers(init?.headers).get("Authorization");
 

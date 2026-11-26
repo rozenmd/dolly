@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { Snapshot } from "../src/transcript";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 
 /**
  * The write_file and edit_file tools run through Pi, the Agent Durable Object and
@@ -168,7 +169,7 @@ it("writes and edits sandbox files through Pi tools, reporting line diff stats a
   });
 
   let requests = 0;
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+  mockFetch(async (url) => {
     expect(String(url)).toContain("api.openai.com");
 
     return codexEvents(requests++);

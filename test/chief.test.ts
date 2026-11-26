@@ -6,6 +6,7 @@ import type { SavedSession } from "../src/session-contracts";
 import { CHIEF_KEY, CHIEF_NAME_KEY, type ChiefRecord } from "../src/chief";
 import { sessionMetadataKey } from "../src/model-defaults";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
 
@@ -132,7 +133,7 @@ async function send(id: string, content: string) {
 function mockModel(responses: (() => Response)[] = []) {
   const bodies: string[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+  mockFetch(async (_, init) => {
     bodies.push(
       new TextDecoder().decode(new Uint8Array(await new Response(init?.body).arrayBuffer())),
     );
@@ -272,7 +273,7 @@ it("follows up on a web session by the id list_sessions reports", async () => {
 });
 
 it("keeps delegating past the child cap by forgetting settled children", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+  mockFetch(async () => answer());
   const [chief] = chiefOf(await list());
 
   const children = async () => {
