@@ -51,6 +51,19 @@ export const SavedSession = Schema.Struct({
    */
   activity: Schema.optional(Schema.String),
   /**
+   * Where the session stood when its latest run ended (session-status.ts): the first sentence of
+   * its final reply, redacted, and what its next move waits on. "ci" is a pending pr_checks or
+   * workflow_run wait, "session" a wait on another session's turn, "schedule" a pending scheduled
+   * prompt, and "owner" none of those, so the next move is the owner's. Absent before a run ends.
+   */
+  status: Schema.optional(
+    Schema.Struct({
+      text: Schema.String,
+      waitingOn: Schema.Literals(["ci", "session", "schedule", "owner"]),
+      at: Schema.Number,
+    }),
+  ),
+  /**
    * The latest pull request this session opened. GitHub's state, title and diff
    * size are added when known; the session summary card shows them.
    */

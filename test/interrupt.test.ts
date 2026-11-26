@@ -11,6 +11,7 @@ import { InboxDoc, LiveDoc, type ConversationId } from "@earendil-works/pi-durab
 import { OwnerInputDoc } from "../src/automation-tool";
 import { InterruptDoc } from "../src/queue";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 
 /**
  * "Interrupt and send now" through the HTTP API, the Agent Durable Object, Pi and the Sandbox
@@ -150,7 +151,7 @@ async function start() {
   });
 
   const requests: string[] = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     expect(String(url)).toContain("api.openai.com");
     const index = requests.push(await new Response(init?.body).text()) - 1;
 

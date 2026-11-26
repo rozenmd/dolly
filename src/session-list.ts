@@ -15,6 +15,7 @@ import { sessionMetadataKey, type SessionMetadata } from "./model-defaults";
 import { AutomationRunDoc } from "./automations";
 import { sessionActivity } from "./session-activity";
 import { GitHubThreads } from "./github-inbox";
+import { sessionStatusKey, type SessionStatus } from "./session-status";
 
 type PullRequestRef = { repository: string; number: number; url: string };
 
@@ -259,19 +260,26 @@ export async function listSessions(
 
           const live = running.has(record.id);
 
-          const [agent, workspace, metadata, transcript, createdPull, automation, activity] =
-            await Promise.all([
-              conversation.agent(BACKGROUND_CONTEXT),
-              harness.snapshot(ConversationWorkspace, record.id, BACKGROUND_CONTEXT),
-              storage.get<SessionMetadata>(sessionMetadataKey(record.id)),
-              summarizeTranscript(conversation, storage, tip, secrets, redaction),
-              storage.get<PullRequestRef>(`session-created-pr:${record.id}`),
-              harness.snapshot(AutomationRunDoc, record.id, BACKGROUND_CONTEXT),
-              // Only running sessions say what they are doing; it costs a few newest entries.
-              live
-                ? sessionActivity(harness, record.id, secrets).catch(() => undefined)
-                : undefined,
-            ]);
+          const [
+            agent,
+            workspace,
+            metadata,
+            transcript,
+            createdPull,
+            automation,
+            activity,
+            status,
+          ] = await Promise.all([
+            conversation.agent(BACKGROUND_CONTEXT),
+            harness.snapshot(ConversationWorkspace, record.id, BACKGROUND_CONTEXT),
+            storage.get<SessionMetadata>(sessionMetadataKey(record.id)),
+            summarizeTranscript(conversation, storage, tip, secrets, redaction),
+            storage.get<PullRequestRef>(`session-created-pr:${record.id}`),
+            harness.snapshot(AutomationRunDoc, record.id, BACKGROUND_CONTEXT),
+            // Only running sessions say what they are doing; it costs a few newest entries.
+            live ? sessionActivity(harness, record.id, secrets).catch(() => undefined) : undefined,
+            storage.get<SessionStatus>(sessionStatusKey(record.id)),
+          ]);
 
           const run = automation?.run;
 
@@ -304,6 +312,8 @@ export async function listSessions(
             ...(isReadOnly(workspace) && !run && { automation: "review" as const }),
             running: live,
             ...(activity && { activity }),
+            // Saved redacted; redact again so a secret added since stays hidden too.
+            ...(status && { status: { ...status, text: redact(status.text, secrets) } }),
             pullRequest: createdPull ?? transcript?.pullRequest,
           } satisfies SavedSession;
         }),

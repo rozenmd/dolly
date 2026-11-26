@@ -13,6 +13,7 @@ import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 import { ConversationWorkspace, READ_ONLY_TOOLS } from "../src/workspace";
 import { AutomationIngress } from "../src/automation-ingress";
 import { ingress } from "../src/ingress";
@@ -149,7 +150,7 @@ const hang = (request: Request) =>
 function model(reply: (body: string, request: Request) => Response | Promise<Response>) {
   const requests: string[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  mockFetch(async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
 
@@ -510,7 +511,7 @@ it("lets a run use only the MCP servers its automation lists, and none by defaul
   const prompts: string[] = [];
   const replies: (() => Response)[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  mockFetch(async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
     const server = servers.get(url.origin);

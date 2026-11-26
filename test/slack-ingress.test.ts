@@ -16,6 +16,7 @@ import type { SlackSetup } from "../src/slack";
 import { ASK_MODE_NOTE, SLACK_SESSION_NOTE } from "../src/slack-intent";
 import { ConversationWorkspace } from "../src/workspace";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 
 const signingSecret = "0123456789abcdef0123456789abcdef";
 const botToken = "xoxb-1111-2222-abcdefghijkl";
@@ -142,7 +143,7 @@ function fakeServices(classification: string) {
   const posted: Posted[] = [];
   const models: string[] = [];
   const requests: { model: string; messages: unknown[] }[] = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     const parsed = new URL(String(url));
 
     if (parsed.hostname === "slack.com") {

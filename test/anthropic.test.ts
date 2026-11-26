@@ -3,6 +3,7 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 import { Snapshot, Live } from "../src/transcript";
 
 const token = `sk-ant-oat01-${"a".repeat(64)}`;
@@ -96,7 +97,7 @@ it("protects Claude credentials, rejects API keys, and stores a wrapped setup to
 it("runs an explicit bounded live inference probe through the Worker Anthropic adapter", async () => {
   await call("/auth/anthropic", "PUT", { token });
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  const fetch = mockFetch(async (url, init) => {
     const target = new URL(String(url));
     expect(target.hostname).toBe("api.anthropic.com");
     expect(target.pathname).toBe("/v1/messages");
@@ -129,7 +130,7 @@ it("runs an explicit bounded live inference probe through the Worker Anthropic a
 it("reports upstream HTML blocks without returning raw HTML, leaking tokens, retrying or refreshing", async () => {
   await call("/auth/anthropic", "PUT", { token });
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(
+  const fetch = mockFetch(
     async () =>
       new Response(`<html>Unable to load site ${token}</html>`, {
         status: 403,
@@ -153,14 +154,12 @@ it("reports upstream HTML blocks without returning raw HTML, leaking tokens, ret
 it("distinguishes JSON authentication errors from HTML edge blocks without leaking credentials", async () => {
   await call("/auth/anthropic", "PUT", { token });
 
-  const fetch = vi
-    .spyOn(globalThis, "fetch")
-    .mockImplementation(async () =>
-      Response.json(
-        { error: { type: "authentication_error", message: `Invalid setup token ${token}` } },
-        { status: 401, headers: { "request-id": token } },
-      ),
-    );
+  const fetch = mockFetch(async () =>
+    Response.json(
+      { error: { type: "authentication_error", message: `Invalid setup token ${token}` } },
+      { status: 401, headers: { "request-id": token } },
+    ),
+  );
 
   const response = await call("/auth/anthropic/test", "POST", {});
   const text = await response.text();
@@ -178,7 +177,7 @@ it("runs Claude-only conversations without Codex credentials and keeps existing 
   expect((await call("/sessions", "POST", { model: "claude-haiku-5-5" })).status).toBe(409);
   await call("/auth/anthropic", "PUT", { token });
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+  const fetch = mockFetch(async (url) => {
     expect(String(url)).toContain("api.anthropic.com/v1/messages");
 
     return reply("Hello from Claude");
@@ -224,7 +223,7 @@ it("runs Claude-only conversations without Codex credentials and keeps existing 
 
 it("inherits Claude for child agents and redacts setup tokens from transcript and child answers", async () => {
   await call("/auth/anthropic", "PUT", { token });
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+  mockFetch(async (url) => {
     expect(String(url)).toContain("api.anthropic.com/v1/messages");
 
     return reply(`Claude child answered without exposing ${token}`);
@@ -293,7 +292,7 @@ it("inherits Claude for child agents and redacts setup tokens from transcript an
 it("executes Dolly tools through Anthropic and resumes generation with their results", async () => {
   await call("/auth/anthropic", "PUT", { token });
   let requests = 0;
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+  mockFetch(async (_url, init) => {
     if (requests++ > 0) return reply("No repositories enrolled.");
     const tools = JSON.parse(String(init?.body)).tools;
     expect(
@@ -364,7 +363,7 @@ it("executes Dolly tools through Anthropic and resumes generation with their res
 it("includes the selected repository in Claude's system prompt before any tool call", async () => {
   await call("/auth/anthropic", "PUT", { token });
   let system = "";
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     expect(String(url)).toContain("api.anthropic.com/v1/messages");
     system = JSON.stringify(JSON.parse(String(init?.body)).system);
 

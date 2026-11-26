@@ -6,6 +6,7 @@ import { configure, type ConversationId } from "@earendil-works/pi-durable";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 import { Live, Snapshot } from "../src/transcript";
 import { SlackThreads } from "../src/slack-inbox";
 import { GitHubThreads } from "../src/github-inbox";
@@ -64,11 +65,14 @@ const call = (args: Record<string, string | number | boolean>) =>
     arguments: JSON.stringify(args),
   });
 
-/** Model responses in order, plus Claude's usage endpoint for live refreshes. */
-function model(responses: Array<() => Response>) {
+/**
+ * Model responses in order, plus Claude's usage endpoint for live refreshes. Title requests get an
+ * unusable answer, so sessions keep their first-line titles and `query` can find them by prompt.
+ */
+function model(responses: Array<() => Response>, title = "") {
   const usageFetches: string[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  mockFetch(async (input) => {
     const url = input instanceof Request ? input.url : String(input);
 
     if (url.includes("/api/oauth/usage")) {
@@ -82,7 +86,7 @@ function model(responses: Array<() => Response>) {
     if (!next) throw new Error(`Unexpected model request ${url}`);
 
     return next();
-  });
+  }, title);
 
   return { usageFetches };
 }
@@ -408,4 +412,87 @@ it("adds the dolly tool to existing sessions' explicit tool lists", async () => 
     ]);
     expect(await state.storage.get("migration:dolly-tool")).toBe(true);
   });
+});
+
+/** A model response calling any one of the session's tools. */
+const callTool = (name: string, args: Record<string, string | number | boolean>) =>
+  sse({
+    type: "function_call",
+    id: `fc_${crypto.randomUUID()}`,
+    call_id: `call_${crypto.randomUUID()}`,
+    name,
+    arguments: JSON.stringify(args),
+  });
+
+/** A session's saved status, once the run that just ended has recorded it. */
+async function statusOf(id: string) {
+  let status: { text: string; waitingOn: string; at: number } | undefined;
+
+  await expect
+    .poll(
+      async () => {
+        const listed = await SELF.fetch("https://worker/api/sessions", { headers });
+        const sessions = await listed.json<{ id: string; status?: typeof status }[]>();
+        status = sessions.find((session) => session.id === id)?.status;
+
+        return status !== undefined;
+      },
+      { timeout: 10_000 },
+    )
+    .toBe(true);
+
+  return status!;
+}
+
+it("lists where each session's latest run left it, redacted, and what it waits on", async () => {
+  model([
+    () =>
+      answer(
+        `Migrated the billing tables with token ${access}. Next I would backfill the invoices, once you say so.`,
+      ),
+    () => callTool("schedule_prompt", { prompt: "Check the backfill finished", in_minutes: 60 }),
+    () => answer("Scheduled a check on the backfill in an hour.\nNothing else to do until then."),
+    () => call({ action: "list_sessions" }),
+    () => answer("Done"),
+  ]);
+
+  const idle = await session();
+  await run(idle, "Migrate the billing tables");
+  const scheduled = await session();
+  await run(scheduled, "Check on the backfill later");
+
+  // Saved when each run ends, outside the run itself.
+  expect(await statusOf(idle)).toMatchObject({
+    text: "Migrated the billing tables with token [redacted].",
+    waitingOn: "owner",
+  });
+  expect(await statusOf(scheduled)).toMatchObject({
+    text: "Scheduled a check on the backfill in an hour.",
+    waitingOn: "schedule",
+  });
+
+  const reader = await session();
+  await run(reader, "Who is waiting on me?");
+  const [listed] = await dollyResults(reader);
+
+  expect(listed).toMatchObject({
+    ok: true,
+    sessions: expect.arrayContaining([
+      expect.objectContaining({
+        id: idle,
+        running: false,
+        status: {
+          text: "Migrated the billing tables with token [redacted].",
+          waitingOn: "owner",
+          at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+        },
+      }),
+      expect.objectContaining({
+        id: scheduled,
+        status: expect.objectContaining({ waitingOn: "schedule" }),
+      }),
+    ]),
+    notes: expect.arrayContaining([expect.stringContaining("waitingOn")]),
+  });
+  expect(JSON.stringify(listed)).not.toContain(access.slice(0, 20));
 });

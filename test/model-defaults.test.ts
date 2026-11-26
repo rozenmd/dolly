@@ -3,6 +3,7 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 import { Live, Snapshot } from "../src/transcript";
 
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
@@ -180,7 +181,7 @@ const tokenOn = (plan?: string) =>
 it("sends ChatGPT's service tier for the session's speed, model and plan", async () => {
   const tiers: (string | undefined)[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     expect(String(url)).toContain("api.openai.com/v1/responses");
 
     const body = Schema.decodeUnknownSync(
@@ -281,7 +282,7 @@ it("switches to the other subscription when usage runs out and finishes the turn
 
   const hosts: string[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+  mockFetch(async (url) => {
     const host = new URL(String(url)).hostname;
     hosts.push(host);
 
@@ -329,7 +330,7 @@ it("stays on the exhausted model when auto-fallback is off, and never bounces ba
 
   const hosts: string[] = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+  mockFetch(async (url) => {
     hosts.push(new URL(String(url)).hostname);
 
     // Both subscriptions are out.

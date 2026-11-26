@@ -234,6 +234,7 @@ import type { Env } from "./env";
 import type { FileResult } from "./sandbox";
 import { resolveImages, storeImages, type PromptImage } from "./images";
 import { listSessions } from "./session-list";
+import { recordSessionStatus } from "./session-status";
 import { SessionsFeed } from "./sessions-feed";
 import type { PullRequestSummary, SavedSession } from "./session-contracts";
 import { PreviewOutbound, PreviewRequest, PreviewToolInput } from "./preview";
@@ -1073,6 +1074,11 @@ export class Agent extends DurableObject<Env> {
           afterRun: async (run, api, context) => {
             const state = await api.snapshot(ConversationWorkspace, api.conversationId, context);
 
+            // Outside the run: a title costs one cheap model call and must never delay or fail it.
+            this.ctx.waitUntil(this.autoTitle(api.conversationId, isReadOnly(state)));
+            // Also outside the run: a status line for listings, from state Dolly already keeps.
+            this.ctx.waitUntil(this.recordStatus(api.conversationId));
+
             const sandboxes = workspaceSandboxes(state, String(api.conversationId));
 
             return sandboxes.length
@@ -1660,6 +1666,51 @@ export class Agent extends DurableObject<Env> {
     yield* this.arm(this.harness.wake());
     this.harness.resume();
   });
+
+  /**
+   * Save the session's one-line status (session-status.ts) when a run ends: its final reply's
+   * first sentence and what it waits on. Best effort: a failure leaves the previous status.
+   */
+  private async recordStatus(conversationId: ConversationId) {
+    try {
+      const [secrets, wait, scheduled] = await Promise.all([
+        Effect.runPromise(this.credentials.secrets),
+        this.ciWaiter.current(conversationId),
+        this.scheduler.list(conversationId),
+      ]);
+
+      await recordSessionStatus(this.harness, this.ctx.storage, conversationId, secrets, {
+        wait: wait?.kind,
+        scheduled: scheduled.scheduled.length,
+      });
+    } catch (error) {
+      console.warn("session.status", error);
+    }
+  }
+
+  /**
+   * Name a session once, after its first run, so the sidebar and `dolly list_sessions` say what it
+   * is about instead of repeating its first line. Skips sessions already titled, automatic reviews
+   * (session-list.ts titles them by pull request) and automation runs (named after their
+   * automation). Best effort: without a connected provider the first-line title stays.
+   */
+  private async autoTitle(conversationId: ConversationId, readOnly: boolean) {
+    try {
+      const metadata = await this.ctx.storage.get<SessionMetadata>(
+        sessionMetadataKey(conversationId),
+      );
+
+      if (readOnly || metadata?.title || metadata?.autoTitled) return;
+
+      if ((await this.harness.snapshot(AutomationRunDoc, conversationId, BACKGROUND_CONTEXT))?.run)
+        return;
+
+      await Effect.runPromise(this.patchSessionMetadata(conversationId, { autoTitled: true }));
+      await this.retitleSession(conversationId);
+    } catch (error) {
+      console.warn("session.autotitle", error);
+    }
+  }
 
   /**
    * Name a session from its first and latest prompts with one tool-less call on the cheapest

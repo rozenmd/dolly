@@ -3,6 +3,7 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import { mockFetch, titleResponse } from "./titles";
 import { Snapshot } from "../src/transcript";
 import { ClaudeCode, CLAUDE_CODE_API_KEY, type ClaudeCodeOutbound } from "../src/claude-code";
 
@@ -91,6 +92,11 @@ it("runs Claude sessions through Claude Code without the setup token or the Clau
   const bodies: string[] = [];
 
   vi.spyOn(ClaudeCode.prototype, "fetch").mockImplementation(async (request: Request) => {
+    // The session's automatic title takes the same transport; it isn't the turn under test.
+    const title = await titleResponse(request);
+
+    if (title) return title;
+
     bridged.push(request);
     bodies.push(await request.text());
 
@@ -161,7 +167,7 @@ it("runs Claude sessions through Claude Code without the setup token or the Clau
 it("lets Claude Code reach only Anthropic, with the owner's token swapped in", async () => {
   const sent: Array<{ url: string; headers: Headers; body: string }> = [];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  mockFetch(async (input, init) => {
     const request = new Request(input, init);
     sent.push({ url: request.url, headers: request.headers, body: await request.text() });
 

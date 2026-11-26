@@ -15,6 +15,7 @@ import { GitHubIngress } from "../src/github-ingress";
 import { ingress } from "../src/ingress";
 import type { SavedSession } from "../src/session-contracts";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 
 const pair = await crypto.subtle.generateKey(
   {
@@ -113,7 +114,7 @@ beforeEach(async () => {
     });
     await state.storage.delete("credential:openai");
   });
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url) =>
+  mockFetch(async (url) =>
     String(url).includes("/repos/other/")
       ? Response.json({}, { status: 404 })
       : Response.json({ id: 7 }),
@@ -225,7 +226,7 @@ it("durably admits and deduplicates commands, resumes after eviction, and replie
   const reactions: string[] = [];
   let stall = true;
   let codexRequests = 0;
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     const parsed = new URL(String(url));
 
     if (parsed.hostname === "api.openai.com") {
@@ -426,7 +427,7 @@ it("runs a /dolly command on the owner's default model, including a Claude one",
   });
   const models: string[] = [];
   const posted: string[] = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     const parsed = new URL(String(url));
 
     if (parsed.hostname === "api.openai.com") {
@@ -619,7 +620,7 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
     },
   ];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+  mockFetch(async (url, init) => {
     const parsed = new URL(String(url));
 
     if (parsed.hostname === "api.openai.com") {
@@ -1009,7 +1010,7 @@ it("keeps one pull request automation, and makes the old Settings > GitHub switc
   await clearAutomations();
   let events = ["issue_comment"];
 
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (url) =>
+  mockFetch(async (url) =>
     new URL(String(url)).pathname === "/app" ? Response.json({ events }) : Response.json({ id: 7 }),
   );
 

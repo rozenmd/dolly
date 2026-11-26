@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import { mockFetch } from "./titles";
 import { HistoryPage, Live, PromptIndex, Snapshot } from "../src/transcript";
 import { extendTranscript, prependHistory } from "../web/src/lib/transcript-history";
 
@@ -95,7 +96,7 @@ function claude(blocks: ClaudeBlock[], stop: "tool_use" | "end_turn", inputToken
 function longTurnModel(rounds = ROUNDS) {
   let round = 0;
 
-  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+  const fetch = mockFetch(async () => {
     round += 1;
 
     if (round > rounds)
@@ -472,7 +473,7 @@ it.each(["threshold", "overflow"])(
 
     const requests: string[] = [];
 
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    mockFetch(async (input, init) => {
       requests.push(
         await (input instanceof Request ? input.clone() : new Response(init?.body)).text(),
       );
