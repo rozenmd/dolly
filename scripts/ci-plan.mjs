@@ -59,6 +59,9 @@ add("sandbox", 2, backend || touches("test/container/"));
 
 add("build", 1, backend || touches("web/src/"));
 
+// The Claude Code bridge is its own npm package, run in its own container.
+add("claude-bridge", 1, touches("claude-bridge/"));
+
 const plan = { matrix: { include }, base: mergeBase, full };
 
 console.log(JSON.stringify(plan));

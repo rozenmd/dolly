@@ -1,3 +1,4 @@
+import type { StreamFunction, StreamOptions } from "@earendil-works/pi-ai";
 import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { stream, streamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -9,8 +10,62 @@ import { AnthropicModel } from "./models";
 import { redact } from "./diagnostics";
 import { attempt } from "./operations";
 import { observeUsage } from "./usage";
+import { CLAUDE_CODE_API_KEY, CLAUDE_CODE_BASE_URL } from "./claude-code";
 
 type AnthropicStream = typeof streamSimple;
+
+/** Sends Claude requests through Claude Code (src/claude-code.ts) while `active` says so. */
+export type ClaudeCodeRoute = {
+  readonly active: () => boolean;
+  readonly fetch: (request: Request) => Promise<Response>;
+};
+
+/**
+ * Point a request at Claude Code instead of Anthropic: the bridge's address and API key, the
+ * provider session and context window it maps onto a Claude Code session, and no Anthropic message
+ * threads, so every request carries the whole conversation. A caller's own fetch is kept: it owns
+ * the transport (the live probe uses it to report what came back).
+ */
+function viaClaudeCode<TOptions extends StreamOptions>(
+  fn: StreamFunction<"anthropic-messages", TOptions>,
+  route: ClaudeCodeRoute,
+): StreamFunction<"anthropic-messages", TOptions> {
+  return (model, context, options) => {
+    if (!route.active()) return fn(model, context, options);
+
+    const headers = new Headers();
+
+    for (const [name, value] of Object.entries(options?.headers ?? {}))
+      if (value !== null) headers.set(name, value);
+
+    headers.set("x-dolly-context-window", String(model.contextWindow));
+
+    if (options?.sessionId) headers.set("x-dolly-session", options.sessionId);
+
+    const bridged = Object.assign({}, options, {
+      apiKey: CLAUDE_CODE_API_KEY,
+      headers: Object.fromEntries(headers),
+      disableContinuation: true,
+      fetch: options?.fetch ?? claudeCodeFetch(route),
+    });
+
+    return fn(
+      {
+        ...model,
+        baseUrl: CLAUDE_CODE_BASE_URL,
+        compat: { ...model.compat, supportsMessageThreads: false },
+      },
+      context,
+      bridged,
+    );
+  };
+}
+
+/** A fetch that hands each request to Claude Code. */
+export const claudeCodeFetch =
+  (route: ClaudeCodeRoute): typeof fetch =>
+  (input, init) =>
+    route.fetch(new Request(input, init));
 
 type ProbeObservation = {
   value: {
@@ -31,8 +86,11 @@ export const AnthropicProbe = Schema.Struct({ model: Schema.optional(AnthropicMo
 export function claudeProvider(
   onHeaders?: (headers: Record<string, string>) => void,
   wrapStream: (fn: AnthropicStream) => AnthropicStream = (fn) => fn,
+  claudeCode?: ClaudeCodeRoute,
 ) {
   const provider = anthropicProvider();
+  const routed = claudeCode ? viaClaudeCode(stream, claudeCode) : stream;
+  const routedSimple = claudeCode ? viaClaudeCode(streamSimple, claudeCode) : streamSimple;
 
   return createProvider({
     id: provider.id,
@@ -42,10 +100,10 @@ export function claudeProvider(
     auth: { apiKey: provider.auth.apiKey },
     api: onHeaders
       ? {
-          stream: observeUsage(stream, onHeaders),
-          streamSimple: wrapStream(observeUsage(streamSimple, onHeaders)),
+          stream: observeUsage(routed, onHeaders),
+          streamSimple: wrapStream(observeUsage(routedSimple, onHeaders)),
         }
-      : { stream, streamSimple: wrapStream(streamSimple) },
+      : { stream: routed, streamSimple: wrapStream(routedSimple) },
   });
 }
 
@@ -72,15 +130,20 @@ export const saveAnthropic = (credentials: Credentials, input: typeof AnthropicS
   );
 
 /** Explicit, bounded, real inference probe. No retries, refresh, tool execution or conversation side effects. */
-export const testAnthropic = (credentials: Credentials, input: typeof AnthropicProbe.Type) =>
+export const testAnthropic = (
+  credentials: Credentials,
+  input: typeof AnthropicProbe.Type,
+  claudeCode?: ClaudeCodeRoute,
+) =>
   Effect.gen(function* () {
     const credential = Option.getOrUndefined(yield* credentials.get("anthropic"));
 
     if (credential?.type !== "api_key" || !credential.key) return { error: "Connect Claude first" };
     const token = credential.key;
     const models = createModels({ credentials });
-    const provider = claudeProvider();
+    const provider = claudeProvider(undefined, undefined, claudeCode);
     models.setProvider(provider);
+    const viaClaudeCode = claudeCode?.active() === true;
 
     const model = provider
       .getModels()
@@ -101,7 +164,10 @@ export const testAnthropic = (credentials: Credentials, input: typeof AnthropicP
           maxTokens: 32,
           maxRetries: 0,
           fetch: async (url, init) => {
-            const response = await fetch(url, { ...init, redirect: "manual" });
+            const response =
+              viaClaudeCode && claudeCode
+                ? await claudeCode.fetch(new Request(url, init))
+                : await fetch(url, { ...init, redirect: "manual" });
 
             const header = (name: string) => {
               const value = response.headers.get(name);
@@ -142,9 +208,53 @@ export const testAnthropic = (credentials: Credentials, input: typeof AnthropicP
       durationMs: Date.now() - started,
       upstream: diagnostic,
       message: ok
-        ? "Claude returned a live inference response from this Worker."
+        ? viaClaudeCode
+          ? "Claude returned a live inference response through Claude Code."
+          : "Claude returned a live inference response from this Worker."
         : diagnostic?.contentType.includes("text/html")
           ? `Anthropic returned HTTP ${diagnostic.status} HTML instead of a model response. This may be an upstream edge block.`
           : redact(error ?? "No text response was returned", [token]).slice(0, 1024),
     };
+  });
+
+/**
+ * Claude Code's request to Anthropic on its way out of the container (src/claude-code.ts): the
+ * placeholder it authenticates with is dropped and the owner's setup token sent instead, so the
+ * token never enters the container. Only the owner Agent holds it.
+ */
+export const claudeCodeUpstream = (credentials: Credentials, request: Request) =>
+  Effect.gen(function* () {
+    const credential = Option.getOrUndefined(yield* credentials.get("anthropic"));
+
+    if (credential?.type !== "api_key" || !credential.key)
+      return Response.json(
+        { type: "error", error: { type: "authentication_error", message: "Connect Claude first" } },
+        { status: 401 },
+      );
+
+    const headers = new Headers(request.headers);
+
+    for (const name of ["authorization", "x-api-key", "cookie", "proxy-authorization", "host"])
+      headers.delete(name);
+    headers.set("authorization", `Bearer ${credential.key}`);
+    const key = credential.key;
+
+    return yield* attempt("claude-code.upstream", (signal) =>
+      fetch(request.url, {
+        method: request.method,
+        headers,
+        body: request.body,
+        redirect: "manual",
+        signal: AbortSignal.any([signal, request.signal]),
+      }),
+    ).pipe(
+      Effect.catchTag("OperationError", (error) =>
+        Effect.succeed(
+          Response.json(
+            { type: "error", error: { type: "api_error", message: redact(error.message, [key]) } },
+            { status: 502 },
+          ),
+        ),
+      ),
+    );
   });

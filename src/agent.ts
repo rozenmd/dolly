@@ -140,12 +140,20 @@ import {
 } from "./session-title";
 import {
   claudeProvider,
+  claudeCodeUpstream,
   anthropicStatus,
   saveAnthropic,
   testAnthropic,
   AnthropicSetup,
   AnthropicProbe,
+  type ClaudeCodeRoute,
 } from "./anthropic";
+import {
+  CLAUDE_CODE_INSTANCE,
+  CLAUDE_TRANSPORT_KEY,
+  ClaudeTransport,
+  DEFAULT_CLAUDE_TRANSPORT,
+} from "./claude-code";
 import { Account, Credentials } from "./credentials";
 import { recordUsageHeaders, usageReport, forgetUsage, type ProviderUsage } from "./usage";
 import {
@@ -371,6 +379,12 @@ export class Agent extends DurableObject<Env> {
       ),
   });
   private readonly steerInterrupts = new SteerInterrupts();
+  /** How Claude requests go out: read once at start, then kept in step with the owner's setting. */
+  private claudeTransport: ClaudeTransport = DEFAULT_CLAUDE_TRANSPORT;
+  private readonly claudeCode: ClaudeCodeRoute = {
+    active: () => this.claudeTransport === "claude-code",
+    fetch: (request) => this.env.CLAUDE_CODE.getByName(CLAUDE_CODE_INSTANCE).fetch(request),
+  };
   private readonly sessionsFeed: SessionsFeed;
   private readonly alarmPermit = Semaphore.makeUnsafe(1);
   private automations!: Automations;
@@ -470,13 +484,25 @@ export class Agent extends DurableObject<Env> {
 
   private initialize = Effect.fn("Agent.initialize")(function* (this: Agent) {
     yield* this.arm({ active: true });
+
+    const transport = yield* attempt("settings.claude-transport.read", () =>
+      this.ctx.storage.get(CLAUDE_TRANSPORT_KEY),
+    );
+
+    this.claudeTransport = Schema.is(ClaudeTransport)(transport)
+      ? transport
+      : DEFAULT_CLAUDE_TRANSPORT;
     const models = createModels({ credentials: this.credentials });
     this.models = models;
     models.setProvider(
       chatgptProvider(this.usageObserver("openai"), (fn) => this.steerInterrupts.wrap(fn)),
     );
     models.setProvider(
-      claudeProvider(this.usageObserver("anthropic"), (fn) => this.steerInterrupts.wrap(fn)),
+      claudeProvider(
+        this.usageObserver("anthropic"),
+        (fn) => this.steerInterrupts.wrap(fn),
+        this.claudeCode,
+      ),
     );
 
     const shell = {
@@ -2716,7 +2742,28 @@ export class Agent extends DurableObject<Env> {
   }
 
   anthropicStatus() {
-    return Effect.runPromise(anthropicStatus(this.credentials));
+    return Effect.runPromise(
+      anthropicStatus(this.credentials).pipe(
+        Effect.map((status) => ({ ...status, transport: this.claudeTransport })),
+      ),
+    );
+  }
+
+  /** Choose how Claude requests go out; applies to the next request of every session. */
+  async anthropicTransport(transport: ClaudeTransport) {
+    await this.ctx.storage.put(CLAUDE_TRANSPORT_KEY, transport);
+    this.claudeTransport = transport;
+
+    return { transport };
+  }
+
+  /** Claude Code's way to Anthropic (ClaudeCodeOutbound), with the owner's token attached. */
+  async claudeCodeUpstream(request: Request) {
+    const response = await Effect.runPromise(claudeCodeUpstream(this.credentials, request));
+
+    this.usageObserver("anthropic")(Object.fromEntries(response.headers));
+
+    return response;
   }
 
   anthropicSave(input: typeof AnthropicSetup.Type) {
@@ -2724,7 +2771,7 @@ export class Agent extends DurableObject<Env> {
   }
 
   anthropicTest(input: typeof AnthropicProbe.Type) {
-    return Effect.runPromise(testAnthropic(this.credentials, input));
+    return Effect.runPromise(testAnthropic(this.credentials, input, this.claudeCode));
   }
 
   anthropicLogout() {

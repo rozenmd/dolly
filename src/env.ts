@@ -1,5 +1,6 @@
 import type { Agent } from "./agent";
 import type { Sandbox } from "./sandbox";
+import type { ClaudeCode } from "./claude-code";
 
 export interface Env {
   ASSETS: Fetcher;
@@ -13,4 +14,5 @@ export interface Env {
   ACCESS_LOCAL_DEV?: string;
   AGENT: DurableObjectNamespace<Agent>;
   SANDBOX: DurableObjectNamespace<Sandbox>;
+  CLAUDE_CODE: DurableObjectNamespace<ClaudeCode>;
 }

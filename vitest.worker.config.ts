@@ -24,6 +24,7 @@ export default defineConfig({
         durableObjects: {
           AGENT: { className: "Agent", useSQLite: true },
           SANDBOX: { className: "Sandbox", useSQLite: true },
+          CLAUDE_CODE: { className: "ClaudeCode", useSQLite: true },
         },
       },
     }),

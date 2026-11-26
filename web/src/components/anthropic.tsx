@@ -1,7 +1,24 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import * as Schema from "effect/Schema";
-import { anthropicStatus, request } from "../lib/api";
+import { anthropicStatus, request, setClaudeTransport, type ClaudeTransport } from "../lib/api";
+import { Picker } from "./picker";
 import { Input } from "./ui";
+
+const TRANSPORTS: { value: ClaudeTransport; label: string; hint: string }[] = [
+  {
+    value: "direct",
+    label: "Direct",
+    hint: "The Worker calls Anthropic, presenting the token as Claude Code would",
+  },
+  {
+    value: "claude-code",
+    label: "Claude Code",
+    hint: "The real Claude Code sends each request, from its own container",
+  },
+];
+
+const transportName = (transport: ClaudeTransport) =>
+  TRANSPORTS.find((option) => option.value === transport)?.label ?? transport;
 
 const Probe = Schema.Struct({
   ok: Schema.Boolean,
@@ -33,6 +50,7 @@ export function AnthropicConnection({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [probe, setProbe] = useState<typeof Probe.Type | null>(null);
+  const [transport, setTransport] = useState<ClaudeTransport>("direct");
   const notify = useRef(onConnection);
   notify.current = onConnection;
 
@@ -42,6 +60,7 @@ export function AnthropicConnection({
       (status) => {
         if (!active) return;
         setConnected(status.connected);
+        setTransport(status.transport ?? "direct");
         setLoaded(true);
         notify.current(status.connected);
       },
@@ -90,6 +109,16 @@ export function AnthropicConnection({
       setConnected(false);
       setProbe(null);
       notify.current(false);
+    });
+  }
+
+  function chooseTransport(value: string) {
+    const next = TRANSPORTS.find((option) => option.value === value)?.value;
+
+    if (!next || next === transport) return;
+    void run(async () => {
+      setTransport(await setClaudeTransport(next));
+      setProbe(null);
     });
   }
 
@@ -175,6 +204,29 @@ export function AnthropicConnection({
             )
           )}
         </div>
+        {connected && (
+          <div className="connection-row">
+            <span className="connection-label">
+              Claude requests
+              <span className="muted">
+                {transport === "claude-code"
+                  ? "Sent by the real Claude Code, in its own container"
+                  : "Sent by the Worker, presented as Claude Code"}
+              </span>
+            </span>
+            <Picker
+              id="claude-transport"
+              label="Claude requests"
+              className="model-picker"
+              align="end"
+              value={transport}
+              options={TRANSPORTS}
+              disabled={pending}
+              onChange={chooseTransport}
+              trigger={<span>{transportName(transport)}</span>}
+            />
+          </div>
+        )}
         {expanded && !connected && (
           <div className="anthropic-connection">
             <p className="field-help">

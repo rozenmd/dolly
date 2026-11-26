@@ -48,11 +48,23 @@ test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", ()
   });
   assert.equal(worker.exports.Agent.storage, "sqlite");
   assert.equal(worker.exports.Sandbox.storage, "sqlite");
-  assert.equal(containers.length, 1);
+  assert.equal(containers.length, 2);
   assert.equal(containers[0].name, "dolly-sandbox");
   assert.equal(worker.exports.Sandbox.container, containers[0]);
   assert.equal(containers[0].schedulingPolicy, "durable-object");
   assert.deepEqual(containers[0].images, { sandbox: { dockerfile: "./Dockerfile" } });
+  // Claude Code runs in its own container, apart from the agent's sandbox.
+  assert.equal(containers[1].name, "dolly-claude-code");
+  assert.equal(worker.exports.ClaudeCode.container, containers[1]);
+  assert.equal(worker.exports.ClaudeCode.storage, "sqlite");
+  assert.deepEqual(containers[1].images, {
+    claude: { dockerfile: "./claude-bridge/Dockerfile" },
+  });
+  assert.deepEqual(worker.env.CLAUDE_CODE, {
+    type: "durable-object",
+    worker: worker.name,
+    exportName: "ClaudeCode",
+  });
 });
 
 test("the sandbox test adapter retains the typed config's container link and image", async () => {
@@ -61,6 +73,7 @@ test("the sandbox test adapter retains the typed config's container link and ima
   assert.equal(generated.main, "./src/index.ts");
   assert.equal(generated.exports.Sandbox.container, config.containers[0].name);
   assert.equal(generated.exports.Sandbox.storage, "sqlite");
+  assert.equal(generated.containers.length, 1);
   assert.equal(generated.containers[0].scheduling_policy, "durable_object");
   assert.deepEqual(generated.containers[0].images, config.containers[0].images);
   assert.deepEqual(
@@ -68,6 +81,7 @@ test("the sandbox test adapter retains the typed config's container link and ima
     [
       ["AGENT", "Agent"],
       ["SANDBOX", "Sandbox"],
+      ["CLAUDE_CODE", "ClaudeCode"],
     ],
   );
 });

@@ -19,6 +19,7 @@ export default defineConfig({
           exports: {
             ...config.worker.exports,
             Sandbox: { type: "durable-object", storage: "sqlite" },
+            ClaudeCode: { type: "durable-object", storage: "sqlite" },
           },
         },
       }),

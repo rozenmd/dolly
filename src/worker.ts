@@ -12,6 +12,8 @@ export {
   AutomationIngress,
   WorkspaceOutbound,
   PreviewOutbound,
+  ClaudeCode,
+  ClaudeCodeOutbound,
 } from "./index";
 
 export default {

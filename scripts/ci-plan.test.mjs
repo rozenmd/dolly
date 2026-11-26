@@ -85,12 +85,14 @@ test("CI planner runs everything for configs, non-imported and generated inputs"
     "test/session.ts",
     "web/src/styles.css",
     "Dockerfile",
+    "claude-bridge/src/bridge.ts",
     "unclassified-input",
   ]) {
     change(path);
     const result = plan();
     assert.equal(result.full, true, path);
-    assert.equal(result.matrix.include.length, 13);
+    assert.ok(result.matrix.include.some((job) => job.suite === "claude-bridge"));
+    assert.equal(result.matrix.include.length, 14);
     assert.ok(result.matrix.include.every((job) => job.mode === "full"));
   }
 });
@@ -106,7 +108,7 @@ test("CI planner fails safe for missing history, main and merge queue", (t) => {
   ]) {
     const result = plan(event, base);
     assert.equal(result.full, true);
-    assert.equal(result.matrix.include.length, 13);
+    assert.equal(result.matrix.include.length, 14);
   }
 });
 

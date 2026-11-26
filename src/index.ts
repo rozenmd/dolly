@@ -17,6 +17,7 @@ import { ChildRequest, DefaultModelSetting, NewSession, SessionSettings } from "
 import { OperationError } from "./operations";
 import { exceptionDetails } from "./diagnostics";
 import { AnthropicSetup, AnthropicProbe } from "./anthropic";
+import { ClaudeTransportSetting } from "./claude-code";
 import { LoginCallback } from "./chatgpt-login";
 import type { Env } from "./env";
 import { PromptImage, MAX_IMAGES, MAX_PROMPT_BYTES } from "./images";
@@ -28,6 +29,8 @@ export { Agent } from "./agent";
 export { Sandbox } from "./sandbox";
 
 export { PreviewOutbound } from "./preview";
+
+export { ClaudeCode, ClaudeCodeOutbound } from "./claude-code";
 
 class InvalidInput extends Schema.TaggedError<InvalidInput>()("InvalidInput", {
   message: Schema.String,
@@ -333,6 +336,27 @@ app.post("/api/auth/anthropic/test", (c) =>
       const result = yield* rpc("anthropic.test", async () => await owner(c).anthropicTest(input));
 
       return c.json(result, "error" in result ? 409 : 200);
+    }),
+  ),
+);
+
+app.put("/api/auth/anthropic/transport", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const input = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(ClaudeTransportSetting)),
+        Effect.mapError(
+          () => new InvalidInput({ message: 'Expected a transport: "direct" or "claude-code"' }),
+        ),
+      );
+
+      return c.json(
+        yield* rpc(
+          "anthropic.transport",
+          async () => await owner(c).anthropicTransport(input.transport),
+        ),
+      );
     }),
   ),
 );

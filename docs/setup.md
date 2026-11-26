@@ -195,3 +195,15 @@ If you had **Review new pull requests** turned on in Settings > GitHub before re
 5. To make Claude the default, go to **Settings > Models**. Set **Default model** to a Claude model.
 
 **Check:** **Settings > Models** shows Claude as **Connected**. Choose **Test**. The result shows that the request succeeded.
+
+### Optional: send Claude requests through the real Claude Code
+
+By default the Worker calls Anthropic itself and presents your token the way Claude Code does. To have the real Claude Code send each request instead, go to **Settings > Models** and set **Claude requests** to **Claude Code**. Choose **Direct** to switch back. The setting applies to every session from its next request.
+
+With **Claude Code** selected, requests go to a separate container, `dolly-claude-code`, built from `claude-bridge/`. It runs the Claude Agent SDK behind an Anthropic Messages API, after Open Session's `anthropic-bridge`. Claude Code only proposes tool calls. Dolly runs them in the session's own sandbox, as it does on the direct path.
+
+- Your token never enters a container. Claude Code holds a placeholder, and the Worker swaps in the real token as the request leaves. The container can reach only `api.anthropic.com`.
+- The first request after the container has been idle for 30 minutes waits for it to start.
+- Each reply arrives in one piece, not token by token. Extended thinking isn't carried between turns, and temperature is ignored.
+
+**Check:** with **Claude Code** selected, choose **Test**. The result says the request went through Claude Code.
