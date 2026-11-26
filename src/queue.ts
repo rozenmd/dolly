@@ -1,4 +1,11 @@
-import type { ConversationView, InboxItem, SubmissionId } from "@earendil-works/pi-durable";
+import {
+  defineDoc,
+  type ConversationView,
+  type EntryId,
+  type InboxItem,
+  type SubmissionId,
+  type TaskId,
+} from "@earendil-works/pi-durable";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -47,3 +54,22 @@ export function submissionId(id: number): SubmissionId {
   // SAFETY: submission IDs are plain positive integers on the wire; routes validate them first.
   return id as SubmissionId;
 }
+
+/**
+ * An interrupt in progress ("Interrupt and send now"): the message that interrupts, taken out of
+ * the inbox so no step boundary places it into the run being stopped, and that run, so only it is
+ * aborted. The commit that sends the message clears it. Empty when no interrupt is in progress.
+ */
+export const InterruptDoc = defineDoc<{
+  item?: InboxItem;
+  /** The interrupted run: its first entry and the generation task running it then. */
+  run?: { task: TaskId; first?: EntryId };
+}>({
+  kind: "app.interrupt",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({}),
+  checkpointWhen: (value) => value.item === undefined,
+});

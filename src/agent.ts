@@ -7,6 +7,7 @@ import {
   createRegistry,
   defineExtension,
   InboxDoc,
+  LiveDoc,
   ProviderDoc,
   GenerationTask,
   hook,
@@ -19,6 +20,8 @@ import {
   type Cursor,
   type EntryId,
   type EntryRecord,
+  type InboxItem,
+  type InputSubmissionDraft,
   type ToolRegistration,
   type Wake,
 } from "@earendil-works/pi-durable";
@@ -75,9 +78,11 @@ import {
   copyInboxItem,
   editableText,
   hasQueued,
+  InterruptDoc,
   OWNER_INPUTS_DOC,
   submissionId as queuedId,
 } from "./queue";
+import { INTERRUPT_NOTE_BLOCK } from "./interrupt-message";
 import {
   runCancellable,
   serializeShellResult,
@@ -463,6 +468,9 @@ export class Agent extends DurableObject<Env> {
       .then(() => {
         // Sidebars that stayed connected through hibernation get running dots again.
         this.sessionsFeed.resume();
+
+        // Not awaited: an interrupt waits for its turn's abort, which needs the harness running.
+        ctx.waitUntil(Effect.runPromise(this.resumeInterrupts()));
 
         return this.resumeStreams();
       });
@@ -3924,6 +3932,173 @@ export class Agent extends DurableObject<Env> {
   }
 
   /**
+   * Interrupt and send now: stop the running turn and deliver one queued message as the next turn
+   * at once, instead of at the next step boundary, which a long tool call can hold for minutes.
+   * The rest of the queue stays queued, in its order; other steers wait for the next turn. The
+   * message carries `INTERRUPT_NOTE`, so the model folds it into the interrupted work rather than
+   * parking.
+   *
+   * The message leaves the inbox first, so no step boundary places it into the run being stopped,
+   * and `InterruptDoc` records it with that run. Only that run is aborted, with the work it owns:
+   * the inbox and the conversation's other tasks (a Slack reply's delivery, say) are untouched.
+   * An `interrupt:` storage key points startup at a conversation whose interrupt a restart cut
+   * short; `InterruptDoc` decides what is left to do.
+   */
+  interruptQueued(id: string, submissionId: number) {
+    return Effect.runPromise(
+      Effect.gen({ self: this }, function* () {
+        const conversation = yield* this.conversation(id);
+
+        if (Option.isNone(conversation)) return undefined;
+
+        const target = conversation.value;
+        const marker = interruptKey(target.id);
+
+        yield* this.arm({ active: true });
+        yield* attempt("interrupt.mark", () => this.ctx.storage.put(marker, true));
+
+        const taken = yield* attempt("pi.queue.interrupt", () =>
+          target.commit(async (tx) => {
+            const live = await tx.doc(LiveDoc, target.id);
+            const inbox = await tx.doc(InboxDoc, target.id);
+            const pending = await tx.doc(InterruptDoc, target.id);
+            const index = inbox.items.findIndex((candidate) => candidate.id === submissionId);
+            const item = inbox.items[index];
+
+            if (pending.item !== undefined) return "interrupting" as const;
+
+            // The boundary may already have consumed it; a queued write is not the owner's.
+            if (!item || item.mode === "write") return "gone" as const;
+
+            // Nothing to interrupt: steering places it as soon as the conversation can.
+            if (!live.run) return "idle" as const;
+
+            pending.item = copyInboxItem(item);
+            pending.run = { task: live.run.taskId };
+
+            if (live.run.first !== undefined) pending.run.first = live.run.first;
+            inbox.items.splice(index, 1);
+
+            return "taken" as const;
+          }, BACKGROUND_CONTEXT),
+        );
+
+        if (taken !== "taken") {
+          // An interrupt already in progress keeps its marker.
+          if (taken !== "interrupting")
+            yield* attempt("interrupt.unmark", () => this.ctx.storage.delete(marker));
+
+          if (taken === "idle")
+            return yield* Effect.promise(() => this.steerQueued(id, submissionId));
+
+          return {
+            error:
+              taken === "interrupting"
+                ? "Already interrupting the agent"
+                : "This message is no longer queued",
+          };
+        }
+
+        yield* attempt("pi.interrupt", () => this.finishInterrupt(target.id));
+
+        return { state: "interrupted" as const };
+      }),
+    );
+  }
+
+  /**
+   * Abort the run an interrupt stopped and send its message. Idempotent, for restarts: with no
+   * interrupt pending it only clears the marker, and it aborts only the recorded run, so a run
+   * started since (the message's own, say) is never cut short.
+   */
+  private async finishInterrupt(conversationId: ConversationId) {
+    const conversation = await this.harness.conversation(conversationId, BACKGROUND_CONTEXT);
+
+    const running =
+      conversation &&
+      (await conversation.commit(async (tx) => {
+        const pending = await tx.doc(InterruptDoc, conversationId);
+        const live = await tx.doc(LiveDoc, conversationId);
+
+        if (pending.item === undefined || !live.run || !pending.run) return undefined;
+
+        // The same run, even if a newer generation task carries it now.
+        const same =
+          live.run.taskId === pending.run.task ||
+          (pending.run.first !== undefined && live.run.first === pending.run.first);
+
+        return same ? live.run.taskId : undefined;
+      }, BACKGROUND_CONTEXT));
+
+    if (running !== undefined) {
+      // The run and the work it owns: running tools are signalled, not waited out.
+      await this.harness.abortTask(running, BACKGROUND_CONTEXT);
+      await this.harness.waitForTask(running, BACKGROUND_CONTEXT);
+    }
+
+    await conversation?.commit(async (tx) => {
+      const pending = await tx.doc(InterruptDoc, conversationId);
+      const target = pending.item;
+
+      if (target === undefined || target.mode === "write") return;
+      const live = await tx.doc(LiveDoc, conversationId);
+      const inbox = await tx.doc(InboxDoc, conversationId);
+      const owner = await tx.doc(OwnerInputDoc, conversationId);
+
+      if (live.run) {
+        // Something started a turn first: the message joins it at its next step boundary.
+        inbox.items.push(withMode(target, "steer"));
+      } else {
+        // The queue steps aside so the message is sent alone, starting the next turn now, then
+        // returns in its order. Other steers wait for the next turn rather than join this one.
+        const queued = inbox.items.map((item) =>
+          item.mode === "steer" ? withMode(item, "followUp") : copyInboxItem(item),
+        );
+
+        inbox.items = queued.filter((item) => item.mode === "write");
+
+        const content = withInterruptNote(target.content);
+        const requestId = `interrupt:${target.id}`;
+
+        // A message placed as its own kind of entry (a review handoff, say) keeps it.
+        const draft: InputSubmissionDraft = target.entry
+          ? { type: "input", content, requestId, entry: target.entry }
+          : { type: "input", content, requestId };
+
+        const sent = await conversation.submit(tx, draft);
+
+        tx.settleSubmission(target.id, { status: "unanswered", reason: "interrupted" });
+
+        // The owner's message stays the owner's: only its turn may act for the owner alone.
+        if (owner.submissions.includes(target.id) && !owner.submissions.includes(sent))
+          owner.submissions.push(sent);
+        owner.submissions.splice(0, Math.max(0, owner.submissions.length - OWNER_INPUTS_KEPT));
+
+        inbox.items.push(...queued.filter((item) => item.mode !== "write"));
+      }
+
+      delete pending.item;
+      delete pending.run;
+    }, BACKGROUND_CONTEXT);
+
+    await this.ctx.storage.delete(interruptKey(conversationId));
+  }
+
+  /** Finish the interrupts a restart cut short (see `interruptQueued`); failures are logged. */
+  private resumeInterrupts = Effect.fn("Agent.resumeInterrupts")(function* (this: Agent) {
+    const marked = yield* attempt("interrupt.list", () =>
+      this.ctx.storage.list({ prefix: INTERRUPT_KEY_PREFIX }),
+    );
+
+    // One conversation's failure leaves the others to finish.
+    for (const key of marked.keys())
+      yield* attempt("interrupt.resume", () =>
+        // SAFETY: interrupt keys are written by interruptKey from a ConversationId.
+        this.finishInterrupt(Number(key.slice(INTERRUPT_KEY_PREFIX.length)) as ConversationId),
+      ).pipe(Effect.catch(logInterruptFailure));
+  }, Effect.catch(logInterruptFailure));
+
+  /**
    * Withdraw a queued message before the agent sees it. Only inputs still waiting in the inbox
    * can be withdrawn; one a boundary already placed stays in the conversation.
    */
@@ -4514,6 +4689,35 @@ export class Agent extends DurableObject<Env> {
 }
 
 type PiMessage = NonNullable<EntryRecord["model"]>[number];
+
+const INTERRUPT_KEY_PREFIX = "interrupt:";
+
+/** Log an interrupt a restart could not finish; its marker stays for the next start. */
+const logInterruptFailure = (error: OperationError) =>
+  Effect.logError({
+    event: "interrupt_resume_failed",
+    operation: error.operation,
+    details: error.details,
+  });
+
+/** The storage key marking an interrupt in progress in a conversation. */
+const interruptKey = (conversationId: ConversationId) => `${INTERRUPT_KEY_PREFIX}${conversationId}`;
+
+type QueuedInput = Extract<InboxItem, { mode: "followUp" | "steer" }>;
+
+/** A copy of a queued input in `mode` (a queued write stays one). */
+function withMode(item: InboxItem, mode: QueuedInput["mode"]): InboxItem {
+  const copy = copyInboxItem(item);
+
+  return copy.mode === "write" ? copy : { ...copy, mode };
+}
+
+/** A queued message's content with the interrupt note after it, as a text block of its own. */
+function withInterruptNote(content: QueuedInput["content"]) {
+  return Predicate.isString(content)
+    ? `${content}\n\n${INTERRUPT_NOTE_BLOCK}`
+    : [...content, { type: "text" as const, text: INTERRUPT_NOTE_BLOCK }];
+}
 
 /** A transcript message for read_session: visible text and tool names, no reasoning or output. */
 function transcriptMessage(

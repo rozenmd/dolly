@@ -1,6 +1,7 @@
 import type { PromptIndex } from "../../../src/transcript";
 import { parseScheduledMessage } from "../../../src/schedule-message";
 import { parseCiWaitMessage } from "../../../src/ci-wait-message";
+import { stripInterruptNote } from "../../../src/interrupt-message";
 import { parseSessionMessage, type SessionMessage } from "../../../src/child-report-message";
 import type { Step, Turn } from "./api";
 
@@ -147,7 +148,9 @@ function sessionMessagePreview(message: SessionMessage) {
 }
 
 /** A prompt as the rail's one line: what it was about, or its screenshots when it has no words. */
-function promptPreview(text: string, images = 0) {
+function promptPreview(raw: string, images = 0) {
+  // The server's prompt index carries an interrupting message's delivery note; the rail shows its words.
+  const text = stripInterruptNote(raw);
   // A scheduled prompt previews as what it asks, a wake-up as its outcome and a session's message as its words, not their labels.
   const delivered = parseSessionMessage(text);
 

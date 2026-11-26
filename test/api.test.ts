@@ -30,6 +30,7 @@ describe("Hono Worker in workerd", () => {
       ["sessions/missing/messages", "POST"],
       ["sessions/missing/abort", "POST"],
       ["sessions/missing/queue/1/steer", "POST"],
+      ["sessions/missing/queue/1/interrupt", "POST"],
       ["sessions/missing/queue/1/edit", "POST"],
       ["sessions/missing/queue/1", "DELETE"],
       ["sessions/missing/queue", "PUT"],
@@ -72,6 +73,7 @@ describe("Hono Worker in workerd", () => {
   it("validates queue IDs and rejects unknown sessions", async () => {
     const routes = [
       ["steer", "POST"],
+      ["interrupt", "POST"],
       ["edit", "POST"],
       ["", "DELETE"],
     ] as const;

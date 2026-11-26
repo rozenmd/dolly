@@ -712,6 +712,26 @@ app.post("/api/sessions/:id/queue/:submissionId/steer", (c) =>
   ),
 );
 
+/** Interrupt and send now: stop the running turn and deliver this queued message at once. */
+app.post("/api/sessions/:id/queue/:submissionId/interrupt", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const submissionId = queuedSubmission(c);
+
+      if (submissionId === undefined)
+        return c.json({ error: "Expected a positive submission ID" }, 400);
+
+      const agent = yield* AgentApi;
+      const result = yield* agent.interruptQueued(c.req.param("id"), submissionId);
+
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 409 : 202);
+    }),
+  ),
+);
+
 app.delete("/api/sessions/:id/queue/:submissionId", (c) =>
   handle(
     c,

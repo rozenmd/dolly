@@ -15,6 +15,7 @@ import {
   ArrowTurnDownLeftIcon,
   ArrowUpIcon,
   ArrowsRightLeftIcon,
+  BoltIcon,
   CheckIcon,
   ChevronRightIcon,
   ExclamationCircleIcon,
@@ -101,6 +102,8 @@ export function Conversation({
   loading,
   older,
   steering = [],
+  onInterrupt,
+  interrupting = false,
   thread,
   onOpenThread,
 }: {
@@ -110,6 +113,10 @@ export function Conversation({
   older?: OlderHistory;
   /** Messages sent into the running turn that its next step boundary hasn't delivered yet. */
   steering?: readonly QueuedMessage[];
+  /** Stop the running turn and send this steer now, rather than after the current step. */
+  onInterrupt?: (id: number) => void;
+  /** An interrupt or another queue change is in flight. */
+  interrupting?: boolean;
 } & ThreadLookup) {
   const scroll = useRef<HTMLDivElement>(null);
   const top = useRef<HTMLDivElement>(null);
@@ -267,6 +274,18 @@ export function Conversation({
                 <div className="prompt-bubble">
                   <Prose text={item.text} />
                 </div>
+                {onInterrupt && (
+                  <button
+                    type="button"
+                    className="steer-interrupt"
+                    disabled={interrupting}
+                    title="Stop what the agent is doing, including a running command, and send this now"
+                    onClick={() => onInterrupt(item.id)}
+                  >
+                    <BoltIcon aria-hidden="true" />
+                    Interrupt and send now
+                  </button>
+                )}
               </article>
             </section>
           ))}
@@ -292,7 +311,9 @@ function seekingEntry(seeking: string | undefined) {
 
 function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number } & ThreadLookup) {
   const started = turn.prompt?.at ?? turn.startedAt;
-  const silent = !turn.running && !turn.answer && !turn.failure && turn.items.length > 0;
+
+  const silent =
+    !turn.running && !turn.answer && !turn.failure && !turn.interrupted && turn.items.length > 0;
 
   // Threads this turn started stay visible as cards even when the work log is folded.
   const spawned = turn.items.flatMap((item) =>
@@ -363,6 +384,11 @@ function TurnView({ turn, now, thread, onOpenThread }: { turn: Turn; now: number
       )}
       {turn.answer && (
         <Answer id={turn.answer.id} text={turn.answer.text} at={turn.endedAt} now={now} />
+      )}
+      {turn.interrupted && (
+        <p className="run-notice interrupted" role="status">
+          Interrupted to send your next message.
+        </p>
       )}
       {silent && (
         <p className="run-notice" role="status">
