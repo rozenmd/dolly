@@ -17,6 +17,7 @@
     "test": "node --test scripts/*.test.mjs && pnpm --dir infra test && vp test run",
     "build": "vp -C . build && cf deploy --prebuilt --dry-run && pnpm --dir ingress run build && pnpm --dir ingress exec cf deploy --prebuilt --dry-run",
     "test:sandbox": "bash scripts/test-sandbox.sh",
+    "test:claude-bridge": "tsrs --noEmit -p claude-bridge/tsconfig.json && npm test --prefix claude-bridge",
     "format": "vp fmt --write .",
     "format:check": "vp fmt --check .",
     "lint": "vp lint --deny-warnings",

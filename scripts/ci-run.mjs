@@ -41,6 +41,11 @@ const commands = {
   worker: [["run", "test:worker"]],
   sandbox: [["run", "test:sandbox", ...shard, ...report]],
   build: [["run", "build"]],
+  "claude-bridge": [
+    ["exec", "npm", "ci", "--prefix", "claude-bridge"],
+    ["run", "test:claude-bridge"],
+    ["exec", "docker", "build", "--file", "claude-bridge/Dockerfile", "claude-bridge"],
+  ],
 };
 
 if (!Object.hasOwn(commands, suite)) throw new Error(`Unknown CI suite: ${suite}`);

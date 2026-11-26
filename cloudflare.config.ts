@@ -13,6 +13,13 @@ const sandbox = defineContainer({
   images: { sandbox: { dockerfile: "./Dockerfile" } },
 });
 
+// Trusted: it only runs the Claude Code bridge (claude-bridge/), never the agent's commands.
+const claudeCode = defineContainer({
+  name: "dolly-claude-code",
+  schedulingPolicy: "durable-object",
+  images: { claude: { dockerfile: "./claude-bridge/Dockerfile" } },
+});
+
 export default defineConfig({
   worker: {
     name: workerName,
@@ -33,6 +40,7 @@ export default defineConfig({
       ACCESS_LOCAL_DEV: bindings.text("false"),
       AGENT: bindings.durableObject({ worker: workerName, exportName: "Agent" }),
       SANDBOX: bindings.durableObject({ worker: workerName, exportName: "Sandbox" }),
+      CLAUDE_CODE: bindings.durableObject({ worker: workerName, exportName: "ClaudeCode" }),
     },
     exports: {
       GitHubIngress: exports.worker(),
@@ -40,10 +48,12 @@ export default defineConfig({
       AutomationIngress: exports.worker(),
       WorkspaceOutbound: exports.worker(),
       PreviewOutbound: exports.worker(),
+      ClaudeCodeOutbound: exports.worker(),
       Agent: exports.durableObject({ storage: "sqlite" }),
       Sandbox: exports.durableObject({ storage: "sqlite", container: sandbox }),
+      ClaudeCode: exports.durableObject({ storage: "sqlite", container: claudeCode }),
     },
     observability: { enabled: true, issues: { enabled: true } },
   },
-  containers: [sandbox],
+  containers: [sandbox, claudeCode],
 });

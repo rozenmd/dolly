@@ -13,8 +13,19 @@ export async function sandboxTestConfig() {
 
   // Keep the generated file beside the source config so relative build paths retain their meaning.
   const path = fileURLToPath(new URL("../.sandbox-test.wrangler.json", import.meta.url));
+
+  // The sandbox suite never starts Claude Code; the claude-bridge CI suite builds its image.
+  const config = convertToWranglerConfig({
+    ...result.data,
+    containers: result.data.containers?.filter((container) => container.name === "dolly-sandbox"),
+  });
+
+  // Its Durable Object stays, unlinked: wrangler rejects a link to a container it doesn't define.
+  const claudeCode = config.exports?.ClaudeCode;
+
+  if (claudeCode?.type === "durable-object") delete claudeCode.container;
+
   // Exercise the backend directly; the separately built HTTP suite covers the web entrypoint.
-  const config = convertToWranglerConfig(result.data);
   config.main = "./src/index.ts";
   delete config.assets;
   await writeFile(path, JSON.stringify(config, null, 2));

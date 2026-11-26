@@ -533,7 +533,8 @@ export type ApiBody = {
   defaultRepository?: string;
   callbackUrl?: string;
   name?: string;
-  transport?: "http";
+  /** An MCP server's transport, or how Claude requests go out. */
+  transport?: "http" | ClaudeTransport;
   headers?: Record<string, string>;
   /** Automations (lib/automations.ts); `null` clears a field. */
   prompt?: string;
@@ -588,10 +589,24 @@ export async function defaultModel(change?: DefaultModelChange) {
   return Schema.decodeUnknownSync(Schema.fromJsonString(DefaultModel))(text);
 }
 
+/** How Claude requests go out: straight from the Worker, or through the real Claude Code. */
+export const ClaudeTransport = Schema.Literals(["direct", "claude-code"]);
+
+export type ClaudeTransport = typeof ClaudeTransport.Type;
+
 export async function anthropicStatus() {
   return Schema.decodeUnknownSync(
-    Schema.fromJsonString(Schema.Struct({ connected: Schema.Boolean })),
+    Schema.fromJsonString(
+      Schema.Struct({ connected: Schema.Boolean, transport: Schema.optional(ClaudeTransport) }),
+    ),
   )(await request("/auth/anthropic"));
+}
+
+/** Saves how Claude requests go out; the next request of every session uses it. */
+export async function setClaudeTransport(transport: ClaudeTransport) {
+  return Schema.decodeUnknownSync(
+    Schema.fromJsonString(Schema.Struct({ transport: ClaudeTransport })),
+  )(await request("/auth/anthropic/transport", { transport }, undefined, "PUT")).transport;
 }
 
 export const ChatGPTStatus = Schema.Union([
