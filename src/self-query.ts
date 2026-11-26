@@ -263,7 +263,7 @@ async function listSessions(
       activity: session.activity,
       archived: Boolean(session.archived),
       pinned: session.pinnedAt === undefined ? undefined : true,
-      coordinator: session.coordinator,
+      chief: session.chief || undefined,
       parentId: session.parentId,
       automation: session.automationRun?.name,
       pullRequest: session.pullRequest,

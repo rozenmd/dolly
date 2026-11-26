@@ -38,7 +38,14 @@ import * as Predicate from "effect/Predicate";
 import { historyPage, promptIndex, promptWindow } from "./transcript-window";
 import { compactionSettings } from "./compaction";
 import { Coordination, coordinationTasks, indexSession } from "./coordination";
-import { coordinatorNote } from "./coordinator";
+import {
+  CHIEF_KEY,
+  CHIEF_NAME_KEY,
+  chiefName,
+  chiefNote,
+  storedChiefName,
+  type ChiefRecord,
+} from "./chief";
 import { formatHandoffEvidence } from "./child-report";
 import { Scheduler, SCHEDULE_TOOL_NAMES, scheduleTasks } from "./schedule";
 import { CI_WAIT_TOOL_NAMES, CiWaiter } from "./ci-wait";
@@ -452,6 +459,9 @@ export class Agent extends DurableObject<Env> {
       return `${base?.replace(/\/+$/, "") ?? ""}/session/${encodeURIComponent(id)}`;
     },
     title: (id) => this.sessionTitle(id),
+    alias: (id) => this.ctx.storage.get<ConversationId>(`session:${id}`),
+    retiresSettledChildren: async (id) =>
+      (await this.ctx.storage.get<ChiefRecord>(CHIEF_KEY))?.conversation === id,
   });
   private readonly checkpointTask = workspaceCheckpoint(
     (sandboxId, turnId) => this.env.SANDBOX.getByName(sandboxId).checkpoint(turnId),
@@ -1182,18 +1192,12 @@ export class Agent extends DurableObject<Env> {
             return "Skill inventory unavailable; prepare the active checkout and inspect its skill files before claiming a skill is missing.";
           }
         }),
-        section("coordinator", async ({ read, conversationId }, context) => {
-          const metadata = await this.ctx.storage.get<SessionMetadata>(
-            sessionMetadataKey(conversationId),
-          );
+        section("chief", async ({ conversationId }) => {
+          const chief = await this.ctx.storage.get<ChiefRecord>(CHIEF_KEY);
 
-          if (!metadata?.coordinator) return undefined;
-          const state = await read.snapshot(ConversationWorkspace, conversationId, context);
+          if (chief?.conversation !== conversationId) return undefined;
 
-          return coordinatorNote({
-            repository: state?.config?.repository,
-            hasCheckout: Boolean(state?.config),
-          });
+          return chiefNote(storedChiefName(await this.ctx.storage.get<string>(CHIEF_NAME_KEY)));
         }),
         section("commit-attribution", async () =>
           commitAttributionPrompt(await this.commitCoauthor()),
@@ -2958,7 +2962,7 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(conversation)) return undefined;
 
-        const { model, thinkingLevel, speed, autoFallback, coordinator } = settings;
+        const { model, thinkingLevel, speed, autoFallback } = settings;
 
         if (model !== undefined) {
           const provider = modelProvider(model);
@@ -3002,17 +3006,10 @@ export class Agent extends DurableObject<Env> {
             ),
           );
 
-        if (
-          model !== undefined ||
-          speed !== undefined ||
-          autoFallback !== undefined ||
-          coordinator !== undefined
-        )
+        if (model !== undefined || speed !== undefined || autoFallback !== undefined)
           yield* this.patchSessionMetadata(conversation.value.id, {
             ...(speed !== undefined && { speed }),
             ...(autoFallback !== undefined && { autoFallback }),
-            // Applies from the next request: the briefing is part of each system prompt.
-            ...(coordinator !== undefined && { coordinator }),
             // Choosing a model by hand re-arms automatic fallback from it.
             ...(model !== undefined && { fellBackTo: undefined }),
           });
@@ -3022,7 +3019,6 @@ export class Agent extends DurableObject<Env> {
           ...(level !== undefined && { thinkingLevel: level }),
           ...(speed !== undefined && { speed }),
           ...(autoFallback !== undefined && { autoFallback }),
-          ...(coordinator !== undefined && { coordinator }),
         };
       }),
     );
@@ -3610,9 +3606,68 @@ export class Agent extends DurableObject<Env> {
     this.refreshPullSummaries([[key, pull]]);
   }
 
+  /** The chief of staff (chief.ts), created on first use; one creation at a time. */
+  private chiefCreation?: Promise<ChiefRecord | undefined>;
+
+  /**
+   * Make sure the chief of staff exists, creating it the first time. Concurrent callers share
+   * one creation, and the record under `CHIEF_KEY` keeps it from being created twice. Until a
+   * subscription is connected there is no model to create it on, so a later call tries again.
+   */
+  private ensureChief() {
+    this.chiefCreation ??= (async () => {
+      const existing = await this.ctx.storage.get<ChiefRecord>(CHIEF_KEY);
+
+      if (existing) return existing;
+
+      const created = await this.createSession({});
+
+      if ("error" in created) return undefined;
+
+      const conversation = await this.ctx.storage.get<ConversationId>(`session:${created.id}`);
+
+      if (conversation === undefined) return undefined;
+
+      const record: ChiefRecord = { session: created.id, conversation };
+      await this.ctx.storage.put(CHIEF_KEY, record);
+
+      return record;
+    })().finally(() => {
+      this.chiefCreation = undefined;
+    });
+
+    return this.chiefCreation;
+  }
+
+  /** The chief of staff's display name (owner settings). */
+  async chiefSettings() {
+    return { name: storedChiefName(await this.ctx.storage.get<string>(CHIEF_NAME_KEY)) };
+  }
+
+  /** Rename the chief of staff; undefined when the name is not 1–40 characters without control characters. */
+  async setChiefName(input: string) {
+    const name = chiefName(input);
+
+    if (name === undefined) return undefined;
+
+    await this.ctx.storage.put(CHIEF_NAME_KEY, name);
+    this.sessionsFeed.changed();
+
+    return { name };
+  }
+
   async sessions() {
     const secrets = await Effect.runPromise(this.credentials.secrets);
-    const sessions = await listSessions(this.harness, this.ctx.storage, secrets);
+    const chief = await this.ensureChief().catch(() => undefined);
+    const chiefTitle = chief && (await this.chiefSettings()).name;
+
+    const sessions = (await listSessions(this.harness, this.ctx.storage, secrets)).map((session) =>
+      // The chief is titled by its name, never by its prompts.
+      session.id === chief?.session && chiefTitle
+        ? { ...session, chief: true, title: chiefTitle }
+        : session,
+    );
+
     const pulls = new Map<string, SessionPull>();
 
     // Prefer active sessions when equally stale. Several sessions may link the same PR.
@@ -3674,6 +3729,14 @@ export class Agent extends DurableObject<Env> {
     if (Option.isNone(conversation)) return undefined;
     const key = `session-meta:${conversation.value.id}`;
     const { pinned, ...choices } = patch;
+
+    if (patch.archived) {
+      const chief = await this.ctx.storage.get<ChiefRecord>(CHIEF_KEY);
+
+      // The chief of staff stays in the sidebar for good.
+      if (chief?.conversation === conversation.value.id)
+        return { error: "The chief of staff can't be archived" };
+    }
 
     const result = await this.ctx.storage.transaction(async (tx) => {
       const metadata = await tx.get<SessionMetadata>(key);

@@ -482,33 +482,3 @@ test("opens a thread as its own page on a phone", async ({ page }) => {
   ).toBeVisible();
   await expect(page.locator(".thread-peek")).toHaveCount(0);
 });
-
-test("turns coordinator mode on for the open session from the model menu", async ({ page }) => {
-  const settings: unknown[] = [];
-
-  await page.route("**/api/sessions/root/settings", (route) => {
-    const body = route.request().postDataJSON();
-    settings.push(body);
-    sessions = sessions.map((session) =>
-      session.id === "root" ? { ...session, ...body } : session,
-    );
-
-    return route.fulfill({ json: body });
-  });
-  await expect(page.getByText("The SDK bump is merged.")).toBeVisible();
-
-  await page.getByRole("button", { name: /GPT-6 Sol/ }).click();
-  const toggle = page.getByRole("menuitemcheckbox", { name: /Coordinator/ });
-  await expect(toggle).toHaveAttribute("aria-checked", "false");
-  await expect(toggle).toContainText("Delegate work to child sessions");
-
-  if (shots) await page.screenshot({ path: `${shots}/desktop-coordinator.png` });
-
-  await toggle.click();
-  // Like Auto-fallback, the switch flips in place and the menu stays open.
-  await expect(toggle).toHaveAttribute("aria-checked", "true");
-  expect(settings).toEqual([{ coordinator: true }]);
-  await toggle.click();
-  await expect(toggle).toHaveAttribute("aria-checked", "false");
-  expect(settings).toEqual([{ coordinator: true }, { coordinator: false }]);
-});

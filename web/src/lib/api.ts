@@ -515,7 +515,6 @@ export type ApiBody = {
   thinkingLevel?: string | null;
   speed?: Speed | null;
   autoFallback?: boolean | null;
-  coordinator?: boolean;
   /** A session's repository; `null` clears an automation's. */
   workspace?: { repository: string; ref?: string; networkHosts?: readonly string[] } | null;
   repository?: string;
@@ -587,6 +586,18 @@ export async function defaultModel(change?: DefaultModelChange) {
       : await request("/settings/model", change, undefined, "PUT");
 
   return Schema.decodeUnknownSync(Schema.fromJsonString(DefaultModel))(text);
+}
+
+export const ChiefSettings = Schema.Struct({ name: Schema.String });
+
+/** Reads, or with a name renames, the chief of staff: the sidebar's standing session. */
+export async function chiefSettings(name?: string) {
+  const text =
+    name === undefined
+      ? await request("/settings/chief")
+      : await request("/settings/chief", { name }, undefined, "PUT");
+
+  return Schema.decodeUnknownSync(Schema.fromJsonString(ChiefSettings))(text);
 }
 
 /** How Claude requests go out: straight from the Worker, or through the real Claude Code. */

@@ -284,7 +284,6 @@ export async function listSessions(
             model: agent.model?.modelId ?? "Existing session",
             thinkingLevel: agent.thinkingLevel,
             ...(metadata?.speed && { speed: metadata.speed }),
-            ...(metadata?.coordinator && { coordinator: true }),
             ...(metadata?.autoFallback !== undefined && { autoFallback: metadata.autoFallback }),
             title:
               (metadata?.title && redact(metadata.title, secrets)) ||

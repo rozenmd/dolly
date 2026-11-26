@@ -87,12 +87,11 @@ export const SessionSettings = Schema.Struct({
   thinkingLevel: Schema.optional(ThinkingLevel),
   speed: Schema.optional(Speed),
   autoFallback: Schema.optional(Schema.Boolean),
-  coordinator: Schema.optional(Schema.Boolean),
 }).check(
   Schema.makeFilter((settings) =>
     Object.values(settings).some((value) => value !== undefined)
       ? undefined
-      : "Expected model, thinkingLevel, speed, autoFallback or coordinator",
+      : "Expected model, thinkingLevel, speed or autoFallback",
   ),
 );
 
