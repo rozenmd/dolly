@@ -128,6 +128,8 @@ export function startServer(port: number, source: NodeJS.ProcessEnv) {
       });
   });
 
+  server.on("close", () => bridge.close());
+
   // Claude Code turns can run for many minutes.
   server.requestTimeout = 0;
   server.headersTimeout = 60_000;

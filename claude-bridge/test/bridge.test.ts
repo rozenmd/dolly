@@ -4,7 +4,7 @@
  */
 import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server } from "node:http";
@@ -17,6 +17,40 @@ function port(server: Server) {
   return z.object({ port: z.number() }).parse(server.address()).port;
 }
 
+/** The Claude Code processes the bridge (running in this test process) has started and not ended. */
+function claudeProcesses() {
+  const pids: number[] = [];
+
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+
+    try {
+      const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+      // After "pid (comm) ": state, then the parent's pid.
+      const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+      const zombie = stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z");
+
+      if (
+        parent === process.pid &&
+        !zombie &&
+        readFileSync(`/proc/${entry}/cmdline`, "utf8").includes("claude")
+      )
+        pids.push(Number(entry));
+    } catch {
+      // The process ended while being read.
+    }
+  }
+
+  return pids.sort((a, b) => a - b);
+}
+
+async function waitFor(condition: () => boolean) {
+  for (let attempt = 0; attempt < 100 && !condition(); attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.ok(condition());
+}
+
 type Upstream = {
   path: string;
   headers: Record<string, string | string[] | undefined>;
@@ -25,6 +59,7 @@ type Upstream = {
 
 type UpstreamBody = {
   model: string;
+  max_tokens: number;
   system: Array<{ text: string }>;
   messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>;
   tools?: Array<{ name: string; input_schema: { properties?: JsonObject } }>;
@@ -267,18 +302,17 @@ test("answers through real Claude Code with its subscription identity and the cl
   assert.match(JSON.stringify(schema?.properties?.timeout), /"maximum":3600/);
 });
 
-test("hands tool calls to the client and resumes the SDK session with their results", async () => {
-  replies.push(
-    {
-      content: [
-        { type: "text", text: "Listing files." },
-        { type: "tool_use", id: "toolu_1", name: "mcp__dolly__shell", input: { command: "ls" } },
-      ],
-      stop: "tool_use",
-    },
-    // Claude Code's second turn after the blocked call.
-    { content: [{ type: "text", text: "Waiting for the result." }], stop: "end_turn" },
-  );
+test("hands tool calls to the client in one model call and resumes the same process with their results", async () => {
+  replies.push({
+    content: [
+      { type: "text", text: "Listing files." },
+      { type: "tool_use", id: "toolu_1", name: "mcp__dolly__shell", input: { command: "ls" } },
+      { type: "tool_use", id: "toolu_2", name: "mcp__dolly__shell", input: { command: "pwd" } },
+    ],
+    stop: "tool_use",
+  });
+
+  const before = claudeProcesses();
 
   const first = await events(
     await send(
@@ -296,28 +330,35 @@ test("hands tool calls to the client and resumes the SDK session with their resu
     started.map((event) => event.data.content_block),
     [
       { type: "text", text: "" },
-      { type: "text", text: "" },
       { type: "tool_use", id: "toolu_1", name: "shell", input: {} },
+      { type: "tool_use", id: "toolu_2", name: "shell", input: {} },
     ],
   );
 
-  const toolInput = first.find(
-    (event) =>
-      event.event === "content_block_delta" &&
-      JSON.stringify(event.data.delta).includes("input_json_delta"),
-  );
+  const inputs = first
+    .filter(
+      (event) =>
+        event.event === "content_block_delta" &&
+        JSON.stringify(event.data.delta).includes("input_json_delta"),
+    )
+    .map((event) => event.data.delta);
 
-  assert.deepEqual(toolInput?.data.delta, {
-    type: "input_json_delta",
-    partial_json: JSON.stringify({ command: "ls" }),
-  });
+  assert.deepEqual(inputs, [
+    { type: "input_json_delta", partial_json: JSON.stringify({ command: "ls" }) },
+    { type: "input_json_delta", partial_json: JSON.stringify({ command: "pwd" }) },
+  ]);
   assert.deepEqual(first.find((event) => event.event === "message_delta")?.data.delta, {
     stop_reason: "tool_use",
     stop_sequence: null,
   });
-  assert.equal(requests.length, 2);
+  // The turn ends at the tool calls: no second model call to narrate the block.
+  assert.equal(requests.length, 1);
 
-  // The client ran the tool; its result goes back on the same session.
+  const kept = claudeProcesses().filter((pid) => !before.includes(pid));
+
+  assert.equal(kept.length, 1);
+
+  // The client ran the tools; their results go to the same waiting Claude Code process.
   replies.push({
     content: [{ type: "text", text: "There is one file: README.md" }],
     stop: "end_turn",
@@ -334,6 +375,7 @@ test("hands tool calls to the client and resumes the SDK session with their resu
             content: [
               { type: "text", text: "Listing files." },
               { type: "tool_use", id: "toolu_1", name: "shell", input: { command: "ls" } },
+              { type: "tool_use", id: "toolu_2", name: "shell", input: { command: "pwd" } },
             ],
           },
           {
@@ -344,6 +386,7 @@ test("hands tool calls to the client and resumes the SDK session with their resu
                 tool_use_id: "toolu_1",
                 content: [{ type: "text", text: "README.md" }],
               },
+              { type: "tool_result", tool_use_id: "toolu_2", content: "/repo" },
             ],
           },
         ],
@@ -354,12 +397,86 @@ test("hands tool calls to the client and resumes the SDK session with their resu
   );
 
   assert.match(JSON.stringify(second), /There is one file: README\.md/);
-  assert.equal(requests.length, 3);
-  const resumed = JSON.stringify(requests[2]?.body.messages);
-  // Resumed, not replayed: the earlier exchange is Claude Code's own record of it, and the new
+  assert.equal(requests.length, 2);
+  assert.deepEqual(
+    claudeProcesses().filter((pid) => !before.includes(pid)),
+    kept,
+  );
+  const resumed = JSON.stringify(requests[1]?.body.messages);
+  // Continued, not replayed: the earlier exchange is Claude Code's own record of it, and the new
   // turn carries only the tool output.
   assert.match(resumed, /What files are here\?/);
   assert.match(resumed, /README\.md/);
+  assert.match(resumed, /\/repo/);
+  assert.doesNotMatch(resumed, /\[Your previous reply\]/);
+});
+
+test("starts a new Claude Code process when a request needs different options", async () => {
+  const conversation = [{ role: "user" as const, content: "First" }];
+
+  replies.push({ content: [{ type: "text", text: "One" }], stop: "end_turn" });
+  const before = claudeProcesses();
+
+  await events(await send({ max_tokens: 4096, messages: conversation }, "conversation-options"));
+  const first = claudeProcesses().filter((pid) => !before.includes(pid));
+
+  replies.push({ content: [{ type: "text", text: "Two" }], stop: "end_turn" });
+
+  const response = await events(
+    await send(
+      {
+        max_tokens: 2048,
+        messages: [
+          ...conversation,
+          { role: "assistant", content: [{ type: "text", text: "One" }] },
+          { role: "user", content: "Second" },
+        ],
+      },
+      "conversation-options",
+    ),
+  );
+
+  assert.match(JSON.stringify(response), /Two/);
+  await waitFor(() => first.every((pid) => !claudeProcesses().includes(pid)));
+  assert.equal(claudeProcesses().filter((pid) => !before.includes(pid)).length, 1);
+  assert.equal(requests[1]?.body.max_tokens, 2048);
+  // The new process resumes the SDK session rather than replaying the conversation.
+  assert.doesNotMatch(JSON.stringify(requests[1]?.body.messages), /\[Your previous reply\]/);
+});
+
+test("answers on a fresh process when the waiting one has exited", async () => {
+  const conversation = [{ role: "user" as const, content: "Before the crash" }];
+
+  replies.push({ content: [{ type: "text", text: "Noted" }], stop: "end_turn" });
+  const before = claudeProcesses();
+
+  await events(await send({ messages: conversation }, "conversation-crash"));
+  const [waiting] = claudeProcesses().filter((pid) => !before.includes(pid));
+
+  assert.ok(waiting);
+  process.kill(waiting, "SIGKILL");
+  await waitFor(() => !claudeProcesses().includes(waiting));
+
+  replies.push({ content: [{ type: "text", text: "Still here" }], stop: "end_turn" });
+
+  const response = await events(
+    await send(
+      {
+        messages: [
+          ...conversation,
+          { role: "assistant", content: [{ type: "text", text: "Noted" }] },
+          { role: "user", content: "After the crash" },
+        ],
+      },
+      "conversation-crash",
+    ),
+  );
+
+  assert.match(JSON.stringify(response), /Still here/);
+  const resumed = JSON.stringify(requests.at(-1)?.body.messages);
+
+  assert.match(resumed, /Before the crash/);
+  assert.match(resumed, /After the crash/);
   assert.doesNotMatch(resumed, /\[Your previous reply\]/);
 });
 

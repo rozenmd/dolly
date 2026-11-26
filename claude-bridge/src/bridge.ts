@@ -8,13 +8,16 @@
  *
  *  - The client's tools are registered as an in-process SDK MCP server with no-op handlers, so the
  *    model emits real tool_use blocks for them.
- *  - A PreToolUse hook blocks every tool call and captures it. The captured calls return to the
- *    client as Anthropic `tool_use` blocks with stop_reason "tool_use": the client (Dolly) runs the
- *    tool itself.
+ *  - A PreToolUse hook blocks every tool call, captures it and ends the turn there, so a tool step
+ *    is one model call. The captured calls return to the client as Anthropic `tool_use` blocks
+ *    with stop_reason "tool_use": the client (Dolly) runs the tool itself.
  *  - Each client session maps to one SDK session, keyed by the `x-dolly-session` header (else a
  *    fingerprint of the first message). A follow-up request resumes that session with only the new
  *    tail; a diverged or compacted history starts a fresh session with a full flat-text replay.
  *  - Only the current user turn's images reach the SDK, as structured content.
+ *  - A session's Claude Code process stays running between its requests (streaming input), so a
+ *    follow-up skips the CLI's start-up, which takes seconds on a container's CPU. A request that
+ *    needs other options, or finds the process gone, starts a new one that resumes the session.
  *
  * Known approximations, as in Open Session: no token-level streaming (a streamed response opens at
  * once, pings while the SDK works, then replays the finished message as Anthropic SSE events),
@@ -28,6 +31,8 @@ import {
   tool,
   type HookCallback,
   type Options,
+  type Query,
+  type SDKMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -83,6 +88,10 @@ export const DISALLOWED_BUILTINS = [
 export const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const MAX_SESSIONS = 500;
 const HEARTBEAT_MS = 15_000;
+
+/** Claude Code processes kept waiting for their session's next request, and for how long. */
+const MAX_LIVE = 6;
+const LIVE_IDLE_MS = 10 * 60_000;
 
 /** Far above any real window: the CLI never refuses a request on its own token estimate. */
 const CLI_BLOCKING_LIMIT_OFF = 1_000_000_000;
@@ -168,15 +177,9 @@ function anthropicError(status: number, type: string, message: string) {
   return Response.json({ type: "error", error: { type, message } }, { status });
 }
 
-/** A one-message streaming input: the SDK only takes image blocks through SDKUserMessage. */
-async function* singleUserMessage(content: SDKUserMessage["message"]["content"]) {
-  const message: SDKUserMessage = {
-    type: "user",
-    message: { role: "user", content },
-    parent_tool_use_id: null,
-  };
-
-  yield message;
+/** A user message for Claude Code: the SDK only takes image blocks through SDKUserMessage. */
+function userMessage(content: SDKUserMessage["message"]["content"]): SDKUserMessage {
+  return { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
 }
 
 /** The SDK's thinking options for the request's: off, adaptive at an effort, or a budget. */
@@ -278,8 +281,65 @@ function messageEvents(message: BridgeMessage) {
   return events;
 }
 
+type Captured = { id: string; name: string; input: JsonObject };
+
+/** What one request's turn collects from Claude Code. */
+type Turn = { captured: Captured[]; content: OutputBlock[]; limitError: string | undefined };
+
+/** A queue of user messages Claude Code reads as its streaming input, open until ended. */
+function inbox() {
+  const queued: SDKUserMessage[] = [];
+  let wake: (() => void) | undefined;
+  let ended = false;
+
+  function poke() {
+    wake?.();
+    wake = undefined;
+  }
+
+  async function* messages() {
+    while (!ended) {
+      const next = queued.shift();
+
+      if (next) yield next;
+      else await new Promise<void>((resolve) => (wake = resolve));
+    }
+  }
+
+  return {
+    messages: messages(),
+    push(message: SDKUserMessage) {
+      queued.push(message);
+      poke();
+    },
+    end() {
+      ended = true;
+      poke();
+    },
+  };
+}
+
+/**
+ * A Claude Code process kept running between a session's requests. Starting one costs seconds on
+ * a container's CPU, so a follow-up request sends its message to the waiting process instead.
+ */
+type Live = {
+  key: string;
+  /** Digest of the options it was started with: a request that needs others gets a new process. */
+  config: string;
+  sdkSessionId: string | undefined;
+  conversation: Query;
+  input: ReturnType<typeof inbox>;
+  /** The turn being answered; undefined while the process waits for the next request. */
+  turn: Turn | undefined;
+  closed: boolean;
+  idle: ReturnType<typeof setTimeout> | undefined;
+  lastUsedAt: number;
+};
+
 export function createBridge(options: BridgeOptions) {
   const sessions = new Map<string, StoredSession>();
+  const lives = new Map<string, Live>();
 
   function remember(key: string, session: StoredSession) {
     sessions.set(key, session);
@@ -300,35 +360,53 @@ export function createBridge(options: BridgeOptions) {
     return `fingerprint:${createHash("sha256").update(first).digest("hex").slice(0, 32)}`;
   }
 
-  async function run(request: Request, body: MessagesRequest, cancel: AbortController) {
-    const key = sessionKey(request, body.messages);
-    const stored = sessions.get(key);
+  /** The options a Claude Code process is started with, fixed for its life. */
+  function processOptions(request: Request, body: MessagesRequest) {
+    const contextWindow = Number(request.headers.get("x-dolly-context-window") ?? 0) || 0;
+    const env = { ...options.claudeEnv };
 
-    // Continuation: the client's history grew past what the SDK session has seen, and starts with
-    // exactly what it was sent. Anything else (first request, edited or compacted history, another
-    // conversation under the same session id) gets a fresh SDK session with a full replay.
-    const continuation =
-      stored !== undefined &&
-      body.messages.length > stored.messageCount &&
-      historyDigest(body.messages.slice(0, stored.messageCount - 1)) === stored.sentDigest;
+    for (const name of ["PATH", "HOME", "LANG"])
+      if (process.env[name]) env[name] = process.env[name];
+    Object.assign(env, cliPassthroughEnv(contextWindow, body.max_tokens ?? 0));
 
-    const turn = sdkTurn(body.messages, continuation ? stored.messageCount : 0);
-    const prompt = sdkTurnText(turn);
-    const promptContent = sdkTurnContent(turn);
-    const captured: Array<{ id: string; name: string; input: JsonObject }> = [];
+    // Not the system prompt: a resumed SDK session keeps the one it started with, so a new process
+    // would answer with the same prompt the waiting one has.
+    const fingerprint = JSON.stringify([
+      body.model,
+      body.tools,
+      body.thinking,
+      body.output_config,
+      body.max_tokens,
+      contextWindow,
+    ]);
 
-    const capture: HookCallback = async (input) => {
-      if (input.hook_event_name === "PreToolUse") {
-        const name = input.tool_name.startsWith(PASSTHROUGH_PREFIX)
-          ? input.tool_name.slice(PASSTHROUGH_PREFIX.length)
-          : input.tool_name;
+    return { env, config: createHash("sha256").update(fingerprint).digest("hex") };
+  }
 
-        const args = ToolArguments.safeParse(input.tool_input);
+  /** Start a Claude Code process for a session, resuming its SDK session when given one. */
+  function start(key: string, request: Request, body: MessagesRequest, resume?: string) {
+    const { env, config } = processOptions(request, body);
+    const input = inbox();
 
-        captured.push({ id: input.tool_use_id, name, input: args.success ? args.data : {} });
+    const capture: HookCallback = async (hook) => {
+      if (hook.hook_event_name === "PreToolUse") {
+        const name = hook.tool_name.startsWith(PASSTHROUGH_PREFIX)
+          ? hook.tool_name.slice(PASSTHROUGH_PREFIX.length)
+          : hook.tool_name;
+
+        const args = ToolArguments.safeParse(hook.tool_input);
+
+        live.turn?.captured.push({
+          id: hook.tool_use_id,
+          name,
+          input: args.success ? args.data : {},
+        });
       }
 
-      return { decision: "block", reason: BLOCK_REASON };
+      // Block the call and end the turn there: without `continue: false` Claude Code sends the
+      // blocked result back for a second model call, seconds and tokens that only produce
+      // narration about the block. Every call of the message is captured before the turn ends.
+      return { continue: false, stopReason: BLOCK_REASON, decision: "block", reason: BLOCK_REASON };
     };
 
     const passthrough = body.tools.map((definition) =>
@@ -348,102 +426,236 @@ export function createBridge(options: BridgeOptions) {
         tools: passthrough,
       });
 
-    const contextWindow = Number(request.headers.get("x-dolly-context-window") ?? 0) || 0;
-    const env = { ...options.claudeEnv };
+    const live: Live = {
+      key,
+      config,
+      sdkSessionId: resume,
+      input,
+      turn: undefined,
+      closed: false,
+      idle: undefined,
+      lastUsedAt: Date.now(),
+      conversation: query({
+        prompt: input.messages,
+        options: {
+          cwd: options.cwd,
+          model: body.model || undefined,
+          resume,
+          // Turn 1 is the answer: the hook ends the turn at a tool call. The cap is a backstop
+          // for a model that keeps going; error_max_turns with captured calls returns them.
+          maxTurns: 2,
+          ...thinkingOptions(body),
+          systemPrompt: systemText(body.system) || " ",
+          settingSources: [],
+          mcpServers,
+          strictMcpConfig: true,
+          tools: [],
+          disallowedTools: DISALLOWED_BUILTINS,
+          allowedTools: body.tools.map((definition) => `${PASSTHROUGH_PREFIX}${definition.name}`),
+          env,
+          hooks: { PreToolUse: [{ matcher: "", hooks: [capture] }] },
+        },
+      }),
+    };
 
-    for (const name of ["PATH", "HOME", "LANG"])
-      if (process.env[name]) env[name] = process.env[name];
-    Object.assign(env, cliPassthroughEnv(contextWindow, body.max_tokens ?? 0));
+    return live;
+  }
 
-    const content: OutputBlock[] = [];
-    let usage = usageFrom(undefined);
-    let sdkSessionId = continuation ? stored.sdkSessionId : undefined;
-    let limitError: string | undefined;
+  function close(live: Live) {
+    if (live.closed) return;
+    live.closed = true;
+    clearTimeout(live.idle);
+    live.input.end();
+    // Not awaited: the reply never waits on the process exiting.
+    live.conversation.close();
 
-    const conversation = query({
-      prompt: promptContent ? singleUserMessage(promptContent) : prompt,
-      options: {
-        cwd: options.cwd,
-        abortController: cancel,
-        model: body.model || undefined,
-        resume: sdkSessionId,
-        // Turn 1 is the real answer; turn 2 exists because blocked tool calls count as a turn
-        // boundary (the hook's reason tells the model to stop). A model that keeps going is
-        // handled at the result: error_max_turns with captured calls returns them as tool_use.
-        maxTurns: 2,
-        ...thinkingOptions(body),
-        systemPrompt: systemText(body.system) || " ",
-        settingSources: [],
-        mcpServers,
-        strictMcpConfig: true,
-        tools: [],
-        disallowedTools: DISALLOWED_BUILTINS,
-        allowedTools: body.tools.map((definition) => `${PASSTHROUGH_PREFIX}${definition.name}`),
-        env,
-        hooks: { PreToolUse: [{ matcher: "", hooks: [capture] }] },
-      },
-    });
+    if (lives.get(live.key) === live) lives.delete(live.key);
+  }
 
-    for await (const message of conversation) {
-      if (message.type === "system" && message.subtype === "init")
-        sdkSessionId = message.session_id;
+  /** Keep a process that just answered for its session's next request, retiring the one it replaces. */
+  function keep(live: Live) {
+    const current = lives.get(live.key);
 
-      if (message.type === "assistant") {
-        const text = message.message.content
-          .map((block) => (block.type === "text" ? block.text : ""))
-          .join("\n")
-          .trim();
+    if (current && current !== live) {
+      // A concurrent request is mid-turn on the kept process: it stays, this one goes.
+      if (current.turn) {
+        close(live);
 
-        if (isLimitErrorKind(message.error) && !limitError && message.error)
-          limitError = limitErrorMessage(message.error, text);
-
-        // Text only: tool_use blocks come from `captured` (after the hook, so a blocked and
-        // retried call is never doubled), and thinking can't round-trip without its signature.
-        for (const block of message.message.content)
-          if (block.type === "text" && block.text) content.push({ type: "text", text: block.text });
+        return;
       }
 
-      if (message.type !== "result") continue;
-      sdkSessionId = message.session_id || sdkSessionId;
-
-      // A limit tag on a message outranks the result's own wording.
-      if (limitError) throw new Error(limitError);
-
-      // error_max_turns with captured calls is a success here: models that answer a blocked call
-      // by trying the next tool blow the turn cap; the captured calls are the point.
-      const maxTurnsWithCaptures = message.subtype === "error_max_turns" && captured.length > 0;
-
-      if ((message.is_error || message.subtype !== "success") && !maxTurnsWithCaptures) {
-        // Surface SDK and API failures as errors, not assistant text: the CLI narrates errors
-        // ("API Error: 400 …") as a message that would otherwise read as a model reply.
-        const detail =
-          (message.subtype === "success" && message.result) ||
-          textOf(content) ||
-          (message.subtype !== "success" && message.errors.join(", ")) ||
-          message.subtype;
-
-        throw new Error(detail);
-      }
-
-      // Claude Code reports some usage limits as a successful result whose whole text is the
-      // notice; treat that as the failure it is.
-      const notice = (message.subtype === "success" && message.result) || textOf(content);
-
-      if (captured.length === 0 && isAccountNotice(notice)) throw new Error(notice);
-      usage = usageFrom(message.usage);
-      break;
+      close(current);
     }
 
-    if (sdkSessionId)
+    live.lastUsedAt = Date.now();
+    live.idle = setTimeout(() => close(live), LIVE_IDLE_MS);
+    live.idle.unref();
+    lives.set(live.key, live);
+
+    if (lives.size <= MAX_LIVE) return;
+    const waiting = [...lives.values()].filter((entry) => !entry.turn);
+
+    waiting.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+
+    for (const stale of waiting.slice(0, lives.size - MAX_LIVE)) close(stale);
+  }
+
+  /**
+   * Fold one SDK message into the turn. Returns the usage once the turn's successful result
+   * arrives, throws for a failed one, and returns undefined for everything before it.
+   */
+  function absorb(live: Live, turn: Turn, message: SDKMessage) {
+    if (message.type === "system" && message.subtype === "init")
+      live.sdkSessionId = message.session_id;
+
+    if (message.type === "assistant") {
+      const text = message.message.content
+        .map((block) => (block.type === "text" ? block.text : ""))
+        .join("\n")
+        .trim();
+
+      if (isLimitErrorKind(message.error) && !turn.limitError && message.error)
+        turn.limitError = limitErrorMessage(message.error, text);
+
+      // Text only: tool_use blocks come from the captured calls (after the hook, so a blocked and
+      // retried call is never doubled), and thinking can't round-trip without its signature.
+      for (const block of message.message.content)
+        if (block.type === "text" && block.text)
+          turn.content.push({ type: "text", text: block.text });
+    }
+
+    if (message.type !== "result") return undefined;
+    live.sdkSessionId = message.session_id || live.sdkSessionId;
+
+    // A limit tag on a message outranks the result's own wording.
+    if (turn.limitError) throw new Error(turn.limitError);
+
+    // error_max_turns with captured calls is a success here: models that answer a blocked call
+    // by trying the next tool blow the turn cap; the captured calls are the point.
+    const maxTurnsWithCaptures = message.subtype === "error_max_turns" && turn.captured.length > 0;
+
+    if ((message.is_error || message.subtype !== "success") && !maxTurnsWithCaptures) {
+      // Surface SDK and API failures as errors, not assistant text: the CLI narrates errors
+      // ("API Error: 400 …") as a message that would otherwise read as a model reply.
+      const detail =
+        (message.subtype === "success" && message.result) ||
+        textOf(turn.content) ||
+        (message.subtype !== "success" && message.errors.join(", ")) ||
+        message.subtype;
+
+      throw new Error(detail);
+    }
+
+    // Claude Code reports some usage limits as a successful result whose whole text is the
+    // notice; treat that as the failure it is.
+    const notice = (message.subtype === "success" && message.result) || textOf(turn.content);
+
+    if (turn.captured.length === 0 && isAccountNotice(notice)) throw new Error(notice);
+
+    return usageFrom(message.usage);
+  }
+
+  /**
+   * One request's turn on a process: send the user message and read until its result. Resolves
+   * to the reason when the process ends first (it exited, or the client went away).
+   */
+  async function ask(live: Live, message: SDKUserMessage, cancel: AbortController) {
+    const turn: Turn = { captured: [], content: [], limitError: undefined };
+    const stop = () => close(live);
+
+    if (cancel.signal.aborted) return { ended: "request canceled" };
+    clearTimeout(live.idle);
+    live.turn = turn;
+    cancel.signal.addEventListener("abort", stop, { once: true });
+    live.input.push(message);
+
+    try {
+      while (true) {
+        let next: IteratorResult<SDKMessage, void>;
+
+        try {
+          next = await live.conversation.next();
+        } catch (cause) {
+          return { ended: cause instanceof Error ? cause.message : String(cause) };
+        }
+
+        if (next.done) return { ended: "Claude Code exited before answering" };
+        const usage = absorb(live, turn, next.value);
+
+        if (usage) return { turn, usage };
+      }
+    } finally {
+      cancel.signal.removeEventListener("abort", stop);
+      live.turn = undefined;
+    }
+  }
+
+  async function run(request: Request, body: MessagesRequest, cancel: AbortController) {
+    const key = sessionKey(request, body.messages);
+    const stored = sessions.get(key);
+
+    // Continuation: the client's history grew past what the SDK session has seen, and starts with
+    // exactly what it was sent. Anything else (first request, edited or compacted history, another
+    // conversation under the same session id) gets a fresh SDK session with a full replay.
+    const continuation =
+      stored !== undefined &&
+      body.messages.length > stored.messageCount &&
+      historyDigest(body.messages.slice(0, stored.messageCount - 1)) === stored.sentDigest;
+
+    const prompt = sdkTurn(body.messages, continuation ? stored.messageCount : 0);
+    const message = userMessage(sdkTurnContent(prompt) ?? sdkTurnText(prompt));
+
+    // A continuation goes to the session's waiting process when it was started the same way and
+    // holds the same SDK session; else a new process resumes the session (or starts afresh).
+    const waiting = lives.get(key);
+
+    const reusable =
+      continuation &&
+      waiting !== undefined &&
+      !waiting.turn &&
+      !waiting.closed &&
+      waiting.sdkSessionId === stored.sdkSessionId &&
+      waiting.config === processOptions(request, body).config;
+
+    const resume = continuation ? stored.sdkSessionId : undefined;
+    let live = reusable ? waiting : start(key, request, body, resume);
+
+    let answer = await ask(live, message, cancel).catch((cause: Error) => {
+      close(live);
+      throw cause;
+    });
+
+    // A waiting process can have exited while idle: answer on a fresh one resuming the session.
+    if ("ended" in answer && reusable && !cancel.signal.aborted) {
+      close(live);
+      live = start(key, request, body, resume);
+      answer = await ask(live, message, cancel).catch((cause: Error) => {
+        close(live);
+        throw cause;
+      });
+    }
+
+    if ("ended" in answer) {
+      close(live);
+      throw new Error(answer.ended);
+    }
+
+    const { turn, usage } = answer;
+
+    keep(live);
+
+    if (live.sdkSessionId)
       // +1: the assistant message returned now is in the client's history on its next request.
       remember(key, {
-        sdkSessionId,
+        sdkSessionId: live.sdkSessionId,
         messageCount: body.messages.length + 1,
         sentDigest: historyDigest(body.messages),
         lastUsedAt: Date.now(),
       });
 
-    for (const call of captured) content.push({ type: "tool_use", ...call });
+    const content = [...turn.content];
+
+    for (const call of turn.captured) content.push({ type: "tool_use", ...call });
 
     const reply: BridgeMessage = {
       id: `msg_bridge_${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`,
@@ -451,7 +663,7 @@ export function createBridge(options: BridgeOptions) {
       role: "assistant",
       model: body.model,
       content,
-      stop_reason: captured.length > 0 ? "tool_use" : "end_turn",
+      stop_reason: turn.captured.length > 0 ? "tool_use" : "end_turn",
       stop_sequence: null,
       usage,
     };
@@ -557,6 +769,10 @@ export function createBridge(options: BridgeOptions) {
   }
 
   return {
+    /** Stop every waiting Claude Code process. */
+    close() {
+      for (const live of lives.values()) close(live);
+    },
     async fetch(request: Request) {
       const url = new URL(request.url);
 
