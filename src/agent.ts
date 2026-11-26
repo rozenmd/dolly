@@ -459,6 +459,7 @@ export class Agent extends DurableObject<Env> {
       return `${base?.replace(/\/+$/, "") ?? ""}/session/${encodeURIComponent(id)}`;
     },
     title: (id) => this.sessionTitle(id),
+    alias: (id) => this.ctx.storage.get<ConversationId>(`session:${id}`),
   });
   private readonly checkpointTask = workspaceCheckpoint(
     (sandboxId, turnId) => this.env.SANDBOX.getByName(sandboxId).checkpoint(turnId),

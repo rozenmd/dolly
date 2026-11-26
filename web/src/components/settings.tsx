@@ -218,6 +218,8 @@ function ChiefName() {
   }, []);
 
   const trimmed = name.trim();
+  // Counted in characters, as the server does: a native maxLength counts UTF-16 units.
+  const length = [...trimmed].length;
 
   function save(event: FormEvent) {
     event.preventDefault();
@@ -240,7 +242,6 @@ function ChiefName() {
         <Input
           id="chief-name"
           className="chief-name-input"
-          maxLength={40}
           value={name}
           disabled={saved === null || pending}
           onChange={(event) => setName(event.target.value)}
@@ -248,7 +249,7 @@ function ChiefName() {
         <button
           type="submit"
           className="secondary-button"
-          disabled={saved === null || pending || !trimmed || trimmed === saved}
+          disabled={saved === null || pending || length < 1 || length > 40 || trimmed === saved}
         >
           Save
         </button>

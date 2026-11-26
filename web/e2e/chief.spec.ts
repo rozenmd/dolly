@@ -150,7 +150,15 @@ test("renames the chief of staff from Settings", async ({ page }) => {
   expect(renames).toEqual([{ name: "Ada" }]);
   await expect(save).toBeDisabled();
 
+  // Forty characters are allowed however many UTF-16 units they take; forty-one are not.
+  await name.fill("🦊".repeat(41));
+  await expect(save).toBeDisabled();
+  await name.fill("🦊".repeat(40));
+  await save.click();
+  await expect(name).toHaveValue("🦊".repeat(40));
+  expect(renames).toEqual([{ name: "Ada" }, { name: "🦊".repeat(40) }]);
+
   await page.getByRole("link", { name: "Back to app" }).click();
   const chiefList = page.getByRole("navigation", { name: "Chief of staff", exact: true });
-  await expect(chiefList).toContainText("Ada");
+  await expect(chiefList).toContainText("🦊".repeat(40));
 });

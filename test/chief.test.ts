@@ -255,6 +255,22 @@ it("briefs the chief with its name and lets it read the owner's sessions", async
   expect(bodies[2]).not.toContain("chief of staff");
 });
 
+it("follows up on a web session by the id list_sessions reports", async () => {
+  const [chief] = chiefOf(await list());
+  const work = await createSession();
+
+  const bodies = mockModel([
+    () => toolCall("send_to_session", { id: work, message: "Status on the bug?" }),
+  ]);
+
+  await send(chief!.id, "Ask the bug session for a status");
+  // The chief's request, its tool result, then the work session's turn on the delivered message.
+  await expect.poll(() => bodies.length).toBeGreaterThanOrEqual(3);
+
+  expect(bodies[1]).not.toContain("No task/session");
+  expect(bodies.slice(2).some((body) => body.includes("Status on the bug?"))).toBe(true);
+});
+
 it("has no coordinator mode, and ignores the flag in older session metadata", async () => {
   const work = await createSession();
 

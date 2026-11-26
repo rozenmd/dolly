@@ -342,6 +342,8 @@ export type CoordinationDeps = {
   link?: (id: string) => Promise<string>;
   /** A session's title, as the sidebar shows it. */
   title?: (id: ConversationId) => Promise<string | undefined>;
+  /** The conversation a web app session's public id names, as list_sessions reports it. */
+  alias?: (id: string) => Promise<ConversationId | undefined>;
   now?: () => number;
 };
 
@@ -398,7 +400,12 @@ export class Coordination {
    */
   private async reach(caller: ConversationId, id: string, context: Context) {
     const index = await this.harness.snapshot(SessionIndex, context);
-    const target = Object.hasOwn(index?.ids ?? {}, id) ? index?.ids[id] : undefined;
+
+    const indexed = (key: string) =>
+      Object.hasOwn(index?.ids ?? {}, key) ? index?.ids[key] : undefined;
+
+    const alias = await this.deps.alias?.(id);
+    const target = indexed(id) ?? (alias === undefined ? undefined : indexed(String(alias)));
 
     if (target === undefined)
       return { ok: false as const, error: `No task/session with id \`${id}\`.` };
