@@ -8,6 +8,9 @@ import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
 import { Live, Snapshot } from "../src/transcript";
 import { SlackThreads } from "../src/slack-inbox";
+import { GitHubThreads } from "../src/github-inbox";
+import { AutomationRunDoc } from "../src/automations";
+import { ConversationWorkspace, workspaceConfig } from "../src/workspace";
 
 const claudeToken = `sk-ant-oat01-${"a".repeat(40)}`;
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
@@ -242,6 +245,84 @@ it("lists and reads other web sessions, redacting credentials", async () => {
   });
   expect(JSON.stringify([listed, read])).not.toContain(access.slice(0, 20));
   expect(missing).toMatchObject({ ok: false, error: expect.stringContaining("no-such-session") });
+});
+
+it("lists the owner's work by default and titles reviews by pull request", async () => {
+  model([
+    () => answer("Shipped"),
+    () => call({ action: "list_sessions" }),
+    () => call({ action: "list_sessions", kind: "review" }),
+    () => call({ action: "list_sessions", kind: "all" }),
+    () => answer("Done"),
+  ]);
+
+  const work = await session();
+  await run(work, "Ship the onboarding flow");
+  const review = await session();
+  const nightly = await session();
+
+  // As github-inbox.ts admits an automatic review and automations.ts starts a run.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    const reviewId = (await state.storage.get<ConversationId>(`session:${review}`))!;
+    const nightlyId = (await state.storage.get<ConversationId>(`session:${nightly}`))!;
+
+    await agent["harness"].commit(async (tx) => {
+      (await tx.doc(ConversationWorkspace, reviewId)).config = workspaceConfig(
+        { repository: "octo/app", ref: "refs/pull/12/head" },
+        String(reviewId),
+        { readOnly: true },
+      );
+      (await tx.doc(GitHubThreads)).threads["review:octo/app#12@abcdef1234567"] = {
+        id: reviewId,
+        events: {},
+      };
+      (await tx.doc(AutomationRunDoc, nightlyId)).run = {
+        automationId: "nightly",
+        name: "Nightly dependency check",
+        trigger: "schedule",
+        mcpServers: [],
+      };
+    }, BACKGROUND_CONTEXT);
+  });
+
+  const reader = await session();
+  await run(reader, "Who is working on what?");
+  const [listed, reviews, everything] = await dollyResults(reader);
+
+  // The reader itself is work too, and is listed while it runs.
+  expect(listed).toMatchObject({ ok: true, kind: "work", hidden: { review: 1, automation: 1 } });
+  expect(listed).toMatchObject({
+    sessions: expect.arrayContaining([
+      expect.objectContaining({ id: work, kind: "work", title: "Ship the onboarding flow" }),
+    ]),
+  });
+  expect(JSON.stringify(listed)).not.toContain(review);
+  expect(JSON.stringify(listed)).not.toContain(nightly);
+
+  expect(reviews).toMatchObject({
+    ok: true,
+    kind: "review",
+    total: 1,
+    sessions: [{ id: review, kind: "review", title: "Review octo/app#12 at abcdef1" }],
+  });
+
+  expect(everything).toMatchObject({ ok: true, kind: "all" });
+  // Earlier tests' sessions are listed too, so check the four this one made.
+  expect(everything).toMatchObject({
+    sessions: expect.arrayContaining(
+      [work, review, nightly, reader].map((id) => expect.objectContaining({ id })),
+    ),
+  });
+  expect(everything).not.toHaveProperty("hidden");
+  expect(everything).toMatchObject({
+    sessions: expect.arrayContaining([
+      expect.objectContaining({
+        id: nightly,
+        kind: "automation",
+        automation: "Nightly dependency check",
+      }),
+    ]),
+  });
 });
 
 it("withholds session history from conversations started in a Slack thread", async () => {

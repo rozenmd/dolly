@@ -14,8 +14,33 @@ import { SessionIndex } from "./coordination";
 import { sessionMetadataKey, type SessionMetadata } from "./model-defaults";
 import { AutomationRunDoc } from "./automations";
 import { sessionActivity } from "./session-activity";
+import { GitHubThreads } from "./github-inbox";
 
 type PullRequestRef = { repository: string; number: number; url: string };
+
+/** `review:<owner/repo>#<number>@<sha>` (github-inbox.ts), or the legacy shared `review:<pull>`. */
+const REVIEW_THREAD = /^review:([\w.-]+\/[\w.-]+)#(\d+)(?:@([0-9a-f]+))?$/i;
+
+/**
+ * Titles for automatic pull request reviews, from the GitHub thread that started each one. Their
+ * first prompt is the shared review instructions, so without this every review reads the same.
+ */
+export function reviewTitles(threads: Readonly<Record<string, { id: ConversationId }>> = {}) {
+  const titles = new Map<string, string>();
+
+  for (const [key, thread] of Object.entries(threads)) {
+    const match = REVIEW_THREAD.exec(key);
+
+    if (!match) continue;
+    const [, repository, number, sha] = match;
+    titles.set(
+      String(thread.id),
+      `Review ${repository}#${number}${sha ? ` at ${sha.slice(0, 7)}` : ""}`,
+    );
+  }
+
+  return titles;
+}
 
 const PULL_URL = /https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/;
 const PULL_SCAN_LIMIT = 500;
@@ -202,6 +227,10 @@ export async function listSessions(
     return live;
   }, BACKGROUND_CONTEXT);
 
+  const reviews = reviewTitles(
+    (await harness.snapshot(GitHubThreads, BACKGROUND_CONTEXT))?.threads,
+  );
+
   const sessions: SavedSession[] = [];
   let cursor: Cursor | undefined;
 
@@ -259,6 +288,7 @@ export async function listSessions(
             ...(metadata?.autoFallback !== undefined && { autoFallback: metadata.autoFallback }),
             title:
               (metadata?.title && redact(metadata.title, secrets)) ||
+              reviews.get(String(record.id)) ||
               transcript?.title ||
               "Untitled session",
             repository: workspace?.config?.repository ?? "",
