@@ -460,6 +460,8 @@ export class Agent extends DurableObject<Env> {
     },
     title: (id) => this.sessionTitle(id),
     alias: (id) => this.ctx.storage.get<ConversationId>(`session:${id}`),
+    retiresSettledChildren: async (id) =>
+      (await this.ctx.storage.get<ChiefRecord>(CHIEF_KEY))?.conversation === id,
   });
   private readonly checkpointTask = workspaceCheckpoint(
     (sandboxId, turnId) => this.env.SANDBOX.getByName(sandboxId).checkpoint(turnId),

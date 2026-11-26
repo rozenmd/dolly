@@ -271,6 +271,42 @@ it("follows up on a web session by the id list_sessions reports", async () => {
   expect(bodies.slice(2).some((body) => body.includes("Status on the bug?"))).toBe(true);
 });
 
+it("keeps delegating past the child cap by forgetting settled children", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => answer());
+  const [chief] = chiefOf(await list());
+
+  const children = async () => {
+    const response = await SELF.fetch(`https://worker/api/sessions/${chief!.id}/children`, {
+      headers,
+    });
+
+    return (await response.json<{ children: { id: string; state: string }[] }>()).children;
+  };
+
+  const spawned: string[] = [];
+
+  for (let count = 0; count < 40; count++) {
+    const response = await SELF.fetch(`https://worker/api/sessions/${chief!.id}/children`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content: `Task ${count}`, requestId: crypto.randomUUID() }),
+    });
+
+    expect(response.status, `spawn ${count}`).toBe(202);
+    spawned.push((await response.json<{ id: string }>()).id);
+    await expect
+      .poll(async () => (await children()).every((child) => child.state === "idle"), {
+        timeout: 4000,
+      })
+      .toBe(true);
+  }
+
+  // The newest children are kept; the earlier, settled ones were forgotten at the cap.
+  const kept = (await children()).map((child) => child.id);
+  expect(kept.length).toBeLessThanOrEqual(32);
+  expect(kept).toContain(spawned.at(-1));
+}, 60_000);
+
 it("has no coordinator mode, and ignores the flag in older session metadata", async () => {
   const work = await createSession();
 
