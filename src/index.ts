@@ -22,7 +22,10 @@ import { LoginCallback } from "./chatgpt-login";
 import type { Env } from "./env";
 import { PromptImage, MAX_IMAGES, MAX_PROMPT_BYTES } from "./images";
 import { SessionUpdate } from "./session-contracts";
+import { CHIEF_NAME_MAX, ChiefSetting } from "./chief";
 import { HISTORY_PAGE_LIMIT } from "./transcript-window";
+
+const CHIEF_NAME_RULE = `Expected a name of 1 to ${CHIEF_NAME_MAX} characters without control characters`;
 
 export { Agent } from "./agent";
 
@@ -399,6 +402,31 @@ app.put("/api/settings/model", (c) =>
   ),
 );
 
+app.get("/api/settings/chief", (c) =>
+  handle(
+    c,
+    rpc("settings.chief.read", async () => c.json(await owner(c).chiefSettings())),
+  ),
+);
+
+app.put("/api/settings/chief", (c) =>
+  handle(
+    c,
+    Effect.gen(function* () {
+      const input = yield* Effect.tryPromise(() => c.req.json<unknown>()).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(ChiefSetting)),
+        Effect.mapError(() => new InvalidInput({ message: CHIEF_NAME_RULE })),
+      );
+
+      const result = yield* rpc("settings.chief.write", async () =>
+        owner(c).setChiefName(input.name),
+      );
+
+      return result ? c.json(result) : c.json({ error: CHIEF_NAME_RULE }, 400);
+    }),
+  ),
+);
+
 app.get("/api/sessions", (c) =>
   handle(
     c,
@@ -421,7 +449,9 @@ app.put("/api/sessions/:id", (c) =>
         owner(c).updateSession(c.req.param("id"), input),
       );
 
-      return result ? c.json(result) : c.json({ error: "Session not found" }, 404);
+      if (!result) return c.json({ error: "Session not found" }, 404);
+
+      return c.json(result, "error" in result ? 409 : 200);
     }),
   ),
 );

@@ -353,6 +353,13 @@ select.input {
 .workspace-icon.pr-draft {
   color: var(--faint);
 }
+/* The chief of staff sits on its own above the workspaces. */
+.chief-list {
+  margin-top: 12px;
+}
+.workspace-icon.chief {
+  color: #d2a8ff;
+}
 .workspace-title {
   flex: 1;
   min-width: 0;
@@ -3888,4 +3895,8 @@ label.connection-row {
   .automation-webhook-url .input {
     flex-basis: 100%;
   }
+}
+.chief-name-input {
+  width: 160px;
+  flex-shrink: 0;
 }

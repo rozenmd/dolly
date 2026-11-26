@@ -56,7 +56,7 @@ export const MAX_SPAWN_DEPTH = 2;
 /** Children working at once. Each is a model run and often a sandbox, so this is bounded. */
 export const MAX_WORKING = 8;
 
-/** Children one session may start over its lifetime. */
+/** Children one session may start over its lifetime, or keep at once if it retires settled ones. */
 export const MAX_CHILDREN = 32;
 
 /** A worker that reported this recently doesn't need the server repeating it. */
@@ -342,6 +342,13 @@ export type CoordinationDeps = {
   link?: (id: string) => Promise<string>;
   /** A session's title, as the sidebar shows it. */
   title?: (id: ConversationId) => Promise<string | undefined>;
+  /**
+   * Whether a session at the child cap forgets its settled children instead of refusing: the
+   * chief of staff, which delegates for as long as the instance lives.
+   */
+  retiresSettledChildren?: (id: ConversationId) => Promise<boolean>;
+  /** The conversation a web app session's public id names, as list_sessions reports it. */
+  alias?: (id: string) => Promise<ConversationId | undefined>;
   now?: () => number;
 };
 
@@ -398,7 +405,12 @@ export class Coordination {
    */
   private async reach(caller: ConversationId, id: string, context: Context) {
     const index = await this.harness.snapshot(SessionIndex, context);
-    const target = Object.hasOwn(index?.ids ?? {}, id) ? index?.ids[id] : undefined;
+
+    const indexed = (key: string) =>
+      Object.hasOwn(index?.ids ?? {}, key) ? index?.ids[key] : undefined;
+
+    const alias = await this.deps.alias?.(id);
+    const target = indexed(id) ?? (alias === undefined ? undefined : indexed(String(alias)));
 
     if (target === undefined)
       return { ok: false as const, error: `No task/session with id \`${id}\`.` };
@@ -517,6 +529,11 @@ export class Coordination {
     const now = this.now();
     const subtrees = yield* attempt("children.subtrees", () => this.subtrees(parent, context));
 
+    const retires = yield* attempt(
+      "children.retire",
+      async () => (await this.deps.retiresSettledChildren?.(parent)) === true,
+    );
+
     const created = yield* attempt("child.create", () =>
       conversation.commit(async (tx): Promise<SpawnResult> => {
         const state = await tx.doc(Children, parent);
@@ -544,16 +561,24 @@ export class Coordination {
             error: `spawn_task refused: this session is already ${depth} spawn hops from a human-created session (max ${MAX_SPAWN_DEPTH}). Do the work here, or report back to your parent instead of delegating further.`,
           };
 
-        if (Object.keys(state.children).length >= MAX_CHILDREN)
+        const full = Object.keys(state.children).length >= MAX_CHILDREN;
+
+        if (full && !retires)
           return { ok: false, error: `Child limit reached (${MAX_CHILDREN} per session)` };
 
         // Task reads come before the commit's first table write.
         let working = 0;
+        const settled: string[] = [];
 
-        for (const child of Object.values(state.children))
+        for (const [key, child] of Object.entries(state.children))
           if (await workingIn(tx, subtrees.get(String(child.id)) ?? [child.id])) working++;
+          else settled.push(key);
 
         if (working >= MAX_WORKING) return { ok: false, error: WORKING_LIMIT };
+
+        // At most MAX_WORKING children are working, so this frees most of the cap. A retired
+        // child stays a session the chief can reach by id; it only leaves this list.
+        if (full) for (const key of settled) delete state.children[key];
 
         const anchor = await tx.createTask(Anchor, null, {
           ownership: { kind: "conversation" },

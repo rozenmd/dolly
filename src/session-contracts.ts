@@ -10,10 +10,10 @@ export const SavedSession = Schema.Struct({
   speed: Schema.optional(Schema.Literals(SPEEDS)),
   /** Switch subscriptions when this one runs out; absent follows the owner's default. */
   autoFallback: Schema.optional(Schema.Boolean),
-  /** Coordinator mode is on: the session delegates to child sessions (coordinator.ts). */
-  coordinator: Schema.optional(Schema.Boolean),
   title: Schema.String,
   repository: Schema.String,
+  /** The chief of staff (chief.ts): one per instance, titled by its name, never archived. */
+  chief: Schema.optional(Schema.Boolean),
   updatedAt: Schema.Number,
   archived: Schema.optional(Schema.Boolean),
   /**
