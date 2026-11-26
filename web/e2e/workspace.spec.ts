@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 import { expect, test, type Page } from "./browser";
 import type { Live } from "../../src/transcript";
 import type { DefaultModel } from "../src/lib/api";
+import { INTERRUPT_NOTE_BLOCK } from "../../src/interrupt-message";
 
 const app = {
   connected: true,
@@ -152,6 +153,9 @@ test("queues a message while running and promotes it with Send now, including af
   const items: { id: number; mode: string; content: string }[] = [];
   let submissions = 0;
   let promotions = 0;
+  let interrupts = 0;
+  // Once interrupted, the steer is delivered as the next turn, carrying the model's delivery note.
+  let delivered = false;
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
 
@@ -190,11 +194,33 @@ test("queues a message while running and promotes it with Send now, including af
       return route.fulfill({ status: 202, json: { state: "steering" } });
     }
 
+    if (path === "/api/sessions/queue-session/queue/42/interrupt") {
+      interrupts++;
+      items.splice(0);
+      delivered = true;
+
+      return route.fulfill({ status: 202, json: { state: "interrupted" } });
+    }
+
     if (path === "/api/sessions/queue-session")
       return route.fulfill({
         json: {
           entries: [
             { id: 1, kind: "pi.user", model: [{ role: "user", content: "Original task" }] },
+            ...(delivered
+              ? [
+                  {
+                    id: 2,
+                    kind: "pi.user",
+                    model: [
+                      {
+                        role: "user",
+                        content: `Use pnpm instead\n\n${INTERRUPT_NOTE_BLOCK}`,
+                      },
+                    ],
+                  },
+                ]
+              : []),
           ],
           docs: { "pi.live": { run: {} }, "pi.inbox": { items } },
         },
@@ -222,6 +248,17 @@ test("queues a message while running and promotes it with Send now, including af
   await expect(steering).toContainText("Sending after the current step");
   expect(submissions).toBe(1);
   expect(promotions).toBe(2);
+  // Interrupt and send now: the steer is delivered as the next turn, without its delivery note.
+  await steering.getByRole("button", { name: "Interrupt and send now" }).click();
+  await expect.poll(() => interrupts).toBe(1);
+  await page.reload();
+  await expect(steering).toHaveCount(0);
+  const prompts = page.getByRole("article", { name: "user message" });
+  await expect(prompts.last()).toContainText("Use pnpm instead");
+  await expect(prompts.last()).not.toContainText("Delivery note");
+  // The turn it cut short reads as interrupted, not as finished without a reply.
+  await expect(page.getByText("Interrupted to send your next message.")).toBeVisible();
+  await expect(page.getByText("The agent finished without a final reply")).toHaveCount(0);
 });
 
 test("edits, deletes, reorders and steers queued messages, and stops on Escape twice", async ({

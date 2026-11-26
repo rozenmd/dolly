@@ -1,4 +1,9 @@
-import type { ConversationView, InboxItem, SubmissionId } from "@earendil-works/pi-durable";
+import {
+  defineDoc,
+  type ConversationView,
+  type InboxItem,
+  type SubmissionId,
+} from "@earendil-works/pi-durable";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -47,3 +52,18 @@ export function submissionId(id: number): SubmissionId {
   // SAFETY: submission IDs are plain positive integers on the wire; routes validate them first.
   return id as SubmissionId;
 }
+
+/**
+ * An interrupt in progress ("Interrupt and send now"): the queued inputs taken out of the inbox
+ * while the running turn is aborted, so the abort can't withdraw them, and the one that interrupts.
+ * The commit that sends `target` puts the others back. Empty when no interrupt is in progress.
+ */
+export const InterruptDoc = defineDoc<{ target?: SubmissionId; items: InboxItem[] }>({
+  kind: "app.interrupt",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ items: [] }),
+  checkpointWhen: (value) => value.target === undefined,
+});

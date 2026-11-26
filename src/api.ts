@@ -79,6 +79,9 @@ function makeAgentApi(env: Env) {
     steerQueued: Effect.fn("AgentApi.steerQueued")((id: string, submissionId: number) =>
       rpc("agent.queue.steer", async () => await agent.steerQueued(id, submissionId)),
     ),
+    interruptQueued: Effect.fn("AgentApi.interruptQueued")((id: string, submissionId: number) =>
+      rpc("agent.queue.interrupt", async () => await agent.interruptQueued(id, submissionId)),
+    ),
     withdrawQueued: Effect.fn("AgentApi.withdrawQueued")((id: string, submissionId: number) =>
       rpc("agent.queue.withdraw", async () => await agent.withdrawQueued(id, submissionId)),
     ),

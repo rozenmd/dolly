@@ -819,6 +819,23 @@ export function WorkspaceApp() {
     }
   }
 
+  /** Interrupt and send now: stop the running turn and deliver this steer as the next one. */
+  async function interruptSteer(submissionId: number) {
+    setPending(true);
+    setError("");
+
+    try {
+      await request(
+        `/sessions/${encodeURIComponent(selected)}/queue/${submissionId}/interrupt`,
+        {},
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not interrupt the agent.");
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function deleteQueued(submissionId: number) {
     setPending(true);
     setError("");
@@ -1076,6 +1093,8 @@ export function WorkspaceApp() {
                 <Conversation
                   turns={turns}
                   steering={steering}
+                  onInterrupt={(id) => void interruptSteer(id)}
+                  interrupting={pending}
                   sessionId={session.id}
                   loading={loading}
                   older={{

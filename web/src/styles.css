@@ -1129,6 +1129,33 @@ li.dragging .queue-handle {
 .prompt.pending .prompt-bubble {
   opacity: 0.6;
 }
+/* Interrupt and send now: stop the running turn rather than wait for its next step. */
+.steer-interrupt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.steer-interrupt:hover:not(:disabled) {
+  border-color: var(--amber);
+  color: var(--text);
+}
+.steer-interrupt:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.steer-interrupt svg {
+  width: 14px;
+  height: 14px;
+  color: var(--amber);
+}
 /* The agent is waiting on CI (wait_for): above the composer, like queued messages. */
 .ci-wait-strip {
   display: flex;
@@ -2696,6 +2723,15 @@ code.summary-label {
   border: 1px solid var(--amber);
   border-radius: 10px;
   background: var(--surface);
+}
+/* Interrupted on purpose ("Interrupt and send now"): a quiet note, not a warning. */
+.run-notice.interrupted {
+  margin: 8px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
 }
 .retry-status {
   color: var(--amber);

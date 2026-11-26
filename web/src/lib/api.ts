@@ -15,6 +15,7 @@ import { parseScheduledMessage } from "../../../src/schedule-message";
 import { parseCiWaitMessage, type CiWaitOutcome } from "../../../src/ci-wait-message";
 import { parseSessionMessage, type SessionMessage } from "../../../src/child-report-message";
 import { stepDetail } from "../../../src/tool-activity";
+import { interrupts, stripInterruptNote } from "../../../src/interrupt-message";
 
 export { Snapshot } from "../../../src/transcript";
 
@@ -189,6 +190,8 @@ export type Turn = {
   startedAt?: number;
   endedAt?: number;
   running: boolean;
+  /** Stopped by "Interrupt and send now" to deliver the next turn's message. */
+  interrupted?: boolean;
   activity?: string;
   failure?: typeof RunFailure.Type;
   retry?: { readonly at: number; readonly error: string };
@@ -258,7 +261,17 @@ export function turnsFromSnapshot(snapshot: typeof Snapshot.Type): Turn[] {
 
   function add(message: typeof Message.Type, id: string, hideText = false) {
     if (message.role === "user") {
-      const text = messageText(message);
+      const raw = messageText(message);
+      // An interrupting message's delivery note is for the model; the owner sees their words.
+      const text = stripInterruptNote(raw);
+      const previous = turns.at(-1);
+
+      // The turn it cut short didn't finish or fail: the owner stopped it to send this.
+      if (previous && interrupts(raw)) {
+        previous.interrupted = true;
+        delete previous.failure;
+      }
+
       const scheduled = parseScheduledMessage(text);
       const wake = parseCiWaitMessage(text);
       const delivered = parseSessionMessage(text);
