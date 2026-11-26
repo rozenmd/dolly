@@ -336,3 +336,56 @@ it("leaves titled sessions, automatic reviews and automation runs to their own t
   expect(listed.find((session) => session.id === titled)?.title).toBe("Named by hand");
   expect(listed.find((session) => session.id === nightly)?.title).toBe("Check the dependencies");
 });
+
+it("keeps an explicit retitle made while the automatic title was still generating", async () => {
+  let released = false;
+
+  /** Answers the automatic title once released, built in the Agent's own I/O context. */
+  const automatic = async () => {
+    while (!released) await new Promise((resolve) => setTimeout(resolve, 20));
+
+    return claude({ text: "Plan the billing migration" });
+  };
+
+  let titleRequests = 0;
+  let turns = 0;
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const request = new Request(input, init);
+
+    if (!request.url.includes("/v1/messages")) return new Response("{}");
+
+    const body = await request.json<ClaudeRequest>();
+
+    if (text(body).includes("short title")) {
+      titleRequests++;
+
+      // The first run's automatic title is slow; the follow-up's retitle_session answers at once.
+      return titleRequests === 1 ? automatic() : claude({ text: "Write the rollback plan" });
+    }
+
+    turns++;
+
+    return turns === 2 ? claude({ tool: "retitle_session" }) : claude({ text: "Done" });
+  });
+
+  await connectClaude();
+  const id = await newSession();
+  await runOnce(id, "Work out how to move billing to the new provider");
+  await expect.poll(() => titleRequests, { timeout: 10_000 }).toBe(1);
+
+  await runOnce(id, "Now write the rollback plan, and rename this session");
+  await expect
+    .poll(async () => (await sessions()).find((session) => session.id === id)?.title, {
+      timeout: 10_000,
+    })
+    .toBe("Write the rollback plan");
+
+  released = true;
+  await settle();
+
+  expect(titleRequests).toBe(2);
+  expect((await sessions()).find((session) => session.id === id)?.title).toBe(
+    "Write the rollback plan",
+  );
+});

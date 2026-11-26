@@ -234,7 +234,7 @@ import type { Env } from "./env";
 import type { FileResult } from "./sandbox";
 import { resolveImages, storeImages, type PromptImage } from "./images";
 import { listSessions } from "./session-list";
-import { recordSessionStatus } from "./session-status";
+import { recordSessionStatus, type PendingWork } from "./session-status";
 import { SessionsFeed } from "./sessions-feed";
 import type { PullRequestSummary, SavedSession } from "./session-contracts";
 import { PreviewOutbound, PreviewRequest, PreviewToolInput } from "./preview";
@@ -1667,22 +1667,25 @@ export class Agent extends DurableObject<Env> {
     this.harness.resume();
   });
 
+  /** What may wake a session by itself, for its listed `waitingOn` (session-status.ts). */
+  private async pendingWork(conversationId: ConversationId): Promise<PendingWork> {
+    const [wait, scheduled] = await Promise.all([
+      this.ciWaiter.current(conversationId),
+      this.scheduler.list(conversationId),
+    ]);
+
+    return { wait: wait?.kind, scheduled: scheduled.scheduled.length };
+  }
+
   /**
    * Save the session's one-line status (session-status.ts) when a run ends: its final reply's
-   * first sentence and what it waits on. Best effort: a failure leaves the previous status.
+   * first sentence. Best effort: a failure leaves the previous status.
    */
   private async recordStatus(conversationId: ConversationId) {
     try {
-      const [secrets, wait, scheduled] = await Promise.all([
-        Effect.runPromise(this.credentials.secrets),
-        this.ciWaiter.current(conversationId),
-        this.scheduler.list(conversationId),
-      ]);
+      const secrets = await Effect.runPromise(this.credentials.secrets);
 
-      await recordSessionStatus(this.harness, this.ctx.storage, conversationId, secrets, {
-        wait: wait?.kind,
-        scheduled: scheduled.scheduled.length,
-      });
+      await recordSessionStatus(this.harness, this.ctx.storage, conversationId, secrets);
     } catch (error) {
       console.warn("session.status", error);
     }
@@ -1706,7 +1709,7 @@ export class Agent extends DurableObject<Env> {
         return;
 
       await Effect.runPromise(this.patchSessionMetadata(conversationId, { autoTitled: true }));
-      await this.retitleSession(conversationId);
+      await this.retitleSession(conversationId, true);
     } catch (error) {
       console.warn("session.autotitle", error);
     }
@@ -1717,7 +1720,7 @@ export class Agent extends DurableObject<Env> {
    * model of the owner's default model provider (opensession's generated titles). Never touches
    * the session's own model or transcript.
    */
-  private async retitleSession(conversationId: ConversationId) {
+  private async retitleSession(conversationId: ConversationId, automatic = false) {
     const { openai, anthropic, stored, secrets } = await Effect.runPromise(
       Effect.all({
         openai: this.credentials.get("openai"),
@@ -1777,7 +1780,18 @@ export class Agent extends DurableObject<Env> {
         model: modelId,
       };
 
-    await Effect.runPromise(this.patchSessionMetadata(conversationId, { title }));
+    // An automatic title loses to one saved while it was generated (retitle_session); checked in
+    // the same transaction as the write. An explicit retitle always replaces the title.
+    const saved = await Effect.runPromise(
+      this.patchSessionMetadata(
+        conversationId,
+        { title },
+        (current) => !automatic || !current?.title,
+      ),
+    );
+
+    if (!saved)
+      return { error: "The session was titled meanwhile; that title stays", model: modelId };
 
     return { title, ...(previous && { previous }), model: modelId };
   }
@@ -2993,12 +3007,23 @@ export class Agent extends DurableObject<Env> {
       this.ctx.storage.get<SessionMetadata>(sessionMetadataKey(conversationId)),
     );
 
-  private patchSessionMetadata = (conversationId: ConversationId, patch: SessionMetadata) =>
+  /** Merge `patch` into a session's metadata, if `when` accepts the current metadata; says if it did. */
+  private patchSessionMetadata = (
+    conversationId: ConversationId,
+    patch: SessionMetadata,
+    when: (current: SessionMetadata | undefined) => boolean = () => true,
+  ) =>
     attempt("session.metadata.write", () =>
       this.ctx.storage.transaction(async (tx) => {
         const key = sessionMetadataKey(conversationId);
+        const current = await tx.get<SessionMetadata>(key);
+
+        if (!when(current)) return false;
+
         // An `undefined` field reads back as unset, which clears that setting.
-        await tx.put(key, { ...(await tx.get<SessionMetadata>(key)), ...patch });
+        await tx.put(key, { ...current, ...patch });
+
+        return true;
       }),
     ).pipe(Effect.tap(() => Effect.sync(() => this.sessionsFeed.changed())));
 
@@ -3663,7 +3688,11 @@ export class Agent extends DurableObject<Env> {
 
   async sessions() {
     const secrets = await Effect.runPromise(this.credentials.secrets);
-    const sessions = await listSessions(this.harness, this.ctx.storage, secrets);
+
+    const sessions = await listSessions(this.harness, this.ctx.storage, secrets, (id) =>
+      this.pendingWork(id),
+    );
+
     const pulls = new Map<string, SessionPull>();
 
     // Prefer active sessions when equally stale. Several sessions may link the same PR.

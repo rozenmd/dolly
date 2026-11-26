@@ -4,14 +4,27 @@ import { lastReply } from "./child-report";
 import { redact } from "./diagnostics";
 
 /**
- * Who a session's next move waits on, as Dolly knows it when a run ends: CI (a pr_checks or
- * workflow_run wait), another session (a session_turn wait), a scheduled prompt, or else the
- * owner, because nothing will wake the session by itself.
+ * Who a session's next move waits on, read when it is listed: CI (a pr_checks or workflow_run
+ * wait), another session (a session_turn wait), a scheduled prompt, or else the owner, because
+ * nothing will wake the session by itself. Read live rather than saved with the status: a wait
+ * or schedule can end without an answered run (a delivered prompt whose run fails, a cancel),
+ * and Pi's afterRun never runs after a failure or an abort.
  */
 export type WaitingOn = "ci" | "session" | "schedule" | "owner";
 
-/** One line per session, saved when each run ends, so a listing can say where each stands. */
-export type SessionStatus = { text: string; waitingOn: WaitingOn; at: number };
+/** What may wake a session by itself: its wait (ci-wait.ts) and scheduled prompts (schedule.ts). */
+export type PendingWork = { wait?: "ci" | "session_turn" | undefined; scheduled: number };
+
+export function waitingOn(pending: PendingWork): WaitingOn {
+  if (pending.wait === "ci") return "ci";
+
+  if (pending.wait === "session_turn") return "session";
+
+  return pending.scheduled > 0 ? "schedule" : "owner";
+}
+
+/** One line per session, saved when each answered run ends, so a listing can say where it stands. */
+export type SessionStatus = { text: string; at: number };
 
 export const sessionStatusKey = (conversationId: ConversationId) =>
   `session-status:${conversationId}`;
@@ -31,16 +44,12 @@ export function statusText(reply: string, secrets: readonly string[]) {
   return sentence.length > STATUS_CHARS ? `${sentence.slice(0, STATUS_CHARS - 1)}…` : sentence;
 }
 
-/**
- * Save a session's status after a run: its final reply's first sentence and what it waits on,
- * from the wait and schedule state ci-wait.ts and schedule.ts already keep. No model call.
- */
+/** Save a session's status after an answered run: its final reply's first sentence. No model call. */
 export async function recordSessionStatus(
   harness: Harness,
   storage: DurableObjectStorage,
   conversationId: ConversationId,
   secrets: readonly string[],
-  pending: { wait?: "ci" | "session_turn" | undefined; scheduled: number },
   now: number = Date.now(),
 ) {
   const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
@@ -54,18 +63,8 @@ export async function recordSessionStatus(
     BACKGROUND_CONTEXT,
   );
 
-  const waitingOn: WaitingOn =
-    pending.wait === "ci"
-      ? "ci"
-      : pending.wait === "session_turn"
-        ? "session"
-        : pending.scheduled > 0
-          ? "schedule"
-          : "owner";
-
   const status: SessionStatus = {
     text: statusText(lastReply([...page.items].reverse()), secrets),
-    waitingOn,
     at: now,
   };
 

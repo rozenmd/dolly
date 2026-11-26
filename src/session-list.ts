@@ -15,7 +15,12 @@ import { sessionMetadataKey, type SessionMetadata } from "./model-defaults";
 import { AutomationRunDoc } from "./automations";
 import { sessionActivity } from "./session-activity";
 import { GitHubThreads } from "./github-inbox";
-import { sessionStatusKey, type SessionStatus } from "./session-status";
+import {
+  sessionStatusKey,
+  waitingOn,
+  type PendingWork,
+  type SessionStatus,
+} from "./session-status";
 
 type PullRequestRef = { repository: string; number: number; url: string };
 
@@ -190,6 +195,8 @@ export async function listSessions(
   harness: Harness,
   storage: DurableObjectStorage,
   secrets: readonly string[],
+  /** What may wake a session by itself (agent.ts pendingWork), for its status's `waitingOn`. */
+  pending: (conversationId: ConversationId) => Promise<PendingWork>,
 ): Promise<SavedSession[]> {
   const aliases = new Map<ConversationId, string>();
   let start: string | undefined;
@@ -281,6 +288,9 @@ export async function listSessions(
             storage.get<SessionStatus>(sessionStatusKey(record.id)),
           ]);
 
+          // Read now, not when the run ended: waits and schedules end without an answered run too.
+          const waits = status && waitingOn(await pending(record.id));
+
           const run = automation?.run;
 
           const parent = record.owner?.conversationId;
@@ -313,7 +323,10 @@ export async function listSessions(
             running: live,
             ...(activity && { activity }),
             // Saved redacted; redact again so a secret added since stays hidden too.
-            ...(status && { status: { ...status, text: redact(status.text, secrets) } }),
+            ...(status &&
+              waits && {
+                status: { text: redact(status.text, secrets), waitingOn: waits, at: status.at },
+              }),
             pullRequest: createdPull ?? transcript?.pullRequest,
           } satisfies SavedSession;
         }),

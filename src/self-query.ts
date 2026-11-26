@@ -275,7 +275,7 @@ async function listSessions(
     })),
     notes: [
       "kind defaults to work: sessions the owner started and the tasks they spawned (parentId names the spawner). hidden counts what other kinds matched the same filters; pass kind review, automation or all to see them.",
-      "status is where a session stood when its latest run ended: text is the first sentence of its final reply, waitingOn what its next move waits on (ci: a pending pr_checks or workflow_run wait; session: a wait on another session's turn; schedule: a pending scheduled prompt; owner: none of those, so the next move is the owner's), at when the run ended. A running session's status is from its previous run; activity says what it is doing now.",
+      "status says where a session stands: text is the first sentence of the final reply of its latest answered run, at when that run ended (a later failed or cancelled run leaves them), and waitingOn what its next move waits on now (ci: a pending pr_checks or workflow_run wait; session: a wait on another session's turn; schedule: a pending scheduled prompt; owner: none of those, so the next move is the owner's). A running session's text is from an earlier run; activity says what it is doing now.",
       "activity is what a running session is doing right now. Titles are generated or the first line of the first prompt; reviews are titled by pull request. query matches titles and repositories only, not transcripts; use read_session to read one.",
     ],
   };

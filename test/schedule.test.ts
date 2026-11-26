@@ -12,6 +12,7 @@ import type { ConversationId } from "@earendil-works/pi-durable";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
+import type { SavedSession } from "../src/session-contracts";
 import { SlackThreads } from "../src/slack-inbox";
 
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
@@ -434,4 +435,50 @@ it("lets the owner send later into a Slack-started session, where the agent may 
 
   expect(response.status).toBe(201);
   expect(await listScheduled(id)).toHaveLength(1);
+});
+
+it("lists a session as waiting on the owner once its scheduled follow-up fails", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    const { serialized, toolOutput } = await modelRequest(init);
+
+    // The scheduled follow-up's run fails terminally, so Pi's afterRun never runs for it.
+    if (serialized.includes("[Scheduled prompt "))
+      return Response.json(
+        {
+          error: {
+            message: "The selected model is unavailable for this account",
+            type: "invalid_request_error",
+            code: "model_not_found",
+          },
+        },
+        { status: 400 },
+      );
+
+    if (toolOutput) return answer("Scheduled the migration for later. It starts in two hours.");
+
+    return call("schedule_prompt", { in_minutes: 120, prompt: "Start the migration now" });
+  });
+
+  const id = await root();
+  await prompt(id, "In two hours, start the migration");
+
+  const status = async () => {
+    const listed = await SELF.fetch("https://worker/api/sessions", { headers });
+
+    return (await listed.json<SavedSession[]>()).find((session) => session.id === id)?.status;
+  };
+
+  await expect
+    .poll(status, { timeout: 4000 })
+    .toMatchObject({ text: "Scheduled the migration for later.", waitingOn: "schedule" });
+
+  await abortAllDurableObjects();
+  await advance(121 * 60_000);
+  await expect.poll(() => userEntries(id), { timeout: 4000 }).toBe(2);
+  await expect.poll(() => transcript(id), { timeout: 4000 }).toContain("model_not_found");
+
+  // Nothing will wake it now: the next move is the owner's, though the text is the last answer's.
+  await expect
+    .poll(status, { timeout: 4000 })
+    .toMatchObject({ text: "Scheduled the migration for later.", waitingOn: "owner" });
 });

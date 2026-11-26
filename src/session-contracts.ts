@@ -51,10 +51,11 @@ export const SavedSession = Schema.Struct({
    */
   activity: Schema.optional(Schema.String),
   /**
-   * Where the session stood when its latest run ended (session-status.ts): the first sentence of
-   * its final reply, redacted, and what its next move waits on. "ci" is a pending pr_checks or
-   * workflow_run wait, "session" a wait on another session's turn, "schedule" a pending scheduled
-   * prompt, and "owner" none of those, so the next move is the owner's. Absent before a run ends.
+   * Where the session stands (session-status.ts): `text` is the first sentence of the final reply
+   * of its latest answered run, redacted, and `at` when that run ended. `waitingOn` is read when
+   * listed: "ci" is a pending pr_checks or workflow_run wait, "session" a wait on another
+   * session's turn, "schedule" a pending scheduled prompt, and "owner" none of those, so the next
+   * move is the owner's. Absent until a run has answered.
    */
   status: Schema.optional(
     Schema.Struct({
