@@ -79,7 +79,8 @@ export const DISALLOWED_BUILTINS = [
   "Workflow",
 ];
 
-const MAX_BODY_BYTES = 10 * 1024 * 1024;
+/** Anthropic's own Messages API request limit: Dolly's four 5 MiB images fit, base64 and all. */
+export const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const MAX_SESSIONS = 500;
 const HEARTBEAT_MS = 15_000;
 
@@ -123,10 +124,23 @@ export type BridgeOptions = {
 
 type StoredSession = {
   sdkSessionId: string;
-  /** How many client messages the SDK session has already seen. */
+  /** How many client messages the SDK session has already seen, its own last reply included. */
   messageCount: number;
+  /** historyDigest of the client messages it was sent, all but that reply. */
+  sentDigest: string;
   lastUsedAt: number;
 };
+
+/**
+ * The conversation as the SDK session saw it: each message's role and flattened text. A request
+ * that doesn't start with exactly this history (a compaction summary, an edit, or another request
+ * sharing the session id such as the summarizer's) must not resume the session.
+ */
+function historyDigest(messages: readonly Message[]) {
+  const seen = messages.map((message) => [message.role, flattenMessageText(message.content)]);
+
+  return createHash("sha256").update(JSON.stringify(seen)).digest("hex");
+}
 
 type OutputBlock =
   | { type: "text"; text: string }
@@ -192,11 +206,25 @@ function textOf(content: readonly OutputBlock[]) {
   return content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
 }
 
+/** The request body as text, or null once it passes MAX_BODY_BYTES, counted in bytes as read. */
 async function readBody(request: Request) {
   if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) return null;
-  const text = await request.text();
 
-  return text.length > MAX_BODY_BYTES ? null : text;
+  if (!request.body) return "";
+
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+
+  for await (const chunk of request.body) {
+    bytes += chunk.byteLength;
+
+    // Leaving the loop cancels the rest of the body.
+    if (bytes > MAX_BODY_BYTES) return null;
+
+    chunks.push(chunk);
+  }
+
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 const encoder = new TextEncoder();
@@ -275,9 +303,15 @@ export function createBridge(options: BridgeOptions) {
   async function run(request: Request, body: MessagesRequest, cancel: AbortController) {
     const key = sessionKey(request, body.messages);
     const stored = sessions.get(key);
-    // Continuation: the client's history grew past what the SDK session has seen. Anything else
-    // (first request, edited or compacted history) gets a fresh SDK session with a full replay.
-    const continuation = stored !== undefined && body.messages.length > stored.messageCount;
+
+    // Continuation: the client's history grew past what the SDK session has seen, and starts with
+    // exactly what it was sent. Anything else (first request, edited or compacted history, another
+    // conversation under the same session id) gets a fresh SDK session with a full replay.
+    const continuation =
+      stored !== undefined &&
+      body.messages.length > stored.messageCount &&
+      historyDigest(body.messages.slice(0, stored.messageCount - 1)) === stored.sentDigest;
+
     const turn = sdkTurn(body.messages, continuation ? stored.messageCount : 0);
     const prompt = sdkTurnText(turn);
     const promptContent = sdkTurnContent(turn);
@@ -405,6 +439,7 @@ export function createBridge(options: BridgeOptions) {
       remember(key, {
         sdkSessionId,
         messageCount: body.messages.length + 1,
+        sentDigest: historyDigest(body.messages),
         lastUsedAt: Date.now(),
       });
 

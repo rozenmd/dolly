@@ -23,7 +23,8 @@ export type ClaudeCodeRoute = {
 /**
  * Point a request at Claude Code instead of Anthropic: the bridge's address and API key, the
  * provider session and context window it maps onto a Claude Code session, and no Anthropic message
- * threads, so every request carries the whole conversation. A caller's own fetch is kept: it owns
+ * threads or mid-conversation system messages, so every request carries the whole conversation as
+ * the plain user and assistant messages the bridge accepts. A caller's own fetch is kept: it owns
  * the transport (the live probe uses it to report what came back).
  */
 function viaClaudeCode<TOptions extends StreamOptions>(
@@ -53,7 +54,13 @@ function viaClaudeCode<TOptions extends StreamOptions>(
       {
         ...model,
         baseUrl: CLAUDE_CODE_BASE_URL,
-        compat: { ...model.compat, supportsMessageThreads: false },
+        // Only user and assistant messages: effort and system text go in the top-level fields.
+        compat: {
+          ...model.compat,
+          supportsMessageThreads: false,
+          supportsMidConvoEffort: false,
+          supportsMidConvoSystemMessages: false,
+        },
       },
       context,
       bridged,

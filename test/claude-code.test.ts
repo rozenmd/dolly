@@ -98,7 +98,7 @@ it("runs Claude sessions through Claude Code without the setup token or the Clau
   });
 
   const session = await (
-    await call("/sessions", "POST", { model: "claude-haiku-5-5" })
+    await call("/sessions", "POST", { model: "claude-sonnet-5-5" })
   ).json<{ id: string }>();
 
   expect(
@@ -130,8 +130,12 @@ it("runs Claude sessions through Claude Code without the setup token or the Clau
   expect(Number(request.headers.get("x-dolly-context-window"))).toBeGreaterThan(0);
 
   const body = JSON.parse(bodies[0] ?? "{}");
-  expect(body.model).toBe("claude-haiku-5-5");
+  expect(body.model).toBe("claude-sonnet-5-5");
   expect(body.thread).toBeUndefined();
+  // Sonnet's default effort rides in output_config, not in a mid-conversation system message:
+  // the bridge accepts only user and assistant messages.
+  expect(body.messages.map((message: { role: string }) => message.role)).toEqual(["user"]);
+  expect(body.output_config?.effort).toBeTruthy();
   expect(JSON.stringify(body.messages)).toContain("hi there");
   // Dolly's own tool names and prompt: Claude Code adds its identity itself.
   expect(body.tools.map((tool: { name: string }) => tool.name)).toContain("workspace");

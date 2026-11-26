@@ -461,3 +461,71 @@ test("stops Claude Code's upstream request when the client goes away", async () 
   // Claude Code's own request to Anthropic is closed with it.
   await upstreamClosed;
 });
+
+test("replays instead of resuming when the session id last carried another conversation", async () => {
+  // Compaction's summarizer shares the conversation's session id with a history of its own.
+  replies.push({ content: [{ type: "text", text: "Summary written" }], stop: "end_turn" });
+  await events(
+    await send(
+      { messages: [{ role: "user", content: "Summarize this conversation" }] },
+      "conversation-compacted",
+    ),
+  );
+
+  replies.push({ content: [{ type: "text", text: "Carrying on" }], stop: "end_turn" });
+
+  const response = await events(
+    await send(
+      {
+        messages: [
+          { role: "user", content: "Summary of earlier work" },
+          { role: "assistant", content: [{ type: "text", text: "Understood" }] },
+          { role: "user", content: "Continue" },
+        ],
+      },
+      "conversation-compacted",
+    ),
+  );
+
+  assert.match(JSON.stringify(response), /Carrying on/);
+
+  const replayed = JSON.stringify(requests[1]?.body.messages);
+
+  assert.match(replayed, /Summary of earlier work/);
+  assert.match(replayed, /\[Your previous reply\]\\nUnderstood/);
+  assert.doesNotMatch(replayed, /Summarize this conversation/);
+});
+
+test("accepts a prompt with images past 10 MiB, as Dolly allows", async () => {
+  replies.push({ content: [{ type: "text", text: "Two images" }], stop: "end_turn" });
+
+  const image = {
+    type: "image" as const,
+    source: {
+      type: "base64" as const,
+      media_type: "image/png" as const,
+      data: Buffer.alloc(4 * 1024 * 1024, 7).toString("base64"),
+    },
+  };
+
+  const response = await send(
+    {
+      stream: false,
+      messages: [{ role: "user", content: [image, image, { type: "text", text: "Compare" }] }],
+    },
+    "conversation-images",
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).content, [{ type: "text", text: "Two images" }]);
+});
+
+test("refuses a body past Anthropic's request limit", async () => {
+  const response = await send(
+    { messages: [{ role: "user", content: "x".repeat(33 * 1024 * 1024) }] },
+    "conversation-huge",
+  );
+
+  assert.equal(response.status, 413);
+  assert.equal(requests.length, 0);
+});
