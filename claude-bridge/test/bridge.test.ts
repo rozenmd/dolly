@@ -17,9 +17,15 @@ function port(server: Server) {
   return z.object({ port: z.number() }).parse(server.address()).port;
 }
 
+/** Process checks read /proc: elsewhere they are skipped, and the rest of each test still runs. */
+const procfs = process.platform === "linux";
+const linux = { skip: !procfs };
+
 /** The Claude Code processes the bridge (running in this test process) has started and not ended. */
 function claudeProcesses() {
   const pids: number[] = [];
+
+  if (!procfs) return pids;
 
   for (const entry of readdirSync("/proc")) {
     if (!/^\d+$/.test(entry)) continue;
@@ -76,6 +82,11 @@ let replies: Reply[] = [];
 
 /** Hold the next upstream response open until the client goes away. */
 let holdNext = false;
+
+/** Stream the start of an answer as the next upstream response, then hold it open. */
+let partialNext = false;
+let partialResolve: () => void = () => undefined;
+let partialSent = new Promise<void>((resolve) => (partialResolve = resolve));
 let heldResolve: () => void = () => undefined;
 let closedResolve: () => void = () => undefined;
 let held = new Promise<void>((resolve) => (heldResolve = resolve));
@@ -152,6 +163,20 @@ before(async () => {
 
     const body: UpstreamBody = JSON.parse(text);
     requests.push({ path: incoming.url, headers: incoming.headers, body });
+
+    if (partialNext) {
+      partialNext = false;
+      outgoing.writeHead(200, { "content-type": "text/event-stream" });
+      outgoing.write(
+        stream(
+          { content: [{ type: "text", text: "PARTIAL ANSWER" }], stop: "end_turn" },
+          body.model,
+        ).split("event: message_delta")[0],
+      );
+      partialResolve();
+
+      return;
+    }
 
     if (holdNext) {
       holdNext = false;
@@ -356,7 +381,7 @@ test("hands tool calls to the client in one model call and resumes the same proc
 
   const kept = claudeProcesses().filter((pid) => !before.includes(pid));
 
-  assert.equal(kept.length, 1);
+  if (procfs) assert.equal(kept.length, 1);
 
   // The client ran the tools; their results go to the same waiting Claude Code process.
   replies.push({
@@ -398,10 +423,12 @@ test("hands tool calls to the client in one model call and resumes the same proc
 
   assert.match(JSON.stringify(second), /There is one file: README\.md/);
   assert.equal(requests.length, 2);
-  assert.deepEqual(
-    claudeProcesses().filter((pid) => !before.includes(pid)),
-    kept,
-  );
+
+  if (procfs)
+    assert.deepEqual(
+      claudeProcesses().filter((pid) => !before.includes(pid)),
+      kept,
+    );
   const resumed = JSON.stringify(requests[1]?.body.messages);
   // Continued, not replayed: the earlier exchange is Claude Code's own record of it, and the new
   // turn carries only the tool output.
@@ -437,14 +464,19 @@ test("starts a new Claude Code process when a request needs different options", 
   );
 
   assert.match(JSON.stringify(response), /Two/);
-  await waitFor(() => first.every((pid) => !claudeProcesses().includes(pid)));
-  assert.equal(claudeProcesses().filter((pid) => !before.includes(pid)).length, 1);
+
+  if (procfs) {
+    assert.equal(first.length, 1);
+    await waitFor(() => first.every((pid) => !claudeProcesses().includes(pid)));
+    assert.equal(claudeProcesses().filter((pid) => !before.includes(pid)).length, 1);
+  }
+
   assert.equal(requests[1]?.body.max_tokens, 2048);
   // The new process resumes the SDK session rather than replaying the conversation.
   assert.doesNotMatch(JSON.stringify(requests[1]?.body.messages), /\[Your previous reply\]/);
 });
 
-test("answers on a fresh process when the waiting one has exited", async () => {
+test("answers on a fresh process when the waiting one has exited", linux, async () => {
   const conversation = [{ role: "user" as const, content: "Before the crash" }];
 
   replies.push({ content: [{ type: "text", text: "Noted" }], stop: "end_turn" });
@@ -478,6 +510,50 @@ test("answers on a fresh process when the waiting one has exited", async () => {
   assert.match(resumed, /Before the crash/);
   assert.match(resumed, /After the crash/);
   assert.doesNotMatch(resumed, /\[Your previous reply\]/);
+});
+
+test("retries a turn whose process died mid-answer without doubling it", linux, async () => {
+  const conversation = [{ role: "user" as const, content: "Question one" }];
+
+  replies.push({ content: [{ type: "text", text: "Answer one" }], stop: "end_turn" });
+  const before = claudeProcesses();
+
+  await events(await send({ messages: conversation }, "conversation-mid-turn"));
+  const [waiting] = claudeProcesses().filter((pid) => !before.includes(pid));
+
+  assert.ok(waiting);
+  partialNext = true;
+
+  const pending = send(
+    {
+      messages: [
+        ...conversation,
+        { role: "assistant", content: [{ type: "text", text: "Answer one" }] },
+        { role: "user", content: "Question two" },
+      ],
+    },
+    "conversation-mid-turn",
+  );
+
+  // The waiting process takes the turn, streams part of an answer, and dies.
+  await partialSent;
+  // Long enough for Claude Code to write the turn so far to its transcript.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  process.kill(waiting, "SIGKILL");
+  replies.push({ content: [{ type: "text", text: "Answer two" }], stop: "end_turn" });
+
+  const response = JSON.stringify(await events(await pending));
+
+  assert.match(response, /Answer two/);
+  assert.doesNotMatch(response, /PARTIAL ANSWER/);
+  const retried = JSON.stringify(requests.at(-1)?.body.messages);
+
+  // Resumed at the last turn the client received: the lost turn is dropped, not replayed twice.
+  assert.match(retried, /Question one/);
+  assert.match(retried, /Answer one/);
+  assert.equal(retried.split("Question two").length - 1, 1);
+  assert.doesNotMatch(retried, /PARTIAL ANSWER/);
+  assert.doesNotMatch(retried, /\[Your previous reply\]/);
 });
 
 test("replays the whole conversation when the history no longer matches the SDK session", async () => {

@@ -137,6 +137,11 @@ type StoredSession = {
   messageCount: number;
   /** historyDigest of the client messages it was sent, all but that reply. */
   sentDigest: string;
+  /**
+   * The last transcript entry of the turn the client received. A resume stops there, dropping a
+   * turn that died or was abandoned after it, so its prompt and partial answer are never doubled.
+   */
+  resumeAt: string | undefined;
   lastUsedAt: number;
 };
 
@@ -284,7 +289,16 @@ function messageEvents(message: BridgeMessage) {
 type Captured = { id: string; name: string; input: JsonObject };
 
 /** What one request's turn collects from Claude Code. */
-type Turn = { captured: Captured[]; content: OutputBlock[]; limitError: string | undefined };
+type Turn = {
+  captured: Captured[];
+  content: OutputBlock[];
+  limitError: string | undefined;
+  /** The turn's latest transcript entry. */
+  lastEntry: string | undefined;
+};
+
+/** Where a new process picks up a session: the SDK session and the entry to resume at. */
+type Resume = { sdkSessionId: string; at: string | undefined };
 
 /** A queue of user messages Claude Code reads as its streaming input, open until ended. */
 function inbox() {
@@ -384,7 +398,7 @@ export function createBridge(options: BridgeOptions) {
   }
 
   /** Start a Claude Code process for a session, resuming its SDK session when given one. */
-  function start(key: string, request: Request, body: MessagesRequest, resume?: string) {
+  function start(key: string, request: Request, body: MessagesRequest, resume?: Resume) {
     const { env, config } = processOptions(request, body);
     const input = inbox();
 
@@ -429,7 +443,7 @@ export function createBridge(options: BridgeOptions) {
     const live: Live = {
       key,
       config,
-      sdkSessionId: resume,
+      sdkSessionId: resume?.sdkSessionId,
       input,
       turn: undefined,
       closed: false,
@@ -440,7 +454,8 @@ export function createBridge(options: BridgeOptions) {
         options: {
           cwd: options.cwd,
           model: body.model || undefined,
-          resume,
+          resume: resume?.sdkSessionId,
+          resumeSessionAt: resume?.at,
           // Turn 1 is the answer: the hook ends the turn at a tool call. The cap is a backstop
           // for a model that keeps going; error_max_turns with captured calls returns them.
           maxTurns: 2,
@@ -508,6 +523,9 @@ export function createBridge(options: BridgeOptions) {
     if (message.type === "system" && message.subtype === "init")
       live.sdkSessionId = message.session_id;
 
+    if ((message.type === "assistant" || message.type === "user") && message.uuid)
+      turn.lastEntry = message.uuid;
+
     if (message.type === "assistant") {
       const text = message.message.content
         .map((block) => (block.type === "text" ? block.text : ""))
@@ -560,7 +578,7 @@ export function createBridge(options: BridgeOptions) {
    * to the reason when the process ends first (it exited, or the client went away).
    */
   async function ask(live: Live, message: SDKUserMessage, cancel: AbortController) {
-    const turn: Turn = { captured: [], content: [], limitError: undefined };
+    const turn: Turn = { captured: [], content: [], limitError: undefined, lastEntry: undefined };
     const stop = () => close(live);
 
     if (cancel.signal.aborted) return { ended: "request canceled" };
@@ -617,7 +635,10 @@ export function createBridge(options: BridgeOptions) {
       waiting.sdkSessionId === stored.sdkSessionId &&
       waiting.config === processOptions(request, body).config;
 
-    const resume = continuation ? stored.sdkSessionId : undefined;
+    const resume = continuation
+      ? { sdkSessionId: stored.sdkSessionId, at: stored.resumeAt }
+      : undefined;
+
     let live = reusable ? waiting : start(key, request, body, resume);
 
     let answer = await ask(live, message, cancel).catch((cause: Error) => {
@@ -625,7 +646,8 @@ export function createBridge(options: BridgeOptions) {
       throw cause;
     });
 
-    // A waiting process can have exited while idle: answer on a fresh one resuming the session.
+    // A waiting process can have exited, idle or mid-turn: answer on a fresh one resuming the
+    // session at the last turn the client received, so the lost turn is dropped, not doubled.
     if ("ended" in answer && reusable && !cancel.signal.aborted) {
       close(live);
       live = start(key, request, body, resume);
@@ -650,6 +672,7 @@ export function createBridge(options: BridgeOptions) {
         sdkSessionId: live.sdkSessionId,
         messageCount: body.messages.length + 1,
         sentDigest: historyDigest(body.messages),
+        resumeAt: turn.lastEntry,
         lastUsedAt: Date.now(),
       });
 
