@@ -8,6 +8,9 @@ import * as Schema from "effect/Schema";
 import { headers, signIn } from "./session";
 import { Live, Snapshot } from "../src/transcript";
 import { SlackThreads } from "../src/slack-inbox";
+import { GitHubThreads } from "../src/github-inbox";
+import { AutomationRunDoc } from "../src/automations";
+import { ConversationWorkspace, workspaceConfig } from "../src/workspace";
 
 const claudeToken = `sk-ant-oat01-${"a".repeat(40)}`;
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
@@ -105,7 +108,11 @@ async function run(id: string, content: string) {
   });
 
   expect(sent.status).toBe(202);
+  await settled(id);
+}
 
+/** Wait until a session's run has ended with an answer. */
+async function settled(id: string) {
   await expect
     .poll(
       async () => {
@@ -124,6 +131,19 @@ async function run(id: string, content: string) {
       { timeout: 10_000 },
     )
     .toBe(true);
+}
+
+/** Spawn a task under `parent` through the children API, as spawn_task does. */
+async function spawn(parent: string, content: string, mode?: string) {
+  const response = await SELF.fetch(`https://worker/api/sessions/${parent}/children`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ content, requestId: crypto.randomUUID(), ...(mode && { mode }) }),
+  });
+
+  expect(response.status).toBe(202);
+
+  return (await response.json<{ id: string }>()).id;
 }
 
 const Reply = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json));
@@ -242,6 +262,101 @@ it("lists and reads other web sessions, redacting credentials", async () => {
   });
   expect(JSON.stringify([listed, read])).not.toContain(access.slice(0, 20));
   expect(missing).toMatchObject({ ok: false, error: expect.stringContaining("no-such-session") });
+});
+
+it("lists the owner's work by default and titles reviews by pull request", async () => {
+  model([
+    () => answer("Shipped"),
+    () => answer("Child answered"),
+    () => answer("Child answered"),
+    () => call({ action: "list_sessions" }),
+    () => call({ action: "list_sessions", kind: "review" }),
+    () => call({ action: "list_sessions", kind: "all" }),
+    () => answer("Done"),
+  ]);
+
+  const created = await SELF.fetch("https://worker/api/sessions", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ workspace: { repository: "octocat/project", ref: "main" } }),
+  });
+
+  const work = (await created.json<{ id: string }>()).id;
+  await run(work, "Ship the onboarding flow");
+  const review = await session();
+  const nightly = await session();
+
+  // As github-inbox.ts admits an automatic review and automations.ts starts a run.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    const reviewId = (await state.storage.get<ConversationId>(`session:${review}`))!;
+    const nightlyId = (await state.storage.get<ConversationId>(`session:${nightly}`))!;
+
+    await agent["harness"].commit(async (tx) => {
+      (await tx.doc(ConversationWorkspace, reviewId)).config = workspaceConfig(
+        { repository: "octo/app", ref: "refs/pull/12/head" },
+        String(reviewId),
+        { readOnly: true },
+      );
+      (await tx.doc(GitHubThreads)).threads["review:octo/app#12@abcdef1234567"] = {
+        id: reviewId,
+        events: {},
+      };
+      (await tx.doc(AutomationRunDoc, nightlyId)).run = {
+        automationId: "nightly",
+        name: "Nightly dependency check",
+        trigger: "schedule",
+        mcpServers: [],
+      };
+    }, BACKGROUND_CONTEXT);
+  });
+
+  // A read-only ask task is still the owner's work; an automation's worker inherits its run.
+  const asked = await spawn(work, "Check the migration", "ask");
+  const worker = await spawn(nightly, "Bump the lockfile");
+  await settled(asked);
+  await settled(worker);
+
+  const reader = await session();
+  await run(reader, "Who is working on what?");
+  const [listed, reviews, everything] = await dollyResults(reader);
+
+  // The reader itself is work too, and is listed while it runs.
+  expect(listed).toMatchObject({ ok: true, kind: "work", hidden: { review: 1, automation: 2 } });
+  expect(listed).toMatchObject({
+    sessions: expect.arrayContaining([
+      expect.objectContaining({ id: work, kind: "work", title: "Ship the onboarding flow" }),
+      expect.objectContaining({ id: asked, kind: "work", parentId: work }),
+    ]),
+  });
+  expect(JSON.stringify(listed)).not.toContain(review);
+  expect(JSON.stringify(listed)).not.toContain(nightly);
+  expect(JSON.stringify(listed)).not.toContain(worker);
+
+  expect(reviews).toMatchObject({
+    ok: true,
+    kind: "review",
+    total: 1,
+    sessions: [{ id: review, kind: "review", title: "Review octo/app#12 at abcdef1" }],
+  });
+
+  expect(everything).toMatchObject({ ok: true, kind: "all" });
+  // Earlier tests' sessions are listed too, so check the four this one made.
+  expect(everything).toMatchObject({
+    sessions: expect.arrayContaining(
+      [work, review, nightly, reader, asked, worker].map((id) => expect.objectContaining({ id })),
+    ),
+  });
+  expect(everything).not.toHaveProperty("hidden");
+  expect(everything).toMatchObject({
+    sessions: expect.arrayContaining([
+      expect.objectContaining({
+        id: nightly,
+        kind: "automation",
+        automation: "Nightly dependency check",
+      }),
+      expect.objectContaining({ id: worker, kind: "automation", parentId: nightly }),
+    ]),
+  });
 });
 
 it("withholds session history from conversations started in a Slack thread", async () => {
