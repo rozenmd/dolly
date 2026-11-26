@@ -7,7 +7,7 @@ import * as Schema from "effect/Schema";
 import { Live, Snapshot } from "../src/transcript";
 import { INTERRUPT_NOTE, stripInterruptNote } from "../src/interrupt-message";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { InboxDoc, type ConversationId } from "@earendil-works/pi-durable";
+import { InboxDoc, LiveDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { OwnerInputDoc } from "../src/automation-tool";
 import { InterruptDoc } from "../src/queue";
 import { headers, signIn } from "./session";
@@ -193,9 +193,18 @@ it(
     const { id, container, requests } = await start();
 
     const later = await send(id, "Then run the tests");
+    const first = await send(id, "Back up the database");
     const steer = await send(id, "Actually, use port 3000", true);
     const other = await send(id, "Also check the logs", true);
 
+    // The owner moved the backup ahead of the tests.
+    const reordered = await SELF.fetch(`https://worker/api/sessions/${id}/queue`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ order: [first, later] }),
+    });
+
+    expect(reordered.status).toBe(200);
     expect((await post(`/api/sessions/${id}/queue/${steer}/interrupt`)).status).toBe(202);
 
     // The command was killed rather than waited out, and the interrupting message went first.
@@ -204,18 +213,22 @@ it(
     expect(requests[1]).toContain("Actually, use port 3000");
     expect(requests[1]).toContain(INTERRUPT_NOTE.slice(0, 60));
     expect(requests[1]).not.toContain("Then run the tests");
+    expect(requests[1]).not.toContain("Back up the database");
     expect(requests[1]).not.toContain("Also check the logs");
 
-    // The rest of the queue stayed queued, the other steer as a follow-up, and ran after it.
-    await expect.poll(() => requests.length, { timeout: 15_000 }).toBe(4);
+    // The rest of the queue stayed queued in the owner's order, the other steer as a follow-up,
+    // and ran after it.
+    await expect.poll(() => requests.length, { timeout: 15_000 }).toBe(5);
     await expect.poll(() => queued(id)).toBe(0);
-    expect(requests[2]).toContain("Then run the tests");
-    expect(requests[3]).toContain("Also check the logs");
+    expect(requests[2]).toContain("Back up the database");
+    expect(requests[3]).toContain("Then run the tests");
+    expect(requests[4]).toContain("Also check the logs");
 
     const texts = await userTexts(id);
     expect(texts.map(stripInterruptNote)).toEqual([
       "Start the server",
       "Actually, use port 3000",
+      "Back up the database",
       "Then run the tests",
       "Also check the logs",
     ]);
@@ -239,8 +252,8 @@ it(
     );
 
     const submissions = owner?.submissions ?? [];
-    expect(submissions).toEqual(expect.arrayContaining([later, steer, other]));
-    expect(submissions).toHaveLength(5);
+    expect(submissions).toEqual(expect.arrayContaining([later, first, steer, other]));
+    expect(submissions).toHaveLength(6);
     expect(Math.max(...submissions)).toBeGreaterThan(other);
   },
 );
@@ -266,17 +279,18 @@ it("finishes an interrupt a restart cut short", { timeout: 45_000 }, async () =>
   const { id, requests } = await start();
   const steer = await send(id, "Actually, use port 3000", true);
 
-  // The process stopped right after taking the queue aside, before aborting the turn.
+  // The process stopped right after taking the message aside, before aborting the turn.
   await runInDurableObject(env.AGENT.getByName("owner"), async (instance, state) => {
     const conversationId = (await state.storage.get<ConversationId>(`session:${id}`))!;
 
     await state.storage.put(`interrupt:${conversationId}`, true);
     await instance["harness"].commit(async (tx) => {
       const inbox = await tx.doc(InboxDoc, conversationId);
+      const live = await tx.doc(LiveDoc, conversationId);
       const pending = await tx.doc(InterruptDoc, conversationId);
 
-      pending.target = inbox.items[0]!.id;
-      pending.items = inbox.items.splice(0);
+      pending.item = inbox.items.splice(0, 1)[0];
+      pending.run = { task: live.run!.taskId };
     }, BACKGROUND_CONTEXT);
   });
   expect(await queued(id)).toBe(0);
@@ -298,4 +312,38 @@ it("finishes an interrupt a restart cut short", { timeout: 45_000 }, async () =>
   );
 
   expect(marked.size).toBe(0);
+});
+
+it("leaves a running turn alone when a restart finds no interrupt pending", async () => {
+  const { id, container, requests } = await start();
+
+  // The process stopped after marking the conversation, before taking the message aside (or
+  // after the delivery commit, before clearing the marker).
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const conversationId = (await state.storage.get<ConversationId>(`session:${id}`))!;
+
+    await state.storage.put(`interrupt:${conversationId}`, true);
+  });
+  const queuedId = await send(id, "Then run the tests");
+
+  await abortAllDurableObjects();
+
+  // Waking clears the marker without aborting anything: the queued message is not withdrawn
+  // (as a conversation abort would), and runs once the turn ends, with no interrupt note.
+  await expect
+    .poll(
+      async () =>
+        (await snapshot(id)) && requests.some((request) => request.includes("Then run the tests")),
+      { timeout: 20_000 },
+    )
+    .toBe(true);
+  expect(requests.some((request) => request.includes(INTERRUPT_NOTE.slice(0, 60)))).toBe(false);
+  expect(container.kills).toEqual([]);
+
+  const marked = await runInDurableObject(env.AGENT.getByName("owner"), (_, state) =>
+    state.storage.list({ prefix: "interrupt:" }),
+  );
+
+  expect(marked.size).toBe(0);
+  expect(queuedId).toBeGreaterThan(0);
 });

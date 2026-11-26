@@ -3934,12 +3934,15 @@ export class Agent extends DurableObject<Env> {
   /**
    * Interrupt and send now: stop the running turn and deliver one queued message as the next turn
    * at once, instead of at the next step boundary, which a long tool call can hold for minutes.
-   * The rest of the queue stays queued; other steers wait for the next turn. The message carries
-   * `INTERRUPT_NOTE`, so the model folds it into the interrupted work rather than parking.
+   * The rest of the queue stays queued, in its order; other steers wait for the next turn. The
+   * message carries `INTERRUPT_NOTE`, so the model folds it into the interrupted work rather than
+   * parking.
    *
-   * The queued inputs leave the inbox first, recorded in `InterruptDoc`, as the abort (the one Stop
-   * uses) withdraws everything queued; the commit that sends the message puts them back. A
-   * `interrupt:` storage key marks the conversation until then, so a restart finishes the job.
+   * The message leaves the inbox first, so no step boundary places it into the run being stopped,
+   * and `InterruptDoc` records it with that run. Only that run is aborted, with the work it owns:
+   * the inbox and the conversation's other tasks (a Slack reply's delivery, say) are untouched.
+   * An `interrupt:` storage key points startup at a conversation whose interrupt a restart cut
+   * short; `InterruptDoc` decides what is left to do.
    */
   interruptQueued(id: string, submissionId: number) {
     return Effect.runPromise(
@@ -3959,9 +3962,10 @@ export class Agent extends DurableObject<Env> {
             const live = await tx.doc(LiveDoc, target.id);
             const inbox = await tx.doc(InboxDoc, target.id);
             const pending = await tx.doc(InterruptDoc, target.id);
-            const item = inbox.items.find((candidate) => candidate.id === submissionId);
+            const index = inbox.items.findIndex((candidate) => candidate.id === submissionId);
+            const item = inbox.items[index];
 
-            if (pending.target !== undefined) return "interrupting" as const;
+            if (pending.item !== undefined) return "interrupting" as const;
 
             // The boundary may already have consumed it; a queued write is not the owner's.
             if (!item || item.mode === "write") return "gone" as const;
@@ -3969,13 +3973,11 @@ export class Agent extends DurableObject<Env> {
             // Nothing to interrupt: steering places it as soon as the conversation can.
             if (!live.run) return "idle" as const;
 
-            pending.target = item.id;
-            pending.items = inbox.items
-              .filter((queued) => queued.mode !== "write")
-              .map(copyInboxItem);
-            inbox.items = inbox.items
-              .filter((queued) => queued.mode === "write")
-              .map(copyInboxItem);
+            pending.item = copyInboxItem(item);
+            pending.run = { task: live.run.taskId };
+
+            if (live.run.first !== undefined) pending.run.first = live.run.first;
+            inbox.items.splice(index, 1);
 
             return "taken" as const;
           }, BACKGROUND_CONTEXT),
@@ -4005,62 +4007,79 @@ export class Agent extends DurableObject<Env> {
   }
 
   /**
-   * Abort the turn an interrupt stopped and send its message, putting the rest of the queue back.
-   * Idempotent: a restart after the abort or before it (the turn still running) ends the same way.
+   * Abort the run an interrupt stopped and send its message. Idempotent, for restarts: with no
+   * interrupt pending it only clears the marker, and it aborts only the recorded run, so a run
+   * started since (the message's own, say) is never cut short.
    */
   private async finishInterrupt(conversationId: ConversationId) {
     const conversation = await this.harness.conversation(conversationId, BACKGROUND_CONTEXT);
 
-    if (conversation) {
-      // The same abort Stop uses: running tools are signalled, not waited out.
-      await conversation.abort(BACKGROUND_CONTEXT, { background: true });
-
-      await conversation.commit(async (tx) => {
+    const running =
+      conversation &&
+      (await conversation.commit(async (tx) => {
         const pending = await tx.doc(InterruptDoc, conversationId);
-
-        if (pending.target === undefined) return;
         const live = await tx.doc(LiveDoc, conversationId);
-        const inbox = await tx.doc(InboxDoc, conversationId);
-        const owner = await tx.doc(OwnerInputDoc, conversationId);
-        const target = pending.items.find((item) => item.id === pending.target);
 
-        // Other steers go back to the queue and wait for the next turn, rather than being swept
-        // into this one. Inputs that arrived while the turn stopped wait behind it as they were.
-        const restored = pending.items
-          .filter((item) => item.id !== pending.target)
-          .map((item) => withMode(item, "followUp"));
+        if (pending.item === undefined || !live.run || !pending.run) return undefined;
 
-        const arrived = inbox.items.filter((item) => item.mode !== "write").map(copyInboxItem);
-        inbox.items = inbox.items.filter((item) => item.mode === "write").map(copyInboxItem);
+        // The same run, even if a newer generation task carries it now.
+        const same =
+          live.run.taskId === pending.run.task ||
+          (pending.run.first !== undefined && live.run.first === pending.run.first);
 
-        if (target && target.mode !== "write" && !live.run) {
-          // Sent alone into the idle conversation, it starts the next turn now.
-          const content = withInterruptNote(target.content);
-          const requestId = `interrupt:${target.id}`;
+        return same ? live.run.taskId : undefined;
+      }, BACKGROUND_CONTEXT));
 
-          // A message placed as its own kind of entry (a review handoff, say) keeps it.
-          const draft: InputSubmissionDraft = target.entry
-            ? { type: "input", content, requestId, entry: target.entry }
-            : { type: "input", content, requestId };
-
-          const sent = await conversation.submit(tx, draft);
-
-          tx.settleSubmission(target.id, { status: "unanswered", reason: "interrupted" });
-
-          // The owner's message stays the owner's: only its turn may act for the owner alone.
-          if (owner.submissions.includes(target.id) && !owner.submissions.includes(sent))
-            owner.submissions.push(sent);
-          owner.submissions.splice(0, Math.max(0, owner.submissions.length - OWNER_INPUTS_KEPT));
-        } else if (target && target.mode !== "write") {
-          // Something started a turn first: the message joins it at its next step boundary.
-          restored.push(withMode(target, "steer"));
-        }
-
-        inbox.items.push(...[...restored, ...arrived].sort((a, b) => a.id - b.id));
-        pending.target = undefined;
-        pending.items = [];
-      }, BACKGROUND_CONTEXT);
+    if (running !== undefined) {
+      // The run and the work it owns: running tools are signalled, not waited out.
+      await this.harness.abortTask(running, BACKGROUND_CONTEXT);
+      await this.harness.waitForTask(running, BACKGROUND_CONTEXT);
     }
+
+    await conversation?.commit(async (tx) => {
+      const pending = await tx.doc(InterruptDoc, conversationId);
+      const target = pending.item;
+
+      if (target === undefined || target.mode === "write") return;
+      const live = await tx.doc(LiveDoc, conversationId);
+      const inbox = await tx.doc(InboxDoc, conversationId);
+      const owner = await tx.doc(OwnerInputDoc, conversationId);
+
+      if (live.run) {
+        // Something started a turn first: the message joins it at its next step boundary.
+        inbox.items.push(withMode(target, "steer"));
+      } else {
+        // The queue steps aside so the message is sent alone, starting the next turn now, then
+        // returns in its order. Other steers wait for the next turn rather than join this one.
+        const queued = inbox.items.map((item) =>
+          item.mode === "steer" ? withMode(item, "followUp") : copyInboxItem(item),
+        );
+
+        inbox.items = queued.filter((item) => item.mode === "write");
+
+        const content = withInterruptNote(target.content);
+        const requestId = `interrupt:${target.id}`;
+
+        // A message placed as its own kind of entry (a review handoff, say) keeps it.
+        const draft: InputSubmissionDraft = target.entry
+          ? { type: "input", content, requestId, entry: target.entry }
+          : { type: "input", content, requestId };
+
+        const sent = await conversation.submit(tx, draft);
+
+        tx.settleSubmission(target.id, { status: "unanswered", reason: "interrupted" });
+
+        // The owner's message stays the owner's: only its turn may act for the owner alone.
+        if (owner.submissions.includes(target.id) && !owner.submissions.includes(sent))
+          owner.submissions.push(sent);
+        owner.submissions.splice(0, Math.max(0, owner.submissions.length - OWNER_INPUTS_KEPT));
+
+        inbox.items.push(...queued.filter((item) => item.mode !== "write"));
+      }
+
+      delete pending.item;
+      delete pending.run;
+    }, BACKGROUND_CONTEXT);
 
     await this.ctx.storage.delete(interruptKey(conversationId));
   }

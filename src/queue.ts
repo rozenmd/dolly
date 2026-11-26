@@ -1,8 +1,10 @@
 import {
   defineDoc,
   type ConversationView,
+  type EntryId,
   type InboxItem,
   type SubmissionId,
+  type TaskId,
 } from "@earendil-works/pi-durable";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -54,16 +56,20 @@ export function submissionId(id: number): SubmissionId {
 }
 
 /**
- * An interrupt in progress ("Interrupt and send now"): the queued inputs taken out of the inbox
- * while the running turn is aborted, so the abort can't withdraw them, and the one that interrupts.
- * The commit that sends `target` puts the others back. Empty when no interrupt is in progress.
+ * An interrupt in progress ("Interrupt and send now"): the message that interrupts, taken out of
+ * the inbox so no step boundary places it into the run being stopped, and that run, so only it is
+ * aborted. The commit that sends the message clears it. Empty when no interrupt is in progress.
  */
-export const InterruptDoc = defineDoc<{ target?: SubmissionId; items: InboxItem[] }>({
+export const InterruptDoc = defineDoc<{
+  item?: InboxItem;
+  /** The interrupted run: its first entry and the generation task running it then. */
+  run?: { task: TaskId; first?: EntryId };
+}>({
   kind: "app.interrupt",
   version: 1,
   scope: "conversation",
   history: "latest",
   fork: "initial",
-  initial: () => ({ items: [] }),
-  checkpointWhen: (value) => value.target === undefined,
+  initial: () => ({}),
+  checkpointWhen: (value) => value.item === undefined,
 });
