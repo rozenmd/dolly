@@ -45,10 +45,41 @@ const SESSION_KINDS = ["work", "review", "automation", "all"] as const;
 
 type SessionKind = Exclude<(typeof SESSION_KINDS)[number], "all">;
 
-function sessionKind(session: SavedSession): SessionKind {
-  if (session.automation === "review") return "review";
+/**
+ * A spawned session is the kind of the top-level session that started it: an owner's read-only
+ * `ask` task is still the owner's work, and an automation's workers belong to the automation.
+ * Only top-level sessions carry what started them: `automation: "review"` marks a read-only one
+ * no automation started, and `automationRun` is set only without a parent (session-list.ts).
+ */
+function sessionKinds(sessions: readonly SavedSession[]) {
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const kinds = new Map<string, SessionKind>();
 
-  return session.automationRun ? "automation" : "work";
+  for (const session of sessions) {
+    let root = session;
+    const seen = new Set([session.id]);
+
+    while (root.parentId && !seen.has(root.parentId)) {
+      const parent = byId.get(root.parentId);
+
+      if (!parent) break;
+      seen.add(parent.id);
+      root = parent;
+    }
+
+    // A parent missing from the listing leaves no record of what started it; count it as work.
+    const kind = root.parentId
+      ? "work"
+      : root.automation === "review"
+        ? "review"
+        : root.automationRun
+          ? "automation"
+          : "work";
+
+    kinds.set(session.id, kind);
+  }
+
+  return kinds;
 }
 
 const Limit = (maximum: number) =>
@@ -191,7 +222,11 @@ async function listSessions(
   const kind = request.kind ?? "work";
   const limit = request.limit ?? DEFAULT_SESSIONS;
 
-  const candidates = (await deps.sessions()).filter(
+  const sessions = await deps.sessions();
+  const kinds = sessionKinds(sessions);
+  const sessionKind = (session: SavedSession) => kinds.get(session.id) ?? "work";
+
+  const candidates = sessions.filter(
     (session) =>
       matchesStatus(session, status) &&
       (!repository || session.repository.toLowerCase() === repository) &&

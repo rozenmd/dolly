@@ -108,7 +108,11 @@ async function run(id: string, content: string) {
   });
 
   expect(sent.status).toBe(202);
+  await settled(id);
+}
 
+/** Wait until a session's run has ended with an answer. */
+async function settled(id: string) {
   await expect
     .poll(
       async () => {
@@ -127,6 +131,19 @@ async function run(id: string, content: string) {
       { timeout: 10_000 },
     )
     .toBe(true);
+}
+
+/** Spawn a task under `parent` through the children API, as spawn_task does. */
+async function spawn(parent: string, content: string, mode?: string) {
+  const response = await SELF.fetch(`https://worker/api/sessions/${parent}/children`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ content, requestId: crypto.randomUUID(), ...(mode && { mode }) }),
+  });
+
+  expect(response.status).toBe(202);
+
+  return (await response.json<{ id: string }>()).id;
 }
 
 const Reply = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json));
@@ -250,13 +267,21 @@ it("lists and reads other web sessions, redacting credentials", async () => {
 it("lists the owner's work by default and titles reviews by pull request", async () => {
   model([
     () => answer("Shipped"),
+    () => answer("Child answered"),
+    () => answer("Child answered"),
     () => call({ action: "list_sessions" }),
     () => call({ action: "list_sessions", kind: "review" }),
     () => call({ action: "list_sessions", kind: "all" }),
     () => answer("Done"),
   ]);
 
-  const work = await session();
+  const created = await SELF.fetch("https://worker/api/sessions", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ workspace: { repository: "octocat/project", ref: "main" } }),
+  });
+
+  const work = (await created.json<{ id: string }>()).id;
   await run(work, "Ship the onboarding flow");
   const review = await session();
   const nightly = await session();
@@ -285,19 +310,27 @@ it("lists the owner's work by default and titles reviews by pull request", async
     }, BACKGROUND_CONTEXT);
   });
 
+  // A read-only ask task is still the owner's work; an automation's worker inherits its run.
+  const asked = await spawn(work, "Check the migration", "ask");
+  const worker = await spawn(nightly, "Bump the lockfile");
+  await settled(asked);
+  await settled(worker);
+
   const reader = await session();
   await run(reader, "Who is working on what?");
   const [listed, reviews, everything] = await dollyResults(reader);
 
   // The reader itself is work too, and is listed while it runs.
-  expect(listed).toMatchObject({ ok: true, kind: "work", hidden: { review: 1, automation: 1 } });
+  expect(listed).toMatchObject({ ok: true, kind: "work", hidden: { review: 1, automation: 2 } });
   expect(listed).toMatchObject({
     sessions: expect.arrayContaining([
       expect.objectContaining({ id: work, kind: "work", title: "Ship the onboarding flow" }),
+      expect.objectContaining({ id: asked, kind: "work", parentId: work }),
     ]),
   });
   expect(JSON.stringify(listed)).not.toContain(review);
   expect(JSON.stringify(listed)).not.toContain(nightly);
+  expect(JSON.stringify(listed)).not.toContain(worker);
 
   expect(reviews).toMatchObject({
     ok: true,
@@ -310,7 +343,7 @@ it("lists the owner's work by default and titles reviews by pull request", async
   // Earlier tests' sessions are listed too, so check the four this one made.
   expect(everything).toMatchObject({
     sessions: expect.arrayContaining(
-      [work, review, nightly, reader].map((id) => expect.objectContaining({ id })),
+      [work, review, nightly, reader, asked, worker].map((id) => expect.objectContaining({ id })),
     ),
   });
   expect(everything).not.toHaveProperty("hidden");
@@ -321,6 +354,7 @@ it("lists the owner's work by default and titles reviews by pull request", async
         kind: "automation",
         automation: "Nightly dependency check",
       }),
+      expect.objectContaining({ id: worker, kind: "automation", parentId: nightly }),
     ]),
   });
 });
