@@ -67,12 +67,10 @@ type SessionChange = {
   thinkingLevel?: string;
   speed?: Speed;
   autoFallback?: boolean;
-  /** Coordinator mode, per session; not a default for new sessions. */
-  coordinator?: boolean;
 };
 
 /** The model settings new sessions start with. */
-type DefaultSettings = Required<Omit<SessionChange, "coordinator">>;
+type DefaultSettings = Required<SessionChange>;
 
 export function WorkspaceApp() {
   const [auth, setAuth] = useState<AuthState | null>(null);
@@ -151,6 +149,7 @@ export function WorkspaceApp() {
         automation: item.automation,
         workspaceId: item.workspaceId,
         createdAt: item.createdAt,
+        chief: item.chief,
       }))
     : [];
 
@@ -687,7 +686,6 @@ export function WorkspaceApp() {
         thinkingLevel: previous.thinkingLevel,
         speed: previous.speed,
         autoFallback: previous.autoFallback,
-        coordinator: previous.coordinator,
       });
       setError(
         cause instanceof Error
@@ -730,7 +728,6 @@ export function WorkspaceApp() {
         effort={settings.thinkingLevel}
         speed={settings.speed}
         autoFallback={settings.autoFallback}
-        coordinator={current.coordinator ?? false}
         placement="above"
         isDefault={atDefault}
         atDefault={atDefault}
@@ -746,7 +743,6 @@ export function WorkspaceApp() {
         onEffort={(thinkingLevel) => void configure({ thinkingLevel })}
         onSpeed={(speed) => void configure({ speed })}
         onAutoFallback={(autoFallback) => void configure({ autoFallback })}
-        onCoordinator={(coordinator) => void configure({ coordinator })}
         onSetDefault={() => void saveDefaults(settings)}
         onReset={
           defaults
@@ -1018,7 +1014,7 @@ export function WorkspaceApp() {
                 <InboxArrowDownIcon />
               </IconButton>
             )}
-            {session && !feed && workspaceRow && !workspaceRow.archived && (
+            {session && !feed && workspaceRow && !workspaceRow.archived && !workspaceRow.chief && (
               <IconButton
                 label={workspaceRow.pinnedAt ? "Unpin workspace" : "Pin workspace"}
                 aria-pressed={Boolean(workspaceRow.pinnedAt)}
@@ -1028,7 +1024,7 @@ export function WorkspaceApp() {
                 <PinIcon />
               </IconButton>
             )}
-            {session && !feed && (
+            {session && !feed && !session.chief && (
               <IconButton
                 label={session.archived ? "Restore session" : "Archive session"}
                 onClick={() => toggleArchive(session.id)}

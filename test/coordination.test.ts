@@ -866,48 +866,6 @@ it("shares the parent's checkout by default and isolates it on request", async (
   expect(invalid.status).toBe(409);
 });
 
-it("briefs a coordinator session on every request while the mode is on", async () => {
-  const bodies: string[] = [];
-
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
-    bodies.push(
-      new TextDecoder().decode(new Uint8Array(await new Response(init?.body).arrayBuffer())),
-    );
-
-    return answer();
-  });
-
-  const parent = await root();
-
-  const configure = (coordinator: boolean) =>
-    SELF.fetch(`https://worker/api/sessions/${parent}/settings`, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ coordinator }),
-    });
-
-  const on = await configure(true);
-  expect(on.status).toBe(200);
-  expect(await on.json()).toEqual({ coordinator: true });
-  await post(`${parent}/messages`, { content: "Plan it", requestId: crypto.randomUUID() });
-  await expect.poll(() => bodies.length).toBe(1);
-  expect(bodies[0]).toContain(
-    "Coordinator mode is on. Your job is to hand work to other sessions, called threads",
-  );
-
-  const list = await (
-    await SELF.fetch("https://worker/api/sessions", { headers })
-  ).json<{ id: string; coordinator?: boolean }[]>();
-
-  expect(list.find((session) => session.id === parent)?.coordinator).toBe(true);
-
-  await configure(false);
-  await post(`${parent}/messages`, { content: "Now do it", requestId: crypto.randomUUID() });
-  await expect.poll(() => bodies.length).toBe(2);
-  // Turning it off removes the briefing from the next request on.
-  expect(bodies[1]).toContain(String.raw`Removed system prompt section \"coordinator\".`);
-});
-
 it("validates and redacts HTTP inputs", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
     answer(`Bearer abc ${access} test-refresh`),

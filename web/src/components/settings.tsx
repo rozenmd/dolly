@@ -14,6 +14,7 @@ import {
 import {
   authState,
   chatgptLogin,
+  chiefSettings,
   defaultModel,
   request,
   type ApiBody,
@@ -167,7 +168,7 @@ export function AccountSettings() {
   const { pending, run, alert } = useAction();
 
   return (
-    <Section title="Account" description="Who you are signed in to dolly as.">
+    <Section title="Account" description="Who you are signed in to dolly as, and who answers you.">
       <div className="connection-row">
         <span className="status-dot idle" />
         <span className="connection-label">
@@ -189,7 +190,71 @@ export function AccountSettings() {
         </button>
       </div>
       {alert}
+      <ChiefName />
     </Section>
+  );
+}
+
+/** The chief of staff's name; it applies to that sidebar session only, not to Slack or GitHub. */
+function ChiefName() {
+  const [saved, setSaved] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const { pending, run, alert } = useAction();
+
+  useEffect(() => {
+    let active = true;
+    chiefSettings().then(
+      (value) => {
+        if (!active) return;
+        setSaved(value.name);
+        setName(value.name);
+      },
+      () => {},
+    );
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const trimmed = name.trim();
+
+  function save(event: FormEvent) {
+    event.preventDefault();
+    void run(async () => {
+      const value = await chiefSettings(trimmed);
+      setSaved(value.name);
+      setName(value.name);
+    }, "Could not save the name.");
+  }
+
+  return (
+    <>
+      <form className="connection-row" onSubmit={save}>
+        <label className="connection-label" htmlFor="chief-name">
+          Chief of staff
+          <span className="muted">
+            The name of the session at the top of the sidebar that tracks and hands out your work
+          </span>
+        </label>
+        <Input
+          id="chief-name"
+          className="chief-name-input"
+          maxLength={40}
+          value={name}
+          disabled={saved === null || pending}
+          onChange={(event) => setName(event.target.value)}
+        />
+        <button
+          type="submit"
+          className="secondary-button"
+          disabled={saved === null || pending || !trimmed || trimmed === saved}
+        >
+          Save
+        </button>
+      </form>
+      {alert}
+    </>
   );
 }
 

@@ -180,11 +180,14 @@ it("redacts cached titles again when credentials change", async () => {
     }, BACKGROUND_CONTEXT);
   });
 
-  expect((await list())[0].title).toBe(`Check ${key}`);
+  // Connecting a subscription also creates the chief of staff (chief.ts); it is not this session.
+  const titled = async () => (await list()).find((session) => !session.chief)?.title;
+
+  expect(await titled()).toBe(`Check ${key}`);
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("credential:anthropic", { type: "api_key", key });
   });
-  expect((await list())[0].title).toBe("Check [redacted]");
+  expect(await titled()).toBe("Check [redacted]");
 });
 
 it("persists archive choices across restarts and rejects the retired browser import", async () => {

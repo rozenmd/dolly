@@ -6,6 +6,7 @@ import {
   BoltIcon,
   CodeBracketIcon,
   MagnifyingGlassIcon,
+  SparklesIcon,
   PlusIcon,
   SignalIcon,
 } from "@heroicons/react/24/outline";
@@ -26,6 +27,8 @@ export type WorkspaceRow = {
   pullRequest?: SavedSession["pullRequest"];
   /** The automation whose run started this workspace. */
   automationRun?: string;
+  /** The chief of staff: listed first on its own, and never archived or pinned. */
+  chief?: boolean;
 };
 
 const PULL_LABELS = {
@@ -157,6 +160,38 @@ function SidebarRow({
   );
 }
 
+/** The chief of staff, above every workspace: no repository, pin or archive control. */
+function ChiefRow({
+  row,
+  active,
+  now,
+  onSelect,
+}: {
+  row: WorkspaceRow;
+  active: boolean;
+  now: number;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <div className="workspace-item">
+      <button
+        type="button"
+        className={`workspace-row chief-row ${active ? "active" : ""}`}
+        aria-current={active ? "page" : undefined}
+        onClick={() => onSelect(row.id)}
+      >
+        {row.running ? (
+          <span className="status-dot working pulse" aria-label="Agent working" />
+        ) : (
+          <SparklesIcon className="workspace-icon chief" aria-hidden="true" />
+        )}
+        <span className="workspace-title">{row.title}</span>
+        <span className="workspace-time">{ago(row.updatedAt, now)}</span>
+      </button>
+    </div>
+  );
+}
+
 export function Sidebar({
   rows,
   selected,
@@ -189,7 +224,9 @@ export function Sidebar({
   const [archived, setArchived] = useState(false);
   const [showOlder, setShowOlder] = useState(false);
   const now = Date.now();
-  const lists = sessionList(rows, selected, now);
+  const chief = rows.find((row) => row.chief);
+  const workspaces = chief ? rows.filter((row) => row !== chief) : rows;
+  const lists = sessionList(workspaces, selected, now);
 
   const visible = archived
     ? lists.archived
@@ -261,6 +298,16 @@ export function Sidebar({
           <BoltIcon />
           <span>Automations</span>
         </Link>
+        {chief && (
+          <nav className="workspace-list chief-list" aria-label="Chief of staff">
+            <ChiefRow
+              row={chief}
+              active={selected === chief.id && !feed}
+              now={now}
+              onSelect={onSelect}
+            />
+          </nav>
+        )}
         <div className="sidebar-heading">
           <h2>Workspaces</h2>
           <IconButton
@@ -305,7 +352,7 @@ export function Sidebar({
             </nav>
           </>
         )}
-        {rows.length > 0 && (archived || filtered.length > 0 || pinned.length === 0) && (
+        {workspaces.length > 0 && (archived || filtered.length > 0 || pinned.length === 0) && (
           <p className="sidebar-group">
             {archived ? "Archived" : "Recent"} <span>{filtered.length}</span>
           </p>
@@ -315,7 +362,9 @@ export function Sidebar({
           {query && filtered.length === 0 && pinned.length === 0 && (
             <p className="sidebar-empty">No matching workspaces.</p>
           )}
-          {connected && rows.length === 0 && <p className="sidebar-empty">No workspaces yet.</p>}
+          {connected && workspaces.length === 0 && (
+            <p className="sidebar-empty">No workspaces yet.</p>
+          )}
           {archived && !query && filtered.length === 0 && (
             <p className="sidebar-empty">No archived workspaces.</p>
           )}
