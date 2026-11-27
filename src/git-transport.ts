@@ -19,16 +19,34 @@ const defaultNetworkHosts = new Set([
   "playwright.download.prss.microsoft.com",
 ]);
 
+/** A checked receive-pack request: forward `body`, or refuse it with `pushRefusal`. */
+export type CheckedPush =
+  | { accepted: true; body: ReadableStream<Uint8Array> }
+  | { accepted: false; sideband: boolean };
+
+/** Capabilities that make git demultiplex the receive-pack response into sideband channels. */
+const SIDEBAND = new Set(["side-band", "side-band-64k"]);
+
 /**
  * Every receive-pack command must update a branch other than `defaultBranch` and never delete
  * one. Force pushes are allowed: to the server they are ordinary updates.
+ *
+ * A body that is exactly one flush packet is git's probe: before streaming a pack larger than
+ * http.postBuffer (1 MiB by default) it posts `0000` to check that the endpoint answers. It
+ * carries no commands, so it changes nothing, and refusing it fails the push with a bare
+ * `RPC failed; HTTP 403`. Pushing a new branch from a shallow checkout hits this whenever the
+ * default branch has moved on: without a shared commit git sends the whole tree.
  */
-export async function checkedPush(body: ReadableStream<Uint8Array> | null, defaultBranch: string) {
-  if (!body) return null;
+export async function checkedPush(
+  body: ReadableStream<Uint8Array> | null,
+  defaultBranch: string,
+): Promise<CheckedPush> {
+  if (!body) return { accepted: false, sideband: false };
   const reader = body.getReader();
   let prefix = new Uint8Array(0);
   let offset = 0;
   let commands = 0;
+  let sideband = false;
 
   const forward = () =>
     new ReadableStream<Uint8Array>({
@@ -67,9 +85,22 @@ export async function checkedPush(body: ReadableStream<Uint8Array> | null, defau
 
         // A flush ends the command list, which must hold at least one update.
         if (length === 0) {
-          if (commands === 0) break read;
+          if (commands > 0) return { accepted: true, body: forward() };
 
-          return forward();
+          // Only a lone flush, with nothing before or after it, is the probe.
+          if (offset !== 0 || prefix.length !== 4) break read;
+
+          while (true) {
+            const next = await reader.read();
+
+            if (next.done) {
+              reader.releaseLock();
+
+              return { accepted: true, body: new Blob([prefix]).stream() };
+            }
+
+            if (next.value.length > 0) break read;
+          }
         }
 
         if (length < 5) break read;
@@ -90,7 +121,12 @@ export async function checkedPush(body: ReadableStream<Uint8Array> | null, defau
           continue;
         }
 
-        const command = packet.split("\0")[0];
+        const [command, capabilities] = packet.split("\0");
+
+        // The first command lists the capabilities, which say how the refusal can be shown.
+        if (commands === 0 && capabilities !== undefined)
+          sideband = capabilities.split(" ").some((capability) => SIDEBAND.has(capability));
+
         const match = /^[0-9a-f]{40} ([0-9a-f]{40}) refs\/heads\/(\S+)$/.exec(command);
 
         if (!match || /^0+$/.test(match[1]) || match[2] === defaultBranch) break read;
@@ -109,7 +145,7 @@ export async function checkedPush(body: ReadableStream<Uint8Array> | null, defau
     await reader.cancel();
     reader.releaseLock();
 
-    return null;
+    return { accepted: false, sideband };
   } catch (error) {
     try {
       await reader.cancel();
@@ -119,6 +155,27 @@ export async function checkedPush(body: ReadableStream<Uint8Array> | null, defau
 
     throw error;
   }
+}
+
+/**
+ * Refuse a receive-pack request so git shows why. Git prints no body for a failed RPC, only
+ * `RPC failed; HTTP 403`, but it prints sideband channel 3 as `remote: <reason>` and then fails
+ * the push, so a client that asked for a sideband gets the reason there.
+ */
+export function pushRefusal(reason: string, sideband: boolean) {
+  if (!sideband) return new Response(reason, { status: 403 });
+  const payload = new TextEncoder().encode(`\x03${reason}\n`);
+  const packet = new Uint8Array(payload.length + 4);
+  packet.set(new TextEncoder().encode((payload.length + 4).toString(16).padStart(4, "0")));
+  packet.set(payload, 4);
+
+  return new Response(packet, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/x-git-receive-pack-result",
+      "Cache-Control": "no-cache",
+    },
+  });
 }
 
 /** Only a Sandbox can mint this per-conversation capability through ctx.exports. */

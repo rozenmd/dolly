@@ -78,7 +78,7 @@ import {
   shellQuote,
   type WorkspaceConfig,
 } from "./workspace";
-import { gitRoute, checkedPush } from "./git-transport";
+import { gitRoute, checkedPush, pushRefusal } from "./git-transport";
 import { BROWSER_SESSION_MS, MAX_BROWSER_SESSIONS } from "./browser-workspace";
 import { pullRequestChange, WebhookProfile, WebhookSetup } from "./github-webhook";
 import { STEER_TOOL_SKIP, SteerInterrupts, steerInterrupts, steerQueued } from "./steer-interrupt";
@@ -2793,18 +2793,19 @@ export class Agent extends DurableObject<Env> {
           github.authorize(workspace.repository, route.write),
         );
 
-        const body =
+        const checked =
           request.method === "POST" && route.write
             ? yield* attempt("git.push.validate", () =>
                 checkedPush(request.body, authorized.defaultBranch),
               )
-            : request.body;
+            : { accepted: true as const, body: request.body };
 
-        if (request.method === "POST" && route.write && !body)
-          return new Response(
+        if (!checked.accepted)
+          return pushRefusal(
             `Pushes may update any branch except the default branch (${authorized.defaultBranch}), and may not delete branches or push tags`,
-            { status: 403 },
+            checked.sideband,
           );
+        const body = checked.body;
         const headers = new Headers();
 
         for (const name of ["Content-Type", "Accept", "Git-Protocol", "Content-Encoding"]) {
