@@ -3,7 +3,9 @@ import { runInDurableObject } from "cloudflare:test";
 import { expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import {
+  BROWSER_PORT_HEADER,
   PREVIEW_RECORD_KEY,
+  PREVIEW_TOKEN_HEADER,
   PREVIEW_TTL_MS,
   previewRequest,
   PreviewRequest,
@@ -49,6 +51,89 @@ it("validates action-specific preview inputs and rejects absolute/network paths"
   ])
     expect(valid(input)).toBe(false);
   expect(valid({ action: "screenshot", path: "/settings?tab=one", waitFor: "main" })).toBe(true);
+});
+
+it("bounds screenshot actions and scale", () => {
+  const valid = Schema.is(PreviewRequest);
+
+  expect(
+    valid({
+      action: "screenshot",
+      scale: 2,
+      actions: [
+        { click: "button[aria-label='Open menu']" },
+        { type: { selector: "#q", text: "hello" } },
+        { press: "Enter" },
+        { press: "/" },
+        { waitFor: "[role=menu]" },
+        { wait: 5000 },
+      ],
+    }),
+  ).toBe(true);
+
+  for (const input of [
+    { scale: 0.5 },
+    { scale: 4 },
+    { actions: Array.from({ length: 11 }, () => ({ wait: 1 })) },
+    { actions: [{ wait: 5001 }] },
+    { actions: [{ press: "F13" }] },
+    { actions: [{ press: "ab" }] },
+    { actions: [{ click: "" }] },
+    { actions: [{ hover: "a" }] },
+    { actions: [{ type: { selector: "#q" } }] },
+  ])
+    expect(valid({ action: "screenshot", ...input })).toBe(false);
+});
+
+it("forwards WebSocket upgrades without credentials or forged sandbox capabilities", () => {
+  const upgrade = (url: string, headers: Record<string, string> = {}) =>
+    new Request(url, { headers: { Upgrade: "websocket", ...headers } });
+
+  const forwarded = previewRequest(
+    upgrade("ws://scoped.test/api/sessions/1/events", {
+      Cookie: "app-cookie",
+      [PREVIEW_TOKEN_HEADER]: "forged",
+      [BROWSER_PORT_HEADER]: "22",
+      "Sec-WebSocket-Protocol": "chat",
+    }),
+    "scoped.test",
+  );
+
+  expect(forwarded?.url).toBe("http://scoped.test/api/sessions/1/events");
+  expect(forwarded?.headers.get("upgrade")).toBe("websocket");
+  expect(forwarded?.headers.get("sec-websocket-protocol")).toBe("chat");
+
+  for (const header of ["cookie", PREVIEW_TOKEN_HEADER, BROWSER_PORT_HEADER])
+    expect(forwarded?.headers.get(header)).toBeNull();
+  // ws: is only an upgrade's scheme, and the hostname pin still applies.
+  expect(previewRequest(new Request("ws://scoped.test/"), "scoped.test")).toBeNull();
+  expect(previewRequest(upgrade("ws://other.test/"), "scoped.test")).toBeNull();
+  expect(previewRequest(upgrade("wss://scoped.test/"), "scoped.test")).toBeNull();
+});
+
+it("refuses sandbox WebSocket upgrades without a live capability, without starting a container", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance) => {
+    Object.assign(instance, {
+      container: () => {
+        throw new Error("Must not start a container");
+      },
+    });
+
+    const upgrade = (headers: Record<string, string>) =>
+      instance.fetch(new Request("http://preview.test/ws", { headers }));
+
+    expect((await upgrade({ [PREVIEW_TOKEN_HEADER]: "forged" })).status).toBe(404);
+    expect((await upgrade({ Upgrade: "websocket", [PREVIEW_TOKEN_HEADER]: "forged" })).status).toBe(
+      404,
+    );
+    expect((await upgrade({ Upgrade: "websocket" })).status).toBe(404);
+    expect((await upgrade({ Upgrade: "websocket", [BROWSER_PORT_HEADER]: "80" })).status).toBe(404);
+    // A browser port is honoured only while the workspace container already runs.
+    expect((await upgrade({ Upgrade: "websocket", [BROWSER_PORT_HEADER]: "3000" })).status).toBe(
+      503,
+    );
+  });
 });
 
 it("does not initialize a sandbox for preview status or unauthorised browser requests", async () => {

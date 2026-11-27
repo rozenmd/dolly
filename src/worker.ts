@@ -12,6 +12,7 @@ export {
   AutomationIngress,
   WorkspaceOutbound,
   PreviewOutbound,
+  SandboxOutbound,
   ClaudeCode,
   ClaudeCodeOutbound,
 } from "./index";

@@ -1,6 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env";
-import { previewRequest } from "./preview";
+import { BROWSER_PORT_HEADER, isWebSocketUpgrade, previewRequest, sandboxUpgrade } from "./preview";
 
 /** The reserved sandbox host that brokers Cloudflare Browser Run over the DevTools protocol. */
 export const BROWSER_HOST = "browser.workspace";
@@ -17,11 +17,12 @@ export class SandboxOutbound extends WorkerEntrypoint<Env, { sandbox: string; po
 
     if (!forwarded) return new Response("Not found", { status: 404 });
     const { sandbox, port } = this.ctx.props;
+    const stub = this.env.SANDBOX.get(this.env.SANDBOX.idFromString(sandbox));
 
-    return this.env.SANDBOX.get(this.env.SANDBOX.idFromString(sandbox)).browserFetch(
-      forwarded,
-      port,
-    );
+    if (isWebSocketUpgrade(forwarded))
+      return stub.fetch(sandboxUpgrade(forwarded, BROWSER_PORT_HEADER, String(port)));
+
+    return stub.browserFetch(forwarded, port);
   }
 }
 

@@ -30,8 +30,11 @@ import {
 } from "./shell-output";
 import type { Env } from "./env";
 import {
+  BROWSER_PORT_HEADER,
+  isWebSocketUpgrade,
   logTail,
   PREVIEW_RECORD_KEY,
+  PREVIEW_TOKEN_HEADER,
   PREVIEW_SCREENSHOT_WAIT_MS,
   PREVIEW_START_WAIT_MS,
   PREVIEW_TTL_MS,
@@ -1643,6 +1646,28 @@ export class Sandbox extends DurableObject<Env> {
     }
 
     return { token: preview.token, expiresAt: preview.expiresAt };
+  }
+
+  /**
+   * WebSocket upgrades from a preview or brokered browser, which RPC cannot carry. Each needs
+   * the capability its RPC twin takes: a live preview's token, or a port of a running container.
+   */
+  override async fetch(request: Request) {
+    const headers = new Headers(request.headers);
+    const token = headers.get(PREVIEW_TOKEN_HEADER);
+    const port = headers.get(BROWSER_PORT_HEADER);
+    headers.delete(PREVIEW_TOKEN_HEADER);
+    headers.delete(BROWSER_PORT_HEADER);
+
+    if (!isWebSocketUpgrade(request)) return new Response("Not found", { status: 404 });
+    const forwarded = new Request(request, { headers });
+
+    if (token !== null) return this.previewFetch(forwarded, token);
+
+    if (port !== null && Schema.is(PreviewPort)(Number(port)))
+      return this.browserFetch(forwarded, Number(port));
+
+    return new Response("Not found", { status: 404 });
   }
 
   async previewFetch(request: Request, token: string) {

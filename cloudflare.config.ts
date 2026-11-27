@@ -48,6 +48,7 @@ export default defineConfig({
       AutomationIngress: exports.worker(),
       WorkspaceOutbound: exports.worker(),
       PreviewOutbound: exports.worker(),
+      SandboxOutbound: exports.worker(),
       ClaudeCodeOutbound: exports.worker(),
       Agent: exports.durableObject({ storage: "sqlite" }),
       Sandbox: exports.durableObject({ storage: "sqlite", container: sandbox }),

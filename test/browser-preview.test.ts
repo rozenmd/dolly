@@ -1,6 +1,12 @@
 import { env } from "cloudflare:workers";
 import { expect, it, vi } from "vite-plus/test";
-import { capturePreview, PreviewCdp, type CdpParams, type CdpResult } from "../src/browser-preview";
+import {
+  capturePreview,
+  elementExpression,
+  PreviewCdp,
+  type CdpParams,
+  type CdpResult,
+} from "../src/browser-preview";
 import { resolveImages } from "../src/images";
 
 class BrowserSocket extends EventTarget {
@@ -11,14 +17,19 @@ class BrowserSocket extends EventTarget {
   navigation: CdpResult = {};
   /** CDP command errors for Runtime.evaluate, used before evaluations. */
   evaluateErrors: string[] = [];
+  /** Answers Runtime.evaluate by expression before evaluations, when it returns a result. */
+  evaluate?: (expression: string) => CdpResult | undefined;
   accept = vi.fn();
   close = vi.fn();
-  result(method: string) {
+  result(method: string, params: CdpParams) {
     if (method === "Page.captureScreenshot") return { data: btoa("png bytes") };
 
     if (method === "Page.navigate") return this.navigation;
 
     if (method !== "Runtime.evaluate") return {};
+    const answer = this.evaluate?.(params.expression ?? "");
+
+    if (answer) return answer;
 
     return this.evaluations.length > 1 ? this.evaluations.shift() : this.evaluations[0];
   }
@@ -35,7 +46,7 @@ class BrowserSocket extends EventTarget {
               ? { error: { message: "deliberate failure" } }
               : command.method === "Runtime.evaluate" && this.evaluateErrors.length
                 ? { error: { message: this.evaluateErrors.shift() } }
-                : { result: this.result(command.method) }),
+                : { result: this.result(command.method, command.params) }),
           }),
         }),
       );
@@ -296,4 +307,134 @@ it("retries when Chrome rejects the readiness check because the page navigated",
   expect(socket.commands.filter((command) => command.method === "Runtime.evaluate")).toHaveLength(
     2,
   );
+});
+
+/** Element lookups answer with state(selector); readiness and settling answer ready. */
+function elements(state: (selector: string, mode: string) => object) {
+  return (expression: string) => {
+    const lookup = /const selector = ("(?:[^"\\]|\\.)*");\s*const mode = "(\w+)"/.exec(expression);
+
+    if (!lookup)
+      return { result: { value: expression.includes("readyState") ? { ready: true } : true } };
+
+    return { result: { value: state(JSON.parse(lookup[1]), lookup[2]) } };
+  };
+}
+
+it("runs click, type, press, waitFor and wait actions through CDP before a retina capture", async () => {
+  const { socket, bindings } = fixture(undefined, (socket) => {
+    socket.evaluate = elements((selector) => ({
+      ok: true,
+      x: selector === "#menu" ? 40 : 10,
+      y: 20,
+    }));
+  });
+
+  const result = await capturePreview(bindings, unusedOutbound, "one.test", {
+    action: "screenshot",
+    width: 390,
+    height: 844,
+    scale: 2,
+    actions: [
+      { click: "#menu" },
+      { waitFor: "[role=menu]" },
+      { type: { selector: "input[name=q]", text: "hello" } },
+      { press: "Enter" },
+      { press: "a" },
+      { wait: 50 },
+    ],
+  });
+
+  expect(socket.commands).toContainEqual(
+    expect.objectContaining({
+      method: "Emulation.setDeviceMetricsOverride",
+      params: { width: 390, height: 844, deviceScaleFactor: 2, mobile: false },
+    }),
+  );
+
+  const input = socket.commands
+    .filter((command) => command.method.startsWith("Input."))
+    .map((command) => [command.method, command.params]);
+
+  expect(input).toEqual([
+    ["Input.dispatchMouseEvent", { type: "mouseMoved", x: 40, y: 20 }],
+    [
+      "Input.dispatchMouseEvent",
+      { type: "mousePressed", x: 40, y: 20, button: "left", clickCount: 1 },
+    ],
+    [
+      "Input.dispatchMouseEvent",
+      { type: "mouseReleased", x: 40, y: 20, button: "left", clickCount: 1 },
+    ],
+    ["Input.insertText", { text: "hello" }],
+    [
+      "Input.dispatchKeyEvent",
+      {
+        type: "keyDown",
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        text: "\r",
+        unmodifiedText: "\r",
+      },
+    ],
+    [
+      "Input.dispatchKeyEvent",
+      { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 },
+    ],
+    [
+      "Input.dispatchKeyEvent",
+      {
+        type: "keyDown",
+        key: "a",
+        code: "KeyA",
+        windowsVirtualKeyCode: 65,
+        text: "a",
+        unmodifiedText: "a",
+      },
+    ],
+    [
+      "Input.dispatchKeyEvent",
+      { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65 },
+    ],
+  ]);
+  // Every action precedes the capture.
+  const methods = socket.commands.map((command) => command.method);
+  expect(methods.lastIndexOf("Input.dispatchKeyEvent")).toBeLessThan(
+    methods.indexOf("Page.captureScreenshot"),
+  );
+  const [text] = result.output;
+  expect(text.type === "text" && JSON.parse(text.text)).toMatchObject({ scale: 2, actions: 6 });
+});
+
+it("names the failed action and why, and takes no screenshot", async () => {
+  const { socket, browser, bindings } = fixture(undefined, (socket) => {
+    socket.evaluate = elements((selector) =>
+      selector === "#open"
+        ? { ok: true, x: 1, y: 1 }
+        : {
+            ok: false,
+            reason:
+              "the matching element <button#save> is not clickable: <div#overlay> covers its centre",
+          },
+    );
+  });
+
+  await expect(
+    capturePreview(bindings, unusedOutbound, "one.test", {
+      action: "screenshot",
+      actions: [{ click: "#open" }, { click: "#save" }, { press: "Escape" }],
+    }),
+  ).rejects.toThrow(
+    'Screenshot action 2 of 3 (click "#save") failed: the matching element <button#save> is not clickable: <div#overlay> covers its centre (after waiting up to 5 seconds). No screenshot was taken; action 1 ran.',
+  );
+  const methods = socket.commands.map((command) => command.method);
+  expect(methods).not.toContain("Page.captureScreenshot");
+  expect(methods).not.toContain("Input.dispatchKeyEvent");
+  expect(browser.closeSession).toHaveBeenCalledWith("session");
+});
+
+it("embeds action selectors in page scripts as data", () => {
+  const expression = elementExpression('a"); alert(1); ("', "click", 5000);
+  expect(expression).toContain(JSON.stringify('a"); alert(1); ("'));
 });
