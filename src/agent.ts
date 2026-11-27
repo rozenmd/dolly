@@ -2718,6 +2718,10 @@ export class Agent extends DurableObject<Env> {
     if (!entry) return;
 
     if (Date.now() - entry.renewed > TURN_KEEPALIVE_MAX_MS) return this.stopTurnKeepAlive(id);
+    // A stopped run clears LiveDoc.run without reaching afterRun: let its checkouts idle out.
+    const live = await this.harness.snapshot(LiveDoc, id, BACKGROUND_CONTEXT);
+
+    if (!live?.run) return this.stopTurnKeepAlive(id);
     const state = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
 
     await Promise.all(

@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 import { headers, signIn } from "./session";
 import { mockFetch } from "./titles";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { LiveDoc } from "@earendil-works/pi-durable";
 import type { SavedSession } from "../src/session-contracts";
 import { ConversationWorkspace, workspaceConfig } from "../src/workspace";
 
@@ -726,6 +727,15 @@ it("keeps every checkout of a running turn alive until the turn ends", async () 
       state.activeRepository = "example/unique";
     }, BACKGROUND_CONTEXT);
 
+    const running = (on: boolean) =>
+      agent["harness"].commit(async (tx) => {
+        const live = await tx.doc(LiveDoc, id);
+        // SAFETY: only the presence of a run is read by the keep-alive; the ids are never used.
+        live.run = on ? ({ taskId: "turn", inputs: [], turns: 0 } as never) : undefined;
+      }, BACKGROUND_CONTEXT);
+
+    await running(true);
+
     // Both checkouts, not just the active one a long command may be running in.
     const both = [String(id), `${id}:repo:example/unique`];
     agent["keepTurnAlive"](id);
@@ -748,6 +758,15 @@ it("keeps every checkout of a running turn alive until the turn ends", async () 
     const entry = agent["turnKeepAlives"].get(String(id));
 
     if (entry) entry.renewed = Date.now() - 71 * 60_000;
+    touched.length = 0;
+    await agent["touchTurnWorkspaces"](id);
+    expect(touched).toEqual([]);
+    expect(agent["turnKeepAlives"].has(String(id))).toBe(false);
+
+    // A stopped run clears LiveDoc.run without reaching afterRun: the next tick stops it.
+    agent["keepTurnAlive"](id);
+    await vi.waitFor(() => expect(touched).toHaveLength(2));
+    await running(false);
     touched.length = 0;
     await agent["touchTurnWorkspaces"](id);
     expect(touched).toEqual([]);
