@@ -440,6 +440,11 @@ ln -s dirty.txt dirty-link`);
       exitCode: 0,
       stdout: expect.stringContaining("ripgrep"),
     });
+    // They also run `python` (not only python3) and `ss` for listening ports.
+    expect(await sandbox.run("python --version && ss -V")).toMatchObject({
+      exitCode: 0,
+      stdout: expect.stringMatching(/^Python 3\.[\s\S]*iproute2/),
+    });
     expect(await snapshotPointer()).toEqual(answeredTurn);
     const saved = await sandbox.checkpoint("next-answered-turn");
 

@@ -60,6 +60,42 @@ const errorReason = (response: Response) =>
       .slice(0, 500);
   }).pipe(Effect.catch(() => Effect.succeed("")));
 
+const GITHUB_API = "https://api.github.com";
+
+/** GitHub answers a renamed or transferred repository's old path with one of these. */
+const REDIRECTS = new Set([301, 302, 307, 308]);
+
+const MAX_REDIRECTS = 3;
+
+/**
+ * Fetch without following redirects, except within GitHub's API: a renamed or transferred
+ * repository redirects to its new path on api.github.com, and following that keeps the request's
+ * credentials on the host they were issued for. Any other redirect is returned as is, and fails.
+ */
+async function fetchFollowingGitHub(url: string, init: RequestInit, signal: AbortSignal) {
+  let target = url;
+
+  for (let hop = 0; ; hop++) {
+    const response = await fetch(target, { ...init, signal, redirect: "manual" });
+    const location = response.headers.get("Location");
+
+    if (
+      !REDIRECTS.has(response.status) ||
+      !location ||
+      hop >= MAX_REDIRECTS ||
+      !URL.canParse(target) ||
+      new URL(target).origin !== GITHUB_API ||
+      !URL.canParse(location, target)
+    )
+      return response;
+    const next = new URL(location, target);
+
+    if (next.origin !== GITHUB_API) return response;
+    await response.body?.cancel().catch(() => {});
+    target = next.href;
+  }
+}
+
 export const integrationJson = Effect.fn("Integration.request")(function* (
   url: string,
   init: RequestInit,
@@ -69,7 +105,7 @@ export const integrationJson = Effect.fn("Integration.request")(function* (
 
   return yield* Effect.gen(function* () {
     const response = yield* Effect.acquireRelease(
-      attempt("integration.fetch", (signal) => fetch(url, { ...init, signal, redirect: "manual" })),
+      attempt("integration.fetch", (signal) => fetchFollowingGitHub(url, init, signal)),
       (value) =>
         attempt("integration.close", async () => {
           if (!value.body?.locked) await value.body?.cancel();

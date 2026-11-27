@@ -2310,6 +2310,22 @@ it("posts inline reviews only against the current head and diff, and never appro
     expect(
       (await post("/api/integrations/github/execute", { operation: { ...review, event } })).ok,
     ).toBe(false);
+  // Models fill a single-line comment's optional range with nulls: those mean "omitted".
+
+  const nulls = await post("/api/integrations/github/execute", {
+    operation: {
+      ...review,
+      comments: [{ ...review.comments[0], start_line: null, start_side: null }],
+    },
+  });
+
+  expect(await nulls.json()).toMatchObject({ ok: true, result: { kind: "review" } });
+  expect(writes.at(-1)).toEqual({
+    path: "/repos/example/project/pulls/49/reviews",
+    body: expect.objectContaining({
+      comments: [{ path: "a.ts", line: 2, side: "RIGHT", body: "Use a constant" }],
+    }),
+  });
 });
 
 it("resolves the review thread holding a comment, from any session but a review's", async () => {

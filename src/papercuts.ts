@@ -546,6 +546,18 @@ const decodeReply = Schema.decodeUnknownOption(ToolReply);
 /** The shell tool's arguments, for the command it ran. */
 const decodeCommand = Schema.decodeUnknownOption(Schema.Struct({ command: Schema.String }));
 
+/** The github tool's arguments, for the action and repository a failure came from. */
+const decodeOperation = Schema.decodeUnknownOption(
+  Schema.Struct({
+    operation: Schema.Struct({
+      action: Schema.String,
+      repository: Schema.optional(Schema.String),
+    }),
+  }),
+);
+
+type Operation = { readonly action: string; readonly repository?: string };
+
 export const STDERR_HEAD = 500;
 export const STDOUT_TAIL = 300;
 const COMMAND_MAX = 300;
@@ -603,7 +615,12 @@ function expectedOutcome(reply: Reply, command: string | undefined) {
  * A compact record of a failed JSON reply: the facts needed to triage it, never its whole output
  * (file contents, diffs and install logs belong to the session, not the log).
  */
-function summarize(reply: Reply, rawCommand: string | undefined, safe: (text: string) => string) {
+function summarize(
+  reply: Reply,
+  rawCommand: string | undefined,
+  safe: (text: string) => string,
+  operation?: Operation,
+) {
   const clean = (value: string | undefined) => (value === undefined ? undefined : safe(value));
   const command = clean(rawCommand);
   const stderr = safe((reply.stderr ?? "").replace(OMITTED, "").trim());
@@ -613,6 +630,8 @@ function summarize(reply: Reply, rawCommand: string | undefined, safe: (text: st
   const code = clean(text(reply.code));
 
   return JSON.stringify({
+    ...(operation && { action: head(safe(operation.action), FIELD_MAX) }),
+    ...(operation?.repository && { repository: head(safe(operation.repository), FIELD_MAX) }),
     ...(reply.exitCode !== undefined && { exitCode: reply.exitCode }),
     ...(reply.timedOut && { timedOut: true }),
     ...(reply.ok === false && { ok: false }),
@@ -638,6 +657,7 @@ export function toolFailure(
 ): string | undefined {
   const failures: string[] = [];
   const command = Option.getOrUndefined(decodeCommand(call?.arguments))?.command;
+  const operation = Option.getOrUndefined(decodeOperation(call?.arguments))?.operation;
 
   for (const diagnostic of result.diagnostics ?? []) {
     if (diagnostic.severity === "error") failures.push(head(safe(diagnostic.message), FIELD_MAX));
@@ -661,16 +681,25 @@ export function toolFailure(
       (value.exitCode !== undefined && value.exitCode !== 0 && !expectedOutcome(value, command)) ||
       (result.isError && value.exitCode === undefined)
     ) {
-      const summary = summarize(value, command, safe);
-      failures.push(summary === "{}" ? head(safe(part.text), FIELD_MAX) : summary);
+      const summary = summarize(value, command, safe, operation);
+      failures.push(
+        summary === summarize({}, undefined, safe, operation)
+          ? head(safe(part.text), FIELD_MAX)
+          : summary,
+      );
     }
   }
 
-  return failures.length
-    ? failures.join("\n").slice(0, 4000)
-    : result.isError
-      ? "Tool failed without details"
-      : undefined;
+  if (!failures.length) return result.isError ? "Tool failed without details" : undefined;
+
+  // Name the github action and repository, so its failures can be told apart; JSON summaries carry
+  // them as fields above, and the line goes last so it never becomes the signature's key line.
+  const where =
+    operation && failures.some((failure) => Option.isNone(decodeReply(failure)))
+      ? `\n${head(safe(`github ${operation.action}${operation.repository ? ` on ${operation.repository}` : ""}`), FIELD_MAX)}`
+      : "";
+
+  return `${failures.join("\n").slice(0, 4000 - where.length)}${where}`;
 }
 
 const ERRORISH =

@@ -20,6 +20,22 @@ export const attempt = <A>(operation: string, run: (signal: AbortSignal) => Prom
     },
   });
 
+/**
+ * A rejected tool call as the model and the papercut log see it: the underlying message, plus its
+ * code when it has one, rather than Effect's generic "An error occurred in Effect.tryPromise".
+ */
+export const toolError = (cause: unknown) => {
+  const { message } = exceptionDetails(cause);
+  const code = Predicate.hasProperty(cause, "code") ? cause.code : undefined;
+
+  return new Error(
+    (Predicate.isString(code) || Predicate.isNumber(code)) && !message.includes(String(code))
+      ? `${message} (code ${code})`
+      : message,
+    { cause },
+  );
+};
+
 /** RPC results are data-only, but Cloudflare still attaches a disposable response handle. */
 export const rpc = <A>(operation: string, call: () => Promise<A>) =>
   Effect.acquireUseRelease(attempt(operation, call), Effect.succeed, (result) =>

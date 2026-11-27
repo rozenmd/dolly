@@ -123,3 +123,91 @@ it("includes the provider's explanation in HTTP errors without leaking credentia
   );
   expect(JSON.stringify(error)).not.toContain("private-provider-token");
 });
+
+it("follows a renamed repository's redirects within api.github.com, keeping the request", async () => {
+  const seen: { url: string; method?: string; body?: unknown; authorization: string | null }[] = [];
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    seen.push({
+      url: String(url),
+      method: init?.method,
+      body: init?.body,
+      authorization: new Headers(init?.headers).get("Authorization"),
+    });
+    expect(init?.redirect).toBe("manual");
+
+    if (String(url) === "https://api.github.com/repos/old/name/pulls")
+      return Response.json(
+        { message: "Moved Permanently" },
+        { status: 307, headers: { Location: "/repositories/42/pulls" } },
+      );
+
+    return Response.json({ number: 7 }, { status: 201 });
+  });
+
+  const result = await Effect.runPromise(
+    integrationJson("https://api.github.com/repos/old/name/pulls", {
+      method: "POST",
+      headers: { Authorization: "Bearer private-provider-token" },
+      body: '{"title":"x"}',
+    }),
+  );
+
+  expect(result).toEqual({ number: 7 });
+  expect(seen).toEqual([
+    {
+      url: "https://api.github.com/repos/old/name/pulls",
+      method: "POST",
+      body: '{"title":"x"}',
+      authorization: "Bearer private-provider-token",
+    },
+    {
+      url: "https://api.github.com/repositories/42/pulls",
+      method: "POST",
+      body: '{"title":"x"}',
+      authorization: "Bearer private-provider-token",
+    },
+  ]);
+});
+
+it("stops following GitHub redirects after three hops, or when one leaves api.github.com", async () => {
+  for (const [location, calls] of [
+    ["https://api.github.com/loop", 4],
+    ["http://api.github.com/insecure", 1],
+    ["https://api.github.com.attacker.example/x", 1],
+  ] as const) {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () =>
+        Response.json({}, { status: 301, headers: { Location: location } }),
+      );
+
+    const error = await Effect.runPromise(
+      integrationJson("https://api.github.com/repos/old/name", {
+        headers: { Authorization: "Bearer private-provider-token" },
+      }).pipe(Effect.flip),
+    );
+
+    expect(error.message).toBe("Provider returned HTTP 301");
+    expect(fetch).toHaveBeenCalledTimes(calls);
+
+    for (const [url] of fetch.mock.calls)
+      expect(String(url)).toMatch(/^https:\/\/api\.github\.com\//);
+    fetch.mockRestore();
+  }
+});
+
+it("never follows redirects from other providers", async () => {
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async () =>
+      Response.json({}, { status: 301, headers: { Location: "https://slack.com/api/other" } }),
+    );
+
+  const error = await Effect.runPromise(
+    integrationJson("https://slack.com/api/chat.postMessage", {}).pipe(Effect.flip),
+  );
+
+  expect(error.message).toBe("Provider returned HTTP 301");
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
