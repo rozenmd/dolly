@@ -4,9 +4,11 @@ FROM node:24-trixie-slim
 COPY --from=sandbox-tools /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 COPY --from=bun-tools /usr/local/bin/bun /usr/local/bin/bun
 # node owns /usr/local/bin so setup can put the repository's pinned pnpm/yarn/bun on PATH.
+# Commands run in a login bash, whose skeleton ~/.bash_logout would run clear_console on every `exit`.
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates python3 python-is-python3 iproute2 curl ripgrep util-linux procps tini zstd && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /workspace /run/sandbox && chown node:node /workspace /run/sandbox && chmod 700 /run/sandbox \
-    && chown node:node /usr/local/bin
+    && chown node:node /usr/local/bin \
+    && rm -f /home/node/.bash_logout
 COPY container/checkout.sh /usr/local/lib/dolly-checkout.sh
 COPY container/setup.py /usr/local/lib/dolly-setup.py
 COPY container/dependency_cache.py /usr/local/lib/dependency_cache.py

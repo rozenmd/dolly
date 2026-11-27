@@ -44,6 +44,7 @@ import {
 } from "./preview";
 import * as Schema from "effect/Schema";
 import previewSupervisor from "../container/preview.py?raw";
+import { EXEC_SCRIPT } from "./exec-script";
 import skillsInventory from "../container/skills.py?raw";
 
 const PREVIEW_DIRECTORY = "/workspace/.dolly-preview";
@@ -634,11 +635,12 @@ export class Sandbox extends DurableObject<Env> {
 
     return yield* Effect.acquireUseRelease(
       attempt("sandbox.exec", (signal) =>
-        container.exec(["python3", "/usr/local/lib/dolly-exec.py", command], {
+        container.exec(["python3", "/usr/local/lib/dolly-exec.py", EXEC_SCRIPT], {
           cwd,
           signal,
           env: {
             ...env,
+            DOLLY_COMMAND: command,
             GIT_TERMINAL_PROMPT: "0",
             GIT_CONFIG_NOSYSTEM: "1",
             GIT_SSL_CAINFO: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
@@ -1484,12 +1486,13 @@ export class Sandbox extends DurableObject<Env> {
           await files.writeFile(PREVIEW_SUPERVISOR, previewSupervisor);
 
           const process = await container.exec(
-            ["python3", PREVIEW_SUPERVISOR, command, String(PREVIEW_TTL_MS / 1000), PREVIEW_LOG],
+            ["python3", PREVIEW_SUPERVISOR, String(PREVIEW_TTL_MS / 1000), PREVIEW_LOG],
             {
               cwd: workspace ? "/workspace/repo" : "/workspace",
               stdout: "ignore",
               stderr: "ignore",
               env: {
+                DOLLY_COMMAND: command,
                 NODE_EXTRA_CA_CERTS: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
                 SSL_CERT_FILE: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
               },

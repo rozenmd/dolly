@@ -236,6 +236,9 @@ const PullHead = Schema.Struct({
   merged: Schema.optional(Schema.Boolean),
   merged_at: Schema.optional(Schema.NullOr(Schema.String)),
   draft: Schema.optional(Schema.Boolean),
+  mergeable: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  mergeable_state: Schema.optional(Schema.String),
+  base: Schema.optional(Schema.Struct({ ref: Schema.String })),
   head: Schema.Struct({
     sha: Sha,
     repo: Schema.optional(Schema.NullOr(Schema.Struct({ full_name: Schema.String }))),
@@ -310,6 +313,7 @@ const CheckCountsResponse = Schema.Struct({
             Schema.Struct({
               state: Schema.String,
               headRefOid: Schema.String,
+              mergeable: Schema.optional(Schema.String),
               commits: Schema.Struct({
                 nodes: Schema.Array(
                   Schema.Struct({
@@ -340,6 +344,7 @@ const CHECK_COUNTS_QUERY = `query($owner: String!, $name: String!, $number: Int!
     pullRequest(number: $number) {
       state
       headRefOid
+      mergeable
       commits(last: 1) {
         nodes {
           commit {
@@ -638,7 +643,30 @@ export type PullCheckCounts = {
   headSha: string;
   /** Count per uppercase GraphQL state (QUEUED, IN_PROGRESS, SUCCESS, FAILURE, PENDING...). */
   counts: { state: string; count: number }[];
+  /** GraphQL's MergeableState: MERGEABLE, CONFLICTING or UNKNOWN (not computed yet). */
+  mergeable?: string;
 };
+
+/**
+ * Whether a PR's head merges cleanly into its base, from REST's `mergeable` and `mergeable_state`.
+ * GitHub computes it lazily after a push to either side: `mergeable: null` (or state "unknown")
+ * means not known yet, never "fine". Only "dirty" is a conflict; "behind", "blocked" or "unstable"
+ * still merge without one.
+ */
+export type Mergeability = "conflicting" | "mergeable" | "unknown";
+
+export function mergeability(
+  mergeable: boolean | null | undefined,
+  state: string | undefined,
+): Mergeability {
+  const lower = state?.toLowerCase();
+
+  if (lower === "dirty" || mergeable === false) return "conflicting";
+
+  if (mergeable === true && lower !== "unknown") return "mergeable";
+
+  return "unknown";
+}
 
 /** One CI check as a wait sees it: a check run or a commit status, by name. */
 export type CiCheck = {
@@ -658,6 +686,10 @@ export type PullChecks = {
    * head branch in another repository (github-webhook.ts reviewEvent). Unset when unknown.
    */
   unreviewable?: boolean;
+  /** Whether the head merges cleanly into the base (see mergeability). Unset when not read. */
+  mergeability?: Mergeability;
+  /** The base branch, for a conflict wake's message. */
+  baseRef?: string;
 };
 
 export type CiWorkflowRun = {
@@ -2069,6 +2101,11 @@ function makeGitHub(
               sha: pull.head.sha,
               repository: pull.head.repo?.full_name ?? null,
             },
+            // REST's raw mergeable / mergeable_state stay alongside; this says what they mean.
+            mergeability:
+              pull.state === "open"
+                ? mergeability(pull.mergeable, pull.mergeable_state)
+                : "not applicable (closed)",
             labels: pull.labels.map((label) => label.name),
             requested_reviewers: pull.requested_reviewers.map((user) => user.login),
             body: truncate(pull.body ?? "", 16_384),
@@ -2988,7 +3025,14 @@ function makeGitHub(
       })),
     ];
 
-    const result: PullChecks = { state, headSha: pull.head.sha, checks };
+    const result: PullChecks = {
+      state,
+      headSha: pull.head.sha,
+      checks,
+      mergeability: mergeability(pull.mergeable, pull.mergeable_state),
+    };
+
+    if (pull.base) result.baseRef = pull.base.ref;
 
     // As reviewEvent decides: a head in another repository, or a deleted one (null), isn't reviewed.
     const fork =
@@ -3031,6 +3075,8 @@ function makeGitHub(
         ...(contexts?.statusContextCountsByState ?? []),
       ],
     };
+
+    if (pull.mergeable !== undefined) result.mergeable = pull.mergeable;
 
     return result;
   });

@@ -15,11 +15,14 @@ def stop(_signum, _frame):
 
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
-deadline = time.monotonic() + float(sys.argv[2])
-with open(sys.argv[3], "wb"):
+deadline = time.monotonic() + float(sys.argv[1])
+log_path = sys.argv[2]
+with open(log_path, "wb"):
     pass
 child = subprocess.Popen(
-    ["sh", "-lc", sys.argv[1]],
+    # The command arrives in $DOLLY_COMMAND, not argv, so pgrep -f/pkill -f
+    # patterns from the command cannot match this supervisor or its shell.
+    ["bash", "-lc", 'dolly_command=$DOLLY_COMMAND; unset DOLLY_COMMAND; eval "$dolly_command"'],
     start_new_session=True,
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
@@ -43,7 +46,7 @@ def capture_output():
         tail = (tail + chunk)[-32768:]
         updated = True
     if updated:
-        with open(sys.argv[3], "wb") as log:
+        with open(log_path, "wb") as log:
             log.write(tail)
 
 
