@@ -116,3 +116,21 @@ test("public ingress binds only the private GitHub, Slack and automation entrypo
   // Automation webhook secrets travel in the query string, which logs must never keep.
   assert.equal(ingress.worker.observability.redactQueryString, true);
 });
+
+test("the deployed entrypoint re-exports every declared export", async () => {
+  const source = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
+  const block = source.match(/export \{([^}]*)\} from "\.\/index";/);
+  assert.ok(
+    block,
+    'src/worker.ts should re-export its entrypoints in one export { ... } from "./index" block',
+  );
+
+  const exported = new Set(
+    block[1]
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean),
+  );
+
+  for (const name of Object.keys(config.worker.exports)) assert.ok(exported.has(name), name);
+});
