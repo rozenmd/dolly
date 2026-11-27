@@ -1165,7 +1165,12 @@ export class Agent extends DurableObject<Env> {
             const message = toolFailure(result, call);
 
             if (message && call.name !== "papercuts")
-              await this.capturePapercut(`tool:${call.name}`, message, api.conversationId);
+              await this.capturePapercut(
+                `tool:${call.name}`,
+                message,
+                api.conversationId,
+                (safe) => toolFailure(result, call, safe) ?? message,
+              );
           },
         }),
       ],
@@ -1805,8 +1810,16 @@ export class Agent extends DurableObject<Env> {
     return { title, ...(previous && { previous }), model: modelId };
   }
 
-  /** Recording must never replace a tool's original result or recursively report failures. */
-  private async capturePapercut(source: string, message: string, conversationId?: ConversationId) {
+  /**
+   * Recording must never replace a tool's original result or recursively report failures.
+   * `render` rebuilds the message from redacted parts, for messages that clip what they quote.
+   */
+  private async capturePapercut(
+    source: string,
+    message: string,
+    conversationId?: ConversationId,
+    render?: (safe: (text: string) => string) => string,
+  ) {
     try {
       const secrets = [
         ...(await Effect.runPromise(this.credentials.secrets)),
@@ -1828,7 +1841,7 @@ export class Agent extends DurableObject<Env> {
           state && conversationId !== undefined
             ? activeWorkspace(state, String(conversationId))?.config.repository
             : undefined,
-        message: redact(message, secrets),
+        message: redact(render ? render((text) => redact(text, secrets)) : message, secrets),
       });
     } catch {
       // Best effort: the harness/storage itself may be unavailable.

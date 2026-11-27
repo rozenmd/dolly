@@ -158,6 +158,8 @@ const OMITTED = /^\[\d+ earlier bytes omitted\]\n/;
 
 const isString = Schema.is(Schema.String);
 
+const decodeString = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.String));
+
 const text = (value: Schema.Json | undefined) =>
   value === undefined || value === null
     ? undefined
@@ -170,30 +172,47 @@ const head = (value: string, max: number) =>
 
 const tail = (value: string, max: number) => (value.length > max ? `…${value.slice(-max)}` : value);
 
+/** Commands whose exit 1 means "no": no match, no difference, condition false. */
+const ANSWERS_NO = /^(?:grep|egrep|fgrep|rg|diff|cmp|test|\[|git\s+(?:diff|grep))(?:\s|$)/;
+
 /**
- * Expected outcomes that are not failures: a shell command that exits 1 with nothing on stderr is
- * grep, diff, test or `git diff --exit-code` answering "no" (no match, no difference), not a bug.
+ * Expected outcomes that are not failures: a shell command that exits 1 with nothing on stderr
+ * and either nothing on stdout or a final command such as grep, diff or test, which exit 1 to
+ * answer "no" (no match, no difference). Test runners also exit 1 with an empty stderr but print
+ * their failures to stdout, so those are still logged.
  */
-function expectedOutcome(reply: Reply) {
-  return (
-    reply.exitCode === 1 &&
-    !reply.timedOut &&
-    reply.ok !== false &&
-    !reply.error &&
-    !(reply.stderr ?? "").replace(OMITTED, "").trim()
-  );
+function expectedOutcome(reply: Reply, command: string | undefined) {
+  if (
+    reply.exitCode !== 1 ||
+    reply.timedOut ||
+    reply.ok === false ||
+    reply.error ||
+    (reply.stderr ?? "").replace(OMITTED, "").trim()
+  )
+    return false;
+
+  // The status of a list or pipeline is its last command's.
+  const last =
+    (command ?? "")
+      .split(/&&|\|\||;|\||\n/)
+      .at(-1)
+      ?.trim() ?? "";
+
+  return !(reply.stdout ?? "").trim() || ANSWERS_NO.test(last);
 }
 
 /**
  * A compact record of a failed JSON reply: the facts needed to triage it, never its whole output
  * (file contents, diffs and install logs belong to the session, not the log).
  */
-function summarize(reply: Reply, command: string | undefined) {
-  const stderr = (reply.stderr ?? "").replace(OMITTED, "").trim();
-  const stdout = (reply.stdout ?? "").trim();
-  const message = text(reply.message);
-  const error = text(reply.error);
-  const code = text(reply.code);
+function summarize(reply: Reply, rawCommand: string | undefined, safe: (text: string) => string) {
+  const clean = (value: string | undefined) => (value === undefined ? undefined : safe(value));
+  const command = clean(rawCommand);
+  const stderr = safe((reply.stderr ?? "").replace(OMITTED, "").trim());
+  const stdout = safe((reply.stdout ?? "").trim());
+  const message = clean(text(reply.message));
+  const error = clean(text(reply.error));
+  const code = clean(text(reply.code));
 
   return JSON.stringify({
     ...(reply.exitCode !== undefined && { exitCode: reply.exitCode }),
@@ -211,17 +230,19 @@ function summarize(reply: Reply, command: string | undefined) {
 /**
  * Tools sometimes encode failures in JSON instead of marking the result as an error. Returns a
  * compact summary of the failure, or undefined when the result is a success or an expected
- * outcome. `call` supplies the command for shell calls.
+ * outcome. `call` supplies the command for shell calls. `safe` redacts secrets: it runs on each
+ * whole field before clipping, since a secret cut in half no longer matches the redactor.
  */
 export function toolFailure(
   result: ToolExecutionResult,
   call?: { readonly arguments?: object },
+  safe: (text: string) => string = (text) => text,
 ): string | undefined {
   const failures: string[] = [];
   const command = Option.getOrUndefined(decodeCommand(call?.arguments))?.command;
 
   for (const diagnostic of result.diagnostics ?? []) {
-    if (diagnostic.severity === "error") failures.push(head(diagnostic.message, FIELD_MAX));
+    if (diagnostic.severity === "error") failures.push(head(safe(diagnostic.message), FIELD_MAX));
   }
 
   for (const part of result.output ?? []) {
@@ -230,7 +251,7 @@ export function toolFailure(
     const parsed = decodeReply(part.text);
 
     if (Option.isNone(parsed)) {
-      if (result.isError) failures.push(head(part.text, FIELD_MAX));
+      if (result.isError) failures.push(head(safe(part.text), FIELD_MAX));
       continue;
     }
 
@@ -239,11 +260,11 @@ export function toolFailure(
     if (
       value.ok === false ||
       value.error ||
-      (value.exitCode !== undefined && value.exitCode !== 0 && !expectedOutcome(value)) ||
+      (value.exitCode !== undefined && value.exitCode !== 0 && !expectedOutcome(value, command)) ||
       (result.isError && value.exitCode === undefined)
     ) {
-      const summary = summarize(value, command);
-      failures.push(summary === "{}" ? head(part.text, FIELD_MAX) : summary);
+      const summary = summarize(value, command, safe);
+      failures.push(summary === "{}" ? head(safe(part.text), FIELD_MAX) : summary);
     }
   }
 
@@ -311,6 +332,21 @@ export function papercutSignature(source: string, message: string) {
       keyLine(text(reply.message) ?? "") ||
       keyLine(stdout, true) ||
       (reply.timedOut ? "timed out" : "");
+  } else if (message.trimStart().startsWith("{")) {
+    // Older entries stored the whole reply clipped at 4,000 characters, which is no longer JSON
+    // and may have lost stderr and the exit code in a long stdout. Recover the fields that
+    // survived; a stdout prefix says nothing about the failure, so never group by it.
+    const field = (name: string) =>
+      Option.getOrUndefined(
+        Option.flatMap(
+          Option.fromNullishOr(new RegExp(`"${name}":"((?:[^"\\\\]|\\\\.)*)"?`).exec(message)),
+          (match) => decodeString(`"${match[1]}"`),
+        ),
+      );
+
+    exit = /"exitCode":(-?\d+)/.exec(message)?.[1] ?? "";
+    line =
+      keyLine(field("stderr") ?? "") || keyLine(field("error") ?? "") || "truncated tool result";
   } else line = keyLine(message);
 
   return `${source}|${exit}|${normalizeSignatureLine(line)}`;

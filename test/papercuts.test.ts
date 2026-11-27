@@ -79,10 +79,48 @@ it("recognizes exceptions, diagnostics, JSON failures and shell exit codes witho
     '{"ok":true}',
     "not JSON",
     // grep/diff/test answering "no": exit 1 with nothing on stderr is not a failure.
-    '{"stdout":"","stderr":"","exitCode":1}',
-    '{"stdout":"a\\nb","stderr":"  \\n","exitCode":1}',
+    '{"stdout":"","stderr":"  \\n","exitCode":1}',
   ])
     expect(toolFailure(text(value))).toBeUndefined();
+
+  // Exit 1 with output on stdout only: "no" from grep/diff/test, a real failure from anything else.
+  const quiet = (stdout: string) => text(JSON.stringify({ stdout, stderr: "", exitCode: 1 }));
+  const diff = quiet("--- a\n+++ b\n-old\n+new");
+
+  for (const command of [
+    "diff -u a b",
+    "cd web && git diff --exit-code",
+    "cat log | grep -n warn",
+    "test -f out.txt",
+  ])
+    expect(toolFailure(diff, { arguments: { command } })).toBeUndefined();
+  const nodeTest = quiet("not ok 1 - parses input\n  ---\n  error: 'Expected values to be equal'");
+
+  for (const call of [undefined, { arguments: { command: "pnpm test" } }])
+    expect(toolFailure(nodeTest, call)).toContain("Expected values to be equal");
+});
+
+it("redacts whole fields before clipping them, so a secret at the cutoff leaves no prefix", () => {
+  const secret = "rt_".padEnd(60, "s3cr3t");
+  const safe = (value: string) => value.split(secret).join("[redacted]");
+
+  const result = {
+    output: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          stdout: "",
+          stderr: `${"e".repeat(480)}${secret} failed`,
+          exitCode: 2,
+        }),
+      },
+    ],
+  };
+
+  const summary = toolFailure(result, { arguments: { command: `curl -H ${secret}` } }, safe)!;
+  expect(summary).not.toContain("rt_s3cr3t");
+  expect(summary).toContain("curl -H [redacted]");
+  expect(JSON.parse(summary).stderr).toContain("[redacted]");
 });
 
 it("stores a compact summary of a shell failure instead of its whole output", () => {
@@ -168,6 +206,29 @@ it("gives repeats of one failure the same signature and different failures diffe
   expect(papercutSignature("tool:shell", shell("sh: 1: rg: not found"))).not.toBe(
     papercutSignature("tool:shell", shell("sh: 1: rg: not found", 1)),
   );
+});
+
+it("groups clipped legacy entries by what survived the clip, never by their stdout", () => {
+  // The old logger stored the whole reply clipped at 4,000 characters.
+  const legacy = (stdout: string) =>
+    JSON.stringify({ stdout, stderr: "sh: 1: rg: not found\n", exitCode: 127 }).slice(0, 4000);
+
+  expect(papercutSignature("tool:shell", legacy("a".repeat(5000)))).toBe(
+    papercutSignature("tool:shell", legacy("b ".repeat(2500))),
+  );
+  expect(papercutSignature("tool:shell", legacy("a".repeat(5000)))).toBe(
+    "tool:shell||truncated tool result",
+  );
+  expect(papercutSignature("tool:shell", legacy("short\n").padEnd(4100, " "))).toBe(
+    "tool:shell|127|sh: <n>: rg: not found",
+  );
+
+  const stderrFirst = JSON.stringify({
+    exitCode: 1,
+    stderr: `Error: ENOENT ${"z".repeat(5000)}`,
+  }).slice(0, 4000);
+
+  expect(papercutSignature("tool:shell", stderrFirst)).toMatch(/^tool:shell\|1\|error: enoent/);
 });
 
 it("adds signatures to entries stored before signatures existed", async () => {
