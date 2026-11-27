@@ -1019,6 +1019,34 @@ it("sends static headers and a User-Agent on every request to a server that requ
   );
 });
 
+it("doesn't blame static headers for the 401 an OAuth server gives a status check without its grant", async () => {
+  network(oauthServer(LINEAR));
+  await call("/connections/mcp", "POST", {
+    name: "linear",
+    url: `${LINEAR}/mcp`,
+    headers: { "User-Agent": "owner-agent/2" },
+  });
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    await state.storage.put("mcp:auth:linear", {
+      serverId: await serverId(state, "linear"),
+      epoch: 0,
+      serverUrl: `${LINEAR}/mcp`,
+      redirectUri: "https://worker/api/connections/mcp-oauth/callback",
+      endpoints: { authorize: `${LINEAR}/authorize`, token: `${LINEAR}/token` },
+      clientId: "dolly-client",
+      shared: {
+        tokens: { accessToken: "valid-access", expiresAt: Date.now() + 3_600_000 },
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  });
+
+  expect(
+    (await connections()).map(({ name, status, detail }) => ({ name, status, detail })),
+  ).toEqual([{ name: "linear", status: "connected", detail: "HTTP 401" }]);
+});
+
 it("keeps a bounded catalog when a server lists many large tools", async () => {
   let pages = 0;
 
@@ -1273,6 +1301,8 @@ it("never sends credentials over plain HTTP, even to a server stored before HTTP
     });
   });
 
+  // Opening Settings > Connections checks it with a bare request, never its headers.
+  expect((await connections()).map((server) => server.name)).toEqual(["plain"]);
   const refused = await runProgram("await tools.plain.anything({})");
   expect(refused.isError).toBe(true);
   expect(resultText(refused)).toContain("Unavailable servers: plain (plain uses plain HTTP");
