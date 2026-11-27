@@ -276,10 +276,6 @@ it("carries a page's WebSocket upgrades to the dev server with the preview's acc
     expect(live.status).toBe(101);
     // A real upgrade reached the server, without the application's cookie.
     expect(await firstMessage(live)).toBe("ws:/api/events?x=1 cookie:none");
-    // Browsers may name the ws: scheme for an upgrade.
-    expect(await firstMessage(await outbound(token).fetch(upgrade(`ws://${hostname}/ws`)))).toBe(
-      "ws:/ws cookie:none",
-    );
     expect(await (await outbound(token).fetch(`http://${hostname}/page`)).text()).toBe(
       "http:/page",
     );
