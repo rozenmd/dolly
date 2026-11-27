@@ -366,17 +366,28 @@ function checkoutNote(checkout: ChildCheckout) {
   }
 }
 
+/**
+ * What a worker that can open pull requests is told about one it opens: it owns it until it is
+ * ready to merge, so its parent never has to forward review findings to it by hand.
+ */
+export function pullOwnershipNote(parentSessionId: string) {
+  return `If you open a pull request, you own it until it is ready to merge. Opening it registers a wait on its checks and reviews (wait_for pr_checks): end your turn and you'll be woken when a check fails, review feedback lands (including Dolly's automatic review), or everything settles. On each wake: fix failing checks; for each unresolved review thread, check the finding against the code, then either fix it (with a test where it changes behaviour), push, reply in the thread with what you did and resolve it with github resolve_review_thread (leave Dolly's automatic review's own threads to its next review, which resolves the fixes it accepts), or reply with your reasoning and leave it open. Push, call wait_for pr_checks again and repeat, for at most 5 review rounds. Report back to \`${parentSessionId}\` only when the latest head's checks have passed, its automatic review (where enabled) has posted, and github list_pull_request_comments with filter unresolved shows no unresolved threads, or when you need a decision or hit the round cap: then hand over with what is still open. Any message you write before that, including the one you end your turn with while waiting, is an interim status ("PR opened, waiting on CI/review"), never "done".`;
+}
+
 /** A child's first message: the task, then what it is and how it reports back. */
 export function buildChildSessionPrompt(input: {
   prompt: string;
   parentSessionId: string;
   checkout: ChildCheckout;
 }) {
+  const writes = input.checkout.kind === "shared" || input.checkout.kind === "isolated";
+
   return [
     input.prompt.trim(),
     `You are a worker session delegated by another Dolly session. Keep the work narrow: execute the requested investigation/implementation, run relevant checks when practical, and do not broaden scope or make product/taste decisions unless explicitly asked. ${checkoutNote(input.checkout)}`,
+    ...(writes ? [pullOwnershipNote(input.parentSessionId)] : []),
     // The facts (files written, commands run, tool failures, PR, turns) are appended to the
     // report mechanically, so the model is asked for the part a server cannot compute.
-    `When finished — as your LAST action, after any commit/PR — report back to the parent/orchestrator session \`${input.parentSessionId}\` with the send_to_session tool. A factual evidence block (files changed, commands run, tool failures, PR, usage) is appended to your report automatically: do not re-list those. Write what the server cannot compute: whether the result meets the acceptance criteria and how confident you are, what you tried that did NOT work and why you abandoned it, assumptions you made, remaining uncertainty, and follow-ups needed.`,
+    `When finished — as your LAST action, after any commit, and for a pull request only once it is ready as above — report back to the parent/orchestrator session \`${input.parentSessionId}\` with the send_to_session tool. A factual evidence block (files changed, commands run, tool failures, PR, usage) is appended to your report automatically: do not re-list those. Write what the server cannot compute: whether the result meets the acceptance criteria and how confident you are, what you tried that did NOT work and why you abandoned it, assumptions you made, remaining uncertainty, and follow-ups needed.`,
   ].join("\n\n");
 }

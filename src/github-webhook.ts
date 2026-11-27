@@ -125,6 +125,8 @@ export type CiEvent = {
   /** Workflow file path and branch or tag, for a run named by workflow and ref. */
   workflowPath?: string;
   ref?: string;
+  /** A review was just posted on the PR (agent.ts, after Dolly publishes its automatic review). */
+  review?: boolean;
 };
 
 function ciEvent(event: string, text: string): CiEvent | undefined {

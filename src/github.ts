@@ -235,7 +235,11 @@ const PullHead = Schema.Struct({
   state: Schema.String,
   merged: Schema.optional(Schema.Boolean),
   merged_at: Schema.optional(Schema.NullOr(Schema.String)),
-  head: Schema.Struct({ sha: Sha }),
+  draft: Schema.optional(Schema.Boolean),
+  head: Schema.Struct({
+    sha: Sha,
+    repo: Schema.optional(Schema.NullOr(Schema.Struct({ full_name: Schema.String }))),
+  }),
 });
 
 const WorkflowRun = Schema.Struct({
@@ -649,6 +653,11 @@ export type PullChecks = {
   state: PullRequestState;
   headSha: string;
   checks: CiCheck[];
+  /**
+   * Whether the automatic review would skip this PR whatever its automation says: a draft, or a
+   * head branch in another repository (github-webhook.ts reviewEvent). Unset when unknown.
+   */
+  unreviewable?: boolean;
 };
 
 export type CiWorkflowRun = {
@@ -2944,6 +2953,13 @@ function makeGitHub(
     ];
 
     const result: PullChecks = { state, headSha: pull.head.sha, checks };
+
+    // As reviewEvent decides: a head in another repository, or a deleted one (null), isn't reviewed.
+    const fork =
+      pull.head.repo !== undefined &&
+      pull.head.repo?.full_name.toLowerCase() !== repository.toLowerCase();
+
+    if (pull.draft === true || fork) result.unreviewable = true;
 
     return result;
   });

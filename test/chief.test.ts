@@ -246,6 +246,9 @@ it("briefs the chief with its name and lets it read the owner's sessions", async
 
   expect(bodies[0]).toContain("You are Ada, the owner's chief of staff.");
   expect(bodies[0]).toContain("send_to_session");
+  // It doesn't call a pull request ready to merge without checking CI and open threads itself.
+  expect(bodies[0]).toContain("Never tell the owner a pull request is ready to merge");
+  expect(bodies[0]).toContain("list_pull_request_comments with filter unresolved");
   // A web-app session: the dolly tool lists sessions for it, marking the chief.
   expect(bodies[1]).toContain(String.raw`\"chief\":true`);
   expect(bodies[1]).toContain(work);

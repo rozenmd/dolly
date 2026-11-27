@@ -856,6 +856,19 @@ it("shares the parent's checkout by default and isolates it on request", async (
     .poll(() => briefing(asked.id))
     .toContain("You have a read-only checkout of octocat/project at main");
 
+  // Workers that can open pull requests own them through CI and review; the others aren't told.
+  const ownership = "If you open a pull request, you own it until it is ready to merge.";
+  expect(await briefing(shared.id)).toContain(ownership);
+  expect(await briefing(isolated.id)).toContain(ownership);
+  expect(await briefing(isolated.id)).toContain(
+    "github list_pull_request_comments with filter unresolved",
+  );
+  expect(await briefing(isolated.id)).toContain(
+    'interim status ("PR opened, waiting on CI/review")',
+  );
+  expect(await briefing(asked.id)).not.toContain(ownership);
+  expect(await briefing(scratch.id)).not.toContain(ownership);
+
   const invalid = await post(`${parent}/children`, {
     content: "Bad branch",
     requestId: crypto.randomUUID(),
