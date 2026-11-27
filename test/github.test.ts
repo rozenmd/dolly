@@ -310,6 +310,45 @@ it("falls back to anonymous reads when the App has no installations", async () =
   expect(new Headers(contents?.[1]?.headers).has("Authorization")).toBe(false);
 });
 
+it("reads a renamed public repository anonymously when the App token meets its redirect", async () => {
+  await connect();
+  const requests: { path: string; auth: string | null }[] = [];
+
+  mockFetch(async (input, init) => {
+    const url = new URL(String(input));
+    const auth = new Headers(init?.headers).get("Authorization");
+
+    if (url.pathname === "/app/installations") return Response.json([{ id: 7 }]);
+
+    if (url.pathname === "/app/installations/7/access_tokens")
+      return Response.json({ token: "public-token", expires_at: "2099-01-01T00:00:00Z" });
+    requests.push({ path: url.pathname, auth });
+
+    // The old slug redirects to the repository's id, as GitHub does after a rename.
+    if (url.pathname.startsWith("/repos/tellahq/opensession"))
+      return Response.json(
+        { message: "Moved Permanently" },
+        {
+          status: 301,
+          headers: { Location: url.href.replace("/repos/tellahq/opensession", "/repositories/9") },
+        },
+      );
+
+    if (url.pathname === "/repositories/9/contents/src/main.ts") return Response.json(publicFile);
+    throw new Error(`Unexpected ${url}`);
+  });
+
+  expect(await readPublic()).toEqual({
+    ok: true,
+    result: { kind: "file", path: "src/main.ts", sha, content: "public code" },
+  });
+  expect(requests).toEqual([
+    { path: "/repos/tellahq/opensession", auth: "Bearer public-token" },
+    { path: "/repos/tellahq/opensession/contents/src/main.ts", auth: null },
+    { path: "/repositories/9/contents/src/main.ts", auth: null },
+  ]);
+});
+
 it.each([403, 429, 500])(
   "preserves public-read HTTP %i even for approved owners",
   async (status) => {
