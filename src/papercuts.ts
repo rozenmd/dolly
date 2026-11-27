@@ -701,6 +701,40 @@ function expectedOutcome(reply: Reply, command: string | undefined) {
 }
 
 /**
+ * Progress lines tools print on stderr whatever the outcome, which never name a failure:
+ * - git: `From <url>`, `To <url>`, ` * branch <sha> -> FETCH_HEAD`, `   a1b2c3d..e4f5a6b  main -> origin/main`,
+ *   `remote: Counting objects: …`, `Receiving objects: …`, `Resolving deltas: …`, `HEAD is now at …`.
+ * - pnpm lifecycle scripts: `<path> postinstall$ node install.js`, `<path> postinstall: Done`
+ *   (never `: Failed`).
+ * - lint-staged: `[STARTED] …`, `[COMPLETED] …`, `[SKIPPED] …` (never `[FAILED]`).
+ */
+const PROGRESS = [
+  /^(?:From|To) (?:[a-z][\w+.-]*:\/\/|[\w.-]+@[\w.-]+:|\/)\S*$/i,
+  /^\* (?:branch|tag|\[new (?:branch|tag|ref)\])\s+\S+\s+->\s+\S+$/,
+  /^\+?\s*[0-9a-f]{7,}\.\.\.?[0-9a-f]{7,}\s+\S+\s+->\s+\S+/,
+  /^(?:remote:\s+)?(?:Enumerating|Counting|Compressing|Receiving|Resolving|Unpacking|Writing) (?:objects|deltas):/,
+  /^(?:remote:\s+)?Total \d+ \(delta \d+\)/,
+  /^Updating files:/,
+  /^HEAD is now at /,
+  /^\S+ (?:pre|post)?(?:install|prepare|prepublish|prepublishOnly|pack|publish)(?:\$ .*|: (?:Done|Running\.\.\.))$/,
+  /^\[(?:STARTED|COMPLETED|SKIPPED)\] /,
+];
+
+/** ANSI colour and cursor codes (CSI and OSC sequences). */
+// oxlint-disable-next-line no-control-regex
+const ANSI = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\))/g;
+
+const isProgress = (line: string) => PROGRESS.some((pattern) => pattern.test(line));
+
+/** Stderr without progress lines, so clipping it keeps the lines that may name a failure. */
+const withoutProgress = (stderr: string) =>
+  stderr
+    .split(/\r?\n/)
+    .filter((line) => !isProgress(line.replace(ANSI, "").trim()))
+    .join("\n")
+    .trim();
+
+/**
  * A compact record of a failed JSON reply: the facts needed to triage it, never its whole output
  * (file contents, diffs and install logs belong to the session, not the log).
  */
@@ -712,7 +746,7 @@ function summarize(
 ) {
   const clean = (value: string | undefined) => (value === undefined ? undefined : safe(value));
   const command = clean(rawCommand);
-  const stderr = safe((reply.stderr ?? "").replace(OMITTED, "").trim());
+  const stderr = withoutProgress(safe((reply.stderr ?? "").replace(OMITTED, "")));
   const stdout = safe((reply.stdout ?? "").trim());
   const message = clean(text(reply.message));
   const error = clean(text(reply.error));
@@ -843,30 +877,6 @@ const LOCATION = /^(?:node:[\w/.-]+|(?:file:\/\/)?[\w@.+/-]*\.[cm]?[jt]sx?):\d+(
 /** Lines Node prints around any crash: stack frames, its own entry point, `^` markers. */
 const NOISE = /^(?:at\s|node:internal\/|triggerUncaughtException\(|\^+$)/;
 
-/**
- * Progress lines tools print on stderr whatever the outcome, which never name a failure:
- * - git: `From <url>`, `To <url>`, ` * branch <sha> -> FETCH_HEAD`, `   a1b2c3d..e4f5a6b  main -> origin/main`,
- *   `remote: Counting objects: …`, `Receiving objects: …`, `Resolving deltas: …`, `HEAD is now at …`.
- * - pnpm lifecycle scripts: `<path> postinstall$ node install.js`, `<path> postinstall: Done`
- *   (never `: Failed`).
- * - lint-staged: `[STARTED] …`, `[COMPLETED] …`, `[SKIPPED] …` (never `[FAILED]`).
- */
-const PROGRESS = [
-  /^(?:From|To) (?:[a-z][\w+.-]*:\/\/|[\w.-]+@[\w.-]+:|\/)\S*$/i,
-  /^\* (?:branch|tag|\[new (?:branch|tag|ref)\])\s+\S+\s+->\s+\S+$/,
-  /^\+?\s*[0-9a-f]{7,}\.\.\.?[0-9a-f]{7,}\s+\S+\s+->\s+\S+/,
-  /^(?:remote:\s+)?(?:Enumerating|Counting|Compressing|Receiving|Resolving|Unpacking|Writing) (?:objects|deltas):/,
-  /^(?:remote:\s+)?Total \d+ \(delta \d+\)/,
-  /^Updating files:/,
-  /^HEAD is now at /,
-  /^\S+ (?:pre|post)?(?:install|prepare|prepublish|prepublishOnly|pack|publish)(?:\$ .*|: (?:Done|Running\.\.\.))$/,
-  /^\[(?:STARTED|COMPLETED|SKIPPED)\] /,
-];
-
-/** ANSI colour and cursor codes (CSI and OSC sequences). */
-// oxlint-disable-next-line no-control-regex
-const ANSI = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\))/g;
-
 /** The lines that may name a failure: without blanks, Node's boilerplate and code frames. */
 function candidates(value: string) {
   const lines: string[] = [];
@@ -893,7 +903,7 @@ function candidates(value: string) {
       NOISE.test(line) ||
       !/[a-z]/i.test(line) ||
       OMITTED.test(`${line}\n`) ||
-      PROGRESS.some((pattern) => pattern.test(line))
+      isProgress(line)
     )
       continue;
     lines.push(line);

@@ -1142,6 +1142,35 @@ it("skips git, pnpm and lint-staged progress lines and ANSI codes when choosing 
     ),
   ).toBe("tool:shell|1|wc: apps/{,web-rr<n>/}agents.md: no such file or directory");
 
+  // The stored summary clips stderr to its head: progress is dropped first, so the error survives.
+  const updates = Array.from(
+    { length: 7 },
+    (_, index) =>
+      ` * [new branch]      dolly/session-${100000 + index} -> origin/dolly/session-${100000 + index}`,
+  ).join("\n");
+
+  const stored = toolFailure(
+    reply({
+      stdout: "",
+      stderr: `${fetch}${updates}\nwc: AGENTS.md: No such file or directory\n`,
+      exitCode: 1,
+    }),
+    { arguments: { command: "git fetch origin && wc -l AGENTS.md" } },
+  )!;
+
+  expect(JSON.parse(stored).stderr).toBe("wc: AGENTS.md: No such file or directory");
+  expect(papercutSignature("tool:shell", stored)).toBe(
+    "tool:shell|1|wc: agents.md: no such file or directory",
+  );
+
+  // Progress alone leaves no stderr to store; the command names the failure.
+  const progressOnly = toolFailure(reply({ stdout: "", stderr: fetch, exitCode: 1 }), {
+    arguments: { command: "git fetch origin main" },
+  })!;
+
+  expect(JSON.parse(progressOnly)).not.toHaveProperty("stderr");
+  expect(papercutSignature("tool:shell", progressOnly)).toBe("tool:shell|1|git");
+
   // 9542fc7c: progress alone says nothing; the command that ran does.
   expect(
     papercutSignature(
