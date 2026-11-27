@@ -41,6 +41,21 @@ const PROBE_TIMEOUT_MS = 10_000;
 
 const TOO_LARGE = `MCP server response exceeded ${MAX_RESPONSE_BYTES / 1024 / 1024} MiB`;
 
+/**
+ * Sent when the owner's static headers don't set one. Workers' fetch sends no User-Agent at all,
+ * and bot protection in front of some MCP servers answers such requests with HTTP 403.
+ */
+export const MCP_USER_AGENT = "Dolly-MCP-Client/1";
+
+/** `headers` plus Dolly's User-Agent, unless they already carry one (in any casing). */
+export function withUserAgent(headers?: HeadersInit) {
+  const merged = new Headers(headers);
+
+  if (!merged.has("user-agent")) merged.set("user-agent", MCP_USER_AGENT);
+
+  return merged;
+}
+
 export class McpHttpError extends Error {
   constructor(
     message: string,
@@ -133,6 +148,7 @@ function guardedFetch(overflow: () => void) {
 
     const response = await fetch(input, {
       ...init,
+      headers: withUserAgent(init?.headers),
       redirect: "manual",
       signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
     });
@@ -248,8 +264,16 @@ function rejectsEra(cause: unknown): cause is Error {
   );
 }
 
-/** Whether a failed auto probe should be retried with the plain 2025 handshake. */
-function probeTimedOut(cause: unknown): cause is SdkError {
+/**
+ * Whether a failed auto negotiation should be retried once with the plain 2025 handshake: the
+ * probe timed out (some slow legacy servers never answer `server/discover`), or the server
+ * answered HTTP 403. The SDK treats a 403 to the probe as final, but some legacy servers and
+ * the gateways in front of them refuse the unknown method or its 2026 MCP-Protocol-Version
+ * header that way while accepting `initialize`; a real denial just fails the retry too.
+ */
+function retryAsLegacy(cause: unknown): cause is SdkError {
+  if (cause instanceof SdkHttpError) return cause.status === 403;
+
   return cause instanceof SdkError && cause.code === SdkErrorCode.RequestTimeout;
 }
 
@@ -272,7 +296,7 @@ export async function openMcpSession(
     opened = await connect(url, headers, prior).catch(async (error) => {
       if (prior) return connect(url, headers);
 
-      if (probeTimedOut(error)) return connect(url, headers, { kind: "legacy" });
+      if (retryAsLegacy(error)) return connect(url, headers, { kind: "legacy" });
       throw error;
     });
   } catch (error) {

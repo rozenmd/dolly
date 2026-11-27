@@ -27,10 +27,16 @@ if "--once" in sys.argv:
         sys.exit(int(result.read_text()))
 
 failures = []
+# Exit codes: 0 all done; 2 only the repository's own .agents/setup failed, so
+# the toolchain and declared dependencies are in place; 1 anything else failed.
+HOOK_ONLY_EXIT = 2
+hook_failures = []
 
 
-def failed(message):
+def failed(message, hook=False):
     failures.append(message)
+    if hook:
+        hook_failures.append(message)
     print(message, file=sys.stderr, flush=True)
 
 
@@ -73,9 +79,9 @@ if custom_setup:
         code = subprocess.run(["./" + str(hook)] if os.access(hook, os.X_OK) else ["sh", str(hook)]).returncode
     except OSError as error:
         code = None
-        failed(f"{hook} could not start: {error}")
+        failed(f"{hook} could not start: {error}", hook=True)
     if code:
-        failed(f"{hook} exited {code}")
+        failed(f"{hook} exited {code}", hook=True)
 
 # Read the manifest after the hook, which may have produced it or its lockfile.
 selected = select(report=True)
@@ -97,4 +103,4 @@ if selected:
 
 if failures:
     print("Setup finished with problems:\n" + "\n".join("- " + failure for failure in failures), file=sys.stderr, flush=True)
-    sys.exit(1)
+    sys.exit(HOOK_ONLY_EXIT if len(hook_failures) == len(failures) else 1)

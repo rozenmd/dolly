@@ -11,7 +11,9 @@ import * as Effect from "effect/Effect";
 import { headers, signIn } from "./session";
 import { mockFetch } from "./titles";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { LiveDoc } from "@earendil-works/pi-durable";
 import type { SavedSession } from "../src/session-contracts";
+import { ConversationWorkspace, workspaceConfig } from "../src/workspace";
 
 const repository = "example/project";
 const sha = "a".repeat(40);
@@ -769,6 +771,157 @@ it("resolves enrolled short names case-insensitively and asks instead of guessin
     expect(await resolve("project")).toContain("ambiguous: example/project, another-owner/project");
     expect(await resolve("hidden")).toContain("No enrolled repository matches");
     expect(await resolve("example/project")).toBe(repository);
+  });
+});
+
+it("attaches a repository by full name, short name or other casing while another repo is primary", async () => {
+  await connect();
+  mockFetch(async (input) => {
+    const path = new URL(String(input)).pathname;
+
+    if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (path.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+
+    if (path.startsWith("/repos/")) return Response.json({ default_branch: "main" });
+    throw new Error(`Unexpected GitHub path ${path}`);
+  });
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    const entry = { defaultBranch: "main", private: true, description: null };
+    await state.storage.put("github:repositories", [
+      { ...entry, fullName: "other/primary" },
+      { ...entry, fullName: "example/unique" },
+    ]);
+
+    // The container is the only simulated boundary: it records which sandbox was prepared.
+    const prepared: string[] = [];
+    // SAFETY: runWorkspace calls only prepare() on the sandbox stub for checkout and attach.
+    vi.spyOn(agent["env"].SANDBOX, "getByName").mockImplementation(
+      (name: string) =>
+        ({
+          prepare: async () => {
+            prepared.push(name);
+
+            return { setup: { state: "ready", updatedAt: 0 } };
+          },
+        }) as never,
+    );
+
+    const conversation = await agent["harness"].createConversation(
+      { ownership: { kind: "ownerless" } },
+      BACKGROUND_CONTEXT,
+    );
+
+    const id = conversation.id;
+
+    const run = (action: "checkout" | "attach", name: string) =>
+      agent["runWorkspace"](id, { action, repository: name });
+
+    expect(await run("checkout", "other/primary")).toMatchObject({
+      repository: "other/primary",
+      sandboxId: String(id),
+    });
+
+    const attached = { repository: "example/unique", sandboxId: `${id}:repo:example/unique` };
+
+    // The first attach of a session used to fall back to the primary checkout.
+    for (const name of [
+      "example/unique",
+      "other/primary",
+      "unique",
+      "other/primary",
+      "EXAMPLE/Unique",
+    ]) {
+      expect(await run("attach", name)).toMatchObject(
+        name === "other/primary"
+          ? { repository: "other/primary", sandboxId: String(id) }
+          : attached,
+      );
+    }
+
+    expect(prepared.at(-1)).toBe(attached.sandboxId);
+    const doc = await agent["harness"].snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
+    expect(doc?.config?.repository).toBe("other/primary");
+    expect(doc?.attached?.map((item) => item.repository)).toEqual(["example/unique"]);
+  });
+});
+
+it("keeps every checkout of a running turn alive until the turn ends", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const touched: string[] = [];
+    // SAFETY: the turn keep-alive calls only keepAlive() on the sandbox stub.
+    vi.spyOn(agent["env"].SANDBOX, "getByName").mockImplementation(
+      (name: string) =>
+        ({
+          keepAlive: async () => {
+            touched.push(name);
+
+            return true;
+          },
+        }) as never,
+    );
+
+    const { id } = await agent["harness"].createConversation(
+      { ownership: { kind: "ownerless" } },
+      BACKGROUND_CONTEXT,
+    );
+
+    await agent["harness"].commit(async (tx) => {
+      const state = await tx.doc(ConversationWorkspace, id);
+      state.config = workspaceConfig({ repository: "other/primary" }, String(id));
+      state.attached = [workspaceConfig({ repository: "example/unique" }, String(id))];
+      state.activeRepository = "example/unique";
+    }, BACKGROUND_CONTEXT);
+
+    const running = (on: boolean) =>
+      agent["harness"].commit(async (tx) => {
+        const live = await tx.doc(LiveDoc, id);
+        // SAFETY: only the presence of a run is read by the keep-alive; the ids are never used.
+        live.run = on ? ({ taskId: "turn", inputs: [], turns: 0 } as never) : undefined;
+      }, BACKGROUND_CONTEXT);
+
+    await running(true);
+
+    // Both checkouts, not just the active one a long command may be running in.
+    const both = [String(id), `${id}:repo:example/unique`];
+    agent["keepTurnAlive"](id);
+    // It touches them at once, then every minute.
+    await vi.waitFor(() => expect(new Set(touched)).toEqual(new Set(both)));
+    touched.length = 0;
+    await agent["touchTurnWorkspaces"](id);
+    expect(new Set(touched)).toEqual(new Set(both));
+    expect(agent["turnKeepAlives"].has(String(id))).toBe(true);
+
+    // The run ending stops it.
+    agent["stopTurnKeepAlive"](id);
+    touched.length = 0;
+    await agent["touchTurnWorkspaces"](id);
+    expect(touched).toEqual([]);
+
+    // A run that never reached afterRun stops on its own once nothing renews it.
+    agent["keepTurnAlive"](id);
+    await vi.waitFor(() => expect(touched).toHaveLength(2));
+    const entry = agent["turnKeepAlives"].get(String(id));
+
+    if (entry) entry.renewed = Date.now() - 71 * 60_000;
+    touched.length = 0;
+    await agent["touchTurnWorkspaces"](id);
+    expect(touched).toEqual([]);
+    expect(agent["turnKeepAlives"].has(String(id))).toBe(false);
+
+    // A stopped run clears LiveDoc.run without reaching afterRun: the next tick stops it.
+    agent["keepTurnAlive"](id);
+    await vi.waitFor(() => expect(touched).toHaveLength(2));
+    await running(false);
+    touched.length = 0;
+    await agent["touchTurnWorkspaces"](id);
+    expect(touched).toEqual([]);
+    expect(agent["turnKeepAlives"].has(String(id))).toBe(false);
   });
 });
 

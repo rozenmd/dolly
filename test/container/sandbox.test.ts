@@ -396,6 +396,22 @@ it("executes commands and uses Sandbox 1.0 Files in isolated containers", async 
   expect(await second.run("test ! -e /workspace/proof.txt")).toMatchObject({ exitCode: 0 });
 });
 
+it("keeps a live container alive for a running turn without ever starting one", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+
+  try {
+    expect(await sandbox.keepAlive()).toBe(false);
+    expect(await sandbox.diagnostics()).toMatchObject({ running: false });
+    expect(await sandbox.run("printf live")).toMatchObject({ stdout: "live", exitCode: 0 });
+    expect(await sandbox.keepAlive()).toBe(true);
+    // A second call within the interval is a no-op, and the container keeps working.
+    expect(await sandbox.keepAlive()).toBe(true);
+    expect(await sandbox.run("printf still")).toMatchObject({ stdout: "still", exitCode: 0 });
+  } finally {
+    await sandbox.restart();
+  }
+});
+
 it("runs commands with bash, keeps the command out of argv and preserves exits and timeouts", async () => {
   const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
 

@@ -323,6 +323,12 @@ function pullOwnerKey(repository: string, number: number) {
 }
 
 /** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
+/** How often a running turn touches its checkouts (Sandbox.keepAlive throttles to this too). */
+const TURN_KEEPALIVE_MS = 60_000;
+
+/** A turn keep-alive with no model request for this long stops: past the longest shell timeout. */
+const TURN_KEEPALIVE_MAX_MS = 70 * 60_000;
+
 export class Agent extends DurableObject<Env> {
   private harness!: Harness;
   private models!: ReturnType<typeof createModels>;
@@ -398,6 +404,15 @@ export class Agent extends DurableObject<Env> {
       ),
   });
   private readonly steerInterrupts = new SteerInterrupts();
+  /**
+   * Running turns whose checkouts are kept from idling out (Sandbox.keepAlive), by conversation:
+   * every live checkout is touched each minute while the turn works, including while one of its
+   * tools runs for minutes in another checkout. In memory only; see keepTurnAlive.
+   */
+  private readonly turnKeepAlives = new Map<
+    string,
+    { renewed: number; timer: ReturnType<typeof setInterval> }
+  >();
   /** How Claude requests go out: read once at start, then kept in step with the owner's setting. */
   private claudeTransport: ClaudeTransport = DEFAULT_CLAUDE_TRANSPORT;
   private readonly claudeCode: ClaudeCodeRoute = {
@@ -789,7 +804,7 @@ export class Agent extends DurableObject<Env> {
     const workspaceTool = {
       name: "workspace",
       description:
-        "Work across repositories in this conversation. Always supply action. checkout/attach require repository (optional ref), commit requires message (at most 1,000 characters: put longer detail in the pull request body), and open_pull_request requires title and body. Checkout returns as soon as Git is ready; dependencies and cache publication continue in the background. Use wait_for_dependencies before builds, tests, preview startup or editing dependency inputs; it returns ready or warning with setup errors. When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or disturbing other live checkouts. Shell, read_file, write_file, edit_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. diagnostics works even when checkout fails and reports the last saved turn and any save error. Files are saved once at the end of an answered agent turn, not after each command. restart bypasses checkout, discards changes since the last successful save, and restores that snapshot on the next repository tool. Use only after explicit user confirmation and supply discardUncheckpointed=true. Missing or expired snapshots fail closed; no saved snapshot means a fresh checkout of the configured ref. Mutations are not automatically replayed; inspect state after interruption.",
+        "Work across repositories in this conversation. Always supply action. checkout/attach require repository (optional ref), commit requires message (at most 1,000 characters: put longer detail in the pull request body), and open_pull_request requires title and body. Checkout returns as soon as Git is ready; dependencies and cache publication continue in the background. Use wait_for_dependencies before builds, tests, preview startup or editing dependency inputs; it returns ready, or warning with setup errors and dependencies: installed (only the repository's .agents/setup failed; dependencies are in place) or failed (dependencies are unavailable). When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or disturbing other live checkouts. Shell, read_file, write_file, edit_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. diagnostics works even when checkout fails and reports the last saved turn and any save error. Files are saved once at the end of an answered agent turn, not after each command. restart bypasses checkout, discards changes since the last successful save, and restores that snapshot on the next repository tool. Use only after explicit user confirmation and supply discardUncheckpointed=true. Missing or expired snapshots fail closed; no saved snapshot means a fresh checkout of the configured ref. Mutations are not automatically replayed; inspect state after interruption.",
       parameters: workspaceSchema,
       replay: "unsafe",
       executionMode: "sequential",
@@ -1135,6 +1150,7 @@ export class Agent extends DurableObject<Env> {
       hooks: [
         hook(GenerationTask, {
           afterRun: async (run, api, context) => {
+            this.stopTurnKeepAlive(api.conversationId);
             const state = await api.snapshot(ConversationWorkspace, api.conversationId, context);
 
             // Outside the run: a title costs one cheap model call and must never delay or fail it.
@@ -1153,6 +1169,11 @@ export class Agent extends DurableObject<Env> {
               : undefined;
           },
           beforeRequest: async ({ messages }, api, context) => {
+            // A turn can work for minutes without touching a checkout (model calls, MCP, a long
+            // command in another checkout): keep its live containers from idling out and losing
+            // unsaved changes until the turn ends.
+            this.keepTurnAlive(api.conversationId);
+
             // Lets a steer cut this request short while it is only thinking (steer-interrupt.ts).
             const provider = await api.snapshot(ProviderDoc, api.conversationId, context);
 
@@ -2662,6 +2683,56 @@ export class Agent extends DurableObject<Env> {
 
         return { status: valid ? (200 as const) : (401 as const) };
       }).pipe(Effect.catchTag("OperationError", () => Effect.succeed({ status: 503 as const }))),
+    );
+  }
+
+  /**
+   * Keep a running turn's checkouts alive (see turnKeepAlives). Renewed before each model
+   * request; stopped when the run ends, or on its own once no request has renewed it for longer
+   * than the longest command can run, so a run that ends without afterRun can't leak it.
+   */
+  private keepTurnAlive(id: ConversationId) {
+    const existing = this.turnKeepAlives.get(String(id));
+
+    if (existing) {
+      existing.renewed = Date.now();
+
+      return;
+    }
+
+    this.turnKeepAlives.set(String(id), {
+      renewed: Date.now(),
+      timer: setInterval(() => void this.touchTurnWorkspaces(id), TURN_KEEPALIVE_MS),
+    });
+    this.ctx.waitUntil(this.touchTurnWorkspaces(id));
+  }
+
+  private stopTurnKeepAlive(id: ConversationId) {
+    const entry = this.turnKeepAlives.get(String(id));
+
+    if (entry) clearInterval(entry.timer);
+    this.turnKeepAlives.delete(String(id));
+  }
+
+  /** Touch every checkout of the turn; Sandbox.keepAlive never starts a container. */
+  private async touchTurnWorkspaces(id: ConversationId) {
+    const entry = this.turnKeepAlives.get(String(id));
+
+    if (!entry) return;
+
+    if (Date.now() - entry.renewed > TURN_KEEPALIVE_MAX_MS) return this.stopTurnKeepAlive(id);
+    // A stopped run clears LiveDoc.run without reaching afterRun: let its checkouts idle out.
+    const live = await this.harness.snapshot(LiveDoc, id, BACKGROUND_CONTEXT);
+
+    if (!live?.run) return this.stopTurnKeepAlive(id);
+    const state = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
+
+    await Promise.all(
+      workspaceSandboxes(state, String(id)).map((sandboxId) =>
+        this.env.SANDBOX.getByName(sandboxId)
+          .keepAlive()
+          .catch(() => false),
+      ),
     );
   }
 
