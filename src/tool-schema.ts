@@ -1,4 +1,5 @@
 import type { ToolCall } from "@earendil-works/pi-ai";
+import type { Schema as JsonSchema } from "@earendil-works/pi-schema";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
@@ -30,12 +31,18 @@ export function toolParameters<const Fields extends Schema.Struct.Fields>(
  * validation and the model had to repeat it. Use this only where ignoring an unknown field can't
  * change what the call does: the named fields are still validated as before.
  */
-export function dropUnknownFields<Args extends object>(known: readonly (keyof Args & string)[]) {
+export function dropUnknownFields<Args>(parameters: JsonSchema<Args>) {
+  const { properties } = parameters;
+
+  if (!Predicate.isObject(properties))
+    throw new Error("Tool parameters must name their properties");
+
+  // The schema's own property names, so a field added to it is never dropped.
+  const known = Object.keys(properties);
+
   // Pi prepares a tool call's arguments once it has parsed them as a JSON object.
   return (args: ToolCall["arguments"]) =>
     // SAFETY: not validated yet, like the model's own arguments: Pi validates this against the
     // tool's parameters before execute() sees it.
-    Object.fromEntries(
-      Object.entries(args).filter(([key]) => known.some((name) => name === key)),
-    ) as Args;
+    Object.fromEntries(Object.entries(args).filter(([key]) => known.includes(key))) as Args;
 }
