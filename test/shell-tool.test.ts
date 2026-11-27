@@ -38,8 +38,9 @@ function fakeContainer(scripts: Record<string, Script>) {
   return {
     kills,
     running: true,
-    exec: async (argv: string[]) => {
-      const command = argv[2]!;
+    // The command travels in DOLLY_COMMAND; argv carries only the fixed wrapper script.
+    exec: async (_argv: string[], options: { env: Record<string, string> }) => {
+      const command = options.env["DOLLY_COMMAND"]!;
       const script = scripts[command];
 
       if (!script) throw new Error(`Unexpected command: ${command}`);

@@ -224,7 +224,11 @@ it("stops failed preview commands and retains bounded failure logs", async () =>
     let failure: unknown;
 
     try {
-      await sandbox.previewStart("echo deliberate-preview-failure; exit 1", 3000);
+      // Bash-only syntax: preview commands run in bash, like shell commands.
+      await sandbox.previewStart(
+        'a=(deliberate preview failure); IFS=-; echo "${a[*]}"; exit 1',
+        3000,
+      );
     } catch (error) {
       failure = error;
     }
@@ -280,7 +284,7 @@ it("enforces preview supervisor TTL and bounds logs independently of the Durable
 
   try {
     const result = await sandbox.run(
-      `python3 /usr/local/lib/dolly-preview.py "python3 -c 'import time; print(\\"x\\"*40000, flush=True); time.sleep(60)'" 1 /run/sandbox/ttl.log; wc -c < /run/sandbox/ttl.log`,
+      `DOLLY_COMMAND="python3 -c 'import time; print(\\"x\\"*40000, flush=True); time.sleep(60)'" python3 /usr/local/lib/dolly-preview.py 1 /run/sandbox/ttl.log; wc -c < /run/sandbox/ttl.log`,
     );
 
     expect(result.exitCode).toBe(0);
@@ -307,6 +311,49 @@ it("executes commands and uses Sandbox 1.0 Files in isolated containers", async 
   });
   const second = env.SANDBOX.getByName(crypto.randomUUID());
   expect(await second.run("test ! -e /workspace/proof.txt")).toMatchObject({ exitCode: 0 });
+});
+
+it("runs commands with bash, keeps the command out of argv and preserves exits and timeouts", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+
+  try {
+    expect(
+      await sandbox.run(
+        [
+          "a=(x y z); echo ${#a[@]} ${a[1]}",
+          "x=banana; echo ${x//a/o}",
+          "false | true; echo ${PIPESTATUS[0]}",
+          "echo pre{a,b}post",
+        ].join("\n"),
+      ),
+    ).toMatchObject({ exitCode: 0, stdout: "3 y\nbonono\n1\npreapost prebpost\n", stderr: "" });
+    // Exit codes, stderr and the login shell's `exit` stay exactly as before.
+    expect(await sandbox.run("printf out; printf err >&2; exit 3")).toMatchObject({
+      exitCode: 3,
+      stdout: "out",
+      stderr: "err",
+    });
+    expect(await sandbox.run("kill -TERM $$")).toMatchObject({ exitCode: 143 });
+    expect(await sandbox.run("pwd")).toMatchObject({ stdout: "/workspace\n" });
+    const marker = `dolly-marker-${crypto.randomUUID()}`;
+    // The command used to be in the wrapper's argv, so this loop killed the wrapper (exit 143).
+    expect(
+      await sandbox.run(
+        `pgrep -af "${marker}" && exit 9
+for p in $(pgrep -f "${marker}"); do kill $p; done
+grep -l "[d]${marker.slice(1)}" /proc/[0-9]*/cmdline 2>/dev/null && exit 8
+test -z "\${DOLLY_COMMAND+set}" || exit 7
+echo survived`,
+      ),
+    ).toMatchObject({ exitCode: 0, stdout: "survived\n" });
+    expect(await sandbox.run("echo early; sleep 120", {}, { timeout: 1 })).toMatchObject({
+      exitCode: 124,
+      timedOut: true,
+      stdout: "early\n",
+    });
+  } finally {
+    await sandbox.restart();
+  }
 });
 
 it("writes and edits files through Sandbox Files with line diff stats and clear failures", async () => {
