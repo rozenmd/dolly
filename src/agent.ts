@@ -323,6 +323,12 @@ function pullOwnerKey(repository: string, number: number) {
 }
 
 /** Durable Object host. Pi owns durable task scheduling; Effect owns application workflows. */
+/** How often a running turn touches its checkouts (Sandbox.keepAlive throttles to this too). */
+const TURN_KEEPALIVE_MS = 60_000;
+
+/** A turn keep-alive with no model request for this long stops: past the longest shell timeout. */
+const TURN_KEEPALIVE_MAX_MS = 70 * 60_000;
+
 export class Agent extends DurableObject<Env> {
   private harness!: Harness;
   private models!: ReturnType<typeof createModels>;
@@ -398,6 +404,15 @@ export class Agent extends DurableObject<Env> {
       ),
   });
   private readonly steerInterrupts = new SteerInterrupts();
+  /**
+   * Running turns whose checkouts are kept from idling out (Sandbox.keepAlive), by conversation:
+   * every live checkout is touched each minute while the turn works, including while one of its
+   * tools runs for minutes in another checkout. In memory only; see keepTurnAlive.
+   */
+  private readonly turnKeepAlives = new Map<
+    string,
+    { renewed: number; timer: ReturnType<typeof setInterval> }
+  >();
   /** How Claude requests go out: read once at start, then kept in step with the owner's setting. */
   private claudeTransport: ClaudeTransport = DEFAULT_CLAUDE_TRANSPORT;
   private readonly claudeCode: ClaudeCodeRoute = {
@@ -1132,6 +1147,7 @@ export class Agent extends DurableObject<Env> {
       hooks: [
         hook(GenerationTask, {
           afterRun: async (run, api, context) => {
+            this.stopTurnKeepAlive(api.conversationId);
             const state = await api.snapshot(ConversationWorkspace, api.conversationId, context);
 
             // Outside the run: a title costs one cheap model call and must never delay or fail it.
@@ -1150,21 +1166,10 @@ export class Agent extends DurableObject<Env> {
               : undefined;
           },
           beforeRequest: async ({ messages }, api, context) => {
-            // A turn can work for minutes without a repository tool (model calls, MCP, waits on
-            // children): keep its live containers from idling out and losing unsaved changes.
-            // Outside the request, and never starting a container (Sandbox.keepAlive).
-            const workspace = await api.snapshot(
-              ConversationWorkspace,
-              api.conversationId,
-              context,
-            );
-
-            for (const sandboxId of workspaceSandboxes(workspace, String(api.conversationId)))
-              this.ctx.waitUntil(
-                this.env.SANDBOX.getByName(sandboxId)
-                  .keepAlive()
-                  .catch(() => false),
-              );
+            // A turn can work for minutes without touching a checkout (model calls, MCP, a long
+            // command in another checkout): keep its live containers from idling out and losing
+            // unsaved changes until the turn ends.
+            this.keepTurnAlive(api.conversationId);
 
             // Lets a steer cut this request short while it is only thinking (steer-interrupt.ts).
             const provider = await api.snapshot(ProviderDoc, api.conversationId, context);
@@ -2675,6 +2680,52 @@ export class Agent extends DurableObject<Env> {
 
         return { status: valid ? (200 as const) : (401 as const) };
       }).pipe(Effect.catchTag("OperationError", () => Effect.succeed({ status: 503 as const }))),
+    );
+  }
+
+  /**
+   * Keep a running turn's checkouts alive (see turnKeepAlives). Renewed before each model
+   * request; stopped when the run ends, or on its own once no request has renewed it for longer
+   * than the longest command can run, so a run that ends without afterRun can't leak it.
+   */
+  private keepTurnAlive(id: ConversationId) {
+    const existing = this.turnKeepAlives.get(String(id));
+
+    if (existing) {
+      existing.renewed = Date.now();
+
+      return;
+    }
+
+    this.turnKeepAlives.set(String(id), {
+      renewed: Date.now(),
+      timer: setInterval(() => void this.touchTurnWorkspaces(id), TURN_KEEPALIVE_MS),
+    });
+    this.ctx.waitUntil(this.touchTurnWorkspaces(id));
+  }
+
+  private stopTurnKeepAlive(id: ConversationId) {
+    const entry = this.turnKeepAlives.get(String(id));
+
+    if (entry) clearInterval(entry.timer);
+    this.turnKeepAlives.delete(String(id));
+  }
+
+  /** Touch every checkout of the turn; Sandbox.keepAlive never starts a container. */
+  private async touchTurnWorkspaces(id: ConversationId) {
+    const entry = this.turnKeepAlives.get(String(id));
+
+    if (!entry) return;
+
+    if (Date.now() - entry.renewed > TURN_KEEPALIVE_MAX_MS) return this.stopTurnKeepAlive(id);
+    const state = await this.harness.snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
+
+    await Promise.all(
+      workspaceSandboxes(state, String(id)).map((sandboxId) =>
+        this.env.SANDBOX.getByName(sandboxId)
+          .keepAlive()
+          .catch(() => false),
+      ),
     );
   }
 

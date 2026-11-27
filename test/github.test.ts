@@ -12,7 +12,7 @@ import { headers, signIn } from "./session";
 import { mockFetch } from "./titles";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { SavedSession } from "../src/session-contracts";
-import { ConversationWorkspace } from "../src/workspace";
+import { ConversationWorkspace, workspaceConfig } from "../src/workspace";
 
 const repository = "example/project";
 const sha = "a".repeat(40);
@@ -696,6 +696,62 @@ it("attaches a repository by full name, short name or other casing while another
     const doc = await agent["harness"].snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
     expect(doc?.config?.repository).toBe("other/primary");
     expect(doc?.attached?.map((item) => item.repository)).toEqual(["example/unique"]);
+  });
+});
+
+it("keeps every checkout of a running turn alive until the turn ends", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const touched: string[] = [];
+    // SAFETY: the turn keep-alive calls only keepAlive() on the sandbox stub.
+    vi.spyOn(agent["env"].SANDBOX, "getByName").mockImplementation(
+      (name: string) =>
+        ({
+          keepAlive: async () => {
+            touched.push(name);
+
+            return true;
+          },
+        }) as never,
+    );
+
+    const { id } = await agent["harness"].createConversation(
+      { ownership: { kind: "ownerless" } },
+      BACKGROUND_CONTEXT,
+    );
+
+    await agent["harness"].commit(async (tx) => {
+      const state = await tx.doc(ConversationWorkspace, id);
+      state.config = workspaceConfig({ repository: "other/primary" }, String(id));
+      state.attached = [workspaceConfig({ repository: "example/unique" }, String(id))];
+      state.activeRepository = "example/unique";
+    }, BACKGROUND_CONTEXT);
+
+    // Both checkouts, not just the active one a long command may be running in.
+    const both = [String(id), `${id}:repo:example/unique`];
+    agent["keepTurnAlive"](id);
+    // It touches them at once, then every minute.
+    await vi.waitFor(() => expect(new Set(touched)).toEqual(new Set(both)));
+    touched.length = 0;
+    await agent["touchTurnWorkspaces"](id);
+    expect(new Set(touched)).toEqual(new Set(both));
+    expect(agent["turnKeepAlives"].has(String(id))).toBe(true);
+
+    // The run ending stops it.
+    agent["stopTurnKeepAlive"](id);
+    touched.length = 0;
+    await agent["touchTurnWorkspaces"](id);
+    expect(touched).toEqual([]);
+
+    // A run that never reached afterRun stops on its own once nothing renews it.
+    agent["keepTurnAlive"](id);
+    await vi.waitFor(() => expect(touched).toHaveLength(2));
+    const entry = agent["turnKeepAlives"].get(String(id));
+
+    if (entry) entry.renewed = Date.now() - 71 * 60_000;
+    touched.length = 0;
+    await agent["touchTurnWorkspaces"](id);
+    expect(touched).toEqual([]);
+    expect(agent["turnKeepAlives"].has(String(id))).toBe(false);
   });
 });
 
