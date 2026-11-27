@@ -16,7 +16,10 @@ def stop(signum, _frame):
 
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
-child = subprocess.Popen(["sh", "-lc", sys.argv[1]], start_new_session=True)
+# argv[1] is a fixed script from the Worker that evals $DOLLY_COMMAND, so the
+# command text never appears in any process's argv (pgrep -f/pkill -f would
+# otherwise match this supervisor and its shell).
+child = subprocess.Popen(["bash", "-lc", sys.argv[1]], start_new_session=True)
 
 
 def signal_group(signum):

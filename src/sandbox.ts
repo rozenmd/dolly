@@ -50,6 +50,14 @@ const PREVIEW_DIRECTORY = "/workspace/.dolly-preview";
 const PREVIEW_SUPERVISOR = `${PREVIEW_DIRECTORY}/supervisor.py`;
 const PREVIEW_LOG = `${PREVIEW_DIRECTORY}/preview.log`;
 
+/**
+ * The fixed script dolly-exec.py runs with `bash -lc`. The command itself travels in
+ * DOLLY_COMMAND, so it never appears in a process's argv, where `pgrep -f`/`pkill -f`
+ * patterns taken from the command would match (and kill) the wrapper. It stays POSIX so
+ * containers on an older image, whose supervisor still uses `sh -lc`, run it too.
+ */
+const EXEC_SCRIPT = 'dolly_command=$DOLLY_COMMAND; unset DOLLY_COMMAND; eval "$dolly_command"';
+
 type RunningPreview = {
   token: string;
   port: number;
@@ -634,11 +642,12 @@ export class Sandbox extends DurableObject<Env> {
 
     return yield* Effect.acquireUseRelease(
       attempt("sandbox.exec", (signal) =>
-        container.exec(["python3", "/usr/local/lib/dolly-exec.py", command], {
+        container.exec(["python3", "/usr/local/lib/dolly-exec.py", EXEC_SCRIPT], {
           cwd,
           signal,
           env: {
             ...env,
+            DOLLY_COMMAND: command,
             GIT_TERMINAL_PROMPT: "0",
             GIT_CONFIG_NOSYSTEM: "1",
             GIT_SSL_CAINFO: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
@@ -1484,12 +1493,13 @@ export class Sandbox extends DurableObject<Env> {
           await files.writeFile(PREVIEW_SUPERVISOR, previewSupervisor);
 
           const process = await container.exec(
-            ["python3", PREVIEW_SUPERVISOR, command, String(PREVIEW_TTL_MS / 1000), PREVIEW_LOG],
+            ["python3", PREVIEW_SUPERVISOR, String(PREVIEW_TTL_MS / 1000), PREVIEW_LOG],
             {
               cwd: workspace ? "/workspace/repo" : "/workspace",
               stdout: "ignore",
               stderr: "ignore",
               env: {
+                DOLLY_COMMAND: command,
                 NODE_EXTRA_CA_CERTS: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
                 SSL_CERT_FILE: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
               },
