@@ -1162,7 +1162,7 @@ export class Agent extends DurableObject<Env> {
               ? { block: STEER_TOOL_SKIP }
               : undefined,
           afterTool: async (call, result, api) => {
-            const message = toolFailure(result);
+            const message = toolFailure(result, call);
 
             if (message && call.name !== "papercuts")
               await this.capturePapercut(`tool:${call.name}`, message, api.conversationId);

@@ -435,6 +435,11 @@ ln -s dirty.txt dirty-link`);
     expect(live.stdout).toContain("AM staged.txt");
     expect(await snapshotPointer()).toEqual(answeredTurn);
     expect(await sandbox.run("exit 7")).toMatchObject({ exitCode: 7 });
+    // Agents reach for ripgrep by default; the image ships it in every checkout.
+    expect(await sandbox.run("rg --version")).toMatchObject({
+      exitCode: 0,
+      stdout: expect.stringContaining("ripgrep"),
+    });
     expect(await snapshotPointer()).toEqual(answeredTurn);
     const saved = await sandbox.checkpoint("next-answered-turn");
 
