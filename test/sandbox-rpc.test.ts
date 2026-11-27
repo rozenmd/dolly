@@ -223,13 +223,14 @@ it("reports dependency setup warnings without blocking checkout or repeating set
         Effect.sync(() => {
           installs++;
 
-          return "Package registry is unavailable";
+          return { error: "Package registry is unavailable", dependencies: "failed" };
         }),
     });
     await instance.prepare(config);
     expect(await instance.waitForDependencies()).toMatchObject({
       state: "warning",
       error: "Package registry is unavailable",
+      dependencies: "failed",
     });
     await instance.prepare(config);
     expect(installs).toBe(1);

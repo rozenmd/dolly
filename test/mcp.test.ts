@@ -915,6 +915,110 @@ it("stops listing at a repeating cursor and bounds what one call can make the Wo
   expect(resultText(dumped)).toContain("Tool calls already made");
 });
 
+it("sends static headers and a User-Agent on every request to a server that requires them", async () => {
+  const BENTO = "https://bento.example";
+
+  const required = {
+    "X-Bento-Publishable-Key": "pk-123456789",
+    "X-Bento-Secret-Key": "sk-123456789",
+    "X-Bento-Site-Uuid": "site-123456789",
+  };
+
+  // Like a key-checking gateway: every request must carry the exact keys and a User-Agent, and
+  // the 2026 `server/discover` probe is refused with 403 rather than a JSON-RPC error.
+  const allowed = (request: Request) =>
+    Object.entries(required).every(([name, value]) => request.headers.get(name) === value) &&
+    Boolean(request.headers.get("user-agent"));
+
+  const legacy = scriptedServer(
+    () => ({ tools: [{ name: "get_site_stats", description: "Site stats" }] }),
+    (id, name) => called(id, name),
+  );
+
+  const seen = network({
+    [`GET ${BENTO}/mcp`]: (_url, _init, request) =>
+      new Response(null, { status: allowed(request) ? 405 : 403 }),
+    [`POST ${BENTO}/mcp`]: async (url, init, request) => {
+      if (!allowed(request)) return new Response("Forbidden", { status: 403 });
+
+      const body = await request.clone().text();
+
+      if (body.includes('"server/discover"')) return new Response("Forbidden", { status: 403 });
+      const response = await legacy(url, init, request);
+
+      if (!body.includes('"initialize"')) return response;
+      const headers = new Headers(response.headers);
+      headers.set("Mcp-Session-Id", "bento-session");
+
+      return new Response(response.body, { status: response.status, headers });
+    },
+    [`DELETE ${BENTO}/mcp`]: (_url, _init, request) =>
+      new Response(null, { status: allowed(request) ? 204 : 403 }),
+  });
+
+  const add = (name: string, headers: Record<string, string>) =>
+    call("/connections/mcp", "POST", { name, url: `${BENTO}/mcp`, headers });
+
+  expect((await add("bento", required)).status).toBe(200);
+  expect((await add("stale", { ...required, "X-Bento-Secret-Key": "sk-revoked-key" })).status).toBe(
+    200,
+  );
+
+  // The status check sends the configured headers, so refused ones don't show as Connected.
+  expect(
+    (await connections()).map(({ name, status, detail }) => ({ name, status, detail })),
+  ).toEqual([
+    { name: "bento", status: "connected", detail: "HTTP 405" },
+    {
+      name: "stale",
+      status: "needs-auth",
+      detail: expect.stringContaining("refused the configured headers (HTTP 403)"),
+    },
+  ]);
+
+  const result = await runProgram("await tools.bento.get_site_stats({})");
+  expect(resultText(result)).toContain("called get_site_stats");
+
+  const requests = seen.filter((request) => request.url === `${BENTO}/mcp`);
+  const methods = requests.map((request) => request.method);
+  expect(methods).toContain("POST");
+  expect(methods).toContain("DELETE");
+
+  // The one bare request is the OAuth discovery GET, which never carries credentials.
+  const bare = requests.filter((item) => !item.headers.has("x-bento-secret-key"));
+  expect(bare.map((item) => item.method)).toEqual(["GET"]);
+
+  // Every request for the good server, probe, handshake, listing, call and session end alike.
+  for (const request of requests.filter(
+    (item) => item.headers.get("x-bento-secret-key") === required["X-Bento-Secret-Key"],
+  )) {
+    for (const [name, value] of Object.entries(required))
+      expect(request.headers.get(name)).toBe(value);
+    expect(request.headers.get("user-agent")).toBe("Dolly-MCP-Client/1");
+  }
+
+  // The probe was refused, and the session fell back to the 2025 handshake.
+  const posted = requests.filter((request) => request.method === "POST").map((item) => item.body);
+  expect(posted.some((body) => body.includes('"server/discover"'))).toBe(true);
+  expect(posted.some((body) => body.includes('"initialize"'))).toBe(true);
+
+  // A User-Agent the owner configured is kept as it is.
+  network({
+    [`POST ${BENTO}/mcp`]: (url, init, request) => {
+      expect(request.headers.get("user-agent")).toBe("owner-agent/2");
+
+      return legacy(url, init, request);
+    },
+    [`DELETE ${BENTO}/mcp`]: () => new Response(null, { status: 204 }),
+  });
+
+  for (const name of ["bento", "stale"]) await call(`/connections/mcp/${name}`, "DELETE");
+  expect((await add("custom", { ...required, "user-agent": "owner-agent/2" })).status).toBe(200);
+  expect(resultText(await runProgram("await tools.custom.get_site_stats({})"))).toContain(
+    "called get_site_stats",
+  );
+});
+
 it("keeps a bounded catalog when a server lists many large tools", async () => {
   let pages = 0;
 

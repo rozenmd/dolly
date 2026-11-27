@@ -236,6 +236,21 @@ class FileRefusal extends Schema.TaggedError<FileRefusal>()("FileRefusal", {
 /** A completed change, or why the request was refused without touching the file. */
 export type FileResult = { readonly change: FileChange } | { readonly refused: string };
 
+/**
+ * How long the platform keeps an idle container. A running command is not activity by itself:
+ * every command that ran past this in production (5-6 minute test suites) finished, and then the
+ * container was stopped within seconds, taking the turn's unsaved edits with it. So a running
+ * command, and a running turn (see keepAlive), register activity every KEEPALIVE_MS.
+ */
+const INACTIVITY_TIMEOUT_MS = 300_000;
+const KEEPALIVE_MS = 60_000;
+
+/** A setup that failed before the installer could report: nothing says dependencies are in. */
+const setupFailure = (cause: Cause.Cause<unknown>) => ({
+  error: redact(Cause.pretty(cause)).slice(-2000),
+  dependencies: "failed" as const,
+});
+
 const refuse = (message: string) => new FileRefusal({ message });
 
 const fileResult = (operation: Effect.Effect<FileChange, FileRefusal | OperationError>) =>
@@ -348,6 +363,8 @@ export class Sandbox extends DurableObject<Env> {
   private readonly permit = Semaphore.makeUnsafe(1);
   private initialized = false;
   private prepared = false;
+  /** When this object last registered container activity (touch), in memory only. */
+  private lastActivity = 0;
   /** How long a turn-end snapshot may take; tests shorten it. */
   private checkpointTimeoutMs = CHECKPOINT_TIMEOUT_MS;
   private setupAbort: AbortController | undefined;
@@ -426,7 +443,7 @@ export class Sandbox extends DurableObject<Env> {
 
     if (container.running && this.initialized) {
       const inactivity = attempt("sandbox.inactivity", () =>
-        container.setInactivityTimeout(300_000),
+        container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS),
       );
 
       if (this.initialization)
@@ -600,7 +617,9 @@ export class Sandbox extends DurableObject<Env> {
         yield* this.timeInitialization(
           initialization,
           "sandbox.inactivity",
-          attempt("sandbox.inactivity", () => container.setInactivityTimeout(300_000)),
+          attempt("sandbox.inactivity", () =>
+            container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS),
+          ),
         );
 
         return container;
@@ -621,6 +640,7 @@ export class Sandbox extends DurableObject<Env> {
     // lazy container startup fails.
     const container = initializingContainer ?? (yield* this.container());
     const startedAt = Date.now();
+    this.lastActivity = startedAt;
 
     const context = {
       sandboxId: String(this.ctx.id),
@@ -660,27 +680,31 @@ export class Sandbox extends DurableObject<Env> {
         ),
       ),
       (process) =>
-        Effect.all(
-          {
-            stdout: streamed
-              ? drainStream(process.stdout, streamed.stdout, streamed.relay).pipe(
-                  Effect.map(() => streamed.stdout.text()),
-                )
-              : readBounded(process.stdout, { limit: 32_768 }),
-            stderr: streamed
-              ? drainStream(process.stderr, streamed.stderr, streamed.relay).pipe(
-                  Effect.map(() => streamed.stderr.text()),
-                )
-              : readBounded(process.stderr, { limit: 32_768 }),
-            exitCode: attempt("sandbox.exit", () => process.exitCode).pipe(
-              Effect.tap(() =>
-                Effect.sync(() => {
-                  exited = true;
-                }),
+        Effect.raceFirst(
+          Effect.all(
+            {
+              stdout: streamed
+                ? drainStream(process.stdout, streamed.stdout, streamed.relay).pipe(
+                    Effect.map(() => streamed.stdout.text()),
+                  )
+                : readBounded(process.stdout, { limit: 32_768 }),
+              stderr: streamed
+                ? drainStream(process.stderr, streamed.stderr, streamed.relay).pipe(
+                    Effect.map(() => streamed.stderr.text()),
+                  )
+                : readBounded(process.stderr, { limit: 32_768 }),
+              exitCode: attempt("sandbox.exit", () => process.exitCode).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    exited = true;
+                  }),
+                ),
               ),
-            ),
-          },
-          { concurrency: "unbounded" },
+            },
+            { concurrency: "unbounded" },
+          ),
+          // Never completes: keeps the container alive for as long as the command runs.
+          this.heartbeat(container),
         ),
       (process) =>
         exited
@@ -716,6 +740,47 @@ export class Sandbox extends DurableObject<Env> {
       ),
     );
   });
+
+  /**
+   * Register container activity: renew the inactivity timeout and run a no-op process. Which of
+   * the two the platform counts is not documented, so both are done; failures are ignored, since
+   * a container that is gone is reported by the next repository tool.
+   */
+  private touch(container: Container) {
+    this.lastActivity = Date.now();
+
+    return Effect.all([
+      attempt("sandbox.inactivity", () => container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS)),
+      attempt("sandbox.keepalive", async (signal) => {
+        const process = await container.exec(["true"], { signal });
+
+        await process.exitCode;
+      }),
+    ]).pipe(Effect.timeout("30 seconds"), Effect.ignore);
+  }
+
+  /** Touch the container every KEEPALIVE_MS, forever: race it against the work it covers. */
+  private heartbeat(container: Container): Effect.Effect<never> {
+    return Effect.forever(
+      Effect.sleep(`${KEEPALIVE_MS / 1000} seconds`).pipe(Effect.andThen(this.touch(container))),
+    );
+  }
+
+  /**
+   * Called by the agent while a turn works (before each model request), so a turn that spends
+   * minutes without repository tools doesn't lose its unsaved changes to the inactivity
+   * timeout. Never starts a container, and touches it at most once per KEEPALIVE_MS.
+   */
+  async keepAlive() {
+    const container = this.ctx.container;
+
+    if (!container?.running || !this.initialized) return false;
+
+    if (Date.now() - this.lastActivity >= KEEPALIVE_MS)
+      await Effect.runPromise(this.touch(container));
+
+    return true;
+  }
 
   private checkout = Effect.fn("Sandbox.checkout")(function* (
     this: Sandbox,
@@ -777,10 +842,16 @@ export class Sandbox extends DurableObject<Env> {
     );
   });
 
-  private setupStatus(state: WorkspaceSetup["state"], error?: string) {
+  private setupStatus(
+    state: WorkspaceSetup["state"],
+    error?: string,
+    dependencies?: WorkspaceSetup["dependencies"],
+  ) {
     const status: WorkspaceSetup = { state, updatedAt: Date.now() };
 
     if (error) status.error = redact(error).slice(-2000);
+
+    if (dependencies) status.dependencies = dependencies;
 
     return attempt("workspace.setup.status", () =>
       this.ctx.storage.put("workspace:setup", status),
@@ -994,17 +1065,21 @@ export class Sandbox extends DurableObject<Env> {
             exitCode: result.exitCode,
           });
 
-          return result.exitCode === 0
-            ? undefined
-            : redact(result.stderr || result.stdout || `Setup exited ${result.exitCode}`).slice(
-                -2000,
-              );
+          if (result.exitCode === 0) return undefined;
+
+          return {
+            error: redact(
+              result.stderr || result.stdout || `Setup exited ${result.exitCode}`,
+            ).slice(-2000),
+            // dolly-setup.py exits 2 when only the repository's .agents/setup failed.
+            dependencies: result.exitCode === 2 ? ("installed" as const) : ("failed" as const),
+          };
         }),
       () =>
         attempt("workspace.cache.disable", () =>
           container.interceptAllOutboundHttp(ordinaryOutbound),
         ).pipe(Effect.orDie),
-    ).pipe(Effect.catchCause((cause) => Effect.succeed(redact(Cause.pretty(cause)).slice(-2000))));
+    ).pipe(Effect.catchCause((cause) => Effect.succeed(setupFailure(cause))));
   });
 
   private startDependencySetup(container: Container) {
@@ -1018,14 +1093,18 @@ export class Sandbox extends DurableObject<Env> {
     this.dependencySetup = Effect.runPromise(
       Effect.gen({ self: this }, function* () {
         const warning = yield* this.installDependencies(container).pipe(
-          Effect.catchCause((cause) => Effect.succeed(redact(Cause.pretty(cause)).slice(-2000))),
+          Effect.catchCause((cause) => Effect.succeed(setupFailure(cause))),
         );
 
-        yield* this.setupStatus(warning ? "warning" : "ready", warning);
+        yield* warning
+          ? this.setupStatus("warning", warning.error, warning.dependencies)
+          : this.setupStatus("ready");
       }),
       { signal: controller.signal },
     ).catch(async (error) => {
-      await Effect.runPromise(this.setupStatus("warning", exceptionDetails(error).message));
+      await Effect.runPromise(
+        this.setupStatus("warning", exceptionDetails(error).message, "failed"),
+      );
     });
     this.ctx.waitUntil(this.dependencySetup);
   }

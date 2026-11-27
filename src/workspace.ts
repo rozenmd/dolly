@@ -157,7 +157,10 @@ export function selectRepository(
     );
 
     if (!state.config && input.action === "checkout") state.config = config;
-    else (state.attached ??= []).push(config);
+    // Assign a new array rather than `(state.attached ??= []).push(config)`: in a Pi doc
+    // transaction the array `??=` just assigned is a copy, so a push into it was lost and the
+    // first attach of a session fell back to the primary checkout.
+    else state.attached = [...(state.attached ?? []), config];
   }
 
   state.activeRepository = existing?.repository ?? input.repository;
@@ -393,6 +396,12 @@ export type WorkspaceSetup = {
   state: "queued" | "checkout" | "installing" | "ready" | "warning" | "failed";
   updatedAt: number;
   error?: string;
+  /**
+   * Set on a warning. "installed": the toolchain and declared dependencies are in place and only
+   * the repository's own .agents/setup reported problems, so builds and checks can usually run.
+   * "failed": installing the toolchain or dependencies failed, so commands that need them won't.
+   */
+  dependencies?: "installed" | "failed";
 };
 
 /** Fixed, read-only diagnostics: never print environment, process arguments or user file contents. */

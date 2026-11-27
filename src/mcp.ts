@@ -33,6 +33,7 @@ import {
   type McpSession,
   openMcpSession,
   type PriorDiscovery,
+  withUserAgent,
 } from "./mcp-client";
 import { discoverMcpOauth, OauthDiscoveryError } from "./mcp-oauth-discovery";
 
@@ -498,13 +499,23 @@ export class McpConnections {
     try {
       // Any HTTP response (incl. 401/405) means the endpoint is up; MCP servers typically
       // reject bare GETs but still answer.
+      // The static headers go along, so a key the server refuses shows here rather than as
+      // "Connected" over a session that will fail. OAuth grants are not sent on this check.
       const res = await fetch(entry.url, {
         method: "GET",
+        headers: withUserAgent(entry.headers),
         redirect: "manual",
         signal: AbortSignal.timeout(4_000),
       });
 
       void res.body?.cancel().catch(() => {});
+
+      if (entry.headers && Object.keys(entry.headers).length && [401, 403].includes(res.status))
+        return {
+          ...base,
+          status: "needs-auth",
+          detail: `The server refused the configured headers (HTTP ${res.status}). Check their names and values, then remove and re-add the server`,
+        };
 
       // Reachable, but an OAuth-protected server with no grant and no static Authorization
       // header isn't usable yet: say "Sign in required" instead of a misleading "Connected".

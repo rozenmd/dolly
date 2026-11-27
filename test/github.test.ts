@@ -12,6 +12,7 @@ import { headers, signIn } from "./session";
 import { mockFetch } from "./titles";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { SavedSession } from "../src/session-contracts";
+import { ConversationWorkspace } from "../src/workspace";
 
 const repository = "example/project";
 const sha = "a".repeat(40);
@@ -618,6 +619,83 @@ it("resolves enrolled short names case-insensitively and asks instead of guessin
     expect(await resolve("project")).toContain("ambiguous: example/project, another-owner/project");
     expect(await resolve("hidden")).toContain("No enrolled repository matches");
     expect(await resolve("example/project")).toBe(repository);
+  });
+});
+
+it("attaches a repository by full name, short name or other casing while another repo is primary", async () => {
+  await connect();
+  mockFetch(async (input) => {
+    const path = new URL(String(input)).pathname;
+
+    if (path.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (path.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+
+    if (path.startsWith("/repos/")) return Response.json({ default_branch: "main" });
+    throw new Error(`Unexpected GitHub path ${path}`);
+  });
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    const entry = { defaultBranch: "main", private: true, description: null };
+    await state.storage.put("github:repositories", [
+      { ...entry, fullName: "other/primary" },
+      { ...entry, fullName: "example/unique" },
+    ]);
+
+    // The container is the only simulated boundary: it records which sandbox was prepared.
+    const prepared: string[] = [];
+    // SAFETY: runWorkspace calls only prepare() on the sandbox stub for checkout and attach.
+    vi.spyOn(agent["env"].SANDBOX, "getByName").mockImplementation(
+      (name: string) =>
+        ({
+          prepare: async () => {
+            prepared.push(name);
+
+            return { setup: { state: "ready", updatedAt: 0 } };
+          },
+        }) as never,
+    );
+
+    const conversation = await agent["harness"].createConversation(
+      { ownership: { kind: "ownerless" } },
+      BACKGROUND_CONTEXT,
+    );
+
+    const id = conversation.id;
+
+    const run = (action: "checkout" | "attach", name: string) =>
+      agent["runWorkspace"](id, { action, repository: name });
+
+    expect(await run("checkout", "other/primary")).toMatchObject({
+      repository: "other/primary",
+      sandboxId: String(id),
+    });
+
+    const attached = { repository: "example/unique", sandboxId: `${id}:repo:example/unique` };
+
+    // The first attach of a session used to fall back to the primary checkout.
+    for (const name of [
+      "example/unique",
+      "other/primary",
+      "unique",
+      "other/primary",
+      "EXAMPLE/Unique",
+    ]) {
+      expect(await run("attach", name)).toMatchObject(
+        name === "other/primary"
+          ? { repository: "other/primary", sandboxId: String(id) }
+          : attached,
+      );
+    }
+
+    expect(prepared.at(-1)).toBe(attached.sandboxId);
+    const doc = await agent["harness"].snapshot(ConversationWorkspace, id, BACKGROUND_CONTEXT);
+    expect(doc?.config?.repository).toBe("other/primary");
+    expect(doc?.attached?.map((item) => item.repository)).toEqual(["example/unique"]);
   });
 });
 

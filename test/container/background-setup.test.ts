@@ -117,9 +117,11 @@ touch /workspace/ready`);
 });
 
 it("reports failed background setup and cancels a hung process tree on restart", async () => {
-  for (const hook of [
-    "echo setup-failed >&2; exit 27",
-    "sleep 600 & echo $! > /workspace/child; wait",
+  for (const [hook, manifest] of [
+    ["echo setup-failed >&2; exit 27", ""],
+    // The hook fails and so does the dependency install the manifest declares.
+    ["echo setup-failed >&2; exit 27", '{"packageManager":"notapm@1.0.0"}'],
+    ["sleep 600 & echo $! > /workspace/child; wait", ""],
   ]) {
     const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
     const config = workspaceConfig({ repository: "fixture/lifecycle" }, "lifecycle");
@@ -131,6 +133,7 @@ mkdir -p /workspace/repo/.agents
 cd /workspace/repo
 git init
 printf '%s' ${shellQuote(hook)} > .agents/setup
+${manifest ? `printf '%s' ${shellQuote(manifest)} > package.json` : ""}
 touch /workspace/ready`),
       ).toMatchObject({ exitCode: 0 });
       await runInDurableObject(sandbox, async (_, state) => {
@@ -141,9 +144,11 @@ touch /workspace/ready`),
       await sandbox.prepare(config);
 
       if (hook.includes("setup-failed")) {
+        // Only the repository's own hook failing leaves dependencies usable, and says so.
         expect(await sandbox.waitForDependencies()).toMatchObject({
           state: "warning",
-          error: expect.stringContaining("setup-failed"),
+          error: expect.stringContaining(manifest ? "notapm" : "setup-failed"),
+          dependencies: manifest ? "failed" : "installed",
         });
         expect(await sandbox.run("printf still-usable")).toMatchObject({ stdout: "still-usable" });
       } else {

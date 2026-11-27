@@ -786,7 +786,7 @@ export class Agent extends DurableObject<Env> {
     const workspaceTool = {
       name: "workspace",
       description:
-        "Work across repositories in this conversation. Always supply action. checkout/attach require repository (optional ref), commit requires message (at most 1,000 characters: put longer detail in the pull request body), and open_pull_request requires title and body. Checkout returns as soon as Git is ready; dependencies and cache publication continue in the background. Use wait_for_dependencies before builds, tests, preview startup or editing dependency inputs; it returns ready or warning with setup errors. When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or disturbing other live checkouts. Shell, read_file, write_file, edit_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. diagnostics works even when checkout fails and reports the last saved turn and any save error. Files are saved once at the end of an answered agent turn, not after each command. restart bypasses checkout, discards changes since the last successful save, and restores that snapshot on the next repository tool. Use only after explicit user confirmation and supply discardUncheckpointed=true. Missing or expired snapshots fail closed; no saved snapshot means a fresh checkout of the configured ref. Mutations are not automatically replayed; inspect state after interruption.",
+        "Work across repositories in this conversation. Always supply action. checkout/attach require repository (optional ref), commit requires message (at most 1,000 characters: put longer detail in the pull request body), and open_pull_request requires title and body. Checkout returns as soon as Git is ready; dependencies and cache publication continue in the background. Use wait_for_dependencies before builds, tests, preview startup or editing dependency inputs; it returns ready, or warning with setup errors and dependencies: installed (only the repository's .agents/setup failed; dependencies are in place) or failed (dependencies are unavailable). When the user mentions another repository, use action repositories to resolve its enrolled name, then action attach with owner/repo or a unique enrolled short name. Ask if a name is ambiguous. Attach creates or activates an isolated checkout without replacing the optional primary repository or disturbing other live checkouts. Shell, read_file, write_file, edit_file, status, diff, commit, push and open_pull_request use the active repository. Each repository has its own sandbox; files are not shared between checkouts. Switch back with attach or checkout. Checkout sets a primary only if none exists. Never require a new conversation just to use another repo. diagnostics works even when checkout fails and reports the last saved turn and any save error. Files are saved once at the end of an answered agent turn, not after each command. restart bypasses checkout, discards changes since the last successful save, and restores that snapshot on the next repository tool. Use only after explicit user confirmation and supply discardUncheckpointed=true. Missing or expired snapshots fail closed; no saved snapshot means a fresh checkout of the configured ref. Mutations are not automatically replayed; inspect state after interruption.",
       parameters: workspaceSchema,
       replay: "unsafe",
       executionMode: "sequential",
@@ -1150,6 +1150,22 @@ export class Agent extends DurableObject<Env> {
               : undefined;
           },
           beforeRequest: async ({ messages }, api, context) => {
+            // A turn can work for minutes without a repository tool (model calls, MCP, waits on
+            // children): keep its live containers from idling out and losing unsaved changes.
+            // Outside the request, and never starting a container (Sandbox.keepAlive).
+            const workspace = await api.snapshot(
+              ConversationWorkspace,
+              api.conversationId,
+              context,
+            );
+
+            for (const sandboxId of workspaceSandboxes(workspace, String(api.conversationId)))
+              this.ctx.waitUntil(
+                this.env.SANDBOX.getByName(sandboxId)
+                  .keepAlive()
+                  .catch(() => false),
+              );
+
             // Lets a steer cut this request short while it is only thinking (steer-interrupt.ts).
             const provider = await api.snapshot(ProviderDoc, api.conversationId, context);
 
