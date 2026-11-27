@@ -848,7 +848,10 @@ it("logs github and workspace failures with their real error, action and reposit
   await credentials();
 
   const calls = [
-    ["github", { operation: { action: "list_files", repository: "example/broken", ref: "main" } }],
+    [
+      "github",
+      { operation: { action: "list_files", repository: "example/build-failures", ref: "main" } },
+    ],
     ["workspace", { action: "status" }],
     ["workspace", { action: "commit", message: "x".repeat(1001) }],
     [
@@ -933,13 +936,17 @@ it("logs github and workspace failures with their real error, action and reposit
   expect(messages.join("\n")).not.toContain("Effect.tryPromise");
   expect(messages).toEqual(
     expect.arrayContaining([
-      "tool:github socket hang up (code ECONNRESET)\ngithub list_files on example/broken",
+      "tool:github socket hang up (code ECONNRESET)\n[github list_files on example/build-failures]",
       "tool:workspace Sandbox went away",
       expect.stringMatching(/^tool:workspace .*message: expected at most 1000 characters/s),
       expect.stringMatching(
-        /^tool:github .*operation\.message: expected at most 200 characters.*\ngithub write_file on example\/project$/s,
+        /^tool:github .*operation\.message: expected at most 200 characters.*\n\[github write_file on example\/project\]$/s,
       ),
     ]),
+  );
+  // The context names where it failed, never what: an error-like repository name isn't the key.
+  expect((await entries()).find((row) => row.message.startsWith("socket hang up"))?.signature).toBe(
+    "tool:github||socket hang up (code econnreset)",
   );
   const notFound = (await entries()).find((row) => row.message.includes("example/gone"));
   expect(JSON.parse(notFound!.message)).toMatchObject({

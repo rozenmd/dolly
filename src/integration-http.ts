@@ -67,32 +67,40 @@ const REDIRECTS = new Set([301, 302, 307, 308]);
 
 const MAX_REDIRECTS = 3;
 
+/** A redirect from GitHub's API to another path on it: a renamed or transferred repository. */
+function githubMove(from: string, response: Response) {
+  const location = response.headers.get("Location");
+
+  if (
+    !REDIRECTS.has(response.status) ||
+    !location ||
+    !URL.canParse(from) ||
+    new URL(from).origin !== GITHUB_API ||
+    !URL.canParse(location, from)
+  )
+    return undefined;
+  const next = new URL(location, from);
+
+  return next.origin === GITHUB_API ? next.href : undefined;
+}
+
 /**
- * Fetch without following redirects, except within GitHub's API: a renamed or transferred
- * repository redirects to its new path on api.github.com, and following that keeps the request's
- * credentials on the host they were issued for. Any other redirect is returned as is, and fails.
+ * Fetch without following redirects, except an anonymous request's within GitHub's API: a renamed
+ * or transferred public repository redirects to its new path on api.github.com. Credentialed
+ * requests never follow one: an App token is minted for the owner and repository name the caller
+ * gave, after checking that owner against the allowlist, so the caller has to use the new name.
  */
 async function fetchFollowingGitHub(url: string, init: RequestInit, signal: AbortSignal) {
   let target = url;
+  const anonymous = !new Headers(init.headers).has("Authorization");
 
   for (let hop = 0; ; hop++) {
     const response = await fetch(target, { ...init, signal, redirect: "manual" });
-    const location = response.headers.get("Location");
+    const next = githubMove(target, response);
 
-    if (
-      !REDIRECTS.has(response.status) ||
-      !location ||
-      hop >= MAX_REDIRECTS ||
-      !URL.canParse(target) ||
-      new URL(target).origin !== GITHUB_API ||
-      !URL.canParse(location, target)
-    )
-      return response;
-    const next = new URL(location, target);
-
-    if (next.origin !== GITHUB_API) return response;
+    if (!anonymous || !next || hop >= MAX_REDIRECTS) return { response, url: target };
     await response.body?.cancel().catch(() => {});
-    target = next.href;
+    target = next;
   }
 }
 
@@ -104,9 +112,9 @@ export const integrationJson = Effect.fn("Integration.request")(function* (
   const secrets = [authorization, authorization.replace(/^Bearer /, "")];
 
   return yield* Effect.gen(function* () {
-    const response = yield* Effect.acquireRelease(
+    const { response, url: from } = yield* Effect.acquireRelease(
       attempt("integration.fetch", (signal) => fetchFollowingGitHub(url, init, signal)),
-      (value) =>
+      ({ response: value }) =>
         attempt("integration.close", async () => {
           if (!value.body?.locked) await value.body?.cancel();
         }).pipe(Effect.catch(() => Effect.void)),
@@ -117,9 +125,13 @@ export const integrationJson = Effect.fn("Integration.request")(function* (
       if (!response.ok) {
         const reason = yield* errorReason(response);
 
+        const moved = githubMove(from, response)
+          ? ". GitHub moved this repository (renamed or transferred): use its current owner/name"
+          : "";
+
         return yield* new OperationError({
           operation: "integration.response",
-          message: `Provider returned HTTP ${response.status}${reason ? `: ${reason}` : ""}`,
+          message: `Provider returned HTTP ${response.status}${reason ? `: ${reason}` : ""}${moved}`,
           details: { status: response.status },
         });
       }

@@ -782,11 +782,11 @@ export function toolFailure(
 
   if (!failures.length) return result.isError ? "Tool failed without details" : undefined;
 
-  // Name the github action and repository, so its failures can be told apart; JSON summaries carry
-  // them as fields above, and the line goes last so it never becomes the signature's key line.
+  // Name the github action and repository, so its failures can be told apart. JSON summaries carry
+  // them as fields above; plain text gets a last context line, which signatures ignore.
   const where =
     operation && failures.some((failure) => Option.isNone(decodeReply(failure)))
-      ? `\n${head(safe(`github ${operation.action}${operation.repository ? ` on ${operation.repository}` : ""}`), FIELD_MAX)}`
+      ? `\n[${head(safe(`github ${operation.action}${operation.repository ? ` on ${operation.repository}` : ""}`), FIELD_MAX).replace(/[\]\n]/g, "")}]`
       : "";
 
   return `${failures.join("\n").slice(0, 4000 - where.length)}${where}`;
@@ -971,8 +971,13 @@ const HARNESS_LINE = /^Tool (?:call blocked: |\S+ (?:was|is|could|failed|ended) 
  * - A result the harness wrote keys on its first line, not on the partial output after it.
  * Works on compact summaries and on the full JSON older entries stored.
  */
-export function papercutSignature(source: string, message: string) {
-  const parsed = decodeReply(message);
+/** The github context line toolFailure ends a plain-text failure with. */
+const CONTEXT_LINE = /\n\[github [^\]\n]*\]$/;
+
+export function papercutSignature(source: string, logged: string) {
+  const parsed = decodeReply(logged);
+  // The context says where a failure happened, not what it was, so it never picks the key line.
+  const message = Option.isSome(parsed) ? logged : logged.replace(CONTEXT_LINE, "");
   let exit = "";
   let line: string;
 

@@ -124,50 +124,58 @@ it("includes the provider's explanation in HTTP errors without leaking credentia
   expect(JSON.stringify(error)).not.toContain("private-provider-token");
 });
 
-it("follows a renamed repository's redirects within api.github.com, keeping the request", async () => {
-  const seen: { url: string; method?: string; body?: unknown; authorization: string | null }[] = [];
+it("follows an anonymous read of a renamed public repository within api.github.com", async () => {
+  const seen: string[] = [];
 
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-    seen.push({
-      url: String(url),
-      method: init?.method,
-      body: init?.body,
-      authorization: new Headers(init?.headers).get("Authorization"),
-    });
+    seen.push(String(url));
     expect(init?.redirect).toBe("manual");
+    expect(new Headers(init?.headers).has("Authorization")).toBe(false);
 
-    if (String(url) === "https://api.github.com/repos/old/name/pulls")
+    if (String(url) === "https://api.github.com/repos/old/name/contents/a")
       return Response.json(
         { message: "Moved Permanently" },
-        { status: 307, headers: { Location: "/repositories/42/pulls" } },
+        { status: 301, headers: { Location: "/repositories/42/contents/a" } },
       );
 
-    return Response.json({ number: 7 }, { status: 201 });
+    return Response.json({ content: "" });
   });
 
   const result = await Effect.runPromise(
-    integrationJson("https://api.github.com/repos/old/name/pulls", {
-      method: "POST",
-      headers: { Authorization: "Bearer private-provider-token" },
-      body: '{"title":"x"}',
+    integrationJson("https://api.github.com/repos/old/name/contents/a", {
+      headers: { Accept: "application/vnd.github+json" },
     }),
   );
 
-  expect(result).toEqual({ number: 7 });
+  expect(result).toEqual({ content: "" });
   expect(seen).toEqual([
-    {
-      url: "https://api.github.com/repos/old/name/pulls",
-      method: "POST",
-      body: '{"title":"x"}',
-      authorization: "Bearer private-provider-token",
-    },
-    {
-      url: "https://api.github.com/repositories/42/pulls",
-      method: "POST",
-      body: '{"title":"x"}',
-      authorization: "Bearer private-provider-token",
-    },
+    "https://api.github.com/repos/old/name/contents/a",
+    "https://api.github.com/repositories/42/contents/a",
   ]);
+});
+
+it("never follows a credentialed redirect, so a token stays scoped to the repository it was checked for", async () => {
+  // A transfer to an owner outside the allowlist, or a rename the token wasn't minted for.
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json(
+      { message: "Moved Permanently" },
+      {
+        status: 301,
+        headers: { Location: "https://api.github.com/repositories/42/installation" },
+      },
+    ),
+  );
+
+  const error = await Effect.runPromise(
+    integrationJson("https://api.github.com/repos/example/project/installation", {
+      headers: { Authorization: "Bearer private-provider-token" },
+    }).pipe(Effect.flip),
+  );
+
+  expect(error.message).toBe(
+    "Provider returned HTTP 301: Moved Permanently. GitHub moved this repository (renamed or transferred): use its current owner/name",
+  );
+  expect(fetch).toHaveBeenCalledTimes(1);
 });
 
 it("stops following GitHub redirects after three hops, or when one leaves api.github.com", async () => {
@@ -183,12 +191,10 @@ it("stops following GitHub redirects after three hops, or when one leaves api.gi
       );
 
     const error = await Effect.runPromise(
-      integrationJson("https://api.github.com/repos/old/name", {
-        headers: { Authorization: "Bearer private-provider-token" },
-      }).pipe(Effect.flip),
+      integrationJson("https://api.github.com/repos/old/name", {}).pipe(Effect.flip),
     );
 
-    expect(error.message).toBe("Provider returned HTTP 301");
+    expect(error.message).toMatch(/^Provider returned HTTP 301/);
     expect(fetch).toHaveBeenCalledTimes(calls);
 
     for (const [url] of fetch.mock.calls)
