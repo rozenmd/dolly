@@ -35,8 +35,13 @@ const PORT = 8080;
 const CA_BUNDLE = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 const READY_TIMEOUT_MS = 60_000;
 
-/** Long enough for Claude Code's sessions to stay warm between turns. */
-const INACTIVITY_TIMEOUT_MS = 30 * 60_000;
+/**
+ * Long enough for Claude Code's sessions to stay warm between turns, and past the bridge's longest
+ * wait for a tool result (TOOL_WAIT_MS in claude-bridge/src/bridge.ts, 70 minutes): while Dolly runs
+ * an hour-long command no request reaches the container, and stopping it would lose the waiting
+ * tool call and send the session to a full replay.
+ */
+const INACTIVITY_TIMEOUT_MS = 75 * 60_000;
 
 /** The only host Claude Code may reach, and only through the Worker. */
 export const ANTHROPIC_HOST = "api.anthropic.com";

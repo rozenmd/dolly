@@ -30,7 +30,7 @@ test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", ()
   assert.ok(Object.values(worker.env).every((binding) => binding.type !== "artifacts"));
   assert.equal(worker.exports.WorkspaceOutbound.type, "worker");
   assert.equal(worker.exports.PreviewOutbound.type, "worker");
-  // WorkspaceOutbound mints SandboxOutbound through ctx.exports for browser sessions.
+  // git-transport.ts mints it for browser.workspace?port= connections.
   assert.equal(worker.exports.SandboxOutbound.type, "worker");
   assert.equal(worker.env.BROWSER.type, "browser");
   assert.equal(worker.previewUrls, false);

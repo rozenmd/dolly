@@ -67,18 +67,50 @@ type UpstreamBody = {
   model: string;
   max_tokens: number;
   system: Array<{ text: string }>;
-  messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>;
+  messages: Array<{ role: string; content: string | UpstreamBlock[] }>;
   tools?: Array<{ name: string; input_schema: { properties?: JsonObject } }>;
 };
+
+type UpstreamBlock = {
+  type: string;
+  text?: string;
+  id?: string;
+  tool_use_id?: string;
+  is_error?: boolean;
+  content?: string | Array<{ type: string; text?: string }>;
+};
+
+/** Anything that would tell the model to stop: none of it may reach the model. */
+const TURN_ENDING =
+  /end your turn|do not call more tools|do not add text|do not retry|hook error|hook stopped continuation|forwarded to the client/i;
+
+/** The text of a tool_result block's content. */
+function resultText(block: UpstreamBlock) {
+  if (!Array.isArray(block.content)) return block.content ?? "";
+
+  return block.content.map((inner) => inner.text ?? "").join("");
+}
+
+/** The tool_result blocks of an upstream request's last user message. */
+function lastResults(body: UpstreamBody) {
+  const last = body.messages.filter((message) => message.role === "user").at(-1);
+
+  if (!last || !Array.isArray(last.content)) return [];
+
+  return last.content.filter((block) => block.type === "tool_result");
+}
 
 type Block =
   | { type: "text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: Record<string, string | number> };
 
-type Reply = { content: Block[]; stop: "end_turn" | "tool_use" };
+type Reply = { content: Block[]; stop: "end_turn" | "tool_use" | "max_tokens" };
 
 const requests: Upstream[] = [];
 let replies: Reply[] = [];
+
+/** A model whose next reply depends on the request: used before `replies` when set. */
+let script: ((body: UpstreamBody) => Reply) | undefined;
 
 /** Hold the next upstream response open until the client goes away. */
 let holdNext = false;
@@ -188,10 +220,11 @@ before(async () => {
       return;
     }
 
-    const reply = replies.shift() ?? {
-      content: [{ type: "text", text: "Done." }],
-      stop: "end_turn",
-    };
+    const reply = script?.(body) ??
+      replies.shift() ?? {
+        content: [{ type: "text", text: "Done." }],
+        stop: "end_turn",
+      };
 
     outgoing.writeHead(200, { "content-type": "text/event-stream" });
     outgoing.end(stream(reply, body.model));
@@ -217,6 +250,7 @@ after(() => {
 beforeEach(() => {
   requests.length = 0;
   replies = [];
+  script = undefined;
 });
 
 const shellTool = {
@@ -436,6 +470,361 @@ test("hands tool calls to the client in one model call and resumes the same proc
   assert.match(resumed, /README\.md/);
   assert.match(resumed, /\/repo/);
   assert.doesNotMatch(resumed, /\[Your previous reply\]/);
+
+  // Both parallel results reach the model as the tool_results of its own calls, in one message,
+  // and nothing in either request tells it to stop.
+  const results = lastResults(requests[1]!.body);
+
+  assert.deepEqual(
+    results.map((block) => [block.tool_use_id, resultText(block)]),
+    [
+      ["toolu_1", "README.md"],
+      ["toolu_2", "/repo"],
+    ],
+  );
+  assert.ok(results.every((block) => !block.is_error));
+
+  for (const upstream of requests) assert.doesNotMatch(JSON.stringify(upstream.body), TURN_ENDING);
+});
+
+const webFetchTool = {
+  name: "web_fetch",
+  description: "Read a web page, from an offset",
+  input_schema: {
+    type: "object",
+    properties: { url: { type: "string" }, offset: { type: "integer" } },
+    required: ["url"],
+  },
+};
+
+type ClientMessage = z.input<typeof MessagesRequest>["messages"][number];
+
+const ClientReply = z.object({
+  content: z.array(
+    z.object({
+      type: z.enum(["text", "tool_use"]),
+      text: z.string().optional(),
+      id: z.string().optional(),
+      name: z.string().optional(),
+      input: z.record(z.string(), z.json()).optional(),
+    }),
+  ),
+  stop_reason: z.string(),
+});
+
+/** One client request, as Dolly's agent loop makes it: the whole conversation each time. */
+async function ask(messages: ClientMessage[], session: string, tools = [webFetchTool]) {
+  const response = await send(
+    { stream: false, system: "You are Dolly.", messages, tools },
+    session,
+  );
+
+  assert.equal(response.status, 200);
+
+  return ClientReply.parse(await response.json());
+}
+
+/** A page read in chunks: each chunk names the offset of the next. */
+function chunk(offset: number) {
+  return offset >= 200_000
+    ? `Chunk at ${offset}. That was the last chunk.`
+    : `Chunk at ${offset}. Next offset: ${offset + 40_000}`;
+}
+
+/** A model that reads the page one chunk per call, each from the offset the last result named. */
+function chunkReader(body: UpstreamBody): Reply {
+  const [result] = lastResults(body);
+  // A replayed round's result is text in the last user message.
+  const read = result ? resultText(result) : JSON.stringify(body.messages.at(-1));
+
+  if (/last chunk/.test(read))
+    return { content: [{ type: "text", text: "I've read the whole page." }], stop: "end_turn" };
+
+  const next = /Next offset: (\d+)/.exec(read)?.[1];
+  const offset = next ? Number(next) : 0;
+
+  return {
+    content: [
+      {
+        type: "tool_use",
+        id: `toolu_chunk_${offset}`,
+        name: "mcp__dolly__web_fetch",
+        input: { url: "https://docs.example/llms-full.txt", offset },
+      },
+    ],
+    stop: "tool_use",
+  };
+}
+
+test("works through many tool rounds in one turn, each call reading the result before it", async () => {
+  script = chunkReader;
+  const before = claudeProcesses();
+  const messages: ClientMessage[] = [{ role: "user", content: "Read the whole page" }];
+  const offsets: number[] = [];
+
+  // Dolly's loop: run each tool call the reply makes and send the results back, until the model
+  // answers. No user message comes in between.
+  for (let round = 0; round < 20; round++) {
+    const reply = await ask(messages, "conversation-loop");
+
+    messages.push({ role: "assistant", content: reply.content });
+    const calls = reply.content.filter((block) => block.type === "tool_use");
+
+    if (calls.length === 0) {
+      assert.equal(reply.stop_reason, "end_turn");
+      break;
+    }
+
+    assert.equal(reply.stop_reason, "tool_use");
+    messages.push({
+      role: "user",
+      content: calls.map((call) => {
+        const offset = Number(call.input?.offset);
+
+        offsets.push(offset);
+
+        return { type: "tool_result", tool_use_id: call.id, content: chunk(offset) };
+      }),
+    });
+  }
+
+  assert.deepEqual(offsets, [0, 40_000, 80_000, 120_000, 160_000, 200_000]);
+  assert.match(JSON.stringify(messages.at(-1)), /I've read the whole page/);
+
+  // One model call per round, all in the same Claude Code process.
+  assert.equal(requests.length, 7);
+
+  if (procfs) assert.equal(claudeProcesses().filter((pid) => !before.includes(pid)).length, 1);
+
+  requests.forEach((upstream, index) => {
+    const body = JSON.stringify(upstream.body);
+
+    // Nothing the model is sent tells it to stop or end its turn.
+    assert.doesNotMatch(body, TURN_ENDING);
+
+    if (index === 0) return;
+    // Each result is the tool_result of the model's own call, with the client's output.
+    const offset = offsets[index - 1]!;
+    const results = lastResults(upstream.body);
+
+    assert.deepEqual(
+      results.map((block) => [block.tool_use_id, resultText(block), block.is_error ?? false]),
+      [[`toolu_chunk_${offset}`, chunk(offset), false]],
+    );
+
+    // After the prompt, the user said nothing: every user message only carries tool results.
+    const userText = upstream.body.messages
+      .slice(1)
+      .filter((message) => message.role === "user")
+      .flatMap((message): UpstreamBlock[] =>
+        Array.isArray(message.content)
+          ? message.content
+          : [{ type: "text", text: message.content }],
+      )
+      .filter((block) => block.type !== "tool_result");
+
+    assert.deepEqual(userText, []);
+  });
+});
+
+test("hands a round's parallel calls over together, past Claude Code's default concurrency", async () => {
+  const offsets = Array.from({ length: 12 }, (_, index) => index * 40_000);
+
+  replies.push(
+    {
+      content: offsets.map((offset) => ({
+        type: "tool_use" as const,
+        id: `toolu_parallel_${offset}`,
+        name: "mcp__dolly__web_fetch",
+        input: { url: "https://docs.example/llms-full.txt", offset },
+      })),
+      stop: "tool_use",
+    },
+    { content: [{ type: "text", text: "Read all twelve." }], stop: "end_turn" },
+  );
+
+  const messages: ClientMessage[] = [{ role: "user", content: "Read it all at once" }];
+  const reply = await ask(messages, "conversation-parallel");
+  const calls = reply.content.filter((block) => block.type === "tool_use");
+
+  assert.deepEqual(
+    calls.map((call) => call.input?.offset),
+    offsets,
+  );
+
+  messages.push(
+    { role: "assistant", content: reply.content },
+    {
+      role: "user",
+      content: calls.map((call) => ({
+        type: "tool_result" as const,
+        tool_use_id: call.id,
+        content: chunk(Number(call.input?.offset)),
+      })),
+    },
+  );
+
+  const answer = await ask(messages, "conversation-parallel");
+
+  assert.deepEqual(answer.content, [{ type: "text", text: "Read all twelve." }]);
+  assert.equal(requests.length, 2);
+  // Every result answers its own call, all in one message (in the order the calls finished).
+  assert.deepEqual(
+    lastResults(requests[1]!.body)
+      .map((block) => [block.tool_use_id, resultText(block)])
+      .sort(),
+    offsets.map((offset) => [`toolu_parallel_${offset}`, chunk(offset)]).sort(),
+  );
+});
+
+test(
+  "resumes a tool loop whose process was lost, replaying its rounds once as tool results",
+  linux,
+  async () => {
+    replies.push({ content: [{ type: "text", text: "Ready to read." }], stop: "end_turn" });
+    const before = claudeProcesses();
+    const messages: ClientMessage[] = [{ role: "user", content: "Get ready" }];
+    const first = await ask(messages, "conversation-lost-loop");
+
+    messages.push(
+      { role: "assistant", content: first.content },
+      { role: "user", content: "Read it" },
+    );
+    script = chunkReader;
+
+    const reply = await ask(messages, "conversation-lost-loop");
+
+    messages.push({ role: "assistant", content: reply.content });
+    messages.push({
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "toolu_chunk_0", content: chunk(0) }],
+    });
+
+    // The process dies while the client runs the tool.
+    const [waiting] = claudeProcesses().filter((pid) => !before.includes(pid));
+
+    assert.ok(waiting);
+    process.kill(waiting, "SIGKILL");
+    await waitFor(() => !claudeProcesses().includes(waiting));
+
+    const resumed = await ask(messages, "conversation-lost-loop");
+
+    // The model carries on from the result: the next call reads the next chunk.
+    assert.deepEqual(
+      resumed.content.filter((block) => block.type === "tool_use").map((block) => block.input),
+      [{ url: "https://docs.example/llms-full.txt", offset: 40_000 }],
+    );
+
+    const replayed = JSON.stringify(requests.at(-1)?.body.messages);
+
+    // Resumed at the last finished turn, which Claude Code still has on record; only the lost
+    // round is replayed, once, with its output labelled as the result of the call before it.
+    assert.match(replayed, /Get ready/);
+    assert.doesNotMatch(replayed, /\[Your previous reply\]\\nReady to read/);
+    assert.equal(replayed.split("Read it").length - 1, 1);
+    assert.match(replayed, /\[called tool web_fetch with/);
+    assert.match(replayed, /\[tool result\]\\nChunk at 0\. Next offset: 40000/);
+    assert.doesNotMatch(replayed, TURN_ENDING);
+  },
+);
+
+test("hands over a complete tool call from a reply that hit the output limit", async () => {
+  replies.push(
+    {
+      content: [
+        { type: "text", text: "Reading the page." },
+        {
+          type: "tool_use",
+          id: "toolu_limit",
+          name: "mcp__dolly__web_fetch",
+          input: { url: "https://docs.example/llms-full.txt", offset: 0 },
+        },
+      ],
+      stop: "max_tokens",
+    },
+    { content: [{ type: "text", text: "Got the first chunk." }], stop: "end_turn" },
+  );
+
+  const messages: ClientMessage[] = [{ role: "user", content: "Read the page" }];
+  const reply = await ask(messages, "conversation-output-limit");
+
+  // Claude Code runs the call, so it reaches the client instead of waiting forever.
+  assert.deepEqual(
+    reply.content.filter((block) => block.type === "tool_use").map((block) => block.id),
+    ["toolu_limit"],
+  );
+
+  messages.push(
+    { role: "assistant", content: reply.content },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "toolu_limit", content: chunk(0) }],
+    },
+  );
+
+  const answer = await ask(messages, "conversation-output-limit");
+
+  assert.deepEqual(answer.content, [{ type: "text", text: "Got the first chunk." }]);
+  assert.deepEqual(
+    lastResults(requests[1]!.body).map((block) => [block.tool_use_id, resultText(block)]),
+    [["toolu_limit", chunk(0)]],
+  );
+});
+
+test("moves on when the client abandons a tool loop for a new prompt", async () => {
+  script = chunkReader;
+  const before = claudeProcesses();
+  const messages: ClientMessage[] = [{ role: "user", content: "Read the whole page" }];
+  const reply = await ask(messages, "conversation-abandoned");
+
+  assert.equal(reply.stop_reason, "tool_use");
+  const waiting = claudeProcesses().filter((pid) => !before.includes(pid));
+
+  // The owner stopped the run before the tool finished, then asked something else.
+  script = undefined;
+  replies.push({ content: [{ type: "text", text: "Hi there" }], stop: "end_turn" });
+  messages.push(
+    { role: "assistant", content: reply.content },
+    { role: "user", content: "Just say hi" },
+  );
+
+  const answer = await ask(messages, "conversation-abandoned");
+
+  assert.deepEqual(answer.content, [{ type: "text", text: "Hi there" }]);
+  // The abandoned call is never answered upstream: no model call beyond the new prompt's.
+  assert.equal(requests.length, 2);
+  assert.match(JSON.stringify(requests.at(-1)?.body.messages), /Just say hi/);
+
+  // The process waiting on the abandoned call is gone.
+  if (procfs) await waitFor(() => waiting.every((pid) => !claudeProcesses().includes(pid)));
+});
+
+test("delivers a message sent beside tool results within the same turn", async () => {
+  script = chunkReader;
+  const messages: ClientMessage[] = [{ role: "user", content: "Read the whole page" }];
+  const reply = await ask(messages, "conversation-steered");
+
+  script = undefined;
+  replies.push({ content: [{ type: "text", text: "Footer checked too." }], stop: "end_turn" });
+  messages.push(
+    { role: "assistant", content: reply.content },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "toolu_chunk_0", content: chunk(0) }],
+    },
+    { role: "user", content: "Also check the footer" },
+  );
+
+  const answer = await ask(messages, "conversation-steered");
+
+  assert.deepEqual(answer.content, [{ type: "text", text: "Footer checked too." }]);
+  assert.equal(requests.length, 2);
+  const upstream = requests[1]!.body;
+
+  // The result answers the call, and the message follows it in the same model call.
+  assert.match(JSON.stringify(upstream.messages), /"tool_use_id":"toolu_chunk_0"/);
+  assert.match(JSON.stringify(upstream.messages), /Also check the footer/);
+  assert.doesNotMatch(JSON.stringify(upstream), TURN_ENDING);
 });
 
 test("starts a new Claude Code process when a request needs different options", async () => {

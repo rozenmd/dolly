@@ -11,8 +11,8 @@ export {
   SlackIngress,
   AutomationIngress,
   WorkspaceOutbound,
-  SandboxOutbound,
   PreviewOutbound,
+  SandboxOutbound,
   ClaudeCode,
   ClaudeCodeOutbound,
 } from "./index";

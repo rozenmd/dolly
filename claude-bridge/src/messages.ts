@@ -3,8 +3,8 @@
  * becomes one Claude Agent SDK prompt.
  *
  * Ported from Open Session's anthropic-bridge.ts (MIT, see third_party/opensession/LICENSE):
- * history replays as flat text, tool results unwrap to their raw output so the model reads them
- * as the natural outcome of its forwarded call, and only the current user turn's images reach the
+ * history replays as flat text, tool results unwrap to their labelled output so the model reads
+ * them as the outcome of the call before them, and only the current user turn's images reach the
  * SDK as real content blocks. Earlier images leave a placeholder and are never re-sent.
  */
 import { z } from "zod";
@@ -50,6 +50,8 @@ const ToolResult = z.object({
   content: z.union([z.string(), z.array(z.union([Text, Image]))]).optional(),
   is_error: z.boolean().optional(),
 });
+
+export type ToolResultBlock = z.infer<typeof ToolResult>;
 
 /**
  * Blocks the bridge never forwards, such as thinking: its signatures cannot round-trip through a
@@ -142,6 +144,10 @@ export const PRIOR_IMAGE_PLACEHOLDER = "[image previously attached]";
 /** Text for a current turn whose only content is an image: an empty prompt reads as no turn. */
 export const IMAGE_ONLY_PROMPT = "(see the attached image)";
 
+/** What a replay puts before a tool call's output. */
+export const TOOL_RESULT_LABEL = "[tool result]";
+export const TOOL_ERROR_LABEL = "[tool error]";
+
 /** Per-turn image ceiling, newest kept. */
 export const MAX_TURN_IMAGES = 8;
 
@@ -156,6 +162,9 @@ export function flattenMessageText(content: Message["content"], markImages = fal
     else if (block.type === "tool_use")
       parts.push(`[called tool ${block.name} with ${JSON.stringify(block.input ?? {})}]`);
     else if (block.type === "tool_result") {
+      // Labelled, so a replay reads as the outcome of the call above it, not as the user talking.
+      parts.push(block.is_error ? TOOL_ERROR_LABEL : TOOL_RESULT_LABEL);
+
       if (!Array.isArray(block.content)) {
         if (block.content) parts.push(block.content);
         continue;

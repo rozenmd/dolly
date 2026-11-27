@@ -16,6 +16,58 @@ export const PreviewPath = Schema.String.check(
 
 const Dimension = Schema.Int.check(Schema.isBetween({ minimum: 200, maximum: 2560 }));
 
+/** Device pixels per CSS pixel; width and height stay in CSS pixels. */
+const Scale = Schema.Finite.check(Schema.isBetween({ minimum: 1, maximum: 3 }));
+
+const Selector = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(500));
+
+/** Most actions a screenshot may run, and the longest single wait action. */
+export const MAX_PREVIEW_ACTIONS = 10;
+export const MAX_PREVIEW_WAIT_MS = 5_000;
+
+/** Keys press accepts: named keys, or one printable character. */
+export const PREVIEW_KEYS = [
+  "Enter",
+  "Escape",
+  "Tab",
+  "Backspace",
+  "Delete",
+  "Space",
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+] as const;
+
+const Key = Schema.String.check(
+  Schema.makeFilter(
+    (key) => PREVIEW_KEYS.some((name) => name === key) || /^[\x21-\x7e]$/.test(key),
+  ),
+);
+
+export const PreviewAction = Schema.Union([
+  Schema.Struct({ click: Selector }),
+  Schema.Struct({
+    type: Schema.Struct({
+      selector: Selector,
+      text: Schema.String.check(Schema.isMaxLength(2000)),
+    }),
+  }),
+  Schema.Struct({ press: Key }),
+  Schema.Struct({ waitFor: Selector }),
+  Schema.Struct({
+    wait: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: MAX_PREVIEW_WAIT_MS })),
+  }),
+]);
+
+export type PreviewAction = typeof PreviewAction.Type;
+
+const Actions = Schema.Array(PreviewAction).check(Schema.isMaxLength(MAX_PREVIEW_ACTIONS));
+
 export const PreviewRequest = Schema.Union([
   Schema.Struct({
     action: Schema.Literal("start"),
@@ -27,7 +79,9 @@ export const PreviewRequest = Schema.Union([
     path: Schema.optional(PreviewPath),
     width: Schema.optional(Dimension),
     height: Schema.optional(Dimension),
+    scale: Schema.optional(Scale),
     waitFor: Schema.optional(Schema.String.check(Schema.isMaxLength(500))),
+    actions: Schema.optional(Actions),
   }),
   Schema.Struct({ action: Schema.Literals(["status", "stop"]) }),
 ]);
@@ -39,7 +93,9 @@ export const PreviewToolInput = Schema.Struct({
   path: Schema.optional(PreviewPath),
   width: Schema.optional(Dimension),
   height: Schema.optional(Dimension),
+  scale: Schema.optional(Scale),
   waitFor: Schema.optional(Schema.String),
+  actions: Schema.optional(Actions),
 });
 
 /** How long start waits before returning a still-starting server. */
@@ -134,19 +190,43 @@ export function readinessHints(logs: string, port: number) {
 
 export type PreviewRoute = { sandboxId: string; token: string; hostname: string };
 
+export const isWebSocketUpgrade = (request: Request) =>
+  request.headers.get("Upgrade")?.toLowerCase() === "websocket";
+
+/**
+ * Workers RPC cannot return a WebSocket, so upgrades reach the sandbox through its fetch
+ * handler instead, carrying the same capability as the RPC call in one of these headers.
+ */
+export const PREVIEW_TOKEN_HEADER = "X-Dolly-Preview-Token";
+export const BROWSER_PORT_HEADER = "X-Dolly-Browser-Port";
+
+const INTERNAL_HEADERS = /^(cookie|authorization|cf-access-.*|x-dolly-.*)$/i;
+
+/** Pin a browser request to one hostname, without the application's credentials. */
 export function previewRequest(request: Request, hostname: string) {
   const url = new URL(request.url);
+  const upgrade = isWebSocketUpgrade(request);
 
-  if (url.protocol !== "http:" || url.hostname !== hostname || url.port) return null;
+  if (!(url.protocol === "http:" || (upgrade && url.protocol === "ws:"))) return null;
 
-  // Never give repository code the application's credentials.
+  if (url.hostname !== hostname || url.port || url.username || url.password) return null;
+
+  // Never give repository code the application's credentials, nor let a page forge a capability.
   const headers = new Headers(request.headers);
 
-  const credentials = Array.from(headers.keys()).filter((name) =>
-    /^(cookie|authorization|cf-access-.*)$/i.test(name),
-  );
+  for (const name of Array.from(headers.keys()).filter((name) => INTERNAL_HEADERS.test(name)))
+    headers.delete(name);
 
-  for (const name of credentials) headers.delete(name);
+  if (url.protocol === "http:") return new Request(request, { headers });
+  url.protocol = "http:";
+
+  return new Request(url, { method: request.method, headers, redirect: "manual" });
+}
+
+/** Add a sandbox capability header to an upgrade bound for the sandbox's fetch handler. */
+export function sandboxUpgrade(request: Request, header: string, value: string) {
+  const headers = new Headers(request.headers);
+  headers.set(header, value);
 
   return new Request(request, { headers });
 }
@@ -157,10 +237,11 @@ export class PreviewOutbound extends WorkerEntrypoint<Env, PreviewRoute> {
     const forwarded = previewRequest(request, this.ctx.props.hostname);
 
     if (!forwarded) return new Response("Not found", { status: 404 });
+    const sandbox = this.env.SANDBOX.getByName(this.ctx.props.sandboxId);
 
-    return this.env.SANDBOX.getByName(this.ctx.props.sandboxId).previewFetch(
-      forwarded,
-      this.ctx.props.token,
-    );
+    if (isWebSocketUpgrade(forwarded))
+      return sandbox.fetch(sandboxUpgrade(forwarded, PREVIEW_TOKEN_HEADER, this.ctx.props.token));
+
+    return sandbox.previewFetch(forwarded, this.ctx.props.token);
   }
 }
