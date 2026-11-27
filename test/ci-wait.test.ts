@@ -799,6 +799,54 @@ it("passing checks wait for the automatic review of their head, up to a timeout"
   expect(wakes[1]).toContain("still hasn't posted on ccccccc");
 });
 
+it("another reviewer's feedback while the automatic review is awaited doesn't settle the checks", async () => {
+  const created = await SELF.fetch("https://worker/api/automations", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      name: "Review pull requests",
+      prompt: "Review it.",
+      event: "pull_request",
+    }),
+  });
+
+  expect(created.status).toBe(201);
+  github.checks = [done("lint", "success"), done("test", "success")];
+  const { wakes } = waiter({ kind: "pr_checks", repository, number: 8 });
+
+  const id = await root();
+  await prompt(id, "Wait for CI");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Registered: ");
+
+  // The checks have settled and wait for the automatic review when another App approves.
+  for (const ms of [20_000, 55_000, 90_000]) await at(ms);
+  expect(wakes).toHaveLength(0);
+  github.reviews = [
+    { id: 70, login: "other-app", bot: true, state: "APPROVED", body: "", commit: head },
+  ];
+
+  // The approval wakes the session, but not as passed: the checks aren't settled without the review.
+  await at(125_000);
+  await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(1);
+  expect(wakes[0]).toContain("finished · PR #8: checks passed; new review feedback");
+  expect(wakes[0]).toContain("Review 70 by @other-app[bot] on aaaaaaa (approved)");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Woken 1");
+
+  // Re-armed, the same checks still reach the review fallback instead of counting as reported.
+  await prompt(id, "Wait again");
+  await expect
+    .poll(async () => (await transcript(id)).split("Registered: ").length, { timeout: 10_000 })
+    .toBe(3);
+
+  for (const ms of [160_000, 200_000, 400_000]) await at(ms);
+  expect(wakes).toHaveLength(1);
+
+  // The gate opened at the 400s poll, so the fallback is due 15 minutes later.
+  for (const ms of [1_350_000, 1_390_000]) await at(ms);
+  await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(2);
+  expect(wakes[1]).toContain("passed · PR #8: checks passed; no automatic review yet");
+}, 20_000);
+
 it("a failing check wakes at once even while the automatic review is awaited", async () => {
   const created = await SELF.fetch("https://worker/api/automations", {
     method: "POST",
