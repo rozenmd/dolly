@@ -6,8 +6,10 @@ import * as Exit from "effect/Exit";
 import * as Semaphore from "effect/Semaphore";
 import { WorkspaceOutbound } from "./git-transport";
 import {
+  CHECKPOINT_TIMEOUT_MS,
   checkoutScript,
   checkoutDiagnosticsScript,
+  checkpointTimeoutMessage,
   restoreNotice,
   type WorkspaceConfig,
   type WorkspaceRestore,
@@ -330,6 +332,8 @@ export class Sandbox extends DurableObject<Env> {
   private readonly permit = Semaphore.makeUnsafe(1);
   private initialized = false;
   private prepared = false;
+  /** How long a turn-end snapshot may take; tests shorten it. */
+  private checkpointTimeoutMs = CHECKPOINT_TIMEOUT_MS;
   private setupAbort: AbortController | undefined;
   private setupOperations = 0;
   /** In-progress `run` calls by execution ID, for `cancel`. */
@@ -830,7 +834,20 @@ export class Sandbox extends DurableObject<Env> {
                   if (signal.aborted) throw signal.reason;
                 }
               }
-            }).pipe(Effect.timeout("120 seconds"));
+            }).pipe(
+              Effect.timeout(`${this.checkpointTimeoutMs} millis`),
+              // A bare "Operation timed out after '5m'" told nobody what was at stake. The platform
+              // snapshot itself cannot be cancelled: a later save waits for it ("already in progress").
+              Effect.catchTag("TimeoutError", () =>
+                Effect.fail(
+                  new OperationError({
+                    operation: "workspace.checkpoint",
+                    message: checkpointTimeoutMessage(this.checkpointTimeoutMs, previous ?? null),
+                    details: { turnId, timeoutMs: this.checkpointTimeoutMs },
+                  }),
+                ),
+              ),
+            );
 
             const saved: WorkspaceSnapshot = { id: snapshot.id, turnId, savedAt: Date.now() };
             yield* this.publishSnapshot(saved);
