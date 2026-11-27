@@ -23,8 +23,10 @@ Docker. In a Dolly sandbox (no Docker, no route to Cloudflare's `Request.cf`
 endpoint) run `pnpm dev:sandbox` instead, for example as the `preview` command on
 port 8787: it uses the test Worker configuration (`test/worker/vite.config.ts`),
 which drops the containers and enables the local Access bypass, and binds
-`0.0.0.0`. Both scripts set `CLOUDFLARE_CF_FETCH_ENABLED=false`, since Dolly never
-reads `request.cf`. Signed-in pages still need seeded storage and a session cookie.
+`0.0.0.0`, so it also sets `X_LOCAL_EXPLORER=false`: the Cloudflare plugin's Local
+Explorer (`/cdn-cgi/local/explorer`, on by default) sits outside Dolly's auth and
+can read Durable Object storage. Both scripts set `CLOUDFLARE_CF_FETCH_ENABLED=false`,
+since Dolly never reads `request.cf`. Signed-in pages still need seeded storage and a session cookie.
 
 If the dev server fails with `ReferenceError: module is not defined`, delete
 `node_modules/.vite`: an optimizer cache from a run that could not resolve React
