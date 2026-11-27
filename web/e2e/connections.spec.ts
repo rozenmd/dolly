@@ -134,8 +134,12 @@ test("lists MCP servers with status, connects a token server and adds a server w
   await expect(page.getByText("Token · workspace")).toBeVisible();
 
   await page.getByRole("button", { name: "Add MCP server" }).click();
+  await expect(page.getByLabel("Transport")).toHaveCount(0);
+  await page.getByLabel("URL").fill("https://mcp.linear.app/mcp");
+  await expect(page.getByLabel("Name")).toHaveValue("linear");
   await page.getByLabel("Name").fill("internal");
   await page.getByLabel("URL").fill("https://tools.example.com/mcp");
+  await expect(page.getByLabel("Name")).toHaveValue("internal");
   await page.getByLabel(/^Headers/).fill("X-Api-Key: secret-value");
   await page.getByRole("button", { name: "Add server" }).click();
 

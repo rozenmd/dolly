@@ -558,8 +558,73 @@ function ConnectTokenDialog({
   );
 }
 
+/** Hosts that serve many tenants as subdomains, so the tenant label names the server. */
+const SHARED_HOSTS = [
+  "workers.dev",
+  "vercel.app",
+  "fly.dev",
+  "netlify.app",
+  "onrender.com",
+  "pages.dev",
+];
+
+/**
+ * Origins whose server must be saved under a fixed name: src/mcp.ts TOKEN_PROVIDERS finds
+ * API-token providers by name and origin, so a guessed name (getvero) would lose token connect.
+ */
+const KNOWN_ORIGIN_NAMES = new Map([
+  ["https://mcp.vercel.com", "vercel"],
+  ["https://api.getvero.com", "vero"],
+  ["https://api.oneleet.com", "oneleet"],
+]);
+
+/** Second-level suffixes where the label in front of them is the domain's name. */
+const TWO_PART_SUFFIXES = new Set(["co", "com", "net", "org", "gov", "ac", "edu"]);
+
+/**
+ * A server name guessed from its URL's host: mcp.linear.app becomes linear, foo.workers.dev
+ * becomes foo. Empty when the URL doesn't parse yet. Names must be letters, digits, dashes or
+ * underscores, at most 41 characters.
+ */
+export function nameFromUrl(value: string) {
+  let host: string;
+
+  try {
+    const parsed = new URL(value.trim());
+    const known = KNOWN_ORIGIN_NAMES.get(parsed.origin);
+
+    if (known) return known;
+
+    host = parsed.hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+
+  const shared = SHARED_HOSTS.find((suffix) => host.endsWith(`.${suffix}`));
+  let labels = (shared ? host.slice(0, -shared.length - 1) : host).split(".").filter(Boolean);
+
+  while (labels.length > 1 && ["mcp", "api", "www"].includes(labels[0])) labels = labels.slice(1);
+
+  let label = labels[0] ?? "";
+
+  if (!shared && labels.length >= 2) {
+    const last = labels.length - 1;
+
+    const twoPart =
+      labels.length >= 3 && labels[last].length === 2 && TWO_PART_SUFFIXES.has(labels[last - 1]);
+
+    label = labels[twoPart ? last - 2 : last - 1];
+  }
+
+  return label
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 41);
+}
+
 function AddMcpForm({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [name, setName] = useState("");
+  const [nameEdited, setNameEdited] = useState(false);
   const [url, setUrl] = useState("");
   const [headers, setHeaders] = useState("");
   const [saving, setSaving] = useState(false);
@@ -589,23 +654,6 @@ function AddMcpForm({ onClose, onAdded }: { onClose: () => void; onAdded: () => 
   return (
     <form className="settings-card" onSubmit={(event) => void add(event)}>
       <h2 className="settings-step">Add MCP server</h2>
-      <div className="mcp-form-row">
-        <div>
-          <label htmlFor="mcp-name">Name</label>
-          <Input
-            id="mcp-name"
-            autoCapitalize="none"
-            spellCheck={false}
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="linear"
-          />
-        </div>
-        <div>
-          <label htmlFor="mcp-transport">Transport</label>
-          <Input id="mcp-transport" value="http · remote MCP endpoint" disabled readOnly />
-        </div>
-      </div>
       <label htmlFor="mcp-url">URL</label>
       <Input
         id="mcp-url"
@@ -613,8 +661,24 @@ function AddMcpForm({ onClose, onAdded }: { onClose: () => void; onAdded: () => 
         autoCapitalize="none"
         spellCheck={false}
         value={url}
-        onChange={(event) => setUrl(event.target.value)}
+        onChange={(event) => {
+          setUrl(event.target.value);
+
+          if (!nameEdited) setName(nameFromUrl(event.target.value));
+        }}
         placeholder="https://mcp.linear.app/mcp"
+      />
+      <label htmlFor="mcp-name">Name</label>
+      <Input
+        id="mcp-name"
+        autoCapitalize="none"
+        spellCheck={false}
+        value={name}
+        onChange={(event) => {
+          setName(event.target.value);
+          setNameEdited(true);
+        }}
+        placeholder="linear"
       />
       <label htmlFor="mcp-headers">
         Headers (optional, one per line; values are never shown again)
