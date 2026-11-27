@@ -465,6 +465,13 @@ export class Agent extends DurableObject<Env> {
     alias: (id) => this.ctx.storage.get<ConversationId>(`session:${id}`),
     retiresSettledChildren: async (id) =>
       (await this.ctx.storage.get<ChiefRecord>(CHIEF_KEY))?.conversation === id,
+    spawned: async (id, createdAt) => {
+      const key = sessionMetadataKey(id);
+      const metadata = await this.ctx.storage.get<SessionMetadata>(key);
+
+      if (metadata?.createdAt === undefined)
+        await this.ctx.storage.put(key, { ...metadata, createdAt } satisfies SessionMetadata);
+    },
   });
   private readonly checkpointTask = workspaceCheckpoint(
     (sandboxId, turnId) => this.env.SANDBOX.getByName(sandboxId).checkpoint(turnId),
@@ -3647,8 +3654,17 @@ export class Agent extends DurableObject<Env> {
         ]),
       );
 
-      // Spawned sessions and sessions recorded in another workspace do not name a workspace.
-      if (record?.owner || (metadata?.workspaceId && metadata.workspaceId !== id)) return undefined;
+      // Spawned sessions and sessions recorded in another workspace do not name a workspace,
+      // except the chief of staff's: each starts a workspace of its own (session-list.ts).
+      const chief =
+        record?.owner &&
+        (yield* attempt("workspace.chief", () => this.ctx.storage.get<ChiefRecord>(CHIEF_KEY)));
+
+      if (
+        (record?.owner && record.owner.conversationId !== chief?.conversation) ||
+        (metadata?.workspaceId && metadata.workspaceId !== id)
+      )
+        return undefined;
       member = conversationId;
     }
 
@@ -3786,8 +3802,12 @@ export class Agent extends DurableObject<Env> {
     const chief = await this.ensureChief().catch(() => undefined);
     const chiefTitle = chief && (await this.chiefSettings()).name;
 
-    const listed = await listSessions(this.harness, this.ctx.storage, secrets, (id) =>
-      this.pendingWork(id),
+    const listed = await listSessions(
+      this.harness,
+      this.ctx.storage,
+      secrets,
+      (id) => this.pendingWork(id),
+      chief?.session,
     );
 
     const sessions = listed.map((session) =>

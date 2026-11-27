@@ -48,7 +48,7 @@ import { extendTranscript, prependHistory } from "./lib/transcript-history";
 import { indexedMarks, type RailMark } from "./lib/turn-rail";
 import { imagesBody, type Attachment } from "./lib/images";
 import { sessionList } from "./lib/session-list";
-import { automated, belongsInSidebar, rootSession, sessionThreads } from "./lib/session-threads";
+import { automated, rootSession, sessionThreads, sidebarSessions } from "./lib/session-threads";
 import { SessionSummaryCard, SessionSummaryToggle } from "./components/session-summary";
 import { useSessionSummary } from "./lib/session-summary";
 import { usePhone } from "./components/threads";
@@ -284,11 +284,7 @@ export function WorkspaceApp() {
         if (!signal.aborted && initial) {
           initial = false;
 
-          const recent = sessionList(
-            sessionListRef.current.filter(belongsInSidebar),
-            "",
-            Date.now(),
-          );
+          const recent = sessionList(sidebarSessions(sessionListRef.current), "", Date.now());
 
           setSelected((current) => current || recent.active[0]?.id || "");
           setSessionsReady(true);
@@ -548,9 +544,7 @@ export function WorkspaceApp() {
       (item) => !item.archived && !automated(item),
     );
 
-    select(
-      sibling?.id || sessionList(left.filter(belongsInSidebar), "", Date.now()).active[0]?.id || "",
-    );
+    select(sibling?.id || sessionList(sidebarSessions(left), "", Date.now()).active[0]?.id || "");
   }
 
   /** Archives every session in a workspace, or restores them all. */
@@ -1004,7 +998,7 @@ export function WorkspaceApp() {
             <h1>{feed ? "Feed" : session ? session.title || "Untitled session" : "dolly"}</h1>
           </div>
           <div className="header-actions">
-            {session && !feed && session.parentId && (
+            {session && !feed && session.parentId && !parent?.chief && (
               <IconButton
                 label={session.kept ? "Remove workspace tab" : "Keep as workspace tab"}
                 aria-pressed={Boolean(session.kept)}

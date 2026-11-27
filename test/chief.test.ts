@@ -7,6 +7,10 @@ import { CHIEF_KEY, CHIEF_NAME_KEY, type ChiefRecord } from "../src/chief";
 import { sessionMetadataKey } from "../src/model-defaults";
 import { headers, signIn } from "./session";
 import { mockFetch } from "./titles";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import { ConversationWorkspace, workspaceConfig } from "../src/workspace";
 
 const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
 
@@ -338,3 +342,106 @@ it("has no coordinator mode, and ignores the flag in older session metadata", as
   expect(bodies[0]).not.toContain("Coordinator mode is on");
   expect(bodies[0]).not.toContain("chief of staff");
 });
+
+it("starts a workspace for each session the chief spawns, unlike other sessions' children", async () => {
+  mockFetch(async () => answer());
+  const [chief] = chiefOf(await list());
+  const work = await createSession();
+
+  const spawn = async (parent: string) => {
+    const response = await SELF.fetch(`https://worker/api/sessions/${parent}/children`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content: "Fix the bug", requestId: crypto.randomUUID() }),
+    });
+
+    expect(response.status).toBe(202);
+
+    return (await response.json<{ id: string }>()).id;
+  };
+
+  const delegated = await spawn(chief!.id);
+  const investigation = await spawn(chief!.id);
+  const nested = await spawn(work);
+
+  // Give them repositories, as spawn_task with `repo` does: an investigation (mode ask) is
+  // read-only, like an automatic review, and the nested child too.
+  await runInDurableObject(owner(), async (agent) => {
+    for (const [id, readOnly] of [
+      [delegated, false],
+      [investigation, true],
+      [nested, true],
+    ] as const) {
+      const { id: conversation } = Option.getOrThrow(
+        await Effect.runPromise(agent["conversation"](id)),
+      );
+
+      await agent["harness"].commit(async (tx) => {
+        const doc = await tx.doc(ConversationWorkspace, conversation);
+        doc.config = workspaceConfig({ repository: "octocat/project", ref: "main" }, id, {
+          readOnly,
+        });
+      }, BACKGROUND_CONTEXT);
+    }
+  });
+
+  await expect
+    .poll(async () => {
+      const sessions = await list();
+
+      return [delegated, investigation, nested].every((id) =>
+        sessions.some((session) => session.id === id),
+      );
+    })
+    .toBe(true);
+
+  const sessions = await list();
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+
+  // The chief's child keeps its link to the chief but is a workspace of its own.
+  expect(byId.get(delegated)?.parentId).toBe(chief!.id);
+  expect(byId.get(delegated)?.workspaceId).toBeDefined();
+  expect(byId.get(delegated)?.workspaceId).not.toBe(byId.get(chief!.id)?.workspaceId);
+
+  // Spawned sessions record when they were created, as sessions the owner creates do.
+  for (const id of [delegated, investigation, nested])
+    expect(byId.get(id)?.createdAt, id).toBeGreaterThan(0);
+
+  // A read-only delegation is not mistaken for an automatic review, so the sidebar lists it.
+  expect(byId.get(investigation)?.automation).toBeUndefined();
+  expect(byId.get(investigation)?.workspaceId).not.toBe(byId.get(delegated)?.workspaceId);
+
+  // A work session's child still joins its parent's workspace; read-only, it stays labelled.
+  expect(byId.get(nested)?.parentId).toBe(work);
+  expect(byId.get(nested)?.workspaceId).toBe(byId.get(work)?.workspaceId);
+  expect(byId.get(nested)?.automation).toBe("review");
+
+  // New sessions join the chief's child's workspace by the id the list gives it, with its repository.
+  const joined = await SELF.fetch("https://worker/api/sessions", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ workspaceId: byId.get(delegated)?.workspaceId }),
+  });
+
+  expect(joined.status).toBe(201);
+  const tab = await joined.json<{ id: string; workspaceId: string }>();
+  expect(tab.workspaceId).toBe(byId.get(delegated)?.workspaceId);
+
+  const after = new Map((await list()).map((session) => [session.id, session]));
+  expect(after.get(tab.id)).toMatchObject({
+    workspaceId: byId.get(delegated)?.workspaceId,
+    repository: "octocat/project",
+  });
+  // The chief's session stays the oldest, so it stays the workspace's first tab and names its row.
+  expect(after.get(tab.id)?.createdAt).toBeGreaterThanOrEqual(byId.get(delegated)?.createdAt ?? 0);
+  expect(after.get(delegated)?.createdAt).toBe(byId.get(delegated)?.createdAt);
+
+  // Another session's child still names no workspace.
+  const refused = await SELF.fetch("https://worker/api/sessions", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ workspaceId: nested }),
+  });
+
+  expect(refused.status).toBe(409);
+}, 30_000);

@@ -27,6 +27,8 @@ export type WorkspaceRow = {
   pullRequest?: SavedSession["pullRequest"];
   /** The automation whose run started this workspace. */
   automationRun?: string;
+  /** The name of the chief of staff, when it spawned the session that started this workspace. */
+  from?: string;
   /** The chief of staff: listed first on its own, and never archived or pinned. */
   chief?: boolean;
 };
@@ -133,6 +135,16 @@ function SidebarRow({
             title={`Started by automation ${row.automationRun}`}
           >
             <BoltIcon />
+          </span>
+        )}
+        {row.from && (
+          <span
+            className="workspace-automation workspace-from"
+            role="img"
+            aria-label={`Started by ${row.from}`}
+            title={`Started by ${row.from}`}
+          >
+            <SparklesIcon />
           </span>
         )}
         <span className="workspace-time">{ago(row.updatedAt, now)}</span>
