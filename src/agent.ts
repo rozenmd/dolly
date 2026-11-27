@@ -3627,8 +3627,17 @@ export class Agent extends DurableObject<Env> {
         ]),
       );
 
-      // Spawned sessions and sessions recorded in another workspace do not name a workspace.
-      if (record?.owner || (metadata?.workspaceId && metadata.workspaceId !== id)) return undefined;
+      // Spawned sessions and sessions recorded in another workspace do not name a workspace,
+      // except the chief of staff's: each starts a workspace of its own (session-list.ts).
+      const chief =
+        record?.owner &&
+        (yield* attempt("workspace.chief", () => this.ctx.storage.get<ChiefRecord>(CHIEF_KEY)));
+
+      if (
+        (record?.owner && record.owner.conversationId !== chief?.conversation) ||
+        (metadata?.workspaceId && metadata.workspaceId !== id)
+      )
+        return undefined;
       member = conversationId;
     }
 

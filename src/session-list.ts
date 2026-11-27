@@ -296,6 +296,7 @@ export async function listSessions(
           const run = automation?.run;
 
           const parent = record.owner?.conversationId;
+          const parentId = parent && (aliases.get(parent) ?? String(parent));
 
           return {
             id: aliases.get(record.id) ?? String(record.id),
@@ -315,12 +316,15 @@ export async function listSessions(
             updatedAt: Math.max(transcript?.updatedAt ?? 0, metadata?.createdAt ?? 0),
             archived: metadata?.archived ?? false,
             ...(metadata?.pinnedAt && { pinnedAt: metadata.pinnedAt }),
-            ...(parent && { parentId: aliases.get(parent) ?? String(parent) }),
+            ...(parentId && { parentId }),
             ...(parent && metadata?.kept && { kept: true }),
             ...(run && !parent && { automationRun: { id: run.automationId, name: run.name } }),
             // Automatic reviews (github-inbox.ts admitGitHub) are the read-only sessions that no
-            // automation run started; read-only automation runs stay in the sidebar.
-            ...(isReadOnly(workspace) && !run && { automation: "review" as const }),
+            // automation run started; read-only automation runs stay in the sidebar, and so do
+            // the chief's read-only (ask) delegations, which start workspaces of their own.
+            ...(isReadOnly(workspace) &&
+              !run &&
+              !(parentId && parentId === chief) && { automation: "review" as const }),
             running: live,
             ...(activity && { activity }),
             // Saved redacted; redact again so a secret added since stays hidden too.
