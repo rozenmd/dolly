@@ -120,7 +120,17 @@ test("public ingress binds only the private GitHub, Slack and automation entrypo
 test("the deployed entrypoint re-exports every declared export", async () => {
   const source = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
   const block = source.match(/export \{([^}]*)\} from "\.\/index";/);
-  assert.ok(block);
-  const exported = new Set(block[1].split(",").map((name) => name.trim()).filter(Boolean));
+  assert.ok(
+    block,
+    'src/worker.ts should re-export its entrypoints in one export { ... } from "./index" block',
+  );
+
+  const exported = new Set(
+    block[1]
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean),
+  );
+
   for (const name of Object.keys(config.worker.exports)) assert.ok(exported.has(name), name);
 });
