@@ -357,7 +357,7 @@ type ToolOutcome = {
 type Round = {
   /** Its tool_use blocks, in order. */
   calls: Captured[];
-  /** The model call has finished, stopping for tool use. */
+  /** The model call has finished streaming: every tool call it makes is known. */
   complete: boolean;
   /** The stop reason its stream reported. */
   stopReason: string | undefined;
@@ -710,7 +710,9 @@ export function createBridge(options: BridgeOptions) {
 
         if (turn.usage) turn.usage.output_tokens = event.usage.output_tokens ?? 0;
       } else if (event.type === "message_stop") {
-        live.round.complete = live.round.stopReason === "tool_use";
+        // Whatever the stop reason: Claude Code also runs a complete call from a reply that hit
+        // the output limit, and that call waits on the client like any other.
+        live.round.complete = true;
       }
     }
 

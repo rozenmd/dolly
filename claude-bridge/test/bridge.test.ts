@@ -104,7 +104,7 @@ type Block =
   | { type: "text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: Record<string, string | number> };
 
-type Reply = { content: Block[]; stop: "end_turn" | "tool_use" };
+type Reply = { content: Block[]; stop: "end_turn" | "tool_use" | "max_tokens" };
 
 const requests: Upstream[] = [];
 let replies: Reply[] = [];
@@ -727,6 +727,49 @@ test(
     assert.doesNotMatch(replayed, TURN_ENDING);
   },
 );
+
+test("hands over a complete tool call from a reply that hit the output limit", async () => {
+  replies.push(
+    {
+      content: [
+        { type: "text", text: "Reading the page." },
+        {
+          type: "tool_use",
+          id: "toolu_limit",
+          name: "mcp__dolly__web_fetch",
+          input: { url: "https://docs.example/llms-full.txt", offset: 0 },
+        },
+      ],
+      stop: "max_tokens",
+    },
+    { content: [{ type: "text", text: "Got the first chunk." }], stop: "end_turn" },
+  );
+
+  const messages: ClientMessage[] = [{ role: "user", content: "Read the page" }];
+  const reply = await ask(messages, "conversation-output-limit");
+
+  // Claude Code runs the call, so it reaches the client instead of waiting forever.
+  assert.deepEqual(
+    reply.content.filter((block) => block.type === "tool_use").map((block) => block.id),
+    ["toolu_limit"],
+  );
+
+  messages.push(
+    { role: "assistant", content: reply.content },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "toolu_limit", content: chunk(0) }],
+    },
+  );
+
+  const answer = await ask(messages, "conversation-output-limit");
+
+  assert.deepEqual(answer.content, [{ type: "text", text: "Got the first chunk." }]);
+  assert.deepEqual(
+    lastResults(requests[1]!.body).map((block) => [block.tool_use_id, resultText(block)]),
+    [["toolu_limit", chunk(0)]],
+  );
+});
 
 test("moves on when the client abandons a tool loop for a new prompt", async () => {
   script = chunkReader;
