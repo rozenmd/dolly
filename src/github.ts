@@ -25,8 +25,8 @@ import {
   type GitHubDelivery,
 } from "./github-webhook";
 import { exceptionDetails } from "./diagnostics";
-import { integrationJson } from "./integration-http";
-import { describeWindow, windowText } from "./file-window";
+import { RESPONSE_TOO_LARGE, integrationJson, integrationWindow } from "./integration-http";
+import { describeWindow, windowText, type FileRange, type FileWindow } from "./file-window";
 import { JobLogWindow, type JobLogRange } from "./job-log";
 import {
   AUTOMATIC_REVIEW_MARKER,
@@ -114,6 +114,26 @@ const FileResponse = Schema.Struct({
   content: Schema.String,
   size: Schema.Number,
 });
+
+/** A directory listing's files with their blob shas, for a file too large to inline. */
+const BlobListing = Schema.Array(
+  Schema.Struct({ path: Schema.String, type: Schema.String, sha: Sha }),
+);
+
+/** A read_file result for one window of a file. */
+function fileRead(path: string, sha: string, window: FileWindow, totalLines?: number): FileRead {
+  const note = describeWindow(window, totalLines).slice(window.text.length).trim();
+  const result: FileRead = { kind: "file", path, sha, content: window.text };
+
+  if (window.startLine > 1 || window.nextOffset !== undefined || window.lineCut)
+    result.lines = `${window.startLine}-${window.endLine}`;
+
+  if (window.nextOffset !== undefined) result.nextOffset = window.nextOffset;
+
+  if (note) result.note = note;
+
+  return result;
+}
 
 const DirectoryResponse = Schema.Array(Schema.Struct({ path: Schema.String, type: Schema.String }));
 
@@ -938,14 +958,9 @@ function makeGitHub(
     return yield* decode(Connected)(raw);
   });
 
-  const api = Effect.fn("GitHub.api")((
-    path: string,
-    token: string,
-    body?: GitHubBody,
-    method = body ? "POST" : "GET",
-  ) => {
+  const apiHeaders = (token: string, accept = "application/vnd.github+json") => {
     const headers = new Headers({
-      Accept: "application/vnd.github+json",
+      Accept: accept,
       "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "dolly",
       "Content-Type": "application/json",
@@ -953,12 +968,25 @@ function makeGitHub(
 
     if (token) headers.set("Authorization", `Bearer ${token}`);
 
-    return integrationJson(`https://api.github.com${path}`, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-  });
+    return headers;
+  };
+
+  const api = Effect.fn("GitHub.api")(
+    (path: string, token: string, body?: GitHubBody, method = body ? "POST" : "GET") =>
+      integrationJson(`https://api.github.com${path}`, {
+        method,
+        headers: apiHeaders(token),
+        body: body ? JSON.stringify(body) : undefined,
+      }),
+  );
+
+  /** A line window of a GET's raw body (`application/vnd.github.raw+json`), of any size. */
+  const rawWindow = (range: FileRange) => (path: string, token: string) =>
+    integrationWindow(
+      `https://api.github.com${path}`,
+      { method: "GET", headers: apiHeaders(token, "application/vnd.github.raw+json") },
+      range,
+    );
 
   const tokenFor = Effect.fn("GitHub.token")(function* (
     connected: typeof Connected.Type,
@@ -1595,37 +1623,42 @@ function makeGitHub(
       details: { status: 404, repository },
     });
 
-  const publicApi = Effect.fn("GitHub.publicApi")(function* (repository: string, path: string) {
-    const token = yield* publicReadToken;
+  type Get<A> = (path: string, token: string) => Effect.Effect<A, OperationError>;
 
-    if (!token) return yield* api(path, "");
+  const json: Get<unknown> = (path, token) => api(path, token);
 
-    return yield* Effect.gen(function* () {
-      const checked = publicRepositories.get(repository.toLowerCase());
+  const publicApi = <A>(repository: string, path: string, get: Get<A>) =>
+    Effect.gen(function* () {
+      const token = yield* publicReadToken;
 
-      if (!checked || checked < Date.now()) {
-        const repo = yield* api(`/repos/${repository}`, token).pipe(
-          Effect.flatMap(decode(Schema.Struct({ private: Schema.Boolean }))),
-        );
+      if (!token) return yield* get(path, "");
 
-        if (repo.private) return yield* notPublic(repository);
-        publicRepositories.set(repository.toLowerCase(), Date.now() + 600_000);
-      }
+      return yield* Effect.gen(function* () {
+        const checked = publicRepositories.get(repository.toLowerCase());
 
-      return yield* api(path, token);
-    }).pipe(
-      // A renamed or transferred repository: credentialed requests never follow its redirect,
-      // so read it anonymously, which follows within api.github.com and sees only public data.
-      Effect.catchTag("OperationError", (error) =>
-        moved(error) ? api(path, "") : Effect.fail(error),
-      ),
-    );
-  });
+        if (!checked || checked < Date.now()) {
+          const repo = yield* api(`/repos/${repository}`, token).pipe(
+            Effect.flatMap(decode(Schema.Struct({ private: Schema.Boolean }))),
+          );
+
+          if (repo.private) return yield* notPublic(repository);
+          publicRepositories.set(repository.toLowerCase(), Date.now() + 600_000);
+        }
+
+        return yield* get(path, token);
+      }).pipe(
+        // A renamed or transferred repository: credentialed requests never follow its redirect,
+        // so read it anonymously, which follows within api.github.com and sees only public data.
+        Effect.catchTag("OperationError", (error) =>
+          moved(error) ? get(path, "") : Effect.fail(error),
+        ),
+      );
+    }).pipe(Effect.withSpan("GitHub.publicApi"));
 
   // Only a confirmed-public repository is readable for unapproved owners. Approved
   // owners fall back to a full read token after a public 404.
-  const readApi = Effect.fn("GitHub.readApi")((repository: string, path: string) =>
-    publicApi(repository, path).pipe(
+  const readWith = <A>(repository: string, path: string, get: Get<A>) =>
+    publicApi(repository, path, get).pipe(
       Effect.catchTag("OperationError", (error) =>
         Effect.gen(function* () {
           const status = Schema.decodeUnknownOption(Schema.Struct({ status: Schema.Number }))(
@@ -1641,11 +1674,13 @@ function makeGitHub(
 
           const token = yield* tokenFor(yield* read(), repository, "read");
 
-          return yield* api(path, token);
+          return yield* get(path, token);
         }),
       ),
-    ),
-  );
+      Effect.withSpan("GitHub.readApi"),
+    );
+
+  const readApi = (repository: string, path: string) => readWith(repository, path, json);
 
   /**
    * Items `[(page - 1) * perPage, page * perPage)` of a REST list. A batch over the 1 MiB
@@ -2000,43 +2035,72 @@ function makeGitHub(
     const op = input.operation;
 
     if (op.action === "read_file") {
-      const path = `/repos/${op.repository}/contents/${op.path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(op.ref)}`;
+      const encoded = op.path.split("/").map(encodeURIComponent).join("/");
+      const ref = encodeURIComponent(op.ref);
+      const range = { offset: op.offset, limit: op.limit };
 
-      const file = yield* readApi(op.repository, path).pipe(Effect.flatMap(decode(FileResponse)));
-
-      // GitHub inlines content only up to 1 MB; larger files need a sandbox checkout.
-      if (!file.content && file.size > 0)
-        return {
-          ok: false,
-          code: "file_too_large",
-          message:
-            "GitHub does not inline files over 1 MB; check out the repository and read it there",
-        };
-
-      const text = yield* attempt("github.file.decode", async () =>
-        new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
-          Uint8Array.from(atob(file.content.replace(/\s/g, "")), (char) => char.charCodeAt(0)),
+      const file = yield* readApi(
+        op.repository,
+        `/repos/${op.repository}/contents/${encoded}?ref=${ref}`,
+      ).pipe(
+        Effect.flatMap(decode(FileResponse)),
+        Effect.map(Option.some),
+        // Over about 750 KB the base64 in the contents JSON outgrows the 1 MiB response bound.
+        Effect.catchTag("OperationError", (error) =>
+          error.message === RESPONSE_TOO_LARGE ? Effect.succeedNone : Effect.fail(error),
         ),
       );
 
-      const window = windowText(text, { offset: op.offset, limit: op.limit });
-      const note = describeWindow(window, window.totalLines).slice(window.text.length).trim();
+      // GitHub inlines content only up to 1 MB, and a larger response is never buffered: stream
+      // the blob's raw bytes instead, keeping only the requested window. The blob is the one the
+      // returned sha names, so its content and sha always agree.
+      if (Option.isNone(file) || (!file.value.content && file.value.size > 0)) {
+        const blob = Option.isSome(file)
+          ? { path: file.value.path, sha: file.value.sha }
+          : yield* Effect.gen(function* () {
+              // The directory listing names the file's blob without inlining its content.
+              const parent = op.path.split("/").slice(0, -1).map(encodeURIComponent).join("/");
 
-      const result: FileRead = {
-        kind: "file",
-        path: file.path,
-        sha: file.sha,
-        content: window.text,
+              const listing = yield* readApi(
+                op.repository,
+                `/repos/${op.repository}/contents/${parent}?ref=${ref}`,
+              ).pipe(Effect.flatMap(decode(BlobListing)));
+
+              const entry = listing.find((item) => item.type === "file" && item.path === op.path);
+
+              if (!entry)
+                return yield* new OperationError({
+                  operation: "github.file",
+                  message: `${op.path} is not a file at ${op.ref}`,
+                  details: null,
+                });
+
+              return { path: entry.path, sha: entry.sha };
+            });
+
+        const window = yield* readWith(
+          op.repository,
+          `/repos/${op.repository}/git/blobs/${blob.sha}`,
+          rawWindow(range),
+        );
+
+        return { ok: true, result: fileRead(blob.path, blob.sha, window, window.totalLines) };
+      }
+
+      const text = yield* attempt("github.file.decode", async () =>
+        new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
+          Uint8Array.from(atob(file.value.content.replace(/\s/g, "")), (char) =>
+            char.charCodeAt(0),
+          ),
+        ),
+      );
+
+      const window = windowText(text, range);
+
+      return {
+        ok: true,
+        result: fileRead(file.value.path, file.value.sha, window, window.totalLines),
       };
-
-      if (window.startLine > 1 || window.nextOffset !== undefined || window.lineCut)
-        result.lines = `${window.startLine}-${window.endLine}`;
-
-      if (window.nextOffset !== undefined) result.nextOffset = window.nextOffset;
-
-      if (note) result.note = note;
-
-      return { ok: true, result };
     }
 
     if (op.action === "list_files") {

@@ -408,23 +408,174 @@ it("reads large public files a window at a time", async () => {
   });
 });
 
-it("explains files GitHub will not inline", async () => {
-  mockFetch(async () =>
-    Response.json({
-      type: "file",
-      path: "huge.bin",
+/** A body served in 64 KiB chunks, counting how many were pulled. */
+function streamed(text: string) {
+  const bytes = new TextEncoder().encode(text);
+  const served = { chunks: 0, total: Math.ceil(bytes.byteLength / 65_536) };
+
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const start = served.chunks * 65_536;
+
+      if (start >= bytes.byteLength) return controller.close();
+      served.chunks++;
+      controller.enqueue(bytes.subarray(start, start + 65_536));
+    },
+  });
+
+  return { body, served };
+}
+
+it("reads files GitHub will not inline from their blob's raw bytes, a window at a time", async () => {
+  // 5 MB: GitHub's contents JSON says encoding "none" and inlines nothing.
+  const text = Array.from(
+    { length: 250_000 },
+    (_, index) => `line ${index + 1} ${"x".repeat(12)}\n`,
+  ).join("");
+
+  const requests: { path: string; accept: string | null }[] = [];
+  const streams: { chunks: number; total: number }[] = [];
+
+  mockFetch(async (input, init) => {
+    const url = new URL(String(input));
+    requests.push({ path: url.pathname, accept: new Headers(init?.headers).get("Accept") });
+
+    if (url.pathname === `/repos/${repository}/contents/data/huge.txt`)
+      return Response.json({
+        type: "file",
+        path: "data/huge.txt",
+        sha,
+        encoding: "none",
+        content: "",
+        size: text.length,
+      });
+
+    if (url.pathname === `/repos/${repository}/git/blobs/${sha}`) {
+      const { body, served } = streamed(text);
+      streams.push(served);
+
+      return new Response(body);
+    }
+
+    throw new Error(`Unexpected ${url}`);
+  });
+
+  const read = async (range: { offset?: number; limit?: number } = {}) =>
+    (
+      await execute({
+        action: "read_file",
+        repository,
+        path: "data/huge.txt",
+        ref: "main",
+        ...range,
+      })
+    ).json<{ ok: boolean; result: { content: string; nextOffset?: number } }>();
+
+  const first = await read();
+
+  expect(first).toMatchObject({
+    ok: true,
+    result: {
+      kind: "file",
+      path: "data/huge.txt",
       sha,
-      encoding: "none",
-      content: "",
-      size: 5_000_000,
-    }),
-  );
+      lines: "1-2000",
+      nextOffset: 2001,
+      note: "[Showing lines 1-2000. Use offset=2001 to continue.]",
+    },
+  });
+  expect(first.result.content).toBe(text.split("\n").slice(0, 2000).join("\n") + "\n");
+  expect(requests.slice(0, 2)).toEqual([
+    { path: `/repos/${repository}/contents/data/huge.txt`, accept: "application/vnd.github+json" },
+    { path: `/repos/${repository}/git/blobs/${sha}`, accept: "application/vnd.github.raw+json" },
+  ]);
+  // Only the chunks up to the window were read, not the whole 5 MB.
+  expect(streams[0]!.chunks).toBeLessThan(streams[0]!.total / 10);
+
+  const last = await read({ offset: 249_999 });
+  expect(last).toMatchObject({
+    ok: true,
+    result: {
+      content: `line 249999 ${"x".repeat(12)}\nline 250000 ${"x".repeat(12)}\n`,
+      lines: "249999-250000",
+    },
+  });
+  expect(last.result).not.toHaveProperty("nextOffset");
+  expect(await read({ offset: 300_000 })).toMatchObject({
+    ok: true,
+    result: { content: "", note: "[offset 300000 is past the end of the file (250000 lines).]" },
+  });
+});
+
+it("reads a file whose contents JSON outgrows the 1 MiB response bound through its blob", async () => {
+  // 900 KB: GitHub inlines it, but as base64 the JSON is about 1.2 MB.
+  const text = Array.from(
+    { length: 30_000 },
+    (_, index) => `row ${index + 1} ${"y".repeat(20)}\n`,
+  ).join("");
+
+  const blob = "b".repeat(40);
+  const requests: string[] = [];
+
+  mockFetch(async (input) => {
+    const url = new URL(String(input));
+    requests.push(`${url.pathname}${url.search}`);
+
+    if (url.pathname === `/repos/${repository}/contents/src/big.json`)
+      return Response.json({
+        type: "file",
+        path: "src/big.json",
+        sha: blob,
+        encoding: "base64",
+        content: btoa(text),
+        size: text.length,
+      });
+
+    if (url.pathname === `/repos/${repository}/contents/src`)
+      return Response.json([
+        { path: "src/a.ts", type: "file", sha },
+        { path: "src/big.json", type: "file", sha: blob },
+      ]);
+
+    if (url.pathname === `/repos/${repository}/git/blobs/${blob}`) return new Response(text);
+
+    throw new Error(`Unexpected ${url}`);
+  });
 
   expect(
     await (
-      await execute({ action: "read_file", repository, path: "huge.bin", ref: "main" })
+      await execute({
+        action: "read_file",
+        repository,
+        path: "src/big.json",
+        ref: "main",
+        offset: 3,
+        limit: 2,
+      })
     ).json(),
-  ).toMatchObject({ ok: false, code: "file_too_large" });
+  ).toEqual({
+    ok: true,
+    result: {
+      kind: "file",
+      path: "src/big.json",
+      sha: blob,
+      content: `row 3 ${"y".repeat(20)}\nrow 4 ${"y".repeat(20)}\n`,
+      lines: "3-4",
+      nextOffset: 5,
+      note: "[Showing lines 3-4. Use offset=5 to continue.]",
+    },
+  });
+  expect(requests).toEqual([
+    `/repos/${repository}/contents/src/big.json?ref=main`,
+    `/repos/${repository}/contents/src?ref=main`,
+    `/repos/${repository}/git/blobs/${blob}`,
+  ]);
+
+  // Other reads keep the bound: a list over 1 MiB still fails instead of being buffered.
+  mockFetch(async () => Response.json([{ path: "x".repeat(2_000_000), type: "file" }]));
+  expect(
+    await (await execute({ action: "list_files", repository, ref: "main" })).json(),
+  ).toMatchObject({ ok: false, message: "Provider response exceeds 1 MiB" });
 });
 
 it("explains an unset account policy without contacting GitHub or granting any accounts", async () => {
