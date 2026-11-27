@@ -135,15 +135,49 @@ it("propagates rejected workspace calls without unhandled RPC rejections", async
   await runInDurableObject(sandbox, async (_, state) => {
     await state.storage.put("workspace", config);
   });
-  let failure: unknown;
+  // The Agent's path resolves the failure as a value: workerd logs a rejected RPC as uncaught.
+  expect(await sandbox.prepareSettled({ ...config, ref: "other" })).toEqual({
+    failure: {
+      operation: "workspace.configure",
+      message: "This conversation already owns a different workspace",
+      details: null,
+    },
+  });
 
-  try {
-    await sandbox.prepare({ ...config, ref: "other" });
-  } catch (error) {
-    failure = error;
-  }
-
+  // prepare itself still rejects (checked in the object, where the rejection is not an RPC's).
+  const failure = await runInDurableObject(sandbox, (instance) =>
+    instance.prepare({ ...config, ref: "other" }).then(
+      () => undefined,
+      (error: unknown) => error,
+    ),
+  );
   expect(failure).toMatchObject({ operation: "workspace.configure" });
+});
+
+it("reports a missing Container binding as an ordinary setup failure", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+
+  const config = {
+    repository: "owner/project",
+    ref: "main",
+    branch: "dolly/test",
+    networkHosts: [],
+  };
+
+  // The test Worker's Sandbox has no Container binding, as in the Worker suites that prewarm.
+  // Background setup records the failure (it used to die, a defect logged as uncaught).
+  expect(await sandbox.warm(config)).toEqual({ queued: true });
+  await expect
+    .poll(() => runInDurableObject(sandbox, (_, state) => state.storage.get("workspace:setup")))
+    .toMatchObject({ state: "failed", error: "Sandbox Container binding is not configured" });
+
+  // A tool's prepare gets the same message as a typed failure value.
+  expect(await sandbox.prepareSettled(config)).toMatchObject({
+    failure: {
+      operation: "sandbox.container",
+      message: "Sandbox Container binding is not configured",
+    },
+  });
 });
 
 it("starts setup asynchronously and makes concurrent tools join one checkout/install", async () => {

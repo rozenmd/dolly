@@ -2672,9 +2672,21 @@ export class Agent extends DurableObject<Env> {
     if (!active) return null;
 
     const prepared = await Effect.runPromise(
-      rpc("workspace.prepare", () =>
-        this.env.SANDBOX.getByName(active.sandboxId).prepare(active.config),
-      ),
+      rpc("workspace.prepare", async () => {
+        const settled = await this.env.SANDBOX.getByName(active.sandboxId).prepareSettled(
+          active.config,
+        );
+
+        // Expected failures cross the RPC as values (see Sandbox.prepareSettled).
+        if ("failure" in settled) {
+          // SAFETY: Sandbox.prepareSettled sends these fields; the RPC types erase `unknown`.
+          const failure = settled.failure as ConstructorParameters<typeof OperationError>[0];
+
+          throw new OperationError(failure);
+        }
+
+        return settled.prepared;
+      }),
     );
 
     return {

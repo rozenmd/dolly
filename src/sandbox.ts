@@ -157,6 +157,8 @@ type StreamedOutput = {
   readonly relay?: OutputRelay;
 };
 
+const CONTAINER_UNCONFIGURED = "Sandbox Container binding is not configured";
+
 /** Options of {@link Sandbox.run}. */
 export type RunOptions = {
   /** Seconds before the command is stopped; default 60, at most `SHELL_TIMEOUT_MAX_SECONDS`. */
@@ -425,7 +427,12 @@ export class Sandbox extends DurableObject<Env> {
   ): Effect.fn.Return<Container, OperationError | Cause.TimeoutError> {
     const container = this.ctx.container;
 
-    if (!container) return yield* Effect.die("Sandbox Container binding is not configured");
+    if (!container)
+      return yield* new OperationError({
+        operation: "sandbox.container",
+        message: CONTAINER_UNCONFIGURED,
+        details: null,
+      });
 
     if (container.running && this.initialized) {
       const inactivity = attempt("sandbox.inactivity", () =>
@@ -1172,6 +1179,33 @@ export class Sandbox extends DurableObject<Env> {
     });
 
     return { ...prepared, restored: restored ? restoreNotice(restored) : undefined };
+  }
+
+  /**
+   * {@link prepare} for the Agent's tools: an {@link OperationError} (a checkout that failed, another
+   * workspace, no Container) resolves as `{ failure }` rather than rejecting, because workerd logs
+   * every rejected Durable Object RPC as an uncaught exception. The Agent rethrows it as the tool's
+   * error. Anything else, such as a timeout, still rejects.
+   */
+  async prepareSettled(config: WorkspaceConfig): Promise<
+    | { readonly prepared: Awaited<ReturnType<Sandbox["prepare"]>> }
+    | {
+        readonly failure: {
+          readonly operation: string;
+          readonly message: string;
+          readonly details: unknown;
+        };
+      }
+  > {
+    try {
+      return { prepared: await this.prepare(config) };
+    } catch (error) {
+      if (!(error instanceof OperationError)) throw error;
+
+      return {
+        failure: { operation: error.operation, message: error.message, details: error.details },
+      };
+    }
   }
 
   async waitForDependencies() {
