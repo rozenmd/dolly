@@ -47,6 +47,7 @@ export default defineConfig({
       SlackIngress: exports.worker(),
       AutomationIngress: exports.worker(),
       WorkspaceOutbound: exports.worker(),
+      SandboxOutbound: exports.worker(),
       PreviewOutbound: exports.worker(),
       ClaudeCodeOutbound: exports.worker(),
       Agent: exports.durableObject({ storage: "sqlite" }),

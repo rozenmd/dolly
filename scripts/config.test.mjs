@@ -30,6 +30,8 @@ test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", ()
   assert.ok(Object.values(worker.env).every((binding) => binding.type !== "artifacts"));
   assert.equal(worker.exports.WorkspaceOutbound.type, "worker");
   assert.equal(worker.exports.PreviewOutbound.type, "worker");
+  // WorkspaceOutbound mints SandboxOutbound through ctx.exports for browser sessions.
+  assert.equal(worker.exports.SandboxOutbound.type, "worker");
   assert.equal(worker.env.BROWSER.type, "browser");
   assert.equal(worker.previewUrls, false);
   assert.equal(worker.env.ACCESS_LOCAL_DEV.value, "false");
@@ -113,4 +115,12 @@ test("public ingress binds only the private GitHub, Slack and automation entrypo
   assert.equal(config.worker.exports.AutomationIngress.type, "worker");
   // Automation webhook secrets travel in the query string, which logs must never keep.
   assert.equal(ingress.worker.observability.redactQueryString, true);
+});
+
+test("the deployed entrypoint re-exports every declared export", async () => {
+  const source = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
+  const block = source.match(/export \{([^}]*)\} from "\.\/index";/);
+  assert.ok(block);
+  const exported = new Set(block[1].split(",").map((name) => name.trim()).filter(Boolean));
+  for (const name of Object.keys(config.worker.exports)) assert.ok(exported.has(name), name);
 });
