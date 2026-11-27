@@ -122,6 +122,7 @@ export function Conversation({
   const top = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const reader = useRef(readerInput());
+  const lastTop = useRef(0);
   // Scroll height before earlier messages are prepended, to keep the reader's place once they arrive.
   const anchor = useRef<{ before: number; height: number }>(undefined);
   const load = useRef(older?.load);
@@ -228,25 +229,36 @@ export function Conversation({
         ref={scroll}
         onScroll={(event) => {
           const element = event.currentTarget;
+          const movedDown = element.scrollTop > lastTop.current;
 
-          // Leaving the bottom, by any means, stops following. Only the reader reaching it starts again:
-          // the browser also scrolls when content below shrinks, and that must not re-pin them.
+          lastTop.current = element.scrollTop;
+
+          // Leaving the bottom, by any means, stops following. Only the reader scrolling down to it starts
+          // again: when content below shrinks the browser moves the view up to the new bottom itself, and
+          // that must not re-pin them, even moments after they turned the wheel.
           if (!atBottom(element)) pinned.current = false;
-          else if (reader.current.scrolling()) pinned.current = true;
+          else if (movedDown && reader.current.scrolling()) pinned.current = true;
         }}
         // Scrolling up stops following at once, from the input itself: a live update can land before the
-        // browser delivers the scroll event, and would snap the reader straight back down.
+        // browser delivers the scroll event, and would snap the reader straight back down. Input that
+        // scrolls a tool result's own output instead leaves the conversation where it is.
         onWheel={(event) => {
           reader.current.mark();
 
-          if (event.deltaY < 0) pinned.current = false;
+          if (event.deltaY < 0) {
+            if (!innerScroller(event.target, event.currentTarget)) pinned.current = false;
+          }
           // Already at the bottom, scrolling down moves nothing and fires no scroll event.
           else if (event.deltaY > 0 && atBottom(event.currentTarget)) pinned.current = true;
         }}
         onTouchStart={(event) => reader.current.touch(event.touches[0]?.clientY)}
         onTouchMove={(event) => {
           // A finger moving down the screen drags the conversation toward earlier messages.
-          if (reader.current.touch(event.touches[0]?.clientY) > 0) pinned.current = false;
+          if (
+            reader.current.touch(event.touches[0]?.clientY) > 0 &&
+            !innerScroller(event.target, event.currentTarget)
+          )
+            pinned.current = false;
         }}
         onPointerDown={() => reader.current.hold()}
         onKeyDown={(event) => {
@@ -386,6 +398,22 @@ function readerInput() {
       return held || now - last < READER_WINDOW || now - lastTouch < TOUCH_WINDOW;
     },
   };
+}
+
+/** A box between `target` and `root`, such as a tool result's output, that scrolls up itself. */
+function innerScroller(target: EventTarget, root: HTMLElement) {
+  for (let node = target instanceof Element ? target : null; node && node !== root;) {
+    if (
+      node instanceof HTMLElement &&
+      node.scrollTop > 0 &&
+      node.scrollHeight > node.clientHeight &&
+      /auto|scroll/.test(getComputedStyle(node).overflowY)
+    )
+      return true;
+    node = node.parentElement;
+  }
+
+  return false;
 }
 
 /** Selecting text is working with it: following would drag the selection away. */

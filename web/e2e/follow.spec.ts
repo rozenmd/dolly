@@ -16,6 +16,9 @@ const signedIn = {
 
 const start = Date.now() - 60 * 60_000;
 
+/** Enough lines that the 40th tool result scrolls inside its own box once opened. */
+const LONG_OUTPUT = Array.from({ length: 60 }, (_, line) => `line ${line}`).join("\n");
+
 /** A running turn: its prompt, then `rounds` narrated tool calls with their results. */
 function snapshot(rounds: number) {
   const entries: object[] = [
@@ -53,7 +56,7 @@ function snapshot(rounds: number) {
             role: "toolResult",
             toolCallId: `call_${round}`,
             toolName: "shell",
-            content: "ok",
+            content: round === 39 ? LONG_OUTPUT : "ok",
             timestamp: at + 500,
           },
         ],
@@ -104,27 +107,27 @@ const distance = (page: Page) =>
     return Math.round(scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop);
   });
 
-const scrollTop = (page: Page) =>
-  page.evaluate(() => Math.round(document.querySelector(".conversation-scroll")!.scrollTop));
+const scrollTop = (page: Page, selector = ".conversation-scroll") =>
+  page.evaluate((selector) => Math.round(document.querySelector(selector)!.scrollTop), selector);
 
 /** Turn the wheel over the conversation and wait for the scroll to come to rest. */
-async function wheel(page: Page, deltaY: number) {
-  const { x, y } = await page.evaluate(() => {
-    const box = document.querySelector(".conversation-scroll")!.getBoundingClientRect();
+async function wheel(page: Page, deltaY: number, over = ".conversation-scroll") {
+  const { x, y } = await page.evaluate((selector) => {
+    const box = document.querySelector(selector)!.getBoundingClientRect();
 
     return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
-  });
+  }, over);
 
-  const before = await scrollTop(page);
+  const before = await scrollTop(page, over);
 
   await page.mouse.wheel(x, y, deltaY);
-  await expect.poll(async () => (await scrollTop(page)) !== before).toBe(true);
+  await expect.poll(async () => (await scrollTop(page, over)) !== before).toBe(true);
 
   let last = -1;
 
   await expect
     .poll(async () => {
-      const now = await scrollTop(page);
+      const now = await scrollTop(page, over);
       const settled = now === last;
       last = now;
 
@@ -153,9 +156,9 @@ test("content shrinking under the reader does not start following again", async 
   const stream = await open(page, 40);
 
   await wheel(page, -150);
-  await pause();
 
-  // Output below the reader gets shorter: the browser moves them to the new bottom on its own.
+  // Output below the reader gets shorter while their wheel turn is still fresh: the browser moves
+  // them up to the new bottom on its own.
   await stream(36);
   await expect.poll(async () => (await distance(page)) <= 3).toBe(true);
   const held = await scrollTop(page);
@@ -171,6 +174,40 @@ test("scrolling back to the bottom follows new output again", async ({ page }) =
   await wheel(page, -300);
   await pause();
   await wheel(page, 2000);
+  await pause();
+
+  await stream(41);
+  await expect.poll(async () => (await distance(page)) <= 3).toBe(true);
+});
+
+test("scrolling inside a tool result's output keeps following the conversation", async ({
+  page,
+}) => {
+  const stream = await open(page, 40);
+
+  // Open the newest tool result, with its own output scrolled to the end, at the bottom of the page.
+  await page.evaluate(() => {
+    const steps = document.querySelectorAll<HTMLDetailsElement>("details.step");
+    const step = steps[steps.length - 1]!;
+
+    for (let node: Element | null = step; node; node = node.parentElement)
+      if (node instanceof HTMLDetailsElement) node.open = true;
+  });
+  await expect.poll(async () => (await page.locator(".step-output").count()) > 0).toBe(true);
+  await page.evaluate(() => {
+    const outputs = document.querySelectorAll(".step-output");
+    const output = outputs[outputs.length - 1]!;
+    const scroll = document.querySelector(".conversation-scroll")!;
+
+    output.setAttribute("data-reading", "");
+    output.scrollTop = output.scrollHeight;
+    scroll.scrollTop = scroll.scrollHeight;
+  });
+  await expect.poll(async () => (await distance(page)) <= 3).toBe(true);
+
+  // Reading back through the output moves only the output.
+  await wheel(page, -40, "[data-reading]");
+  expect(await distance(page)).toBeLessThanOrEqual(3);
   await pause();
 
   await stream(41);
