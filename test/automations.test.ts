@@ -2,11 +2,11 @@ import { env } from "cloudflare:workers";
 import {
   SELF,
   createExecutionContext,
-  reset,
   runInDurableObject,
   runDurableObjectAlarm,
   abortAllDurableObjects,
 } from "cloudflare:test";
+import { resetStorage } from "./storage";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
@@ -181,13 +181,9 @@ async function connect() {
 }
 
 beforeEach(async () => {
-  await reset();
+  await resetStorage();
   sessionIds.length = 0;
   await connect();
-
-  // reset() clears key-value storage but not Pi's documents, where automations live.
-  for (const { id } of decodeList(await (await api("/automations")).json()).automations)
-    await api(`/automations/${id}`, "DELETE");
 });
 
 afterEach(async () => {
@@ -195,6 +191,18 @@ afterEach(async () => {
 
   for (const id of sessionIds) await api(`/sessions/${id}/abort`, "POST", {});
   await abortAllDurableObjects();
+});
+
+it("starts each test with no automations, even after the Agent was stopped", async () => {
+  // reset() alone kept a stopped Agent's storage, Pi's automation documents included.
+  expect((await api("/automations", "POST", { name: "Leftover", prompt: "Stay" })).status).toBe(
+    201,
+  );
+  await abortAllDurableObjects();
+  await resetStorage();
+  await connect();
+
+  expect(decodeList(await (await api("/automations")).json()).automations).toEqual([]);
 });
 
 it("fires a scheduled automation once, in its time zone, into a fresh titled session", async () => {

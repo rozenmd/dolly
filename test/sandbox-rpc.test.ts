@@ -148,9 +148,10 @@ it("propagates rejected workspace calls without unhandled RPC rejections", async
   const failure = await runInDurableObject(sandbox, (instance) =>
     instance.prepare({ ...config, ref: "other" }).then(
       () => undefined,
-      (error: unknown) => error,
+      (error) => error,
     ),
   );
+
   expect(failure).toMatchObject({ operation: "workspace.configure" });
 });
 

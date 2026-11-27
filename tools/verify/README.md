@@ -9,9 +9,30 @@ Dolly itself, not workloads that Dolly runs.
 pnpm verify
 ```
 
-Runs repository formatting and lint checks, then root, infrastructure and frontend
-typechecks. No unit tests, integration tests, browser sessions, builds or deployments
-are included. Unlike `pnpm check`, this does not run frontend unit tests.
+Runs repository formatting and lint checks, root, infrastructure and frontend
+typechecks, then the Node config guards (`pnpm test:node`: `node --test
+scripts/*.test.mjs infra/*.test.ts`, exactly what CI's `node` suite runs). No Vitest
+suites, browser sessions, builds or deployments are included. Unlike `pnpm check`,
+this does not run frontend unit tests.
+
+## Worker test setup
+
+Worker suites under `test/` share one Miniflare instance per file, so storage
+outlives a test unless it is cleared. Start each test with `resetStorage()` from
+`test/storage.ts`, not `reset()` from `cloudflare:test`: `reset()` clears only
+Durable Objects that are live, and an object stopped by `abortAllDurableObjects()`
+(as `afterEach` hooks do) keeps its key-value storage and Pi's SQLite tables
+(documents, document revisions, conversations), so automations, review receipts
+and GitHub threads would carry into the next test. `resetStorage()` wakes every
+object first. Call it before spying on `Harness.open`: waking an Agent opens its
+harness.
+
+A Durable Object RPC that rejects is logged by workerd as `uncaught exception;
+source = Uncaught (in promise)` even when the caller handles it. Expected outcomes
+crossing the Sandbox RPC (a cancelled command, a failed prepare) are returned as
+values for that reason; a test that wants a rejection without the log can call the
+method inside `runInDurableObject`. A genuinely unhandled rejection in the test
+isolate is different: Vitest reports it as an error and fails the run.
 
 ## Integration-first behavioral proof
 

@@ -4,6 +4,7 @@
  * runs. Commands may run for many minutes, so neither may grow without bound.
  */
 
+import * as Predicate from "effect/Predicate";
 import { OperationError } from "./operations";
 
 /** Seconds a shell tool command may run when the model does not say. */
@@ -162,8 +163,10 @@ export type RunCancelled = { readonly cancelled: true };
 
 export const RUN_CANCELLED_MESSAGE = "The command was cancelled";
 
-export const isRunCancelled = (outcome: object): outcome is RunCancelled =>
-  "cancelled" in outcome && outcome.cancelled === true;
+export const RUN_CANCELLED: RunCancelled = { cancelled: true };
+
+export const isRunCancelled = <A>(outcome: A | RunCancelled): outcome is RunCancelled =>
+  Predicate.hasProperty(outcome, "cancelled") && outcome.cancelled === true;
 
 /**
  * Run a sandbox command that `signal` can stop. A Durable Object RPC in flight cannot be cancelled,
@@ -195,6 +198,7 @@ export async function runCancellable<A extends object>(
         details: null,
       });
 
+    // SAFETY: isRunCancelled above rejected the one RunCancelled shape A can include.
     return outcome as Exclude<A, RunCancelled>;
   } finally {
     signal?.removeEventListener("abort", cancel);

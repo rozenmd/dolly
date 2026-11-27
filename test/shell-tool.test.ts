@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { OperationError } from "../src/operations";
 import { runCancellable } from "../src/shell-output";
 import { Live, Snapshot } from "../src/transcript";
 import { headers, signIn } from "./session";
@@ -395,12 +396,13 @@ it("reports a stopped run as a value over RPC and rejects only the caller's runC
   });
 
   const abort = new AbortController();
-  let outcome: unknown;
+  const outcomes: unknown[] = [];
 
   const run = runCancellable(sandbox, abort.signal, async (executionId) => {
-    outcome = await sandbox.runUntilCancelled("never", {}, { executionId });
+    const outcome = await sandbox.runUntilCancelled("never", {}, { executionId });
+    outcomes.push(outcome);
 
-    return outcome as object;
+    return outcome;
   });
 
   // Let the run start before stopping it, as the shell tool's abort does.
@@ -408,20 +410,24 @@ it("reports a stopped run as a value over RPC and rejects only the caller's runC
   await expect.poll(() => started, { timeout: 10_000 }).toBe(true);
   abort.abort();
 
-  await expect(run).rejects.toMatchObject({
-    _tag: "OperationError",
-    message: "The command was cancelled",
-  });
+  const stopped = await run.then(
+    () => undefined,
+    (error) => error,
+  );
+
+  expect(stopped).toBeInstanceOf(OperationError);
+  expect(stopped).toMatchObject({ message: "The command was cancelled" });
   // The RPC itself resolved: nothing rejected inside the Sandbox for workerd to report.
-  expect(outcome).toEqual({ cancelled: true });
+  expect(outcomes).toEqual([{ cancelled: true }]);
   expect(container.kills).toEqual([{ command: "never", signal: 15 }]);
 
   // A real failure still rejects (called in the object, so the expected error is not logged).
   const failure = await runInDurableObject(sandbox, (instance) =>
     instance.runUntilCancelled("unknown", {}, { executionId: "other" }).then(
       () => undefined,
-      (error: unknown) => error,
+      (error) => error,
     ),
   );
+
   expect(String(failure)).toContain("Unexpected command: unknown");
 });

@@ -5,10 +5,10 @@ import type { ConversationId } from "@earendil-works/pi-durable";
 import {
   SELF,
   createExecutionContext,
-  reset,
   runInDurableObject,
   abortAllDurableObjects,
 } from "cloudflare:test";
+import { resetStorage } from "./storage";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -684,7 +684,7 @@ let roots: string[] = [];
 let reviewAutomation = "";
 
 beforeEach(async () => {
-  await reset();
+  await resetStorage();
   await signIn();
   roots = [];
   github.number = 8;
@@ -739,12 +739,6 @@ beforeEach(async () => {
 
     return model(await modelRequest(init));
   });
-
-  // reset() clears key-value storage but not Pi's documents, where automations live.
-  const listed = await SELF.fetch("https://worker/api/automations", { headers });
-
-  for (const { id } of (await listed.json<{ automations: { id: string }[] }>()).automations)
-    await SELF.fetch(`https://worker/api/automations/${id}`, { method: "DELETE", headers });
 
   // Reviews run while the pull request automation is enabled, as Settings > Automations makes it.
   const created = await SELF.fetch("https://worker/api/automations", {

@@ -22,7 +22,8 @@ const commands = {
   "types-root": [["exec", "tsrs", "--noEmit"]],
   "types-infra": [["--dir", "infra", "typecheck"]],
   "types-web": [["--dir", "web", "typecheck"]],
-  node: [["exec", "node", "--test", "scripts/*.test.mjs", "infra/*.test.ts"]],
+  // The same script `pnpm verify` and `pnpm test` run, so local checks cover this job.
+  node: [["run", "test:node"]],
   root: [["exec", "vp", "test", "run", ...changed, ...shard, ...report]],
   web: [
     [

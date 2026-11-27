@@ -23,6 +23,7 @@ import { applyEdit, diffStats, MAX_EDIT_BYTES, type DiffStats, type Edit } from 
 import { exceptionDetails, redact } from "./diagnostics";
 import {
   isRunCancelled,
+  RUN_CANCELLED,
   OutputRelay,
   OutputTail,
   RUN_CANCELLED_MESSAGE,
@@ -1316,14 +1317,13 @@ export class Sandbox extends DurableObject<Env> {
       }),
     );
 
-    const result = this.runWorkspaceOperation(operation, cancel.signal);
+    const result: Promise<RunResult | RunCancelled> = this.runWorkspaceOperation(
+      operation,
+      cancel.signal,
+    );
 
     return result
-      .catch((error: unknown): RunCancelled => {
-        if (!cancel.signal.aborted) throw error;
-
-        return { cancelled: true };
-      })
+      .catch(() => (cancel.signal.aborted ? RUN_CANCELLED : result))
       .finally(async () => {
         if (executionId && this.executions.get(executionId) === cancel)
           this.executions.delete(executionId);
