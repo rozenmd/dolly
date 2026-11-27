@@ -229,12 +229,48 @@ it("stops failed preview commands and retains bounded failure logs", async () =>
       failure = error;
     }
 
-    expect(String(failure)).toContain("did not become ready");
+    // The error carries the log tail, so the agent need not call status to see why.
+    expect(String(failure)).toContain("Dev server exited before it answered on port 3000");
+    expect(String(failure)).toContain("deliberate-preview-failure");
     expect(await sandbox.previewStatus()).toMatchObject({
       running: false,
       logs: expect.stringContaining("deliberate-preview-failure"),
+      message: expect.stringContaining("The last preview start on port 3000 failed at"),
     });
   } finally {
+    await sandbox.restart();
+  }
+});
+
+it("leaves a slow dev server starting, and screenshot capability waits for it", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+
+  try {
+    // Slower than start's 30-second wait, like a large monorepo's first compile.
+    const started = await sandbox.previewStart(
+      `echo compiling; sleep 40; node -e 'require("http").createServer((req,res)=>res.end("slow")).listen(3000,"0.0.0.0")'`,
+      3000,
+    );
+
+    expect(started).toMatchObject({
+      ready: false,
+      state: "starting",
+      port: 3000,
+      message: expect.stringContaining("left starting"),
+      logTail: expect.stringContaining("compiling"),
+    });
+    expect(await sandbox.previewStatus()).toMatchObject({
+      running: true,
+      ready: false,
+      state: "starting",
+    });
+    const { token } = await sandbox.previewCapability();
+    expect(await sandbox.previewStatus()).toMatchObject({ running: true, ready: true });
+    expect(
+      await (await sandbox.previewFetch(new Request("http://private.test/"), token)).text(),
+    ).toBe("slow");
+  } finally {
+    await sandbox.previewStop();
     await sandbox.restart();
   }
 });

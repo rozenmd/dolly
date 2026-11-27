@@ -11,7 +11,12 @@ import {
   toolFailure,
 } from "../src/papercuts";
 import { STEER_TOOL_SKIP } from "../src/steer-interrupt";
-import { ConversationWorkspace, workspaceConfig } from "../src/workspace";
+import {
+  CHECKPOINT_TIMEOUT_MS,
+  checkpointTimeoutMessage,
+  ConversationWorkspace,
+  workspaceConfig,
+} from "../src/workspace";
 import { headers, signIn } from "./session";
 
 beforeEach(async () => {
@@ -184,6 +189,22 @@ it("stores a compact summary of a shell failure instead of its whole output", ()
   );
 
   expect(timeout).toEqual({ exitCode: 124, timedOut: true });
+});
+
+it("groups checkpoint timeouts by cause, whatever the restore point was", () => {
+  const signature = (previous: Parameters<typeof checkpointTimeoutMessage>[1]) =>
+    papercutSignature(
+      "workspace:checkpoint",
+      checkpointTimeoutMessage(CHECKPOINT_TIMEOUT_MS, previous),
+    );
+
+  expect(signature(null)).toBe(
+    "workspace:checkpoint||workspace save timed out: the container snapshot did not finish within <n> minutes.",
+  );
+  expect(signature({ id: "snapshot-abc", turnId: "turn-1", savedAt: Date.now() })).toBe(
+    signature(null),
+  );
+  expect(signature({ id: "other" })).toBe(signature(null));
 });
 
 it("gives repeats of one failure the same signature and different failures different ones", () => {
@@ -1285,4 +1306,29 @@ it("does not log calls the harness cut off for a steer, a restart or a deliberat
       "Tool shell was aborted",
     ]),
   );
+});
+
+it("groups preview errors across ports, times and pages under the current signatures", () => {
+  // Messages from preview.ts and browser-preview.ts; their varying parts must not split groups.
+  const pairs = [
+    [
+      "Dev server on port 5173 exited at 2026-11-27T10:00:00.000Z; check preview status logs, then use preview start again",
+      "Dev server on port 3000 exited at 2026-11-28T09:12:44.123Z; check preview status logs, then use preview start again",
+    ],
+    [
+      "Preview page http://127.0.0.1:5173/ did not fire its load event within 20 seconds; the page never loaded (a dev server compiling this route on first request can take this long: retry, and check preview status logs)",
+      "Preview page http://127.0.0.1:3000/settings did not fire its load event within 20 seconds; the page never loaded (a dev server compiling this route on first request can take this long: retry, and check preview status logs)",
+    ],
+    [
+      "The sandbox restarted at 2026-11-27T10:00:00.000Z, which ended the preview on port 5173 started at 2026-11-27T09:50:00.000Z; use preview start again",
+      "The sandbox restarted at 2026-11-27T11:00:00.000Z, which ended the preview on port 8080 started at 2026-11-27T10:58:00.000Z; use preview start again",
+    ],
+  ] as const;
+
+  for (const [first, second] of pairs) {
+    expect(papercutSignature("tool:preview", first)).toBe(
+      papercutSignature("tool:preview", second),
+    );
+    expect(papercutSignature("tool:preview", first)).not.toMatch(/\d/);
+  }
 });

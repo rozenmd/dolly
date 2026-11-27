@@ -194,7 +194,7 @@ import {
   toolFailure,
   harnessInterruption,
 } from "./papercuts";
-import { toolParameters } from "./tool-schema";
+import { dropUnknownFields, toolParameters } from "./tool-schema";
 import {
   formatPage,
   formatSlice,
@@ -545,20 +545,24 @@ export class Agent extends DurableObject<Env> {
       ),
     );
 
+    const shellParameters = obj({
+      command: str(),
+      timeout: opt(
+        int({
+          minimum: 1,
+          maximum: SHELL_TIMEOUT_MAX_SECONDS,
+          description: `Seconds before the command is stopped (default ${SHELL_TIMEOUT_DEFAULT_SECONDS}, at most ${SHELL_TIMEOUT_MAX_SECONDS}); seconds, not milliseconds`,
+        }),
+      ),
+    });
+
     const shell = {
       name: "shell",
       description:
         "Run a shell command in the active repository's isolated Linux checkout. Commands start in /workspace/repo (or /workspace when no repo is selected), so no cd is needed. Dependency setup runs in the background: use workspace action wait_for_dependencies before builds, tests, starting a dev server, or changing dependency inputs; file reads and ordinary shell commands do not wait. Use workspace checkout to switch repositories in this same conversation; other live checkouts are preserved. Git credentials stay outside the container. Repository sandboxes can reach only package registries, raw.githubusercontent.com, Playwright's browser download CDN and configured network hosts; a sandbox with no repository has no network access. To read a web page, use web_fetch rather than curl. For browser automation or browser tests, use the Chrome DevTools endpoint at http://browser.workspace (Cloudflare Browser Run; /json/version names its WebSocket) instead of installing a browser. Output streams live while a command runs; the result keeps the last 32 KiB of stdout and of stderr. Commands are stopped after 10 minutes unless you pass timeout (seconds, up to 3600): run slow builds and test suites in the foreground with a long enough timeout rather than backgrounding them and polling with sleep. A command stopped at its timeout returns its output so far with timedOut: true and exit code 124. Repository files are snapshotted once after the agent turn answers, not after each command. Changes since the last successful turn-end save can be lost on container shutdown or restart; if that happens, the next repository tool result starts with a WORKSPACE RESTORED notice (workspaceRestored) naming the snapshot, so re-check git status before continuing. Push important work to GitHub for long-term storage.",
-      parameters: obj({
-        command: str(),
-        timeout: opt(
-          int({
-            minimum: 1,
-            maximum: SHELL_TIMEOUT_MAX_SECONDS,
-            description: `Seconds before the command is stopped (default ${SHELL_TIMEOUT_DEFAULT_SECONDS})`,
-          }),
-        ),
-      }),
+      parameters: shellParameters,
+      // A stray extra field (GPT's `"x": 0` or `"}": "x"`) no longer fails a complete command.
+      prepareArguments: dropUnknownFields(shellParameters),
       replay: "unsafe",
       executionMode: "sequential",
       // Live output keeps its newest lines; the result itself fits Pi's limit (serializeShellResult).
@@ -1039,7 +1043,7 @@ export class Agent extends DurableObject<Env> {
       {
         name: "preview",
         description:
-          "Private, opt-in dev-server previews in the active repository's sandbox. Use only when the user asks for a preview, screenshot, or browser verification. start requires command and port (1024–65535); bind the server to 0.0.0.0 and keep it in the foreground. It waits up to 30 seconds and expires after 15 minutes. screenshot captures a relative path (default /), optional width/height (200–2560) and waitFor CSS selector, using Cloudflare Browser Run; no public URL exists. External browser requests are limited to the workspace's configured network hosts. status returns bounded server logs; stop revokes access and stops only the dev server, preserving workspace files. Previews are ephemeral: after sandbox/DO restart start again. Never start a server via shell backgrounding for this workflow.",
+          "Private, opt-in dev-server previews in the active repository's sandbox. Use only when the user asks for a preview, screenshot, or browser verification. start requires command and port (1024–65535); run workspace wait_for_dependencies first, bind the server to 0.0.0.0 on that same port and keep it in the foreground. start waits up to 30 seconds: ready true means the server answered; a slow server is left running with ready false and state starting (not an error), so call status until ready is true, or screenshot, which waits up to 60 more seconds for it. Don't start again while one is running: stop it first. A preview expires 15 minutes after start and ends when the sandbox restarts; screenshot and status then say which happened, so start it again. screenshot captures a relative path (default /), optional width/height (200–2560) and waitFor CSS selector, using Cloudflare Browser Run; no public URL exists. Its errors say whether the page never loaded or loaded without the selector, with the final URL, title and the start of the page text; give waitFor only for an element the page really renders. External browser requests are limited to the workspace's configured network hosts. status returns ready, state, why no preview is running, and bounded server logs; stop revokes access and stops only the dev server, preserving workspace files. Never start a server via shell backgrounding for this workflow.",
         parameters: Schema.toJsonSchemaDocument(PreviewToolInput).schema,
         replay: "unsafe",
         executionMode: "sequential",
