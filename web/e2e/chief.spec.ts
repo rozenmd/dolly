@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { expect, test } from "./browser";
+import type { SavedSession } from "../src/lib/api";
 
 const Rename = Schema.Struct({ name: Schema.String });
 
@@ -17,11 +18,16 @@ const chief = {
 };
 
 let chiefName = "Dolly";
+
+// Sessions a test adds to the list, such as the chief's delegated ones.
+let extra: SavedSession[] = [];
+const shots = process.env.SCREENSHOT_DIR;
 const updates: { id: string; body: unknown }[] = [];
 const renames: unknown[] = [];
 
 test.beforeEach(async ({ page }) => {
   chiefName = "Dolly";
+  extra = [];
   updates.length = 0;
   renames.length = 0;
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -45,6 +51,7 @@ test.beforeEach(async ({ page }) => {
       updatedAt: now,
       archived: false,
     },
+    ...extra,
   ];
 
   await page.route("**/api/**", (route) => {
@@ -161,4 +168,82 @@ test("renames the chief of staff from Settings", async ({ page }) => {
   await page.getByRole("link", { name: "Back to app" }).click();
   const chiefList = page.getByRole("navigation", { name: "Chief of staff", exact: true });
   await expect(chiefList).toContainText("🦊".repeat(40));
+});
+
+test("lists each session the chief spawns as a workspace of its repository, marked as the chief's", async ({
+  page,
+}) => {
+  extra = [
+    {
+      id: "delegated",
+      parentId: "chief",
+      // As an older server described it: in the chief's workspace.
+      workspaceId: "chief",
+      title: "Fix the sidebar grouping",
+      model: "gpt-6-sol",
+      repository: "octocat/dolly",
+      updatedAt: now - 60_000,
+      archived: false,
+      running: true,
+    },
+    {
+      id: "delegated-helper",
+      parentId: "delegated",
+      title: "Read the CI logs",
+      model: "gpt-6-sol",
+      repository: "octocat/dolly",
+      updatedAt: now - 30_000,
+      archived: false,
+    },
+    {
+      id: "nested",
+      parentId: "recent",
+      title: "Child of recent work",
+      model: "gpt-6-sol",
+      repository: "octocat/project",
+      updatedAt: now - 1_000,
+      archived: false,
+    },
+  ];
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+
+  const workspaces = page.getByRole("navigation", { name: "Workspaces", exact: true });
+  await expect(workspaces).toContainText("Recent work");
+
+  if (shots) await page.screenshot({ path: `${shots}/chief-spawned-desktop.png` });
+
+  await expect(workspaces.locator(".workspace-row")).toHaveCount(2);
+
+  const delegated = workspaces
+    .locator(".workspace-row")
+    .filter({ hasText: "Fix the sidebar grouping" });
+
+  // Badged with its own repository, octocat/dolly, not the chief's (none).
+  await expect(delegated.locator(".repo-badge")).toHaveText("D");
+  await expect(delegated.getByRole("img", { name: "Started by Dolly" })).toBeVisible();
+  await expect(delegated.getByLabel("Agent working")).toBeVisible();
+
+  // Other sessions' children, and the delegated session's own, stay with their parent.
+  await expect(workspaces).not.toContainText("Child of recent work");
+  await expect(workspaces).not.toContainText("Read the CI logs");
+  await expect(workspaces.locator(".workspace-from")).toHaveCount(1);
+
+  // It opens as its own workspace, with a breadcrumb back to the chief and no keep-as-tab toggle.
+  await delegated.click();
+  await expect(page.getByRole("heading", { name: "Fix the sidebar grouping" })).toBeVisible();
+  await expect(page).toHaveURL(/\/workspace\/delegated\/session\/delegated$/);
+  await expect(page.getByRole("button", { name: "Dolly", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Keep as workspace tab" })).toHaveCount(0);
+
+  // The phone sidebar lists it too.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/workspace/recent/session/recent");
+  await page.getByRole("button", { name: "Open navigation", exact: true }).click();
+  await expect(workspaces).toContainText("Recent work");
+
+  if (shots) await page.screenshot({ path: `${shots}/chief-spawned-phone.png` });
+
+  await expect(workspaces).toContainText("Fix the sidebar grouping");
 });

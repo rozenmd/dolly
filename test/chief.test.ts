@@ -338,3 +338,44 @@ it("has no coordinator mode, and ignores the flag in older session metadata", as
   expect(bodies[0]).not.toContain("Coordinator mode is on");
   expect(bodies[0]).not.toContain("chief of staff");
 });
+
+it("starts a workspace for each session the chief spawns, unlike other sessions' children", async () => {
+  mockFetch(async () => answer());
+  const [chief] = chiefOf(await list());
+  const work = await createSession();
+
+  const spawn = async (parent: string) => {
+    const response = await SELF.fetch(`https://worker/api/sessions/${parent}/children`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content: "Fix the bug", requestId: crypto.randomUUID() }),
+    });
+
+    expect(response.status).toBe(202);
+
+    return (await response.json<{ id: string }>()).id;
+  };
+
+  const delegated = await spawn(chief!.id);
+  const nested = await spawn(work);
+
+  await expect
+    .poll(async () => {
+      const sessions = await list();
+
+      return [delegated, nested].every((id) => sessions.some((session) => session.id === id));
+    })
+    .toBe(true);
+
+  const sessions = await list();
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+
+  // The chief's child keeps its link to the chief but is a workspace of its own.
+  expect(byId.get(delegated)?.parentId).toBe(chief!.id);
+  expect(byId.get(delegated)?.workspaceId).toBeDefined();
+  expect(byId.get(delegated)?.workspaceId).not.toBe(byId.get(chief!.id)?.workspaceId);
+
+  // A work session's child still joins its parent's workspace.
+  expect(byId.get(nested)?.parentId).toBe(work);
+  expect(byId.get(nested)?.workspaceId).toBe(byId.get(work)?.workspaceId);
+}, 30_000);

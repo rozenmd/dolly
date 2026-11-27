@@ -3766,8 +3766,12 @@ export class Agent extends DurableObject<Env> {
     const chief = await this.ensureChief().catch(() => undefined);
     const chiefTitle = chief && (await this.chiefSettings()).name;
 
-    const listed = await listSessions(this.harness, this.ctx.storage, secrets, (id) =>
-      this.pendingWork(id),
+    const listed = await listSessions(
+      this.harness,
+      this.ctx.storage,
+      secrets,
+      (id) => this.pendingWork(id),
+      chief?.session,
     );
 
     const sessions = listed.map((session) =>

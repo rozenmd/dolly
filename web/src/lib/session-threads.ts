@@ -11,6 +11,8 @@ type Related = {
   parentId?: string;
   kept?: boolean;
   automation?: "review";
+  /** The chief of staff: the sessions it spawns are workspaces of their own (lib/workspaces.ts). */
+  chief?: boolean;
 };
 
 type Thread = Related & {
@@ -32,11 +34,18 @@ export const THREAD_STATE_LABEL: Record<ThreadState, string> = {
 };
 
 /**
- * Spawned sessions are not workspace tabs unless the owner kept one.
- * They are reached from their parent instead.
+ * The sessions the sidebar lists. Spawned sessions are not workspace tabs unless the owner kept
+ * one, or the chief of staff spawned it: that one starts a workspace of its own. The others are
+ * reached from their parent instead.
  */
-export function belongsInSidebar(session: Related) {
-  return !automated(session) && (!session.parentId || Boolean(session.kept));
+export function sidebarSessions<T extends Related>(sessions: readonly T[]): T[] {
+  const chiefs = new Set(sessions.flatMap((session) => (session.chief ? [session.id] : [])));
+
+  return sessions.filter(
+    (session) =>
+      !automated(session) &&
+      (!session.parentId || Boolean(session.kept) || chiefs.has(session.parentId)),
+  );
 }
 
 /**
@@ -49,7 +58,10 @@ export function automated(session: Pick<Related, "automation">) {
   return session.automation !== undefined;
 }
 
-/** The highest known ancestor of `id`, following parent edges; `id` itself for a root. */
+/**
+ * The highest known ancestor of `id`, following parent edges; `id` itself for a root. A session
+ * the chief of staff spawned is a root, like its workspace (lib/workspaces.ts).
+ */
 export function rootSession(sessions: readonly Related[], id: string) {
   const byId = new Map(sessions.map((session) => [session.id, session]));
   const seen = new Set([id]);
@@ -58,7 +70,7 @@ export function rootSession(sessions: readonly Related[], id: string) {
   while (root?.parentId && !seen.has(root.parentId)) {
     const parent = byId.get(root.parentId);
 
-    if (!parent) break;
+    if (!parent || parent.chief) break;
     seen.add(parent.id);
     root = parent;
   }

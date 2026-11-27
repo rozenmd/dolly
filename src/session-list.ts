@@ -197,6 +197,8 @@ export async function listSessions(
   secrets: readonly string[],
   /** What may wake a session by itself (agent.ts pendingWork), for its status's `waitingOn`. */
   pending: (conversationId: ConversationId) => Promise<PendingWork>,
+  /** The chief of staff's session id: the sessions it spawns start workspaces of their own. */
+  chief?: string,
 ): Promise<SavedSession[]> {
   const aliases = new Map<ConversationId, string>();
   let start: string | undefined;
@@ -337,23 +339,24 @@ export async function listSessions(
     cursor = page.next;
   } while (cursor);
 
-  return withWorkspaces(sessions).sort(
+  return withWorkspaces(sessions, chief).sort(
     (a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id),
   );
 }
 
 /**
  * Every session's workspace: spawned sessions join their root's, and a root recorded before
- * workspaces existed is a workspace of its own, keyed by its session ID.
+ * workspaces existed is a workspace of its own, keyed by its session ID. The chief of staff has
+ * no repository to work in, so a session it spawns is a root: it starts its own workspace.
  */
-export function withWorkspaces(sessions: readonly SavedSession[]): SavedSession[] {
+export function withWorkspaces(sessions: readonly SavedSession[], chief?: string): SavedSession[] {
   const byId = new Map(sessions.map((session) => [session.id, session]));
 
   return sessions.map((session) => {
     let root = session;
     const seen = new Set([session.id]);
 
-    while (root.parentId && !seen.has(root.parentId)) {
+    while (root.parentId && root.parentId !== chief && !seen.has(root.parentId)) {
       const parent = byId.get(root.parentId);
 
       if (!parent) break;
