@@ -6,14 +6,19 @@
  * A port of Open Session's anthropic-bridge.ts (MIT, see third_party/opensession/LICENSE), which
  * reimplements the mapping pioneered by Pi-with-claude and @rynfar/meridian:
  *
- *  - The client's tools are registered as an in-process SDK MCP server with no-op handlers, so the
- *    model emits real tool_use blocks for them.
- *  - A PreToolUse hook blocks every tool call, captures it and ends the turn there, so a tool step
- *    is one model call. The captured calls return to the client as Anthropic `tool_use` blocks
- *    with stop_reason "tool_use": the client (Dolly) runs the tool itself.
+ *  - The client's tools are registered as an in-process SDK MCP server, so the model emits real
+ *    tool_use blocks for them. Their handlers don't run anything: each waits for the client's
+ *    result. Once a model call's tool calls are all waiting, they return to the client as Anthropic
+ *    `tool_use` blocks with stop_reason "tool_use", and the client (Dolly) runs the tools itself.
+ *  - The client's next request carries the results. They go to the waiting handlers, so Claude Code
+ *    hands them to the model as the tool_result of each call and its turn carries on: the model
+ *    works through many tool rounds in one turn, with nothing telling it to stop, as it would with
+ *    the API directly. Only the model's final answer (no tool calls) ends the Claude Code turn.
  *  - Each client session maps to one SDK session, keyed by the `x-dolly-session` header (else a
  *    fingerprint of the first message). A follow-up request resumes that session with only the new
- *    tail; a diverged or compacted history starts a fresh session with a full flat-text replay.
+ *    tail; a diverged or compacted history starts a fresh session with a full flat-text replay. A
+ *    process lost mid-turn (or a turn the client abandoned) resumes at the last finished turn and
+ *    replays the rounds since as text.
  *  - Only the current user turn's images reach the SDK, as structured content.
  *  - A session's Claude Code process stays running between its requests (streaming input), so a
  *    follow-up skips the CLI's start-up, which takes seconds on a container's CPU. A request that
@@ -35,6 +40,7 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 import {
   MessagesRequest,
   flattenMessageText,
@@ -45,6 +51,7 @@ import {
   ToolArguments,
   type JsonObject,
   type Message,
+  type ToolResultBlock,
 } from "./messages.ts";
 import { toolInputSchema } from "./tool-schema.ts";
 import { isAccountNotice, isLimitErrorKind, limitErrorMessage } from "./limits.ts";
@@ -96,9 +103,31 @@ const LIVE_IDLE_MS = 10 * 60_000;
 /** Far above any real window: the CLI never refuses a request on its own token estimate. */
 const CLI_BLOCKING_LIMIT_OFF = 1_000_000_000;
 
-const BLOCK_REASON =
-  "This tool call was forwarded to the client for execution; its result arrives in a future turn. " +
-  "Do not retry it, do not call more tools, do not add text — end your turn now.";
+/**
+ * How long a process waits for the client's tool results before it is closed: past Dolly's longest
+ * tool call (an hour-long shell command). A later request then resumes on a new process.
+ */
+const TOOL_WAIT_MS = 70 * 60_000;
+
+/**
+ * Backstop for a round Claude Code holds part of back (a concurrency cap): once the model call is
+ * done and nothing more starts for this long, the calls that did start go to the client, and the
+ * rest follow as their own round.
+ */
+const ROUND_SETTLE_MS = 2_000;
+
+/** How long closing a process mid-tool-loop waits for its turn to be interrupted. */
+const INTERRUPT_WAIT_MS = 2_000;
+
+/** Model calls in one Claude Code turn: a whole tool loop is one turn, so far above any real one. */
+const MAX_TURNS = 10_000;
+
+/** Concurrent tool calls Claude Code starts at once: every call of a round must start to be handed over. */
+const TOOL_CONCURRENCY = 64;
+
+/** Why a call never got a result: the client sent none, or the bridge lost the call. */
+const NO_RESULT = "No result came back for this tool call.";
+const UNMATCHED_CALL = "The bridge could not match this tool call to its result.";
 
 /**
  * Env that keeps the Claude Code CLI a plain transport. The client owns the conversation and its
@@ -115,6 +144,11 @@ export function cliPassthroughEnv(contextWindow: number, maxTokens: number) {
   if (contextWindow > 0) env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(contextWindow);
 
   if (maxTokens > 0) env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(Math.floor(maxTokens));
+
+  // A tool call waits on the client for as long as its tool runs: never move it to the background,
+  // and start every call of a round at once so they all reach the client together.
+  env.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS = "0";
+  env.CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY = String(TOOL_CONCURRENCY);
 
   return env;
 }
@@ -137,12 +171,24 @@ type StoredSession = {
   messageCount: number;
   /** historyDigest of the client messages it was sent, all but that reply. */
   sentDigest: string;
-  /**
-   * The last transcript entry of the turn the client received. A resume stops there, dropping a
-   * turn that died or was abandoned after it, so its prompt and partial answer are never doubled.
-   */
-  resumeAt: string | undefined;
+  /** That reply made tool calls: the SDK session's turn waits on their results. */
+  awaiting: boolean;
+  /** Where a new process picks the session up; none means it starts afresh with a full replay. */
+  anchor: Anchor | undefined;
   lastUsedAt: number;
+};
+
+/**
+ * The last Claude Code turn that finished (the model answered without tool calls) and the client
+ * received. A new process resumes there and is sent the client's messages from `from` on as text,
+ * so a turn that died, was abandoned or was lost mid-tool-loop is replayed once, never doubled.
+ */
+type Anchor = {
+  sdkSessionId: string;
+  /** The turn's last transcript entry. */
+  at: string | undefined;
+  /** How many client messages that turn covers, its reply included. */
+  from: number;
 };
 
 /**
@@ -201,7 +247,10 @@ function thinkingOptions(body: MessagesRequest) {
   return options;
 }
 
-function usageFrom(usage: Partial<Usage> | undefined): Usage {
+/** Usage as the SDK or a stream event reports it, where a missing count may also be null. */
+type ReportedUsage = { [Count in keyof Usage]?: number | null };
+
+function usageFrom(usage: ReportedUsage | undefined): Usage {
   return {
     input_tokens: usage?.input_tokens ?? 0,
     output_tokens: usage?.output_tokens ?? 0,
@@ -288,17 +337,85 @@ function messageEvents(message: BridgeMessage) {
 
 type Captured = { id: string; name: string; input: JsonObject };
 
-/** What one request's turn collects from Claude Code. */
+/** What one request collects from Claude Code: one tool round, or the turn's final answer. */
 type Turn = {
-  captured: Captured[];
   content: OutputBlock[];
   limitError: string | undefined;
-  /** The turn's latest transcript entry. */
-  lastEntry: string | undefined;
+  /** The latest model call's usage, as Anthropic would report it for that one request. */
+  usage: Usage | undefined;
 };
+
+/** A tool call's result as Claude Code hands it to the model. */
+type ToolOutcome = {
+  content: Array<
+    { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
+  >;
+  isError?: boolean;
+};
+
+/** The latest model call's tool calls, and how far each has got. */
+type Round = {
+  /** Its tool_use blocks, in order. */
+  calls: Captured[];
+  /** The model call has finished, stopping for tool use. */
+  complete: boolean;
+  /** The stop reason its stream reported. */
+  stopReason: string | undefined;
+  /** Calls Claude Code answered itself (an input it refused, an unknown tool). */
+  answered: Set<string>;
+  /** Calls already handed to the client. */
+  handed: Set<string>;
+  /** The settle backstop ran out: hand over whatever has started. */
+  settled: boolean;
+};
+
+const newRound = (): Round => ({
+  calls: [],
+  complete: false,
+  stopReason: undefined,
+  answered: new Set(),
+  handed: new Set(),
+  settled: false,
+});
+
+/**
+ * How one request is answered: on which process, by sending what, and whether that process holds
+ * the session's anchor (it continues or resumes the SDK session) rather than a fresh replay.
+ */
+type Attempt = { live: Live; send: () => void; resumed: boolean };
 
 /** Where a new process picks up a session: the SDK session and the entry to resume at. */
 type Resume = { sdkSessionId: string; at: string | undefined };
+
+/** The SDK's tool-call context: Claude Code names the tool_use a call answers in `_meta`. */
+const ToolCallContext = z.object({
+  _meta: z.object({ "claudecode/toolUseId": z.string().min(1) }),
+});
+
+/** The client's tool result as the content Claude Code hands the model. */
+function toolOutcome(block: ToolResultBlock): ToolOutcome {
+  const content: ToolOutcome["content"] = [];
+
+  if (!Array.isArray(block.content)) {
+    if (block.content) content.push({ type: "text", text: block.content });
+  } else
+    for (const inner of block.content) {
+      if (inner.type === "text") content.push({ type: "text", text: inner.text });
+      else if (inner.source.type === "base64")
+        content.push({ type: "image", data: inner.source.data, mimeType: inner.source.media_type });
+      else content.push({ type: "text", text: `[image: ${inner.source.url}]` });
+    }
+
+  // An empty result still answers the call.
+  if (content.length === 0) content.push({ type: "text", text: "(no output)" });
+
+  return { content, isError: block.is_error === true };
+}
+
+const failedCall = (text: string): ToolOutcome => ({
+  content: [{ type: "text", text }],
+  isError: true,
+});
 
 /** A queue of user messages Claude Code reads as its streaming input, open until ended. */
 function inbox() {
@@ -346,6 +463,17 @@ type Live = {
   input: ReturnType<typeof inbox>;
   /** The turn being answered; undefined while the process waits for the next request. */
   turn: Turn | undefined;
+  /** Tool calls Claude Code has started, each waiting for the client's result. */
+  calls: Map<string, (outcome: ToolOutcome) => void>;
+  /** Each call's input as the PreToolUse hook saw it. */
+  inputs: Map<string, JsonObject>;
+  round: Round;
+  /** Wakes a request waiting for the round to be ready when a call starts. */
+  wake: (() => void) | undefined;
+  /** The SDK message being read, kept across requests: a round can end while one is pending. */
+  next: Promise<IteratorResult<SDKMessage, void>> | undefined;
+  /** The latest transcript entry. */
+  lastEntry: string | undefined;
   closed: boolean;
   idle: ReturnType<typeof setTimeout> | undefined;
   lastUsedAt: number;
@@ -402,25 +530,36 @@ export function createBridge(options: BridgeOptions) {
     const { env, config } = processOptions(request, body);
     const input = inbox();
 
+    // Records each client tool's input as Claude Code will run it. Anything else is refused: only
+    // the client's tools exist (an empty `tools` list is the primary switch).
     const capture: HookCallback = async (hook) => {
-      if (hook.hook_event_name === "PreToolUse") {
-        const name = hook.tool_name.startsWith(PASSTHROUGH_PREFIX)
-          ? hook.tool_name.slice(PASSTHROUGH_PREFIX.length)
-          : hook.tool_name;
+      if (hook.hook_event_name !== "PreToolUse") return {};
 
-        const args = ToolArguments.safeParse(hook.tool_input);
+      if (!hook.tool_name.startsWith(PASSTHROUGH_PREFIX))
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: `${hook.tool_name} is not available here.`,
+          },
+        };
 
-        live.turn?.captured.push({
-          id: hook.tool_use_id,
-          name,
-          input: args.success ? args.data : {},
-        });
-      }
+      const args = ToolArguments.safeParse(hook.tool_input);
 
-      // Block the call and end the turn there: without `continue: false` Claude Code sends the
-      // blocked result back for a second model call, seconds and tokens that only produce
-      // narration about the block. Every call of the message is captured before the turn ends.
-      return { continue: false, stopReason: BLOCK_REASON, decision: "block", reason: BLOCK_REASON };
+      if (args.success) live.inputs.set(hook.tool_use_id, args.data);
+
+      return {};
+    };
+
+    // The client runs every tool: a call waits here until its result arrives with the client's
+    // next request, and Claude Code hands that to the model as the call's own tool_result.
+    const waitForClient = (id: string | undefined) => {
+      if (id === undefined || live.closed) return Promise.resolve(failedCall(UNMATCHED_CALL));
+
+      return new Promise<ToolOutcome>((resolve) => {
+        live.calls.set(id, resolve);
+        live.wake?.();
+      });
     };
 
     const passthrough = body.tools.map((definition) =>
@@ -428,7 +567,11 @@ export function createBridge(options: BridgeOptions) {
         definition.name,
         definition.description || definition.name,
         toolInputSchema(definition.input_schema),
-        async () => ({ content: [{ type: "text", text: "forwarded to client" }] }),
+        async (_args, extra) =>
+          waitForClient(ToolCallContext.safeParse(extra).data?._meta["claudecode/toolUseId"]),
+        // Read-only to Claude Code means safe to run concurrently: a round's calls all start, and
+        // wait, together. What a tool may really do is the client's business.
+        { annotations: { readOnlyHint: true } },
       ),
     );
 
@@ -446,6 +589,12 @@ export function createBridge(options: BridgeOptions) {
       sdkSessionId: resume?.sdkSessionId,
       input,
       turn: undefined,
+      calls: new Map(),
+      inputs: new Map(),
+      round: newRound(),
+      wake: undefined,
+      next: undefined,
+      lastEntry: resume?.at,
       closed: false,
       idle: undefined,
       lastUsedAt: Date.now(),
@@ -456,9 +605,10 @@ export function createBridge(options: BridgeOptions) {
           model: body.model || undefined,
           resume: resume?.sdkSessionId,
           resumeSessionAt: resume?.at,
-          // Turn 1 is the answer: the hook ends the turn at a tool call. The cap is a backstop
-          // for a model that keeps going; error_max_turns with captured calls returns them.
-          maxTurns: 2,
+          // A whole tool loop is one Claude Code turn: one model call per round.
+          maxTurns: MAX_TURNS,
+          // Stream events say when a model call has finished, so its tool calls are all known.
+          includePartialMessages: true,
           ...thinkingOptions(body),
           systemPrompt: systemText(body.system) || " ",
           settingSources: [],
@@ -480,11 +630,30 @@ export function createBridge(options: BridgeOptions) {
     if (live.closed) return;
     live.closed = true;
     clearTimeout(live.idle);
-    live.input.end();
-    // Not awaited: the reply never waits on the process exiting.
-    live.conversation.close();
 
     if (lives.get(live.key) === live) lives.delete(live.key);
+
+    const exit = () => {
+      live.input.end();
+      live.conversation.close();
+    };
+
+    // Not awaited: the reply never waits on the process exiting.
+    if (live.calls.size === 0) {
+      exit();
+
+      return;
+    }
+
+    // Mid-tool-loop, Claude Code would answer the waiting calls as interrupted and make one more
+    // model call before it exits: interrupt the turn first so it doesn't.
+    live.calls.clear();
+    // A process that already died never answers the interrupt.
+    const gone = new Promise((resolve) => setTimeout(resolve, INTERRUPT_WAIT_MS).unref());
+
+    void Promise.race([live.conversation.interrupt(), gone])
+      .catch(() => undefined)
+      .finally(exit);
   }
 
   /** Keep a process that just answered for its session's next request, retiring the one it replaces. */
@@ -503,28 +672,47 @@ export function createBridge(options: BridgeOptions) {
     }
 
     live.lastUsedAt = Date.now();
-    live.idle = setTimeout(() => close(live), LIVE_IDLE_MS);
+    live.idle = setTimeout(() => close(live), live.calls.size > 0 ? TOOL_WAIT_MS : LIVE_IDLE_MS);
     live.idle.unref();
     lives.set(live.key, live);
 
     if (lives.size <= MAX_LIVE) return;
     const waiting = [...lives.values()].filter((entry) => !entry.turn);
 
-    waiting.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+    // A process mid-tool-loop goes last: losing it means replaying the loop's rounds as text.
+    waiting.sort(
+      (a, b) => Number(a.calls.size > 0) - Number(b.calls.size > 0) || a.lastUsedAt - b.lastUsedAt,
+    );
 
     for (const stale of waiting.slice(0, lives.size - MAX_LIVE)) close(stale);
   }
 
   /**
-   * Fold one SDK message into the turn. Returns the usage once the turn's successful result
-   * arrives, throws for a failed one, and returns undefined for everything before it.
+   * Fold one SDK message into the turn and the process's round. Returns the usage once the turn's
+   * successful result arrives, throws for a failed one, and returns undefined for everything else.
    */
   function absorb(live: Live, turn: Turn, message: SDKMessage) {
     if (message.type === "system" && message.subtype === "init")
       live.sdkSessionId = message.session_id;
 
     if ((message.type === "assistant" || message.type === "user") && message.uuid)
-      turn.lastEntry = message.uuid;
+      live.lastEntry = message.uuid;
+
+    if (message.type === "stream_event" && message.parent_tool_use_id === null) {
+      const event = message.event;
+
+      // A new model call: the round before it is over, every call answered.
+      if (event.type === "message_start") {
+        live.round = newRound();
+        turn.usage = usageFrom(event.message.usage);
+      } else if (event.type === "message_delta") {
+        live.round.stopReason = event.delta.stop_reason ?? undefined;
+
+        if (turn.usage) turn.usage.output_tokens = event.usage.output_tokens ?? 0;
+      } else if (event.type === "message_stop") {
+        live.round.complete = live.round.stopReason === "tool_use";
+      }
+    }
 
     if (message.type === "assistant") {
       const text = message.message.content
@@ -535,12 +723,34 @@ export function createBridge(options: BridgeOptions) {
       if (isLimitErrorKind(message.error) && !turn.limitError && message.error)
         turn.limitError = limitErrorMessage(message.error, text);
 
-      // Text only: tool_use blocks come from the captured calls (after the hook, so a blocked and
-      // retried call is never doubled), and thinking can't round-trip without its signature.
-      for (const block of message.message.content)
+      // Thinking can't round-trip without its signature, so only text and tool calls go back.
+      for (const block of message.message.content) {
         if (block.type === "text" && block.text)
           turn.content.push({ type: "text", text: block.text });
+
+        if (block.type === "tool_use") {
+          const input = ToolArguments.safeParse(block.input);
+
+          live.round.calls.push({
+            id: block.id,
+            name: block.name.startsWith(PASSTHROUGH_PREFIX)
+              ? block.name.slice(PASSTHROUGH_PREFIX.length)
+              : block.name,
+            input: input.success ? input.data : {},
+          });
+        }
+      }
     }
+
+    // A result for a call that never reached the client: Claude Code answered it itself.
+    if (message.type === "user" && Array.isArray(message.message.content))
+      for (const block of message.message.content)
+        if (
+          block.type === "tool_result" &&
+          !live.calls.has(block.tool_use_id) &&
+          !live.round.handed.has(block.tool_use_id)
+        )
+          live.round.answered.add(block.tool_use_id);
 
     if (message.type !== "result") return undefined;
     live.sdkSessionId = message.session_id || live.sdkSessionId;
@@ -548,11 +758,7 @@ export function createBridge(options: BridgeOptions) {
     // A limit tag on a message outranks the result's own wording.
     if (turn.limitError) throw new Error(turn.limitError);
 
-    // error_max_turns with captured calls is a success here: models that answer a blocked call
-    // by trying the next tool blow the turn cap; the captured calls are the point.
-    const maxTurnsWithCaptures = message.subtype === "error_max_turns" && turn.captured.length > 0;
-
-    if ((message.is_error || message.subtype !== "success") && !maxTurnsWithCaptures) {
+    if (message.is_error || message.subtype !== "success") {
       // Surface SDK and API failures as errors, not assistant text: the CLI narrates errors
       // ("API Error: 400 …") as a message that would otherwise read as a model reply.
       const detail =
@@ -568,39 +774,117 @@ export function createBridge(options: BridgeOptions) {
     // notice; treat that as the failure it is.
     const notice = (message.subtype === "success" && message.result) || textOf(turn.content);
 
-    if (turn.captured.length === 0 && isAccountNotice(notice)) throw new Error(notice);
+    if (isAccountNotice(notice)) throw new Error(notice);
 
-    return usageFrom(message.usage);
+    return turn.usage ?? usageFrom(message.usage);
   }
 
   /**
-   * One request's turn on a process: send the user message and read until its result. Resolves
-   * to the reason when the process ends first (it exited, or the client went away).
+   * The round's calls to hand to the client, once they can go: the model call is done and every
+   * call has started (or been answered by Claude Code), or the settle backstop ran out. Undefined
+   * while the round isn't ready or has nothing new for the client.
    */
-  async function ask(live: Live, message: SDKUserMessage, cancel: AbortController) {
-    const turn: Turn = { captured: [], content: [], limitError: undefined, lastEntry: undefined };
+  function handover(live: Live) {
+    const round = live.round;
+
+    if (!round.complete) return undefined;
+
+    const fresh = round.calls.filter(
+      (call) => live.calls.has(call.id) && !round.handed.has(call.id),
+    );
+
+    if (fresh.length === 0) return undefined;
+
+    const started = round.calls.every(
+      (call) => live.calls.has(call.id) || round.answered.has(call.id) || round.handed.has(call.id),
+    );
+
+    if (!started && !round.settled) return undefined;
+
+    for (const call of fresh) round.handed.add(call.id);
+
+    // The input Claude Code runs the call with, else the model's own.
+    return fresh.map((call) => ({ ...call, input: live.inputs.get(call.id) ?? call.input }));
+  }
+
+  /** Whether the round is waiting only on calls Claude Code hasn't started: time for the backstop. */
+  function stalled(live: Live) {
+    const round = live.round;
+
+    return (
+      round.complete &&
+      !round.settled &&
+      round.calls.some((call) => live.calls.has(call.id) && !round.handed.has(call.id))
+    );
+  }
+
+  /**
+   * One request on a process: send what it carries (a user message, or the results of the tool
+   * calls the process is waiting on) and read until the next round of tool calls is ready or the
+   * turn's result arrives. Resolves to the reason when the process ends first (it exited, or the
+   * client went away).
+   */
+  async function ask(live: Live, send: () => void, cancel: AbortController) {
+    const turn: Turn = { content: [], limitError: undefined, usage: undefined };
     const stop = () => close(live);
 
     if (cancel.signal.aborted) return { ended: "request canceled" };
     clearTimeout(live.idle);
     live.turn = turn;
     cancel.signal.addEventListener("abort", stop, { once: true });
-    live.input.push(message);
+    send();
 
     try {
       while (true) {
-        let next: IteratorResult<SDKMessage, void>;
+        // Armed before the check: a call that starts after it still wakes this wait.
+        const started = new Promise<"started">((resolve) => {
+          live.wake = () => resolve("started");
+        });
+
+        const calls = handover(live);
+
+        if (calls) return { turn, calls, usage: turn.usage ?? usageFrom(undefined) };
+
+        if (live.closed) return { ended: "request canceled" };
+        live.next ??= live.conversation.next();
+        let settle: ReturnType<typeof setTimeout> | undefined;
+
+        const waits: Array<Promise<IteratorResult<SDKMessage, void> | "started" | "settled">> = [
+          live.next,
+          started,
+        ];
+
+        if (stalled(live))
+          waits.push(
+            new Promise((resolve) => {
+              settle = setTimeout(() => resolve("settled"), ROUND_SETTLE_MS);
+            }),
+          );
+
+        let next: IteratorResult<SDKMessage, void> | "started" | "settled";
 
         try {
-          next = await live.conversation.next();
+          next = await Promise.race(waits);
         } catch (cause) {
           return { ended: cause instanceof Error ? cause.message : String(cause) };
+        } finally {
+          clearTimeout(settle);
+          live.wake = undefined;
         }
+
+        if (next === "started") continue;
+
+        if (next === "settled") {
+          live.round.settled = true;
+          continue;
+        }
+
+        live.next = undefined;
 
         if (next.done) return { ended: "Claude Code exited before answering" };
         const usage = absorb(live, turn, next.value);
 
-        if (usage) return { turn, usage };
+        if (usage) return { turn, calls: [], usage };
       }
     } finally {
       cancel.signal.removeEventListener("abort", stop);
@@ -608,9 +892,59 @@ export function createBridge(options: BridgeOptions) {
     }
   }
 
+  /** The tool calls the process waits on, answered from the client's tail, when they all match. */
+  function deliverable(live: Live, tail: readonly Message[]) {
+    const results = new Map<string, ToolResultBlock>();
+    const rest: Message[] = [];
+
+    for (const message of tail) {
+      if (message.role !== "user") return undefined;
+
+      if (!Array.isArray(message.content)) {
+        rest.push(message);
+        continue;
+      }
+
+      const other = message.content.filter((block) => block.type !== "tool_result");
+
+      for (const block of message.content)
+        if (block.type === "tool_result") results.set(block.tool_use_id, block);
+
+      if (other.length > 0) rest.push({ role: "user", content: other });
+    }
+
+    // Results for these very calls, or the tail is something else (a new prompt after a stop).
+    if (![...live.round.handed].some((id) => results.has(id) && live.calls.has(id)))
+      return undefined;
+
+    const extra = rest.length > 0 ? sdkTurn(rest) : undefined;
+
+    const message =
+      extra && (extra.current.trim() || extra.images.length > 0)
+        ? userMessage(sdkTurnContent(extra) ?? sdkTurnText(extra))
+        : undefined;
+
+    return () => {
+      // Anything sent beside the results (a steering message) joins the turn after them.
+      if (message) live.input.push(message);
+
+      for (const id of live.round.handed) {
+        const resolve = live.calls.get(id);
+
+        if (!resolve) continue;
+        live.calls.delete(id);
+        live.inputs.delete(id);
+        const result = results.get(id);
+
+        resolve(result ? toolOutcome(result) : failedCall(NO_RESULT));
+      }
+    };
+  }
+
   async function run(request: Request, body: MessagesRequest, cancel: AbortController) {
     const key = sessionKey(request, body.messages);
     const stored = sessions.get(key);
+    const config = processOptions(request, body).config;
 
     // Continuation: the client's history grew past what the SDK session has seen, and starts with
     // exactly what it was sent. Anything else (first request, edited or compacted history, another
@@ -620,65 +954,97 @@ export function createBridge(options: BridgeOptions) {
       body.messages.length > stored.messageCount &&
       historyDigest(body.messages.slice(0, stored.messageCount - 1)) === stored.sentDigest;
 
-    const prompt = sdkTurn(body.messages, continuation ? stored.messageCount : 0);
-    const message = userMessage(sdkTurnContent(prompt) ?? sdkTurnText(prompt));
-
-    // A continuation goes to the session's waiting process when it was started the same way and
-    // holds the same SDK session; else a new process resumes the session (or starts afresh).
+    // The session's waiting process takes a continuation when it was started the same way and
+    // holds the same SDK session: the tool results it waits on, or the next user message.
     const waiting = lives.get(key);
 
-    const reusable =
+    const sameProcess =
       continuation &&
       waiting !== undefined &&
       !waiting.turn &&
       !waiting.closed &&
       waiting.sdkSessionId === stored.sdkSessionId &&
-      waiting.config === processOptions(request, body).config;
+      waiting.config === config;
 
-    const resume = continuation
-      ? { sdkSessionId: stored.sdkSessionId, at: stored.resumeAt }
-      : undefined;
+    const tail = continuation ? body.messages.slice(stored.messageCount) : [];
+    const deliver = sameProcess && stored.awaiting ? deliverable(waiting, tail) : undefined;
+    const pushable = sameProcess && !stored.awaiting && waiting.calls.size === 0;
 
-    let live = reusable ? waiting : start(key, request, body, resume);
+    /** What a new process is sent, and where it resumes: the anchor, else a fresh full replay. */
+    function restart() {
+      const anchor = continuation && stored ? stored.anchor : undefined;
+      const prompt = sdkTurn(body.messages, anchor?.from ?? 0);
+      const message = userMessage(sdkTurnContent(prompt) ?? sdkTurnText(prompt));
+      const resume = anchor ? { sdkSessionId: anchor.sdkSessionId, at: anchor.at } : undefined;
 
-    let answer = await ask(live, message, cancel).catch((cause: Error) => {
-      close(live);
+      // Never two processes on one session: a waiting one (mid-tool-loop or not) goes first.
+      if (waiting && !waiting.turn) close(waiting);
+      const live = start(key, request, body, resume);
+
+      return { live, send: () => live.input.push(message), resumed: anchor !== undefined };
+    }
+
+    let attempt: Attempt;
+
+    if (deliver) attempt = { live: waiting!, send: deliver, resumed: true };
+    else if (pushable) {
+      const prompt = sdkTurn(body.messages, stored.messageCount);
+      const message = userMessage(sdkTurnContent(prompt) ?? sdkTurnText(prompt));
+
+      attempt = { live: waiting!, send: () => waiting!.input.push(message), resumed: true };
+    } else attempt = restart();
+
+    let answer = await ask(attempt.live, attempt.send, cancel).catch((cause: Error) => {
+      close(attempt.live);
       throw cause;
     });
 
     // A waiting process can have exited, idle or mid-turn: answer on a fresh one resuming the
-    // session at the last turn the client received, so the lost turn is dropped, not doubled.
-    if ("ended" in answer && reusable && !cancel.signal.aborted) {
-      close(live);
-      live = start(key, request, body, resume);
-      answer = await ask(live, message, cancel).catch((cause: Error) => {
-        close(live);
+    // session at the last turn the client received, so the lost turn is replayed, not doubled.
+    if ("ended" in answer && (deliver || pushable) && !cancel.signal.aborted) {
+      close(attempt.live);
+      attempt = restart();
+      answer = await ask(attempt.live, attempt.send, cancel).catch((cause: Error) => {
+        close(attempt.live);
         throw cause;
       });
     }
+
+    const live = attempt.live;
 
     if ("ended" in answer) {
       close(live);
       throw new Error(answer.ended);
     }
 
-    const { turn, usage } = answer;
+    const { turn, calls, usage } = answer;
 
     keep(live);
 
-    if (live.sdkSessionId)
+    if (live.sdkSessionId) {
+      // A finished turn is the new anchor. Mid-loop the anchor stays the last finished turn of this
+      // SDK session, if the process resumed one; a loop from a fresh replay has none to go back to.
+      const previous = attempt.resumed && stored ? stored.anchor : undefined;
+
+      const anchor: Anchor | undefined =
+        calls.length === 0
+          ? { sdkSessionId: live.sdkSessionId, at: live.lastEntry, from: body.messages.length + 1 }
+          : previous;
+
       // +1: the assistant message returned now is in the client's history on its next request.
       remember(key, {
         sdkSessionId: live.sdkSessionId,
         messageCount: body.messages.length + 1,
         sentDigest: historyDigest(body.messages),
-        resumeAt: turn.lastEntry,
+        awaiting: calls.length > 0,
+        anchor,
         lastUsedAt: Date.now(),
       });
+    }
 
     const content = [...turn.content];
 
-    for (const call of turn.captured) content.push({ type: "tool_use", ...call });
+    for (const call of calls) content.push({ type: "tool_use", ...call });
 
     const reply: BridgeMessage = {
       id: `msg_bridge_${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`,
@@ -686,7 +1052,7 @@ export function createBridge(options: BridgeOptions) {
       role: "assistant",
       model: body.model,
       content,
-      stop_reason: turn.captured.length > 0 ? "tool_use" : "end_turn",
+      stop_reason: calls.length > 0 ? "tool_use" : "end_turn",
       stop_sequence: null,
       usage,
     };
