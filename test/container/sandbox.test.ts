@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env, exports as entrypoints } from "cloudflare:workers";
 import { expect, it } from "vite-plus/test";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { Files } from "@cloudflare/sandbox";
@@ -8,6 +8,8 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type { Env as WorkerEnv } from "../../src/env";
 import { workspaceConfig } from "../../src/workspace";
+import type { PreviewOutbound } from "../../src/preview";
+import type { SandboxOutbound } from "../../src/browser-workspace";
 
 declare global {
   namespace Cloudflare {
@@ -211,6 +213,91 @@ it("privately previews without an image-provided runtime directory and preserves
     expect((await sandbox.previewFetch(new Request("http://private.test/"), token)).status).toBe(
       404,
     );
+  } finally {
+    await sandbox.previewStop();
+    await sandbox.restart();
+  }
+});
+
+/** A dependency-free WebSocket server: greets each upgrade with its path and cookie. */
+const WEBSOCKET_SERVER = `node -e '
+const http = require("http"), crypto = require("crypto");
+const server = http.createServer((req, res) => res.end("http:" + req.url));
+server.on("upgrade", (req, socket) => {
+  const accept = crypto.createHash("sha1").update(req.headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+  socket.write("HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: " + accept + "\\r\\n\\r\\n");
+  const text = Buffer.from("ws:" + req.url + " cookie:" + (req.headers.cookie || "none"));
+  socket.write(Buffer.concat([Buffer.from([0x81, text.length]), text]));
+});
+server.listen(3000, "0.0.0.0");
+'`;
+
+async function firstMessage(response: Response) {
+  const socket = response.webSocket;
+
+  if (!socket) throw new Error(`Expected a WebSocket, got HTTP ${response.status}`);
+
+  const message = new Promise<string>((resolve, reject) => {
+    socket.addEventListener("message", (event) => resolve(String(event.data)));
+    socket.addEventListener("close", () => reject(new Error("closed before a message")));
+  });
+
+  socket.accept();
+
+  try {
+    return await message;
+  } finally {
+    socket.close();
+  }
+}
+
+it("carries a page's WebSocket upgrades to the dev server with the preview's access checks", async () => {
+  const name = crypto.randomUUID();
+  const sandbox = env.SANDBOX.getByName(name);
+
+  // SAFETY: src/index.ts exports both outbound entrypoints.
+  const loopback = entrypoints as Cloudflare.Exports & {
+    PreviewOutbound: LoopbackForExport<typeof PreviewOutbound>;
+    SandboxOutbound: LoopbackForExport<typeof SandboxOutbound>;
+  };
+
+  const upgrade = (url: string) =>
+    new Request(url, { headers: { Upgrade: "websocket", Cookie: "app-session" } });
+
+  try {
+    await sandbox.previewStart(WEBSOCKET_SERVER, 3000);
+    const { token } = await sandbox.previewCapability();
+    const hostname = "preview-websocket.test";
+
+    const outbound = (token: string) =>
+      loopback.PreviewOutbound({ props: { sandboxId: name, token, hostname } });
+
+    const live = await outbound(token).fetch(upgrade(`http://${hostname}/api/events?x=1`));
+    expect(live.status).toBe(101);
+    // A real upgrade reached the server, without the application's cookie.
+    expect(await firstMessage(live)).toBe("ws:/api/events?x=1 cookie:none");
+    // Browsers may name the ws: scheme for an upgrade.
+    expect(await firstMessage(await outbound(token).fetch(upgrade(`ws://${hostname}/ws`)))).toBe(
+      "ws:/ws cookie:none",
+    );
+    expect(await (await outbound(token).fetch(`http://${hostname}/page`)).text()).toBe(
+      "http:/page",
+    );
+    // The same checks as HTTP: a wrong token or host gets nothing.
+    expect((await outbound("forged").fetch(upgrade(`http://${hostname}/ws`))).status).toBe(404);
+    expect((await outbound(token).fetch(upgrade("http://other.test/ws"))).status).toBe(404);
+
+    // The brokered browser's sandbox host carries upgrades too.
+    const browser = loopback.SandboxOutbound({
+      props: { sandbox: sandbox.id.toString(), port: 3000 },
+    });
+
+    expect(
+      await firstMessage(await browser.fetch(upgrade("http://sandbox.workspace/socket"))),
+    ).toBe("ws:/socket cookie:none");
+
+    await sandbox.previewStop();
+    expect((await outbound(token).fetch(upgrade(`http://${hostname}/ws`))).status).toBe(404);
   } finally {
     await sandbox.previewStop();
     await sandbox.restart();

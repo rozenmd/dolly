@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { MAX_IMAGE_BYTES, storeImages } from "./images";
 import type { Env } from "./env";
-import type { PreviewRequest } from "./preview";
+import { MAX_PREVIEW_WAIT_MS, type PreviewAction, type PreviewRequest } from "./preview";
 import * as Schema from "effect/Schema";
 
 const CdpReply = Schema.Struct({
@@ -39,6 +39,16 @@ export type CdpParams = {
   returnByValue?: boolean;
   format?: string;
   captureBeyondViewport?: boolean;
+  type?: string;
+  x?: number;
+  y?: number;
+  button?: string;
+  clickCount?: number;
+  key?: string;
+  code?: string;
+  text?: string;
+  unmodifiedText?: string;
+  windowsVirtualKeyCode?: number;
 };
 
 type CdpSocket = EventTarget & { send(data: string): void };
@@ -246,6 +256,226 @@ export async function waitForPage(cdp: PreviewCdp, url: string, selector?: strin
   );
 }
 
+/** How long click and type wait for their element to be present, visible and uncovered. */
+export const ACTION_ELEMENT_MS = 5_000;
+
+/** How long a waitFor action waits for its selector. */
+export const ACTION_WAIT_FOR_MS = 15_000;
+
+const ElementState = Schema.Struct({
+  ok: Schema.Boolean,
+  final: Schema.optional(Schema.Boolean),
+  reason: Schema.optional(Schema.String),
+  x: Schema.optional(Schema.Number),
+  y: Schema.optional(Schema.Number),
+});
+
+/**
+ * Runs in the page: find selector's element, waiting up to timeoutMs for it to be ready for
+ * mode (present; visible and uncovered for a click; focusable text for type). Never throws.
+ */
+export function elementExpression(
+  selector: string,
+  mode: "present" | "click" | "type",
+  timeoutMs: number,
+) {
+  return `(async () => {
+    const selector = ${JSON.stringify(selector)};
+    const mode = ${JSON.stringify(mode)};
+    const deadline = Date.now() + ${timeoutMs};
+    const describe = (node) => {
+      if (!(node instanceof Element)) return "nothing";
+      const id = node.id ? "#" + node.id : "";
+      const classes = typeof node.className === "string" && node.className.trim()
+        ? "." + node.className.trim().split(/\\s+/).slice(0, 3).join(".") : "";
+      return "<" + node.tagName.toLowerCase() + id + classes + ">";
+    };
+    const check = () => {
+      let element;
+      try { element = document.querySelector(selector); }
+      catch { return { ok: false, final: true, reason: "it is not a valid CSS selector" }; }
+      if (!element) return { ok: false, reason: "no element matches the selector" };
+      if (mode === "present") return { ok: true };
+      element.scrollIntoView({ block: "center", inline: "center" });
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      if (!rect.width || !rect.height || style.visibility === "hidden" || style.display === "none")
+        return { ok: false, reason: "the matching element " + describe(element) + " is not visible (it has no size or is hidden)" };
+      if (element.disabled) return { ok: false, reason: "the matching element " + describe(element) + " is disabled" };
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      if (mode === "type") {
+        const editable = element.isContentEditable ||
+          (element instanceof HTMLTextAreaElement) ||
+          (element instanceof HTMLInputElement && !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(element.type));
+        if (!editable) return { ok: false, final: true, reason: "the matching element " + describe(element) + " is not a text input, textarea or contenteditable element" };
+        if (element.readOnly) return { ok: false, reason: "the matching element " + describe(element) + " is read-only" };
+        element.focus();
+        if (document.activeElement !== element) return { ok: false, reason: "the matching element " + describe(element) + " could not be focused" };
+        if (typeof element.setSelectionRange === "function") {
+          try { element.setSelectionRange(element.value.length, element.value.length); } catch {}
+        }
+        return { ok: true, x, y };
+      }
+      const top = document.elementFromPoint(x, y);
+      if (!top || (top !== element && !element.contains(top)))
+        return { ok: false, reason: "the matching element " + describe(element) + " is not clickable: " + describe(top) + " covers its centre" };
+      return { ok: true, x, y };
+    };
+    for (;;) {
+      const state = check();
+      if (state.ok || state.final || Date.now() >= deadline) return state;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  })()`;
+}
+
+/** Wait for two frames so the page has painted what an action changed. */
+const SETTLE = `new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))`;
+
+/** Evaluate in the page, retrying when an action's navigation replaced the document. */
+async function evaluate(cdp: PreviewCdp, expression: string) {
+  let failure = "";
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let reply: CdpResult;
+
+    try {
+      reply = await cdp.send("Runtime.evaluate", {
+        expression,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+    } catch (error) {
+      if (!(error instanceof Error) || !NAVIGATED.test(error.message)) throw error;
+      failure = error.message;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      continue;
+    }
+
+    if (!reply.exceptionDetails) return reply.result?.value;
+    failure = exceptionText(reply.exceptionDetails);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  throw new Error(`the page kept navigating (${failure})`);
+}
+
+async function findElement(
+  cdp: PreviewCdp,
+  selector: string,
+  mode: "present" | "click" | "type",
+  timeoutMs: number,
+) {
+  const state = await evaluate(cdp, elementExpression(selector, mode, timeoutMs));
+
+  if (!Schema.is(ElementState)(state)) throw new Error("the page returned no element state");
+
+  if (!state.ok) {
+    const reason = state.reason ?? "the element was not ready";
+
+    throw new Error(
+      state.final ? reason : `${reason} (after waiting up to ${timeoutMs / 1000} seconds)`,
+    );
+  }
+
+  return state;
+}
+
+/** CDP key definitions for press: named keys, or one printable character. */
+export function keyDefinition(key: string) {
+  const named = new Map<string, readonly [code: string, keyCode: number, text?: string]>([
+    ["Enter", ["Enter", 13, "\r"]],
+    ["Escape", ["Escape", 27]],
+    ["Tab", ["Tab", 9]],
+    ["Backspace", ["Backspace", 8]],
+    ["Delete", ["Delete", 46]],
+    ["Space", ["Space", 32, " "]],
+    ["ArrowUp", ["ArrowUp", 38]],
+    ["ArrowDown", ["ArrowDown", 40]],
+    ["ArrowLeft", ["ArrowLeft", 37]],
+    ["ArrowRight", ["ArrowRight", 39]],
+    ["Home", ["Home", 36]],
+    ["End", ["End", 35]],
+    ["PageUp", ["PageUp", 33]],
+    ["PageDown", ["PageDown", 34]],
+  ]);
+
+  const definition = named.get(key);
+
+  if (definition) {
+    const [code, keyCode, text] = definition;
+
+    return { key: key === "Space" ? " " : key, code, windowsVirtualKeyCode: keyCode, text };
+  }
+
+  const upper = key.toUpperCase();
+  const letter = /^[A-Z]$/.test(upper);
+  const digit = /^\d$/.test(key);
+
+  return {
+    key,
+    code: letter ? `Key${upper}` : digit ? `Digit${key}` : "",
+    windowsVirtualKeyCode: letter || digit ? upper.charCodeAt(0) : 0,
+    text: key,
+  };
+}
+
+/** A short label for an action in errors, such as `click "button.menu"`. */
+export function describeAction(action: PreviewAction) {
+  if ("click" in action) return `click ${JSON.stringify(action.click)}`;
+
+  if ("type" in action) return `type into ${JSON.stringify(action.type.selector)}`;
+
+  if ("press" in action) return `press ${action.press}`;
+
+  if ("waitFor" in action) return `waitFor ${JSON.stringify(action.waitFor)}`;
+
+  return `wait ${action.wait}ms`;
+}
+
+async function runAction(cdp: PreviewCdp, action: PreviewAction) {
+  if ("click" in action) {
+    const { x = 0, y = 0 } = await findElement(cdp, action.click, "click", ACTION_ELEMENT_MS);
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+
+    for (const type of ["mousePressed", "mouseReleased"])
+      await cdp.send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+  } else if ("type" in action) {
+    await findElement(cdp, action.type.selector, "type", ACTION_ELEMENT_MS);
+    await cdp.send("Input.insertText", { text: action.type.text });
+  } else if ("press" in action) {
+    const { text, ...key } = keyDefinition(action.press);
+    const down: CdpParams = { type: "rawKeyDown", ...key };
+
+    // A key with text also types it, as a keypress would.
+    if (text) Object.assign(down, { type: "keyDown", text, unmodifiedText: text });
+    await cdp.send("Input.dispatchKeyEvent", down);
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...key });
+  } else if ("waitFor" in action) {
+    await findElement(cdp, action.waitFor, "present", ACTION_WAIT_FOR_MS);
+  } else {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(action.wait, MAX_PREVIEW_WAIT_MS)));
+  }
+
+  await evaluate(cdp, SETTLE);
+}
+
+/** Run screenshot actions in order; an error names the failed action and why. */
+export async function runActions(cdp: PreviewCdp, actions: readonly PreviewAction[]) {
+  for (const [index, action] of actions.entries()) {
+    try {
+      await runAction(cdp, action);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+
+      throw new Error(
+        `Screenshot action ${index + 1} of ${actions.length} (${describeAction(action)}) failed: ${reason}. No screenshot was taken${index === 1 ? "; action 1 ran" : index ? `; actions 1–${index} ran` : ""}.`,
+      );
+    }
+  }
+}
+
 type ScreenshotRequest = Extract<typeof PreviewRequest.Type, { action: "screenshot" }>;
 
 export async function capturePreview(
@@ -280,13 +510,19 @@ export async function capturePreview(
     await cdp.send("Emulation.setDeviceMetricsOverride", {
       width: input.width ?? 1280,
       height: input.height ?? 800,
-      deviceScaleFactor: 1,
+      deviceScaleFactor: input.scale ?? 1,
       mobile: false,
     });
     const url = `http://${hostname}${input.path ?? "/"}`;
     await cdp.navigate(url);
 
     await waitForPage(cdp, url, input.waitFor);
+
+    if (input.actions?.length) {
+      await runActions(cdp, input.actions);
+      // An action may have navigated: capture a loaded, painted document.
+      await waitForPage(cdp, url);
+    }
 
     const screenshot = await cdp.send("Page.captureScreenshot", {
       format: "png",
@@ -297,7 +533,9 @@ export async function capturePreview(
     const size = Buffer.byteLength(screenshot.data, "base64");
 
     if (!size || size > MAX_IMAGE_BYTES)
-      throw new Error("Screenshot exceeds the 5 MiB image limit");
+      throw new Error(
+        "Screenshot exceeds the 5 MiB image limit; lower scale, width or height and retry",
+      );
 
     const images = await storeImages(env.SCREENSHOTS, [
       { mimeType: "image/png", data: screenshot.data },
@@ -311,6 +549,8 @@ export async function capturePreview(
             path: input.path ?? "/",
             width: input.width ?? 1280,
             height: input.height ?? 800,
+            scale: input.scale ?? 1,
+            actions: input.actions?.length ?? 0,
             image: images[0].data,
           }),
         },
