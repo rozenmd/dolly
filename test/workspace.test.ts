@@ -6,7 +6,7 @@ import {
   GITHUB_APP_WRITE_PERMISSIONS,
   GITHUB_APP_CODE_PERMISSIONS,
 } from "../src/github-permissions";
-import { checkedPush, gitRoute } from "../src/git-transport";
+import { checkedPush, gitRoute, pushRefusal } from "../src/git-transport";
 import {
   activeWorkspace,
   selectRepository,
@@ -140,35 +140,66 @@ it("permits only the selected repository's Git smart HTTP routes", () => {
   ).toBeNull();
 });
 
-it("streams an accepted push unchanged across fragmented packets", async () => {
-  const text = update(`refs/heads/${branch}`) + "0000PACKbinary-payload";
+/** The forwarded body, or null when the push is refused; the request arrives in `size` chunks. */
+async function forwarded(text: string, size = Number.POSITIVE_INFINITY) {
+  const checked = await checkedPush(fragmented(text, size), defaultBranch);
+
+  return checked.accepted ? new Response(checked.body).text() : null;
+}
+
+function fragmented(text: string, size: number) {
   const bytes = new TextEncoder().encode(text);
 
-  const stream = new ReadableStream<Uint8Array>({
+  return new ReadableStream<Uint8Array>({
     start(controller) {
-      for (let index = 0; index < bytes.length; index += 3)
-        controller.enqueue(bytes.slice(index, index + 3));
+      for (let index = 0; index < bytes.length; index += size)
+        controller.enqueue(bytes.slice(index, index + size));
       controller.close();
     },
   });
+}
 
-  const checked = await checkedPush(stream, defaultBranch);
-  expect(checked).not.toBeNull();
-  expect(await new Response(checked).text()).toBe(text);
+it("streams an accepted push unchanged across fragmented packets", async () => {
+  const text = update(`refs/heads/${branch}`) + "0000PACKbinary-payload";
+  expect(await forwarded(text, 3)).toBe(text);
 });
 
 it("accepts shallow boundary announcements without relaxing the default branch restriction", async () => {
   const shallow = packet(`shallow ${"c".repeat(40)}\n`);
   const text = shallow + update(`refs/heads/${branch}`) + "0000PACKbinary-payload";
-  const checked = await checkedPush(new Blob([text]).stream(), defaultBranch);
-  expect(checked).not.toBeNull();
-  expect(await new Response(checked).text()).toBe(text);
-  expect(
-    await checkedPush(
-      new Blob([shallow + update("refs/heads/main") + "0000PACK"]).stream(),
-      defaultBranch,
-    ),
-  ).toBeNull();
+  expect(await forwarded(text)).toBe(text);
+  expect(await forwarded(shallow + update("refs/heads/main") + "0000PACK")).toBeNull();
+});
+
+it("lets a shallow checkout push a new branch whose pack needs git's probe request", async () => {
+  // What git 2.47 sends to push a new branch from a --depth=1 checkout once the default branch
+  // has moved on: no commit is shared, so the pack holds the whole tree, and above
+  // http.postBuffer git first probes the endpoint with a lone flush packet, then streams the
+  // shallow boundary, the creation of the branch and the pack.
+  expect(await forwarded("0000")).toBe("0000");
+  expect(await forwarded("0000", 1)).toBe("0000");
+
+  const push =
+    packet(`shallow ${"c".repeat(40)}\n`) +
+    packet(
+      `${"0".repeat(40)} ${"b".repeat(40)} refs/heads/${branch}\0 report-status-v2 side-band-64k quiet object-format=sha1 agent=git/2.47.3`,
+    ) +
+    "0000PACK" +
+    "x".repeat(70_000);
+
+  expect(await forwarded(push, 4096)).toBe(push);
+});
+
+it("refuses a probe-shaped body that carries anything besides the flush", async () => {
+  for (const text of [
+    "00000000",
+    "0000PACK",
+    packet(`shallow ${"c".repeat(40)}\n`) + "0000",
+    packet(`shallow ${"c".repeat(40)}\n`) + "0000PACK",
+  ]) {
+    expect(await forwarded(text)).toBeNull();
+    expect(await forwarded(text, 1)).toBeNull();
+  }
 });
 
 it("accepts updates, including force pushes, to any branches but the default", async () => {
@@ -178,17 +209,23 @@ it("accepts updates, including force pushes, to any branches but the default", a
     update("refs/heads/feature/x", "c".repeat(40)) +
     "0000PACK";
 
-  const checked = await checkedPush(new Blob([text]).stream(), defaultBranch);
-  expect(await new Response(checked).text()).toBe(text);
+  expect(await forwarded(text)).toBe(text);
 });
 
 it("refuses the default branch, tags, deletes and malformed pushes, cancelling rejected bodies", async () => {
+  const shallow = packet(`shallow ${"c".repeat(40)}\n`);
+
   for (const text of [
     update("refs/heads/main") + "0000PACK",
     update("refs/tags/v1") + "0000PACK",
     update(`refs/heads/${branch}`, "0".repeat(40)) + "0000PACK",
     update(`refs/heads/${branch}`) + update("refs/heads/main") + "0000PACK",
-    "0000",
+    // A shallow push gets no exemption from the branch rules.
+    shallow + update("refs/heads/main") + "0000PACK",
+    shallow + update("refs/tags/v1") + "0000PACK",
+    shallow + update(`refs/heads/${branch}`, "0".repeat(40)) + "0000PACK",
+    update(`refs/heads/${branch}`) + shallow + "0000PACK",
+    "0000PACK",
     "zzzz",
     "0004",
     update(`refs/heads/${branch}`),
@@ -208,10 +245,36 @@ it("refuses the default branch, tags, deletes and malformed pushes, cancelling r
       },
     });
 
-    expect(await checkedPush(stream, defaultBranch)).toBeNull();
+    expect(await checkedPush(stream, defaultBranch)).toMatchObject({ accepted: false });
     expect(cancelled || !stream.locked).toBe(true);
     expect(stream.locked).toBe(false);
   }
+});
+
+it("refuses a push so that git prints the reason", async () => {
+  const reason = "Pushes may update any branch except the default branch (main)";
+
+  // A client that asked for a sideband prints channel 3 as `remote: <reason>` and fails.
+  expect(
+    await checkedPush(new Blob([update("refs/heads/main") + "0000PACK"]).stream(), defaultBranch),
+  ).toEqual({
+    accepted: false,
+    sideband: true,
+  });
+  const sideband = pushRefusal(reason, true);
+  expect(sideband.status).toBe(200);
+  expect(sideband.headers.get("Content-Type")).toBe("application/x-git-receive-pack-result");
+  expect(await sideband.text()).toBe(packet(`\x03${reason}\n`));
+
+  // Without one there is no channel for it, so the refusal stays a plain 403.
+  const plain = packet(`${"a".repeat(40)} ${"b".repeat(40)} refs/heads/main\0report-status\n`);
+  expect(await checkedPush(new Blob([plain + "0000PACK"]).stream(), defaultBranch)).toEqual({
+    accepted: false,
+    sideband: false,
+  });
+  const refused = pushRefusal(reason, false);
+  expect(refused.status).toBe(403);
+  expect(await refused.text()).toBe(reason);
 });
 
 it("quotes shell values and keeps checkout refs out of shell syntax", () => {

@@ -1362,6 +1362,86 @@ it("lets a session push and force-push any branch but the default one", async ()
   expect(upstream).toBe(3);
 });
 
+it("lets a shallow checkout push a new branch, and shows git why other pushes are refused", async () => {
+  await connect();
+  const { workspaceConfig } = await import("../src/workspace");
+
+  const config = workspaceConfig({ repository: "another-owner/project" }, "42");
+
+  const forwarded: string[] = [];
+  mockFetch(async (input, init) => {
+    const url = new URL(String(input));
+
+    if (url.hostname === "github.com") {
+      forwarded.push(await new Response(init?.body).text());
+
+      return new Response("Git response");
+    }
+
+    if (url.pathname.endsWith("/installation")) return Response.json({ id: 7 });
+
+    if (url.pathname.endsWith("/access_tokens"))
+      return Response.json({
+        token: "private-installation-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+
+    return Response.json({ default_branch: "main" });
+  });
+  const agent = env.AGENT.getByName("owner");
+  const pkt = (text: string) => (text.length + 4).toString(16).padStart(4, "0") + text;
+  const shallow = pkt(`shallow ${"c".repeat(40)}\n`);
+
+  const create = (ref: string) =>
+    pkt(
+      `${"0".repeat(40)} ${"b".repeat(40)} ${ref}\0 report-status-v2 side-band-64k quiet object-format=sha1 agent=git/2.47.3`,
+    );
+
+  const send = async (body: string) => {
+    const response = await agent.gitTransport(
+      new Request("http://github.workspace/another-owner/project.git/git-receive-pack", {
+        method: "POST",
+        body,
+      }),
+      config,
+    );
+
+    return {
+      status: response.status,
+      type: response.headers.get("Content-Type"),
+      text: await response.text(),
+    };
+  };
+
+  // The probe git sends before a pack larger than http.postBuffer, then the push itself.
+  const push = shallow + create("refs/heads/dolly/session-42") + "0000PACK" + "x".repeat(70_000);
+  expect(await send("0000")).toMatchObject({ status: 200, text: "Git response" });
+  expect(await send(push)).toMatchObject({ status: 200, text: "Git response" });
+  expect(forwarded).toEqual(["0000", push]);
+
+  // git prints sideband channel 3 as `remote: <reason>`, instead of a bare RPC failure.
+  const reason =
+    "Pushes may update any branch except the default branch (main), and may not delete branches or push tags";
+
+  const refused = {
+    status: 200,
+    type: "application/x-git-receive-pack-result",
+    text: pkt(`\x03${reason}\n`),
+  };
+
+  for (const body of [
+    shallow + create("refs/heads/main") + "0000PACK",
+    shallow + create("refs/tags/v1") + "0000PACK",
+    shallow +
+      pkt(`${"a".repeat(40)} ${"0".repeat(40)} refs/heads/feature\0 report-status side-band-64k`) +
+      "0000",
+  ])
+    expect(await send(body)).toEqual(refused);
+
+  expect(await send("0000PACK")).toMatchObject({ status: 403, text: reason });
+  expect(forwarded).toHaveLength(2);
+});
+
 it("keeps a read-only session from changing repositories", async () => {
   await connect();
   const { ConversationWorkspace, workspaceConfig } = await import("../src/workspace");
