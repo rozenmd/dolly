@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { expect, it } from "vite-plus/test";
 import * as Effect from "effect/Effect";
-import { checkoutDiagnosticsScript } from "../src/workspace";
+import { CHECKPOINT_TIMEOUT_MS, checkoutDiagnosticsScript } from "../src/workspace";
 import type { Sandbox } from "../src/sandbox";
 
 const config = {
@@ -353,6 +353,63 @@ it("waits for an in-progress container snapshot before checkpointing", async () 
       turnId: "turn-after-conflict",
     });
     expect(attempts).toBe(2);
+  });
+});
+
+it("gives large snapshots more than two minutes and explains a timed-out save", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance, state) => {
+    const container = fakeContainer();
+    withContainer(instance, state, container);
+
+    // Production saves of ~2 GB checkouts took up to ~2 minutes under load.
+    expect(CHECKPOINT_TIMEOUT_MS).toBeGreaterThanOrEqual(5 * 60_000);
+
+    await instance.prepare(config);
+    await expect(instance.checkpoint("turn-1")).resolves.toMatchObject({ turnId: "turn-1" });
+    const restorePoint = await state.storage.get<{ id: string }>("snapshot:checkpoint");
+
+    await instance.run("printf work > unsaved.txt");
+
+    // The platform snapshot stalls past the (shortened) limit and keeps running afterwards.
+    Object.assign(instance, { checkpointTimeoutMs: 50 });
+    let inProgress = true;
+    container.snapshotContainer = async () => {
+      if (inProgress)
+        throw new DOMException(
+          "A snapshot is already in progress for this container. Wait for it to complete.",
+          "OperationError",
+        );
+
+      return { id: "snapshot-after-stall", size: 1 };
+    };
+
+    await expect(instance.checkpoint("turn-2")).rejects.toThrow(
+      new RegExp(
+        [
+          "^Workspace save timed out: the container snapshot did not finish within 0\\.05 seconds\\.",
+          `the restore point is still snapshot ${restorePoint!.id} saved at \\S+ \\(end of turn turn-1\\)\\.`,
+          "if the container stops first, they are gone\\.",
+        ].join(".*"),
+      ),
+    );
+
+    // The old save stays the restore point and the change is still known to be unsaved.
+    expect(await state.storage.get("snapshot:checkpoint")).toEqual(restorePoint);
+    expect(await state.storage.get("workspace:unsaved")).toEqual(expect.any(Number));
+    expect(await state.storage.get("snapshot:error")).toMatchObject({
+      turnId: "turn-2",
+      error: expect.stringContaining("Workspace save timed out"),
+    });
+
+    // Once the stalled snapshot finishes, the next turn-end save succeeds and clears the error.
+    inProgress = false;
+    await expect(instance.checkpoint("turn-3")).resolves.toMatchObject({
+      id: "snapshot-after-stall",
+      turnId: "turn-3",
+    });
+    expect(await state.storage.get("snapshot:error")).toBeUndefined();
+    expect(await state.storage.get("workspace:unsaved")).toBeUndefined();
   });
 });
 

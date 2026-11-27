@@ -364,6 +364,26 @@ export function restoreNotice(restore: WorkspaceRestore) {
   return `WORKSPACE RESTORED: the sandbox container stopped and was restored to snapshot ${restore.snapshot.id}${saved}${turn}. ${recovery}`;
 }
 
+/**
+ * A turn-end container snapshot must finish within this. Snapshots copy the whole checkout,
+ * including installed dependencies (1–3 GB is common), and production saves of ~2 GB took up to
+ * ~2 minutes while many sessions saved at once; the earlier 2-minute limit failed those. The save
+ * holds the workspace permit, so queued input and commands wait at most this long for a stall.
+ */
+export const CHECKPOINT_TIMEOUT_MS = 5 * 60_000;
+
+/** Why a turn-end save failed on timeout, and what that leaves at risk. */
+export function checkpointTimeoutMessage(timeoutMs: number, previous: WorkspaceSnapshot | null) {
+  const limit =
+    timeoutMs % 60_000 === 0 ? `${timeoutMs / 60_000} minutes` : `${timeoutMs / 1000} seconds`;
+
+  const restorePoint = previous
+    ? `the restore point is still snapshot ${previous.id}${previous.savedAt ? ` saved at ${new Date(previous.savedAt).toISOString()}` : ""}${previous.turnId ? ` (end of turn ${previous.turnId})` : ""}`
+    : "no earlier save exists, so a restart would recreate the checkout from its ref";
+
+  return `Workspace save timed out: the container snapshot did not finish within ${limit}. Nothing was lost yet, but ${restorePoint}. Changes made since then live only in the running container until the next turn-end save succeeds; if the container stops first, they are gone. Push important work to GitHub.`;
+}
+
 export type WorkspaceSetup = {
   state: "queued" | "checkout" | "installing" | "ready" | "warning" | "failed";
   updatedAt: number;
