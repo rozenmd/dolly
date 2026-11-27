@@ -354,6 +354,15 @@ export class Page {
   readonly mouse = {
     move: (x: number, y: number) =>
       this.session.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }),
+    /** A real wheel turn at (x, y), so the page sees the reader scroll rather than a script. */
+    wheel: (x: number, y: number, deltaY: number) =>
+      this.session.send("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x,
+        y,
+        deltaX: 0,
+        deltaY,
+      }),
   };
 
   private constructor(

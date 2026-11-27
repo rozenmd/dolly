@@ -121,6 +121,8 @@ export function Conversation({
   const scroll = useRef<HTMLDivElement>(null);
   const top = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const reader = useRef(readerInput());
+  const lastTop = useRef(0);
   // Scroll height before earlier messages are prepended, to keep the reader's place once they arrive.
   const anchor = useRef<{ before: number; height: number }>(undefined);
   const load = useRef(older?.load);
@@ -187,8 +189,9 @@ export function Conversation({
 
     if (!element) return;
 
-    if (pinned.current) element.scrollTop = element.scrollHeight;
-    else if (anchor.current && anchor.current.before !== before) {
+    if (pinned.current) {
+      if (!selecting(element)) element.scrollTop = element.scrollHeight;
+    } else if (anchor.current && anchor.current.before !== before) {
       // Earlier messages went in above the reader: move down by what they added.
       element.scrollTop += element.scrollHeight - anchor.current.height;
       anchor.current = undefined;
@@ -226,7 +229,44 @@ export function Conversation({
         ref={scroll}
         onScroll={(event) => {
           const element = event.currentTarget;
-          pinned.current = element.scrollHeight - element.clientHeight - element.scrollTop < 80;
+          const movedDown = element.scrollTop > lastTop.current;
+
+          lastTop.current = element.scrollTop;
+
+          // Leaving the bottom, by any means, stops following. Only the reader scrolling down to it starts
+          // again: when content below shrinks the browser moves the view up to the new bottom itself, and
+          // that must not re-pin them, even moments after they turned the wheel.
+          if (!atBottom(element)) pinned.current = false;
+          else if (movedDown && reader.current.scrolling()) pinned.current = true;
+        }}
+        // Scrolling up stops following at once, from the input itself: a live update can land before the
+        // browser delivers the scroll event, and would snap the reader straight back down. Input that
+        // scrolls a tool result's own output instead leaves the conversation where it is.
+        onWheel={(event) => {
+          reader.current.mark();
+
+          if (event.deltaY < 0) {
+            if (!innerScroller(event.target, event.currentTarget)) pinned.current = false;
+          }
+          // Already at the bottom, scrolling down moves nothing and fires no scroll event.
+          else if (event.deltaY > 0 && atBottom(event.currentTarget)) pinned.current = true;
+        }}
+        onTouchStart={(event) => reader.current.touch(event.touches[0]?.clientY)}
+        onTouchMove={(event) => {
+          // A finger moving down the screen drags the conversation toward earlier messages.
+          if (
+            reader.current.touch(event.touches[0]?.clientY) > 0 &&
+            !innerScroller(event.target, event.currentTarget)
+          )
+            pinned.current = false;
+        }}
+        onPointerDown={() => reader.current.hold()}
+        onKeyDown={(event) => {
+          reader.current.mark();
+
+          if (SCROLL_UP_KEYS.has(event.key)) pinned.current = false;
+          else if (SCROLL_DOWN_KEYS.has(event.key) && atBottom(event.currentTarget))
+            pinned.current = true;
         }}
       >
         <div className="conversation-content">
@@ -302,6 +342,88 @@ export function Conversation({
         now={now}
       />
     </div>
+  );
+}
+
+/** How close to the bottom counts as at it: room for fractional scroll positions, not for a line of text. */
+const BOTTOM_SLACK = 3;
+
+/** How long after the reader's last wheel, key or pointer release a scroll is still theirs. */
+const READER_WINDOW = 1000;
+
+/** A fling keeps scrolling for seconds after the finger lifts, and iOS sends nothing meanwhile. */
+const TOUCH_WINDOW = 6000;
+const SCROLL_UP_KEYS = new Set(["ArrowUp", "PageUp", "Home"]);
+const SCROLL_DOWN_KEYS = new Set(["ArrowDown", "PageDown", "End", " "]);
+
+function atBottom(element: HTMLElement) {
+  return element.scrollHeight - element.clientHeight - element.scrollTop <= BOTTOM_SLACK;
+}
+
+/** Tells the reader's own scrolling apart from the browser's: a held pointer or finger, or recent input. */
+function readerInput() {
+  let last = -Infinity;
+  let lastTouch = -Infinity;
+  let touchY: number | undefined;
+  let held = false;
+
+  function release() {
+    held = false;
+    last = performance.now();
+    window.removeEventListener("pointerup", release);
+    window.removeEventListener("pointercancel", release);
+  }
+
+  return {
+    mark() {
+      last = performance.now();
+    },
+    // Released anywhere: a scrollbar drag often ends outside the conversation.
+    hold() {
+      held = true;
+      window.addEventListener("pointerup", release);
+      window.addEventListener("pointercancel", release);
+    },
+    /** Records a finger at `y`; returns how far it moved down since the last one. */
+    touch(y: number | undefined) {
+      lastTouch = performance.now();
+      const moved = y === undefined || touchY === undefined ? 0 : y - touchY;
+      touchY = y;
+
+      return moved;
+    },
+    scrolling() {
+      const now = performance.now();
+
+      return held || now - last < READER_WINDOW || now - lastTouch < TOUCH_WINDOW;
+    },
+  };
+}
+
+/** A box between `target` and `root`, such as a tool result's output, that scrolls up itself. */
+function innerScroller(target: EventTarget, root: HTMLElement) {
+  for (let node = target instanceof Element ? target : null; node && node !== root;) {
+    if (
+      node instanceof HTMLElement &&
+      node.scrollTop > 0 &&
+      node.scrollHeight > node.clientHeight &&
+      /auto|scroll/.test(getComputedStyle(node).overflowY)
+    )
+      return true;
+    node = node.parentElement;
+  }
+
+  return false;
+}
+
+/** Selecting text is working with it: following would drag the selection away. */
+function selecting(element: HTMLElement) {
+  const selection = window.getSelection();
+
+  return Boolean(
+    selection &&
+    !selection.isCollapsed &&
+    (element.contains(selection.anchorNode) || element.contains(selection.focusNode)),
   );
 }
 
