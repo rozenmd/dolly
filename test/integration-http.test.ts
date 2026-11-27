@@ -123,3 +123,97 @@ it("includes the provider's explanation in HTTP errors without leaking credentia
   );
   expect(JSON.stringify(error)).not.toContain("private-provider-token");
 });
+
+it("follows an anonymous read of a renamed public repository within api.github.com", async () => {
+  const seen: string[] = [];
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    seen.push(String(url));
+    expect(init?.redirect).toBe("manual");
+    expect(new Headers(init?.headers).has("Authorization")).toBe(false);
+
+    if (String(url) === "https://api.github.com/repos/old/name/contents/a")
+      return Response.json(
+        { message: "Moved Permanently" },
+        { status: 301, headers: { Location: "/repositories/42/contents/a" } },
+      );
+
+    return Response.json({ content: "" });
+  });
+
+  const result = await Effect.runPromise(
+    integrationJson("https://api.github.com/repos/old/name/contents/a", {
+      headers: { Accept: "application/vnd.github+json" },
+    }),
+  );
+
+  expect(result).toEqual({ content: "" });
+  expect(seen).toEqual([
+    "https://api.github.com/repos/old/name/contents/a",
+    "https://api.github.com/repositories/42/contents/a",
+  ]);
+});
+
+it("never follows a credentialed redirect, so a token stays scoped to the repository it was checked for", async () => {
+  // A transfer to an owner outside the allowlist, or a rename the token wasn't minted for.
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json(
+      { message: "Moved Permanently" },
+      {
+        status: 301,
+        headers: { Location: "https://api.github.com/repositories/42/installation" },
+      },
+    ),
+  );
+
+  const error = await Effect.runPromise(
+    integrationJson("https://api.github.com/repos/example/project/installation", {
+      headers: { Authorization: "Bearer private-provider-token" },
+    }).pipe(Effect.flip),
+  );
+
+  expect(error.message).toBe(
+    "Provider returned HTTP 301: Moved Permanently. GitHub moved this repository (renamed or transferred): use its current owner/name",
+  );
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it("stops following GitHub redirects after three hops, or when one leaves api.github.com", async () => {
+  for (const [location, calls] of [
+    ["https://api.github.com/loop", 4],
+    ["http://api.github.com/insecure", 1],
+    ["https://api.github.com.attacker.example/x", 1],
+  ] as const) {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () =>
+        Response.json({}, { status: 301, headers: { Location: location } }),
+      );
+
+    const error = await Effect.runPromise(
+      integrationJson("https://api.github.com/repos/old/name", {}).pipe(Effect.flip),
+    );
+
+    expect(error.message).toMatch(/^Provider returned HTTP 301/);
+    expect(fetch).toHaveBeenCalledTimes(calls);
+
+    for (const [url] of fetch.mock.calls)
+      expect(String(url)).toMatch(/^https:\/\/api\.github\.com\//);
+    fetch.mockRestore();
+  }
+});
+
+it("never follows redirects from other providers", async () => {
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async () =>
+      Response.json({}, { status: 301, headers: { Location: "https://slack.com/api/other" } }),
+    );
+
+  const error = await Effect.runPromise(
+    integrationJson("https://slack.com/api/chat.postMessage", {}).pipe(Effect.flip),
+  );
+
+  expect(error.message).toBe("Provider returned HTTP 301");
+  expect(fetch).toHaveBeenCalledTimes(1);
+});

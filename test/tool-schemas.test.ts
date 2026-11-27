@@ -14,6 +14,7 @@ const token = `sk-ant-oat01-${"a".repeat(64)}`;
 
 type AnthropicTool = {
   name: string;
+  description?: string;
   defer_loading?: boolean;
   input_schema: { type: string; properties: object; required: string[] };
 };
@@ -116,6 +117,14 @@ it("sends Claude every tool's arguments as root properties", async () => {
     "wait_status",
     "cancel_wait",
   ]);
+
+  // Length limits the model can't see in a schema it reads loosely are stated in the descriptions.
+  expect(byName.github?.description).toContain(
+    "message, the commit message, is at most 200 characters",
+  );
+  expect(byName.workspace?.description).toContain(
+    "commit requires message (at most 1,000 characters",
+  );
 
   expect(byName.papercuts?.input_schema).toMatchObject({
     required: ["action"],

@@ -1583,6 +1583,11 @@ function makeGitHub(
     ),
   );
 
+  const moved = (error: OperationError) =>
+    Schema.decodeUnknownOption(Schema.Struct({ status: Schema.Literals([301, 302, 307, 308]) }))(
+      error.details,
+    ).pipe(Option.isSome);
+
   const notPublic = (repository: string) =>
     new OperationError({
       operation: "integration.response",
@@ -1594,18 +1599,27 @@ function makeGitHub(
     const token = yield* publicReadToken;
 
     if (!token) return yield* api(path, "");
-    const checked = publicRepositories.get(repository.toLowerCase());
 
-    if (!checked || checked < Date.now()) {
-      const repo = yield* api(`/repos/${repository}`, token).pipe(
-        Effect.flatMap(decode(Schema.Struct({ private: Schema.Boolean }))),
-      );
+    return yield* Effect.gen(function* () {
+      const checked = publicRepositories.get(repository.toLowerCase());
 
-      if (repo.private) return yield* notPublic(repository);
-      publicRepositories.set(repository.toLowerCase(), Date.now() + 600_000);
-    }
+      if (!checked || checked < Date.now()) {
+        const repo = yield* api(`/repos/${repository}`, token).pipe(
+          Effect.flatMap(decode(Schema.Struct({ private: Schema.Boolean }))),
+        );
 
-    return yield* api(path, token);
+        if (repo.private) return yield* notPublic(repository);
+        publicRepositories.set(repository.toLowerCase(), Date.now() + 600_000);
+      }
+
+      return yield* api(path, token);
+    }).pipe(
+      // A renamed or transferred repository: credentialed requests never follow its redirect,
+      // so read it anonymously, which follows within api.github.com and sees only public data.
+      Effect.catchTag("OperationError", (error) =>
+        moved(error) ? api(path, "") : Effect.fail(error),
+      ),
+    );
   });
 
   // Only a confirmed-public repository is readable for unapproved owners. Approved

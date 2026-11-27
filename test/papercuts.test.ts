@@ -844,6 +844,119 @@ it("refuses to resolve papercuts from a read-only session", async () => {
   expect(rows.find((row) => row.id === old)?.resolved_at).toBeNull();
 });
 
+it("logs github and workspace failures with their real error, action and repository", async () => {
+  await credentials();
+
+  const calls = [
+    [
+      "github",
+      { operation: { action: "list_files", repository: "example/build-failures", ref: "main" } },
+    ],
+    ["workspace", { action: "status" }],
+    ["workspace", { action: "commit", message: "x".repeat(1001) }],
+    [
+      "github",
+      {
+        operation: {
+          action: "write_file",
+          repository: "example/project",
+          branch: "dolly/x",
+          path: "a.txt",
+          content: "",
+          message: "x".repeat(201),
+        },
+      },
+    ],
+    [
+      "github",
+      { operation: { action: "read_file", repository: "example/gone", path: "a", ref: "main" } },
+    ],
+  ] as const;
+
+  let requests = 0;
+
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    if (new URL(String(input)).hostname.endsWith("github.com"))
+      return Response.json({ message: "Not Found" }, { status: 404 });
+    const index = requests++;
+
+    const call = calls[index];
+
+    const item = call
+      ? {
+          type: "function_call",
+          id: `fc_${index}`,
+          call_id: `call_${index}`,
+          name: call[0],
+          arguments: JSON.stringify(call[1]),
+        }
+      : {
+          type: "message",
+          id: "msg_done",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "Done", annotations: [] }],
+        };
+
+    const events = [
+      {
+        type: "response.created",
+        response: { id: `resp_${index}`, status: "in_progress", output: [] },
+      },
+      { type: "response.output_item.done", output_index: 0, item },
+      {
+        type: "response.completed",
+        response: {
+          id: `resp_${index}`,
+          status: "completed",
+          output: [item],
+          usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+        },
+      },
+    ];
+
+    return new Response(
+      events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+  });
+
+  // A rejection such as a dropped connection, with the code Node and Workers errors carry.
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    const reset = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+    const github = agent["githubForSession"].bind(agent);
+    agent["githubForSession"] = async (id, input) =>
+      input.operation.action === "list_files" ? Promise.reject(reset) : github(id, input);
+    agent["runWorkspace"] = async () => Promise.reject(new Error("Sandbox went away"));
+  });
+  await start();
+  await expect.poll(async () => (await entries()).length).toBe(5);
+
+  const messages = (await entries()).map((row) => `${row.source} ${row.message}`);
+  expect(messages.join("\n")).not.toContain("Effect.tryPromise");
+  expect(messages).toEqual(
+    expect.arrayContaining([
+      "tool:github socket hang up (code ECONNRESET)\n[github list_files on example/build-failures]",
+      "tool:workspace Sandbox went away",
+      expect.stringMatching(/^tool:workspace .*message: expected at most 1000 characters/s),
+      expect.stringMatching(
+        /^tool:github .*operation\.message: expected at most 200 characters.*\n\[github write_file on example\/project\]$/s,
+      ),
+    ]),
+  );
+  // The context names where it failed, never what: an error-like repository name isn't the key.
+  expect((await entries()).find((row) => row.message.startsWith("socket hang up"))?.signature).toBe(
+    "tool:github||socket hang up (code econnreset)",
+  );
+  const notFound = (await entries()).find((row) => row.message.includes("example/gone"));
+  expect(JSON.parse(notFound!.message)).toMatchObject({
+    action: "read_file",
+    repository: "example/gone",
+    message: expect.stringContaining("HTTP 404"),
+  });
+  expect(notFound!.signature).toBe("tool:github||provider returned http <n>: not found");
+});
+
 /** A tool result carrying one text part, as tools return them. */
 type Reply = {
   stdout?: string;

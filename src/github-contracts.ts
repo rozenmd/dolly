@@ -1,4 +1,7 @@
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import { ScreenshotReference } from "./images";
 
 const Name = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/));
@@ -46,14 +49,30 @@ const PullTitle = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(
 
 const PullBody = Schema.String.check(Schema.isMaxLength(32_768));
 
+/**
+ * An optional field that also accepts null and decodes it as omitted. Models fill optional fields
+ * with null (the github tool's schema reaches Claude with them nullable), and GitHub treats a
+ * missing start_line or start_side as a single-line comment.
+ */
+const omittedWhenNull = <A>(schema: Schema.Codec<A>) =>
+  Schema.optional(Schema.NullOr(schema)).pipe(
+    Schema.decodeTo(
+      Schema.optional(schema),
+      SchemaTransformation.transformOptional<A | undefined, A | null | undefined>({
+        decode: Option.filter(Predicate.isNotNullish),
+        encode: (value) => value,
+      }),
+    ),
+  );
+
 /** An inline review comment anchored with GitHub's line/side model (never the deprecated position). */
 export const ReviewComment = Schema.Struct({
   path: Path,
   body: CommentBody,
   line: LineNumber,
   side: Side,
-  start_line: Schema.optional(LineNumber),
-  start_side: Schema.optional(Side),
+  start_line: omittedWhenNull(LineNumber),
+  start_side: omittedWhenNull(Side),
 });
 
 export const GitHubAccounts = Schema.Struct({ accounts: Schema.Array(Name) });

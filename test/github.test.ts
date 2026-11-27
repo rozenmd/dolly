@@ -310,6 +310,45 @@ it("falls back to anonymous reads when the App has no installations", async () =
   expect(new Headers(contents?.[1]?.headers).has("Authorization")).toBe(false);
 });
 
+it("reads a renamed public repository anonymously when the App token meets its redirect", async () => {
+  await connect();
+  const requests: { path: string; auth: string | null }[] = [];
+
+  mockFetch(async (input, init) => {
+    const url = new URL(String(input));
+    const auth = new Headers(init?.headers).get("Authorization");
+
+    if (url.pathname === "/app/installations") return Response.json([{ id: 7 }]);
+
+    if (url.pathname === "/app/installations/7/access_tokens")
+      return Response.json({ token: "public-token", expires_at: "2099-01-01T00:00:00Z" });
+    requests.push({ path: url.pathname, auth });
+
+    // The old slug redirects to the repository's id, as GitHub does after a rename.
+    if (url.pathname.startsWith("/repos/tellahq/opensession"))
+      return Response.json(
+        { message: "Moved Permanently" },
+        {
+          status: 301,
+          headers: { Location: url.href.replace("/repos/tellahq/opensession", "/repositories/9") },
+        },
+      );
+
+    if (url.pathname === "/repositories/9/contents/src/main.ts") return Response.json(publicFile);
+    throw new Error(`Unexpected ${url}`);
+  });
+
+  expect(await readPublic()).toEqual({
+    ok: true,
+    result: { kind: "file", path: "src/main.ts", sha, content: "public code" },
+  });
+  expect(requests).toEqual([
+    { path: "/repos/tellahq/opensession", auth: "Bearer public-token" },
+    { path: "/repos/tellahq/opensession/contents/src/main.ts", auth: null },
+    { path: "/repositories/9/contents/src/main.ts", auth: null },
+  ]);
+});
+
 it.each([403, 429, 500])(
   "preserves public-read HTTP %i even for approved owners",
   async (status) => {
@@ -2315,6 +2354,22 @@ it("posts inline reviews only against the current head and diff, and never appro
     expect(
       (await post("/api/integrations/github/execute", { operation: { ...review, event } })).ok,
     ).toBe(false);
+  // Models fill a single-line comment's optional range with nulls: those mean "omitted".
+
+  const nulls = await post("/api/integrations/github/execute", {
+    operation: {
+      ...review,
+      comments: [{ ...review.comments[0], start_line: null, start_side: null }],
+    },
+  });
+
+  expect(await nulls.json()).toMatchObject({ ok: true, result: { kind: "review" } });
+  expect(writes.at(-1)).toEqual({
+    path: "/repos/example/project/pulls/49/reviews",
+    body: expect.objectContaining({
+      comments: [{ path: "a.ts", line: 2, side: "RIGHT", body: "Use a constant" }],
+    }),
+  });
 });
 
 it("resolves the review thread holding a comment, from any session but a review's", async () => {
