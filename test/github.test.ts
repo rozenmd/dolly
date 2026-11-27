@@ -1867,7 +1867,8 @@ type CommentsPage = {
         part?: number;
         parts?: number;
         body?: string;
-        comments?: Array<{ id: number; body: string; body_part?: number }>;
+        trusted?: boolean;
+        comments?: Array<{ id: number; body: string; body_part?: number; trusted?: boolean }>;
       }>;
     };
   };
@@ -2088,6 +2089,39 @@ it("counts a thread with no resolution state as unresolved and says so", async (
   ]);
   expect(first.counts.unresolved_threads).toBe(2);
   expect(first.note).toContain("1 thread has no resolution state");
+});
+
+it("marks which authors are trusted, so sessions leave outsiders' comments alone", async () => {
+  const comment = (id: number, login: string) => ({
+    id,
+    user: { login },
+    body: `thread ${id}`,
+    path: "src/a.ts",
+    line: id,
+    html_url: `t${id}`,
+    created_at: minute(id),
+  });
+
+  await serveConversation({
+    inline: [comment(1, "dolly-test[bot]"), comment(2, "other-app[bot]"), comment(3, "outsider")],
+    resolved: new Map([
+      [1, false],
+      [2, false],
+      [3, false],
+    ]),
+    discussion: [
+      { id: 10, user: { login: "outsider" }, body: "hi", html_url: "c", created_at: minute(0) },
+    ],
+  });
+
+  const { first, items } = await readAllComments();
+  const trust = (id: number) => items.find((item) => item.id === id);
+
+  expect(trust(1)?.comments?.[0]).toMatchObject({ trusted: true });
+  expect(trust(2)?.comments?.[0]).toMatchObject({ trusted: true });
+  expect(trust(3)?.comments?.[0]).toMatchObject({ trusted: false });
+  expect(trust(10)).toMatchObject({ type: "comment", trusted: false });
+  expect(first.note).toContain("trusted: false marks an author");
 });
 
 it("fails the read rather than returning part of a list GitHub didn't finish sending", async () => {

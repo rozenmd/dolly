@@ -26,6 +26,11 @@ export type Post = {
   created_at: string | null;
   url: string | null;
   body: string;
+  /**
+   * Whether the author is this App, an installed GitHub App or an allowed sender, as the review
+   * handoff decides; false marks untrusted text. Unset when no GitHub App is connected.
+   */
+  trusted?: boolean;
 };
 
 /** A discussion comment, a review (one post each) or an inline thread (its comments). */
@@ -84,6 +89,7 @@ function single(item: CommentItem, budget: number) {
     id: item.id,
     ...item.fields,
     author: post.author,
+    ...(post.trusted !== undefined && { trusted: post.trusted }),
     created_at: post.created_at,
     url: post.url,
     body,

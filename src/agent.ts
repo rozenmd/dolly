@@ -427,6 +427,13 @@ export class Agent extends DurableObject<Env> {
             Effect.provide(this.services),
           ),
         ),
+      pullReviews: (repository, number) =>
+        Effect.runPromise(
+          Effect.flatMap(GitHub, (github) => github.pullReview(repository, number)).pipe(
+            Effect.provide(this.services),
+          ),
+        ),
+      automaticReview: async () => (await this.reviewAutomation()) !== undefined,
       workflowRun: (repository, target) =>
         Effect.runPromise(
           Effect.flatMap(GitHub, (github) => github.workflowRun(repository, target)).pipe(
@@ -2175,7 +2182,24 @@ export class Agent extends DurableObject<Env> {
             head: workspace?.reviewTarget?.sha,
           });
 
-        return this.publishReview(input);
+        const published = await this.publishReview(input);
+
+        // A wait on this PR (its author's) reads the new review now rather than at its next poll.
+        if (published.ok && input.operation.action === "create_review") {
+          const { repository, number, commit_id } = input.operation;
+
+          await this.ciWaiter
+            .nudge({
+              installationId: 0,
+              repository: repository.toLowerCase(),
+              shas: [commit_id.toLowerCase()],
+              pulls: [number],
+              review: true,
+            })
+            .catch(() => 0);
+        }
+
+        return published;
       }
     }
 
