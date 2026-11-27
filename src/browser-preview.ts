@@ -304,6 +304,9 @@ export function elementExpression(
       if (element.disabled) return { ok: false, reason: "the matching element " + describe(element) + " is disabled" };
       const x = rect.left + rect.width / 2;
       const y = rect.top + rect.height / 2;
+      const top = document.elementFromPoint(x, y);
+      if (!top || (top !== element && !element.contains(top)))
+        return { ok: false, reason: "the matching element " + describe(element) + (mode === "type" ? " cannot be typed into: " : " is not clickable: ") + describe(top) + " covers its centre" };
       if (mode === "type") {
         const editable = element.isContentEditable ||
           (element instanceof HTMLTextAreaElement) ||
@@ -317,9 +320,6 @@ export function elementExpression(
         }
         return { ok: true, x, y };
       }
-      const top = document.elementFromPoint(x, y);
-      if (!top || (top !== element && !element.contains(top)))
-        return { ok: false, reason: "the matching element " + describe(element) + " is not clickable: " + describe(top) + " covers its centre" };
       return { ok: true, x, y };
     };
     for (;;) {
