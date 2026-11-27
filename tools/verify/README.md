@@ -9,9 +9,48 @@ Dolly itself, not workloads that Dolly runs.
 pnpm verify
 ```
 
-Runs repository formatting and lint checks, then root, infrastructure and frontend
-typechecks. No unit tests, integration tests, browser sessions, builds or deployments
-are included. Unlike `pnpm check`, this does not run frontend unit tests.
+Runs repository formatting and lint checks, root, infrastructure and frontend
+typechecks, then the Node config guards (`pnpm test:node`: `node --test
+scripts/*.test.mjs infra/*.test.ts`, exactly what CI's `node` suite runs). No Vitest
+suites, browser sessions, builds or deployments are included. Unlike `pnpm check`,
+this does not run frontend unit tests.
+
+## Local dev server
+
+`pnpm dev` serves the Worker and web app on `127.0.0.1:8787` with the production
+configuration, so it builds the sandbox and Claude Code container images and needs
+Docker. In a Dolly sandbox (no Docker, no route to Cloudflare's `Request.cf`
+endpoint) run `pnpm dev:sandbox` instead, for example as the `preview` command on
+port 8787: it uses the test Worker configuration (`test/worker/vite.config.ts`),
+which drops the containers and enables the local Access bypass, and binds
+`0.0.0.0`, so it also sets `X_LOCAL_EXPLORER=false`: the Cloudflare plugin's Local
+Explorer (`/cdn-cgi/local/explorer`, on by default) sits outside Dolly's auth and
+can read Durable Object storage. Both scripts set `CLOUDFLARE_CF_FETCH_ENABLED=false`,
+since Dolly never reads `request.cf`. Signed-in pages still need seeded storage and a session cookie.
+
+If the dev server fails with `ReferenceError: module is not defined`, delete
+`node_modules/.vite`: an optimizer cache from a run that could not resolve React
+(before `publicHoistPattern` in `pnpm-workspace.yaml` hoisted web's React to the
+root) is reused otherwise.
+
+## Worker test setup
+
+Worker suites under `test/` share one Miniflare instance per file, so storage
+outlives a test unless it is cleared. Start each test with `resetStorage()` from
+`test/storage.ts`, not `reset()` from `cloudflare:test`: `reset()` clears only
+Durable Objects that are live, and an object stopped by `abortAllDurableObjects()`
+(as `afterEach` hooks do) keeps its key-value storage and Pi's SQLite tables
+(documents, document revisions, conversations), so automations, review receipts
+and GitHub threads would carry into the next test. `resetStorage()` wakes every
+object first. Call it before spying on `Harness.open`: waking an Agent opens its
+harness.
+
+A Durable Object RPC that rejects is logged by workerd as `uncaught exception;
+source = Uncaught (in promise)` even when the caller handles it. Expected outcomes
+crossing the Sandbox RPC (a cancelled command, a failed prepare) are returned as
+values for that reason; a test that wants a rejection without the log can call the
+method inside `runInDurableObject`. A genuinely unhandled rejection in the test
+isolate is different: Vitest reports it as an error and fails the run.
 
 ## Integration-first behavioral proof
 

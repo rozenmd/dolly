@@ -5,9 +5,9 @@ import {
   SELF,
   createExecutionContext,
   runInDurableObject,
-  reset,
   abortAllDurableObjects,
 } from "cloudflare:test";
+import { resetStorage } from "./storage";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { GitHubThreads } from "../src/github-inbox";
 import { REVIEW_INSTRUCTIONS } from "../src/review-instructions";
@@ -97,6 +97,8 @@ const open = Harness.open;
 let harnesses: Harness[] = [];
 
 beforeEach(async () => {
+  // Before the spy: waking objects to reset them opens their harnesses.
+  await resetStorage();
   harnesses = [];
   vi.spyOn(Harness, "open").mockImplementation(async (...args) => {
     const harness = await open(...args);
@@ -104,7 +106,6 @@ beforeEach(async () => {
 
     return harness;
   });
-  await reset();
   await signIn();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     await state.storage.put("github:webhook", profile);
@@ -549,7 +550,7 @@ const pullRequest = {
   },
 };
 
-/** reset() clears key-value storage but not Pi's documents, where automations live. */
+/** Delete every automation mid-test (each test starts with none: see resetStorage). */
 async function clearAutomations() {
   const listed = await SELF.fetch("https://worker/api/automations", { headers });
 
@@ -583,9 +584,8 @@ const listAutomations = async () =>
 
 it("reviews a new pull request in an enrolled repository once, posting the answer only if the agent did not", async () => {
   const access = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" }, exp: 9_999_999_999 }))}.signature`;
-  await clearAutomations();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
-    // Earlier tests leave Claude connected and chosen; this review runs on the ChatGPT mock.
+    // This review runs on the ChatGPT mock, even if Claude was connected.
     await state.storage.delete("credential:anthropic");
     await state.storage.put("github:connected", {
       app: { id: 42, slug: "dolly-test", pem, owner: { login: "example" } },
@@ -1007,7 +1007,6 @@ it("reviews a new pull request in an enrolled repository once, posting the answe
 }, 30_000);
 
 it("keeps one pull request automation, and makes the old Settings > GitHub switch into it", async () => {
-  await clearAutomations();
   let events = ["issue_comment"];
 
   mockFetch(async (url) =>

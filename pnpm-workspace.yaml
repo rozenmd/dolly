@@ -5,6 +5,13 @@ allowBuilds:
   protobufjs: false
   workerd: true
 
+# The root dev server (`pnpm dev`, `pnpm dev:sandbox`) renders web/ and prebundles its React from the
+# repository root, so web's renderer dependencies must resolve there too.
+publicHoistPattern:
+  - react
+  - react-dom
+  - "@tanstack/react-router"
+
 minimumReleaseAge: 1440
 # Preserve the existing lockfile's reviewed versions without exempting future releases.
 minimumReleaseAgeExclude:

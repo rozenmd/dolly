@@ -22,8 +22,12 @@ import { LineWindow, describeWindow, type FileRange } from "./file-window";
 import { applyEdit, diffStats, MAX_EDIT_BYTES, type DiffStats, type Edit } from "./file-edit";
 import { exceptionDetails, redact } from "./diagnostics";
 import {
+  isRunCancelled,
+  RUN_CANCELLED,
   OutputRelay,
   OutputTail,
+  RUN_CANCELLED_MESSAGE,
+  type RunCancelled,
   SHELL_OUTPUT_LIMIT,
   SHELL_TIMEOUT_EXIT_CODE,
   SHELL_TIMEOUT_MAX_SECONDS,
@@ -156,6 +160,8 @@ type StreamedOutput = {
   readonly stderr: OutputTail;
   readonly relay?: OutputRelay;
 };
+
+const CONTAINER_UNCONFIGURED = "Sandbox Container binding is not configured";
 
 /** Options of {@link Sandbox.run}. */
 export type RunOptions = {
@@ -425,7 +431,12 @@ export class Sandbox extends DurableObject<Env> {
   ): Effect.fn.Return<Container, OperationError | Cause.TimeoutError> {
     const container = this.ctx.container;
 
-    if (!container) return yield* Effect.die("Sandbox Container binding is not configured");
+    if (!container)
+      return yield* new OperationError({
+        operation: "sandbox.container",
+        message: CONTAINER_UNCONFIGURED,
+        details: null,
+      });
 
     if (container.running && this.initialized) {
       const inactivity = attempt("sandbox.inactivity", () =>
@@ -1174,6 +1185,33 @@ export class Sandbox extends DurableObject<Env> {
     return { ...prepared, restored: restored ? restoreNotice(restored) : undefined };
   }
 
+  /**
+   * {@link prepare} for the Agent's tools: an {@link OperationError} (a checkout that failed, another
+   * workspace, no Container) resolves as `{ failure }` rather than rejecting, because workerd logs
+   * every rejected Durable Object RPC as an uncaught exception. The Agent rethrows it as the tool's
+   * error. Anything else, such as a timeout, still rejects.
+   */
+  async prepareSettled(config: WorkspaceConfig): Promise<
+    | { readonly prepared: Awaited<ReturnType<Sandbox["prepare"]>> }
+    | {
+        readonly failure: {
+          readonly operation: string;
+          readonly message: string;
+          readonly details: unknown;
+        };
+      }
+  > {
+    try {
+      return { prepared: await this.prepare(config) };
+    } catch (error) {
+      if (!(error instanceof OperationError)) throw error;
+
+      return {
+        failure: { operation: error.operation, message: error.message, details: error.details },
+      };
+    }
+  }
+
   async waitForDependencies() {
     const config = await this.ctx.storage.get<WorkspaceConfig>("workspace");
 
@@ -1203,13 +1241,37 @@ export class Sandbox extends DurableObject<Env> {
    * Run a command in the workspace. `env` adds variables such as the agent's git identity; it cannot
    * override the fixed git and TLS settings. Each stream's result is its last 32 KiB. A command that
    * reaches its timeout is stopped and returns its output so far with `timedOut`; one cancelled
-   * through {@link cancel} is stopped and rejects.
+   * through {@link cancel} is stopped and rejects. Callers that cancel should use
+   * {@link runUntilCancelled}, which reports the cancellation as a value.
    */
-  run(
+  async run(
     command: string,
     env: Readonly<Record<string, string>> = {},
     options: RunOptions = {},
   ): Promise<RunResult> {
+    const outcome = await this.runUntilCancelled(command, env, options);
+
+    if (isRunCancelled(outcome))
+      throw new OperationError({
+        operation: "sandbox.run",
+        message: RUN_CANCELLED_MESSAGE,
+        details: null,
+      });
+
+    return outcome;
+  }
+
+  /**
+   * {@link run}, except that a command cancelled through {@link cancel} resolves `{ cancelled: true }`
+   * instead of rejecting. workerd logs every rejected Durable Object RPC as an uncaught exception, so
+   * an expected stop must cross the RPC boundary as a value; `runCancellable` turns it back into the
+   * caller's rejection. Real failures still reject.
+   */
+  runUntilCancelled(
+    command: string,
+    env: Readonly<Record<string, string>> = {},
+    options: RunOptions = {},
+  ): Promise<RunResult | RunCancelled> {
     const timeout = Math.min(
       Math.max(Math.ceil(options.timeout ?? 60), 1),
       SHELL_TIMEOUT_MAX_SECONDS,
@@ -1258,18 +1320,13 @@ export class Sandbox extends DurableObject<Env> {
       }),
     );
 
-    const result = this.runWorkspaceOperation(operation, cancel.signal);
+    const result: Promise<RunResult | RunCancelled> = this.runWorkspaceOperation(
+      operation,
+      cancel.signal,
+    );
 
     return result
-      .catch(() => {
-        if (!cancel.signal.aborted) return result;
-
-        throw new OperationError({
-          operation: "sandbox.run",
-          message: "The command was cancelled",
-          details: null,
-        });
-      })
+      .catch(() => (cancel.signal.aborted ? RUN_CANCELLED : result))
       .finally(async () => {
         if (executionId && this.executions.get(executionId) === cancel)
           this.executions.delete(executionId);

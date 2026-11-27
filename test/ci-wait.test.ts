@@ -3,11 +3,11 @@ import { env } from "cloudflare:workers";
 import {
   SELF,
   createExecutionContext,
-  reset,
   runInDurableObject,
   runDurableObjectAlarm,
   abortAllDurableObjects,
 } from "cloudflare:test";
+import { resetStorage } from "./storage";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -501,7 +501,7 @@ const alarm = () =>
   runInDurableObject(env.AGENT.getByName("owner"), (_, state) => state.storage.getAlarm());
 
 beforeEach(async () => {
-  await reset();
+  await resetStorage();
   await signIn();
   roots = [];
   started.at = realNow();
@@ -541,12 +541,6 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  // Pi documents, where automations live, outlast reset(): no test lends another its reviewer.
-  const listed = await SELF.fetch("https://worker/api/automations", { headers });
-
-  for (const { id } of (await listed.json<{ automations: { id: string }[] }>()).automations)
-    await SELF.fetch(`https://worker/api/automations/${id}`, { method: "DELETE", headers });
-
   vi.restoreAllMocks();
 
   for (const id of roots)
