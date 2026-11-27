@@ -298,6 +298,15 @@ it("lets a response with a tool call finish, then skips its unstarted calls for 
       ["call_1|fc_1", true, expect.stringContaining(STEER_TOOL_SKIP)],
       ["call_2|fc_2", true, expect.stringContaining(STEER_TOOL_SKIP)],
     ]);
+
+    // Skipping them for the owner's steer is not a tool failure.
+    const logged = await runInDurableObject(env.AGENT.getByName("owner"), (_, state) =>
+      state.storage.sql
+        .exec("SELECT id FROM app_papercuts WHERE message LIKE ?", `%${STEER_TOOL_SKIP}%`)
+        .toArray(),
+    );
+
+    expect(logged).toEqual([]);
     expect(messages.map((message) => message.role)).toEqual([
       "user",
       "assistant",
