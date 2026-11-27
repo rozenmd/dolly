@@ -120,11 +120,20 @@ it("sends Claude every tool's arguments as root properties", async () => {
   expect(byName.papercuts?.input_schema).toMatchObject({
     required: ["action"],
     properties: {
-      action: { enum: ["log", "list", "resolve"] },
+      action: { enum: ["log", "list", "read", "resolve", "resolve_stale"] },
       message: expect.anything(),
       repository: expect.anything(),
       status: expect.anything(),
+      signature: expect.anything(),
+      group: expect.anything(),
+      limit: expect.anything(),
+      cursor: expect.anything(),
       id: expect.anything(),
+      ids: expect.anything(),
+      before: expect.anything(),
+      reason: expect.anything(),
+      note: expect.anything(),
+      olderThanDays: expect.anything(),
     },
   });
 

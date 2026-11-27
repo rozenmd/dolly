@@ -3,7 +3,8 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { configure, type ConversationId } from "@earendil-works/pi-durable";
-import { Papercuts, papercutSignature, toolFailure } from "../src/papercuts";
+import { PAGE_BYTES, Papercuts, papercutSignature, toolFailure } from "../src/papercuts";
+import { ConversationWorkspace, workspaceConfig } from "../src/workspace";
 import { headers, signIn } from "./session";
 
 beforeEach(async () => {
@@ -35,16 +36,19 @@ it("stores each occurrence across conversations, filters and resolves without de
       message: "Build failed",
     });
     store.log({ kind: "improvement", source: "agent", message: "Setup needs documentation" });
-    expect(store.list()).toHaveLength(3);
-    expect(store.list("ORG/REPO")).toHaveLength(2);
+    expect(store.list().entries).toHaveLength(3);
+    expect(store.list({ repository: "ORG/REPO" }).entries).toHaveLength(2);
     expect(() => store.log({ kind: "improvement", source: "agent", message: "  " })).toThrow(
       "empty",
     );
-    expect(store.resolve(first.id)).toEqual({ resolved: true });
-    expect(store.resolve(first.id)).toEqual({ resolved: false });
-    expect(store.resolve("missing")).toEqual({ resolved: false });
-    expect(store.list("org/repo")).toHaveLength(1);
-    expect(store.list("org/repo", "fixed")[0].id).toBe(first.id);
+    expect(store.resolve({ id: first.id })).toEqual({ resolved: 1 });
+    expect(store.resolve({ id: first.id })).toEqual({ resolved: 0 });
+    expect(store.resolve({ id: "missing" })).toEqual({ resolved: 0 });
+    expect(store.list({ repository: "org/repo" }).entries).toHaveLength(1);
+    expect(store.list({ repository: "org/repo", status: "fixed" }).entries[0]).toMatchObject({
+      id: first.id,
+      resolution_reason: "fixed",
+    });
 
     return first.id;
   });
@@ -52,8 +56,8 @@ it("stores each occurrence across conversations, filters and resolves without de
   await abortAllDurableObjects();
   await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
     const store = new Papercuts(state.storage.sql);
-    expect(store.list()).toHaveLength(2);
-    expect(store.list(undefined, "fixed")[0].id).toBe(id);
+    expect(store.list().entries).toHaveLength(2);
+    expect(store.list({ status: "fixed" }).entries[0].id).toBe(id);
   });
 });
 
@@ -252,13 +256,282 @@ it("adds signatures to entries stored before signatures existed", async () => {
     );
 
     const store = new Papercuts(sql);
-    expect(store.list()).toMatchObject([
+    expect(store.list().entries).toMatchObject([
       { id: "old", signature: "tool:shell|127|sh: <n>: rg: not found" },
     ]);
     store.log({ kind: "error", source: "model", message: "Overloaded" });
-    expect(new Papercuts(sql).list().map((row) => row.signature)).toEqual([
+    expect(new Papercuts(sql).list().entries.map((row) => row.signature)).toEqual([
       "model||overloaded",
       "tool:shell|127|sh: <n>: rg: not found",
+    ]);
+  });
+});
+
+/** Log an entry as if at `time`, so paging, grouping and cutoffs are deterministic. */
+function logAt(
+  store: Papercuts,
+  time: number,
+  input: Partial<Parameters<Papercuts["log"]>[0]> & { message: string },
+) {
+  vi.spyOn(Date, "now").mockReturnValueOnce(time);
+
+  return store.log({ kind: "error", source: "tool:shell", ...input }).id;
+}
+
+it("pages compact entries with a cursor and reads one entry in full", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const store = new Papercuts(state.storage.sql);
+    const long = `Build failed: ${"x".repeat(1_000)}`;
+
+    const ids = Array.from({ length: 5 }, (_, index) =>
+      logAt(store, 1_000 + Math.floor(index / 2), {
+        message: index === 4 ? long : `Failed ${index}`,
+      }),
+    );
+
+    const first = store.list({ limit: 2 });
+    expect(first).toMatchObject({ total: 5, more: true, nextCursor: expect.any(String) });
+    expect(first.entries[0]).toMatchObject({
+      id: ids[4],
+      message_length: long.length,
+      signature: expect.any(String),
+      kind: "error",
+      source: "tool:shell",
+      created_at: 1_002,
+    });
+    expect(first.entries[0].message).toHaveLength(201);
+    expect(first.entries[0]).not.toHaveProperty("resolved_at");
+
+    const seen = [...first.entries];
+    let page = first;
+
+    while (page.more) {
+      page = store.list({ limit: 2, cursor: page.nextCursor });
+      seen.push(...page.entries);
+    }
+
+    expect(page).not.toHaveProperty("nextCursor");
+    expect(new Set(seen.map((entry) => entry.id))).toEqual(new Set(ids));
+    expect(seen).toHaveLength(5);
+    expect(store.read(ids[4]).message).toBe(long);
+    expect(() => store.read("missing")).toThrow("No papercut");
+    expect(store.list({ limit: 10_000 }).entries).toHaveLength(5);
+    expect(() => store.list({ cursor: "nonsense" })).toThrow("Invalid cursor");
+  });
+});
+
+it("groups entries by signature and flags a problem that came back after it was resolved", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const store = new Papercuts(state.storage.sql);
+
+    const notFound = (port: number) =>
+      JSON.stringify({ exitCode: 127, stderr: `sh: ${port}: rg: not found` });
+
+    const fixed = logAt(store, 100, {
+      conversationId: "a",
+      repository: "org/a",
+      message: notFound(1),
+    });
+
+    logAt(store, 200, { conversationId: "a", repository: "org/a", message: notFound(2) });
+    logAt(store, 300, { conversationId: "b", repository: "org/b", message: notFound(3) });
+    logAt(store, 250, { kind: "improvement", source: "agent", message: "Docs are missing" });
+
+    vi.spyOn(Date, "now").mockReturnValueOnce(150);
+    expect(store.resolve({ id: fixed })).toEqual({ resolved: 1 });
+
+    const { groups, total, more } = store.groups();
+    expect({ total, more }).toEqual({ total: 2, more: false });
+    expect(groups).toMatchObject([
+      {
+        signature: "tool:shell|127|sh: <n>: rg: not found",
+        count: 2,
+        sessions: 2,
+        repositories: ["org/a", "org/b"],
+        repository_count: 2,
+        first_seen: 200,
+        last_seen: 300,
+        sample_message: notFound(3),
+        last_resolved_at: 150,
+        last_resolution_reason: "fixed",
+        recurred_after_resolve: true,
+      },
+      { signature: "agent||docs are missing", count: 1, sessions: 0, repositories: [] },
+    ]);
+    expect(groups[0].sample_ids).toHaveLength(2);
+    expect(groups[1]).not.toHaveProperty("last_resolved_at");
+
+    const page = store.groups({ limit: 1 });
+    expect(page).toMatchObject({ more: true, groups: [{ count: 2 }] });
+    expect(store.groups({ limit: 1, cursor: page.nextCursor })).toMatchObject({
+      more: false,
+      groups: [{ signature: "agent||docs are missing" }],
+    });
+    expect(store.groups({ repository: "org/b" }).groups).toMatchObject([
+      { count: 1, repositories: ["org/b"] },
+    ]);
+    expect(store.groups({ status: "fixed" }).groups).toMatchObject([{ count: 1, first_seen: 100 }]);
+  });
+});
+
+it("resolves by ids or by signature before a time, keeping later repeats open", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const store = new Papercuts(state.storage.sql);
+    const message = JSON.stringify({ exitCode: 127, stderr: "sh: 1: rg: not found" });
+    const signature = papercutSignature("tool:shell", message);
+    const before = [100, 200, 300].map((time) => logAt(store, time, { message }));
+    const after = logAt(store, 500, { message });
+    const others = [logAt(store, 150, { message: "A" }), logAt(store, 160, { message: "B" })];
+
+    expect(
+      store.resolve({ signature, before: 400, note: "https://github.com/o/r/pull/178" }),
+    ).toEqual({ resolved: 3 });
+    expect(store.list({ signature }).entries.map((entry) => entry.id)).toEqual([after]);
+    expect(store.read(before[0])).toMatchObject({
+      resolution_reason: "fixed",
+      resolution_note: "https://github.com/o/r/pull/178",
+    });
+    expect(store.list({ status: "fixed" }).total).toBe(3);
+
+    expect(
+      store.resolve({ ids: [...others, others[0], "missing"], reason: "not-an-error" }),
+    ).toEqual({
+      resolved: 2,
+    });
+    expect(store.read(others[1]).resolution_reason).toBe("not-an-error");
+    expect(store.resolve({ signature })).toEqual({ resolved: 1 });
+    expect(store.list().total).toBe(0);
+
+    expect(() => store.resolve({})).toThrow("needs id");
+    expect(() => store.resolve({ id: after, signature })).toThrow("not both");
+    expect(() => store.resolve({ id: after, before: 1 })).toThrow(
+      "only when resolving by signature",
+    );
+  });
+});
+
+it("stops a page short of its row limit before it outgrows the tool output limit", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const store = new Papercuts(state.storage.sql);
+    // Letters, since signatures replace numbers: each entry gets its own signature.
+
+    const word = (index: number) =>
+      String.fromCharCode(97 + Math.floor(index / 26)) + String.fromCharCode(97 + (index % 26));
+
+    const stderr = (index: number) => `sh: ${word(index)}: ${"é".repeat(300)} failed`;
+
+    for (let index = 0; index < 201; index++)
+      logAt(store, index, {
+        conversationId: `session-${index}`,
+        repository: `org/repo-${index}`,
+        message: JSON.stringify({ exitCode: 1, stderr: stderr(index) }),
+      });
+
+    const seen = new Set<string>();
+    let page = store.list({ limit: 200 });
+
+    for (;;) {
+      expect(new TextEncoder().encode(JSON.stringify(page)).length).toBeLessThan(PAGE_BYTES + 1024);
+      expect(page.entries.length).toBeGreaterThan(0);
+
+      for (const entry of page.entries) seen.add(entry.id);
+
+      if (!page.more) break;
+      expect(page.entries.length).toBeLessThan(200);
+      page = store.list({ limit: 200, cursor: page.nextCursor });
+    }
+
+    expect(seen.size).toBe(201);
+
+    const groups = store.groups({ limit: 200 });
+    expect(new TextEncoder().encode(JSON.stringify(groups)).length).toBeLessThan(PAGE_BYTES + 1024);
+    expect(groups).toMatchObject({ total: 201, more: true, nextCursor: expect.any(String) });
+
+    for (let index = 0; index < 12; index++)
+      logAt(store, 1_000, { repository: `org/many-${index}`, message: "Many repositories" });
+    expect(store.groups({ limit: 1 }).groups[0]).toMatchObject({
+      repository_count: 12,
+      repositories: expect.arrayContaining(["org/many-0"]),
+    });
+    expect(store.groups({ limit: 1 }).groups[0].repositories).toHaveLength(10);
+
+    store.resolveStale({ olderThanDays: 0, note: "n".repeat(1_000) });
+    const fixed = store.list({ status: "fixed" });
+    expect(fixed.more).toBe(true);
+    expect(new TextEncoder().encode(JSON.stringify(fixed)).length).toBeLessThan(PAGE_BYTES + 1024);
+  });
+});
+
+it("scopes a resolve by signature to one repository when given", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const store = new Papercuts(state.storage.sql);
+    const a = logAt(store, 100, { repository: "org/a", message: "Permission denied: org/a" });
+    const b = logAt(store, 100, { repository: "org/b", message: "Permission denied: org/b" });
+    const signature = store.read(a).signature;
+    expect(store.read(b).signature).toBe(signature);
+
+    expect(store.resolve({ signature, repository: "ORG/A", before: 200 })).toEqual({ resolved: 1 });
+    expect(store.read(a).resolved_at).not.toBeNull();
+    expect(store.read(b).resolved_at).toBeNull();
+    expect(() => store.resolve({ id: b, repository: "org/b" })).toThrow(
+      "repository applies only when resolving by signature",
+    );
+  });
+});
+
+it("resolves open entries older than a number of days as stale, optionally for one repository", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const store = new Papercuts(state.storage.sql);
+    const day = 86_400_000;
+    const now = Date.now();
+    const legacy = '{"stdout":"' + "x".repeat(50);
+    const oldA = logAt(store, now - 10 * day, { repository: "org/a", message: legacy });
+    const oldB = logAt(store, now - 10 * day, { repository: "org/b", message: legacy });
+    const recent = logAt(store, now - day, { repository: "org/a", message: legacy });
+    expect(store.read(oldA).signature).toBe("tool:shell||truncated tool result");
+
+    expect(store.resolveStale({ olderThanDays: 7, repository: "ORG/A" })).toEqual({ resolved: 1 });
+    expect(store.read(oldA)).toMatchObject({
+      resolution_reason: "stale",
+      resolved_at: expect.any(Number),
+    });
+    expect(store.read(oldB).resolved_at).toBeNull();
+    expect(store.resolveStale({ olderThanDays: 7, note: "Legacy clipped entries" })).toEqual({
+      resolved: 1,
+    });
+    expect(store.read(oldB)).toMatchObject({
+      resolution_reason: "stale",
+      resolution_note: "Legacy clipped entries",
+    });
+    expect(store.list().entries.map((entry) => entry.id)).toEqual([recent]);
+    expect(() => store.resolveStale({ olderThanDays: -1 })).toThrow("non-negative");
+  });
+});
+
+it("adds resolution columns to existing rows, marking already resolved entries as fixed", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const sql = state.storage.sql;
+    // Put the table back in its shape before resolution reasons existed.
+    new Papercuts(sql);
+    sql.exec("ALTER TABLE app_papercuts DROP COLUMN resolution_reason");
+    sql.exec("ALTER TABLE app_papercuts DROP COLUMN resolution_note");
+
+    for (const [id, resolved] of [
+      ["open", null],
+      ["done", 5],
+    ] as const)
+      sql.exec(
+        `INSERT INTO app_papercuts (id, kind, source, message, signature, created_at, resolved_at)
+         VALUES (?, 'error', 'model', 'Overloaded', 'model||overloaded', 1, ?)`,
+        id,
+        resolved,
+      );
+
+    const store = new Papercuts(sql);
+    expect(store.read("open")).toMatchObject({ resolution_reason: null, resolution_note: null });
+    expect(store.read("done")).toMatchObject({ resolution_reason: "fixed", resolved_at: 5 });
+    expect(new Papercuts(sql).list({ status: "fixed" }).entries).toMatchObject([
+      { id: "done", resolution_reason: "fixed" },
     ]);
   });
 });
@@ -276,9 +549,14 @@ async function credentials() {
 }
 
 async function entries() {
-  return runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
-    new Papercuts(state.storage.sql).list(),
-  );
+  // Every entry, open or resolved, with its full message.
+  return runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const store = new Papercuts(state.storage.sql);
+
+    return (["open", "fixed"] as const).flatMap((status) =>
+      store.list({ status, limit: 200 }).entries.map((entry) => store.read(entry.id)),
+    );
+  });
 }
 
 it("adds papercuts to existing sessions without replacing their other tool configuration", async () => {
@@ -377,16 +655,24 @@ it("registers the papercuts tool and captures failed tool results through the re
     const index = requests++;
 
     const item =
-      index < 2
+      index < 3
         ? {
             type: "function_call",
             id: `fc_${index}`,
             call_id: `call_${index}`,
-            name: index === 0 ? "papercuts" : "workspace",
+            name: index === 1 ? "workspace" : "papercuts",
             arguments: JSON.stringify(
-              index === 0
-                ? { action: "log", message: "Setup instructions omit private-refresh" }
-                : { action: "status" },
+              [
+                { action: "log", message: "Setup instructions omit private-refresh" },
+                { action: "status" },
+                {
+                  action: "resolve",
+                  signature: "agent||setup instructions omit [redacted]",
+                  before: new Date(Date.now() + 60_000).toISOString(),
+                  reason: "wontfix",
+                  note: "Documented elsewhere",
+                },
+              ][index],
             ),
           }
         : {
@@ -421,13 +707,107 @@ it("registers the papercuts tool and captures failed tool results through the re
   });
   await start();
   await expect.poll(async () => (await entries()).length).toBe(2);
+  await expect
+    .poll(async () => (await entries()).find((row) => row.source === "agent")?.resolution_reason)
+    .toBe("wontfix");
   const rows = await entries();
-  expect(rows.find((row) => row.source === "agent")?.message).toBe(
-    "Setup instructions omit [redacted]",
-  );
+  expect(rows.find((row) => row.source === "agent")).toMatchObject({
+    message: "Setup instructions omit [redacted]",
+    resolved_at: expect.any(Number),
+    resolution_reason: "wontfix",
+    resolution_note: "Documented elsewhere",
+  });
   expect(rows.find((row) => row.source === "tool:workspace")?.message).toContain(
     "Select a repository",
   );
   expect(rows.every((row) => row.conversation_id !== null)).toBe(true);
   expect(rows.every((row) => row.signature.length > 0)).toBe(true);
+});
+
+it("refuses to resolve papercuts from a read-only session", async () => {
+  await credentials();
+
+  const old = await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) =>
+    logAt(new Papercuts(state.storage.sql), 1, { message: "Old failure" }),
+  );
+
+  const calls = [
+    { action: "resolve_stale", olderThanDays: 0 },
+    { action: "resolve", id: old, reason: "stale" },
+    { action: "list", group: true },
+  ];
+
+  const bodies: string[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {
+    const index = bodies.length;
+    bodies.push(String(init?.body ?? ""));
+
+    const item =
+      index < calls.length
+        ? {
+            type: "function_call",
+            id: `fc_${index}`,
+            call_id: `call_${index}`,
+            name: "papercuts",
+            arguments: JSON.stringify(calls[index]),
+          }
+        : {
+            type: "message",
+            id: "msg_done",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "Done", annotations: [] }],
+          };
+
+    const events = [
+      {
+        type: "response.created",
+        response: { id: `resp_${index}`, status: "in_progress", output: [] },
+      },
+      { type: "response.output_item.done", output_index: 0, item },
+      {
+        type: "response.completed",
+        response: {
+          id: `resp_${index}`,
+          status: "completed",
+          output: [item],
+          usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+        },
+      },
+    ];
+
+    return new Response(
+      events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+  });
+
+  const created = await SELF.fetch("https://worker/api/sessions", { method: "POST", headers });
+  const { id } = await created.json<{ id: string }>();
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent, state) => {
+    const conversationId = (await state.storage.get<ConversationId>(`session:${id}`))!;
+    await agent["harness"].commit(async (tx) => {
+      (await tx.doc(ConversationWorkspace, conversationId)).config = workspaceConfig(
+        { repository: "example/project" },
+        String(conversationId),
+        { readOnly: true },
+      );
+    }, BACKGROUND_CONTEXT);
+  });
+
+  const submitted = await SELF.fetch(`https://worker/api/sessions/${id}/messages`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ content: "Clean up papercuts", requestId: crypto.randomUUID() }),
+  });
+
+  expect(submitted.status).toBe(202);
+  await expect.poll(() => bodies.length, { timeout: 15_000 }).toBe(calls.length + 1);
+
+  // Both resolves were refused and the list still answered.
+  expect(bodies[1]).toContain("Read-only sessions can list and read papercuts");
+  expect(bodies[2]).toContain("Read-only sessions can list and read papercuts");
+  expect(bodies[3]).toContain("Old failure");
+  const rows = await entries();
+  expect(rows.find((row) => row.id === old)?.resolved_at).toBeNull();
 });
