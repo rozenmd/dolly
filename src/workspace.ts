@@ -378,10 +378,15 @@ export function checkpointTimeoutMessage(timeoutMs: number, previous: WorkspaceS
     timeoutMs % 60_000 === 0 ? `${timeoutMs / 60_000} minutes` : `${timeoutMs / 1000} seconds`;
 
   const restorePoint = previous
-    ? `the restore point is still snapshot ${previous.id}${previous.savedAt ? ` saved at ${new Date(previous.savedAt).toISOString()}` : ""}${previous.turnId ? ` (end of turn ${previous.turnId})` : ""}`
-    : "no earlier save exists, so a restart would recreate the checkout from its ref";
+    ? `The restore point is the last completed save, snapshot ${previous.id}${previous.savedAt ? ` saved at ${new Date(previous.savedAt).toISOString()}` : ""}${previous.turnId ? ` (end of turn ${previous.turnId})` : ""}.`
+    : "No save had completed, so a container restart recreates the checkout from its ref.";
 
-  return `Workspace save timed out: the container snapshot did not finish within ${limit}. Nothing was lost yet, but ${restorePoint}. Changes made since then live only in the running container until the next turn-end save succeeds; if the container stops first, they are gone. Push important work to GitHub.`;
+  // The first line is the papercut signature: keep varying details off it. Later lines are also
+  // read from diagnostics after the container may have stopped, so they claim nothing about now.
+  return [
+    `Workspace save timed out: the container snapshot did not finish within ${limit}.`,
+    `${restorePoint} Changes made after it survive only while the container that made them keeps running, until a later turn-end save succeeds; if that container stops first, they are discarded and the next repository tool reports it. Push important work to GitHub.`,
+  ].join("\n");
 }
 
 export type WorkspaceSetup = {

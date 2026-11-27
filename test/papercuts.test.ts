@@ -4,7 +4,12 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { configure, type ConversationId } from "@earendil-works/pi-durable";
 import { PAGE_BYTES, Papercuts, papercutSignature, toolFailure } from "../src/papercuts";
-import { ConversationWorkspace, workspaceConfig } from "../src/workspace";
+import {
+  CHECKPOINT_TIMEOUT_MS,
+  checkpointTimeoutMessage,
+  ConversationWorkspace,
+  workspaceConfig,
+} from "../src/workspace";
 import { headers, signIn } from "./session";
 
 beforeEach(async () => {
@@ -177,6 +182,22 @@ it("stores a compact summary of a shell failure instead of its whole output", ()
   );
 
   expect(timeout).toEqual({ exitCode: 124, timedOut: true });
+});
+
+it("groups checkpoint timeouts by cause, whatever the restore point was", () => {
+  const signature = (previous: Parameters<typeof checkpointTimeoutMessage>[1]) =>
+    papercutSignature(
+      "workspace:checkpoint",
+      checkpointTimeoutMessage(CHECKPOINT_TIMEOUT_MS, previous),
+    );
+
+  expect(signature(null)).toBe(
+    "workspace:checkpoint||workspace save timed out: the container snapshot did not finish within <n> minutes.",
+  );
+  expect(signature({ id: "snapshot-abc", turnId: "turn-1", savedAt: Date.now() })).toBe(
+    signature(null),
+  );
+  expect(signature({ id: "other" })).toBe(signature(null));
 });
 
 it("gives repeats of one failure the same signature and different failures different ones", () => {

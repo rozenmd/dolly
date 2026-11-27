@@ -387,10 +387,10 @@ it("gives large snapshots more than two minutes and explains a timed-out save", 
     await expect(instance.checkpoint("turn-2")).rejects.toThrow(
       new RegExp(
         [
-          "^Workspace save timed out: the container snapshot did not finish within 0\\.05 seconds\\.",
-          `the restore point is still snapshot ${restorePoint!.id} saved at \\S+ \\(end of turn turn-1\\)\\.`,
-          "if the container stops first, they are gone\\.",
-        ].join(".*"),
+          "^Workspace save timed out: the container snapshot did not finish within 0\\.05 seconds\\.\n",
+          `The restore point is the last completed save, snapshot ${restorePoint!.id} saved at \\S+ \\(end of turn turn-1\\)\\.`,
+          "if that container stops first, they are discarded",
+        ].join("[\\s\\S]*"),
       ),
     );
 
