@@ -151,7 +151,14 @@ type Run = {
 
 /** What the fake GitHub API currently reports. */
 type FakeGitHub = {
-  pull: { state: string; merged: boolean; sha: string };
+  pull: {
+    state: string;
+    merged: boolean;
+    sha: string;
+    /** REST's mergeable and mergeable_state; unset reads as clean. */
+    mergeable?: boolean | null;
+    mergeableState?: string;
+  };
   checks: Check[];
   run?: Run;
   /** Every API read, then the full PR reads and the cheap GraphQL count reads on their own. */
@@ -244,6 +251,13 @@ const reviewGraph = () => ({
   },
 });
 
+/** GraphQL's MergeableState for the fake PR. */
+function graphMergeable() {
+  if (github.pull.mergeable === false) return "CONFLICTING";
+
+  return github.pull.mergeable === null ? "UNKNOWN" : "MERGEABLE";
+}
+
 /** The GraphQL rollup state GitHub would count a fake check under. */
 function rollupState(check: Check) {
   if (check.status !== "completed") return "IN_PROGRESS";
@@ -290,6 +304,7 @@ function fakeGitHub(url: URL, init?: RequestInit) {
           pullRequest: {
             state: github.pull.merged ? "MERGED" : github.pull.state.toUpperCase(),
             headRefOid: github.pull.sha,
+            mergeable: graphMergeable(),
             commits: {
               nodes: [
                 {
@@ -330,6 +345,9 @@ function fakeGitHub(url: URL, init?: RequestInit) {
     return Response.json({
       state: github.pull.state,
       merged: github.pull.merged,
+      mergeable: github.pull.mergeable ?? true,
+      mergeable_state: github.pull.mergeableState ?? "clean",
+      base: { ref: "main" },
       head: { sha: github.pull.sha },
     });
 
@@ -744,6 +762,81 @@ it("wakes once for new review feedback on the head; outdated and untrusted feedb
   await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(3);
   expect(wakes[2]).toContain("comment 502");
   expect(wakes[2]).toContain("Review round 2 of at most 5");
+});
+
+it("wakes once per head that conflicts with the base; unknown and behind don't wake", async () => {
+  github.checks = [pending("test")];
+  // GitHub hasn't computed mergeability yet.
+  github.pull.mergeable = null;
+  github.pull.mergeableState = "unknown";
+  const { wakes } = waiter({ kind: "pr_checks", repository, number: 8 });
+
+  const id = await root();
+  await prompt(id, "Wait for CI");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Registered: ");
+
+  for (const ms of [20_000, 55_000, 90_000]) await at(ms);
+  expect(wakes).toHaveLength(0);
+
+  // The base moved ahead without a conflict: still nothing to act on.
+  github.pull.mergeable = true;
+  github.pull.mergeableState = "behind";
+
+  for (const ms of [130_000, 170_000]) await at(ms);
+  expect(wakes).toHaveLength(0);
+  const fullReads = github.pulls;
+
+  // Now it conflicts: the cheap count read sees it and falls through to the full read, which wakes
+  // the session at once, while the check still runs.
+  github.pull.mergeable = false;
+  github.pull.mergeableState = "dirty";
+  await at(200_000);
+  expect(github.pulls).toBe(fullReads + 1);
+  await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(1);
+  expect(wakes[0]).toContain("failed · PR #8 conflicts with main on aaaaaaa");
+  expect(wakes[0]).toContain("CI won't run on it");
+  expect(wakes[0]).toContain("fetch the base, merge it into the PR's branch");
+  expect(wakes[0]).toContain("hand it to the owner");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Woken 1");
+
+  // Re-armed on the same conflicted head: no second wake, not even when its checks settle.
+  await prompt(id, "Wait again");
+  await expect
+    .poll(async () => (await transcript(id)).split("Registered: ").length, { timeout: 10_000 })
+    .toBe(3);
+  github.checks = [done("test", "success")];
+
+  for (const ms of [300_000, 450_000, 600_000, 750_000]) await at(ms);
+  expect(wakes).toHaveLength(1);
+  expect((await wait(id))?.last_seen).toContain("PR #8 conflicts with main on aaaaaaa");
+
+  // A new push that still conflicts wakes again.
+  github.pull.sha = "c".repeat(40);
+  github.checks = [];
+
+  for (const ms of [900_000, 1_000_000]) await at(ms);
+  await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(2);
+  expect(wakes[1]).toContain("PR #8 conflicts with main on ccccccc");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Woken 2");
+
+  // The conflict is resolved: the next head's checks run and settle as usual.
+  await prompt(id, "Resolved, wait again");
+  await expect
+    .poll(async () => (await transcript(id)).split("Registered: ").length, { timeout: 10_000 })
+    .toBe(4);
+  github.pull.sha = "d".repeat(40);
+  github.pull.mergeable = true;
+  github.pull.mergeableState = "clean";
+  github.checks = [pending("test")];
+  await at(1_100_000);
+  expect(wakes).toHaveLength(2);
+  github.checks = [done("test", "success")];
+
+  for (const ms of [1_200_000, 1_250_000, 1_300_000]) await at(ms);
+  await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(3);
+  expect(wakes[2]).toContain("passed · PR #8: checks passed");
+  expect(wakes[2]).toContain("on ddddddd");
+  expect(wakes[2]).not.toContain("conflicts with");
 });
 
 it("passing checks wait for the automatic review of their head, up to a timeout", async () => {
