@@ -4,6 +4,9 @@ import { nameFromUrl } from "./connections";
 describe("nameFromUrl", () => {
   it.each([
     ["https://mcp.linear.app/mcp", "linear"],
+    ["https://api.getvero.com/mcp", "vero"],
+    ["https://mcp.vercel.com", "vercel"],
+    ["https://api.oneleet.com/mcp", "oneleet"],
     ["https://mcp.resend.com/mcp", "resend"],
     ["https://mcp.cloudflare.com/mcp", "cloudflare"],
     ["https://mcp.pscale.dev/mcp/planetscale", "pscale"],

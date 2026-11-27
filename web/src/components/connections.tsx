@@ -568,6 +568,16 @@ const SHARED_HOSTS = [
   "pages.dev",
 ];
 
+/**
+ * Origins whose server must be saved under a fixed name: src/mcp.ts TOKEN_PROVIDERS finds
+ * API-token providers by name and origin, so a guessed name (getvero) would lose token connect.
+ */
+const KNOWN_ORIGIN_NAMES = new Map([
+  ["https://mcp.vercel.com", "vercel"],
+  ["https://api.getvero.com", "vero"],
+  ["https://api.oneleet.com", "oneleet"],
+]);
+
 /** Second-level suffixes where the label in front of them is the domain's name. */
 const TWO_PART_SUFFIXES = new Set(["co", "com", "net", "org", "gov", "ac", "edu"]);
 
@@ -580,7 +590,12 @@ export function nameFromUrl(value: string) {
   let host: string;
 
   try {
-    host = new URL(value.trim()).hostname.toLowerCase();
+    const parsed = new URL(value.trim());
+    const known = KNOWN_ORIGIN_NAMES.get(parsed.origin);
+
+    if (known) return known;
+
+    host = parsed.hostname.toLowerCase();
   } catch {
     return "";
   }
