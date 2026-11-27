@@ -308,7 +308,7 @@ export class Papercuts {
       const duplicate = this.sql
         .exec<{ id: string }>(
           `SELECT id FROM app_papercuts WHERE signature = ? AND conversation_id = ?
-           AND created_at > ? ORDER BY created_at DESC LIMIT 1`,
+           AND resolved_at IS NULL AND created_at > ? ORDER BY created_at DESC LIMIT 1`,
           signature,
           input.conversationId,
           now - DUPLICATE_WINDOW_MS,
@@ -636,7 +636,14 @@ const head = (value: string, max: number) =>
 
 const tail = (value: string, max: number) => (value.length > max ? `…${value.slice(-max)}` : value);
 
-const isSetup = (reply: Reply) => isString(reply.state);
+/** Workspace setup states (workspace.ts `WorkspaceSetup`): the only `state` values kept. */
+const SETUP_STATES = new Set(["queued", "checkout", "installing", "ready", "warning", "failed"]);
+
+/** A workspace setup status. Any other `state` is a tool's own data and is never stored. */
+const setupState = (reply: Reply) =>
+  isString(reply.state) && SETUP_STATES.has(reply.state) ? reply.state : undefined;
+
+const isSetup = (reply: Reply) => setupState(reply) !== undefined;
 
 /** The line dolly-setup.py ends a failed setup with, followed by what failed. */
 const SETUP_PROBLEMS = "Setup finished with problems";
@@ -698,7 +705,7 @@ function summarize(reply: Reply, rawCommand: string | undefined, safe: (text: st
     ...(reply.exitCode !== undefined && { exitCode: reply.exitCode }),
     ...(reply.timedOut && { timedOut: true }),
     ...(reply.ok === false && { ok: false }),
-    ...(isSetup(reply) && { state: reply.state }),
+    ...(isSetup(reply) && { state: setupState(reply) }),
     ...(command && { command: head(command, COMMAND_MAX) }),
     ...(error && { error: isSetup(reply) ? setupError(error) : head(error, FIELD_MAX) }),
     ...(message && { message: head(message, FIELD_MAX) }),
@@ -913,6 +920,16 @@ export function normalizeSignatureLine(line: string) {
     .slice(0, 160);
 }
 
+/**
+ * Summaries stored before setup replies kept `state` held only `error`'s first 500 characters:
+ * a workspace failure whose kept text still ends with the setup footer is one of those.
+ */
+const setupFooter = (source: string, error: string | undefined) =>
+  source === "tool:workspace" && (error ?? "").includes(SETUP_PROBLEMS);
+
+const setupLike = (source: string, reply: Reply) =>
+  isSetup(reply) || setupFooter(source, text(reply.error));
+
 /** The first line of a result the harness wrote itself: `Tool shell was interrupted ...`. */
 const HARNESS_LINE = /^Tool (?:call blocked: |\S+ (?:was|is|could|failed|ended) )/;
 
@@ -942,7 +959,7 @@ export function papercutSignature(source: string, message: string) {
     exit = reply.exitCode === undefined ? "" : String(reply.exitCode);
     line =
       keyLine(stderr) ||
-      keyLine(text(reply.error) ?? "", isSetup(reply) ? EXITED : undefined) ||
+      keyLine(text(reply.error) ?? "", setupLike(source, reply) ? EXITED : undefined) ||
       keyLine(text(reply.message) ?? "") ||
       thrownLine(stdout) ||
       commandName(reply.command) ||
@@ -967,7 +984,10 @@ export function papercutSignature(source: string, message: string) {
     exit = /"exitCode":(-?\d+)/.exec(message)?.[1] ?? "";
     line =
       keyLine(field("stderr") ?? "") ||
-      keyLine(field("error") ?? "", message.includes('"state":"') ? EXITED : undefined) ||
+      keyLine(
+        field("error") ?? "",
+        message.includes('"state":"') || setupFooter(source, field("error")) ? EXITED : undefined,
+      ) ||
       commandName(field("command")) ||
       "truncated tool result";
   } else {

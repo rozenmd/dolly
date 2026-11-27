@@ -962,6 +962,24 @@ it("keys a setup warning on what failed, not on the head of an install log cut t
   });
   expect(papercutSignature("tool:workspace", summary)).toBe(signatures[0]);
 
+  // A `state` that is not a setup state is a tool's own data: never stored, never setup-clipped.
+  const secret = JSON.parse(
+    toolFailure(reply({ state: "Bearer private-token", error: "request failed" }))!,
+  );
+
+  expect(secret).toEqual({ error: "request failed" });
+
+  // Summaries stored before `state` was kept had only the error's first 500 characters.
+  expect(
+    papercutSignature(
+      "tool:workspace",
+      JSON.stringify({
+        error:
+          "npm ERR! code E404\nnpm ERR! 404 Not Found - GET https://registry.npmjs.org/x\nSetup finished with problems:\n- .agents/setup exited 22",
+      }),
+    ),
+  ).toBe(signatures[0]);
+
   // Without a problems section, the end of the log is kept.
   const plain = JSON.parse(
     toolFailure(reply({ state: "warning", error: `${"y".repeat(2000)}\nSetup exited 1` }))!,
@@ -1069,6 +1087,18 @@ it("drops a repeat of one signature from the same conversation within ten second
     logAt(store, 1_010_002, { message: message(916) });
     logAt(store, 1_010_003, { message: message(916) });
     expect(store.list().total).toBe(5);
+
+    // A repeat right after its entry was resolved is a recurrence, not a duplicate.
+    const fixed = logAt(store, 2_000_000, { conversationId: "c", message: message(1) });
+    vi.spyOn(Date, "now").mockReturnValueOnce(2_000_100);
+    store.resolve({ id: fixed });
+    const again = logAt(store, 2_000_200, { conversationId: "c", message: message(1) });
+    expect(again).not.toBe(fixed);
+    expect(
+      store
+        .list({ signature: papercutSignature("tool:shell", message(1)) })
+        .entries.filter((entry) => entry.conversation_id === "c"),
+    ).toEqual([expect.objectContaining({ id: again })]);
   });
 });
 
@@ -1080,7 +1110,7 @@ it("recomputes open entries' signatures once when the algorithm changes, leaving
     sql.exec("DROP TABLE app_papercuts_meta");
 
     const rows = [
-      ["a", "tool:workspace||<path> postinstall: done", null],
+      ["a", "tool:workspace||npm err! code e<n>", null],
       [
         "b",
         "tool:workspace||<path> postinstall$ node -e \"import('<path>').catch(() => void <n>)\"",
@@ -1091,10 +1121,10 @@ it("recomputes open entries' signatures once when the algorithm changes, leaving
     ] as const;
 
     const messages = {
+      // The shape main stored: the error's first 500 characters, without `state`.
       a: JSON.stringify({
-        state: "warning",
         error:
-          "odules/.pnpm-65eb1774 postinstall: Done\nSetup finished with problems:\n- .agents/setup exited 22\n",
+          "npm ERR! code E404\nodules/.pnpm-65eb1774 postinstall: Done\nSetup finished with problems:\n- .agents/setup exited 22",
       }),
       b: JSON.stringify({
         state: "warning",
@@ -1231,14 +1261,28 @@ it("does not log calls the harness cut off for a steer, a restart or a deliberat
   expect(await logged()).toHaveLength(3);
 
   await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
-    // After the owner stops the run, what that cut off is not.
-    agent["noteStop"](conversationId);
+    // After the owner stops the run, the calls it had in flight are not failures.
+    agent["stops"].set(String(conversationId), {
+      at: Date.now(),
+      calls: new Set(["call_github", "call_shell"]),
+    });
     await agent["captureToolFailure"](
-      { name: "github" },
+      { id: "call_github", name: "github" },
       harness("aborted", "Tool github was aborted"),
       conversationId,
     );
-    await agent["captureToolFailure"](shell, killed, conversationId);
+    await agent["captureToolFailure"]({ id: "call_shell", ...shell }, killed, conversationId);
+    // The replacement run's own calls are.
+    await agent["captureToolFailure"]({ id: "call_next", ...shell }, killed, conversationId);
   });
-  expect(await logged()).toHaveLength(3);
+  const rows = await logged();
+  expect(rows).toHaveLength(4);
+  expect(rows).toEqual(
+    expect.arrayContaining([
+      expect.stringContaining('"exitCode":143,"command":"pnpm verify'),
+      "Tool call blocked: read-only session",
+      expect.stringContaining('"command":"pkill'),
+      "Tool shell was aborted",
+    ]),
+  );
 });

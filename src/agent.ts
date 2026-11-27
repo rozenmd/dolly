@@ -1848,23 +1848,37 @@ export class Agent extends DurableObject<Env> {
   }
 
   /**
-   * Conversations whose run someone stopped on purpose (Stop, "Interrupt and send now",
-   * cancel_task), by when: what that cut off is not a tool failure. In memory only: a restart
+   * Tool calls in flight when someone stopped their run on purpose (Stop, "Interrupt and send
+   * now", cancel_task), by conversation, with when: what that cut off is not a tool failure. Only
+   * those calls: a replacement run's own failures are still logged. In memory only: a restart
    * labels the calls it cuts off itself.
    */
-  private readonly stops = new Map<string, number>();
+  private readonly stops = new Map<string, { at: number; calls: Set<string> }>();
 
-  private noteStop(conversationId: ConversationId) {
+  /** Record the tool calls running in `conversationId` before its run is stopped. Never throws. */
+  private async noteStop(conversationId: ConversationId) {
+    const live = await this.harness
+      ?.snapshot(LiveDoc, conversationId, BACKGROUND_CONTEXT)
+      .catch(() => undefined);
+
     const now = Date.now();
 
-    for (const [id, at] of this.stops) if (now - at > STOP_WINDOW_MS) this.stops.delete(id);
-    this.stops.set(String(conversationId), now);
+    for (const [id, stop] of this.stops) if (now - stop.at > STOP_WINDOW_MS) this.stops.delete(id);
+    const calls = this.stops.get(String(conversationId))?.calls ?? new Set<string>();
+
+    for (const slot of live?.tools ?? []) calls.add(slot.callId);
+    this.stops.set(String(conversationId), { at: now, calls });
   }
 
-  private stoppedRecently(conversationId: ConversationId | undefined) {
-    const at = conversationId === undefined ? undefined : this.stops.get(String(conversationId));
+  private stoppedCall(conversationId: ConversationId | undefined, callId: string | undefined) {
+    const stop = conversationId === undefined ? undefined : this.stops.get(String(conversationId));
 
-    return at !== undefined && Date.now() - at <= STOP_WINDOW_MS;
+    return (
+      stop !== undefined &&
+      callId !== undefined &&
+      Date.now() - stop.at <= STOP_WINDOW_MS &&
+      stop.calls.has(callId)
+    );
   }
 
   /**
@@ -1874,7 +1888,7 @@ export class Agent extends DurableObject<Env> {
    * stopped are still logged.
    */
   private async captureToolFailure(
-    call: { readonly name: string; readonly arguments?: object },
+    call: { readonly id?: string; readonly name: string; readonly arguments?: object },
     result: ToolExecutionResult,
     conversationId?: ConversationId,
     aborted = false,
@@ -1887,7 +1901,7 @@ export class Agent extends DurableObject<Env> {
 
     if (
       (interruption === "aborted" || interruption === "signalled") &&
-      this.stoppedRecently(conversationId)
+      this.stoppedCall(conversationId, call.id)
     )
       return;
 
@@ -4361,7 +4375,7 @@ export class Agent extends DurableObject<Env> {
       }, BACKGROUND_CONTEXT));
 
     if (running !== undefined) {
-      this.noteStop(conversationId);
+      await this.noteStop(conversationId);
       // The run and the work it owns: running tools are signalled, not waited out.
       await this.harness.abortTask(running, BACKGROUND_CONTEXT);
       await this.harness.waitForTask(running, BACKGROUND_CONTEXT);
@@ -5009,7 +5023,7 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(conversation)) return undefined;
 
-        this.noteStop(conversation.value.id);
+        yield* Effect.promise(() => this.noteStop(conversation.value.id));
         yield* attempt("pi.abort", () =>
           conversation.value.abort(BACKGROUND_CONTEXT, { background: true }),
         );

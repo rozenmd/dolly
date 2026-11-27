@@ -36,8 +36,19 @@ function fakeContainer(scripts: Record<string, Script>) {
       if (!script) throw new Error(`Unexpected command: ${command}`);
 
       const stop = Promise.withResolvers<number>();
-      const output = () => new ReadableStream<Uint8Array>({ start: () => {} });
       const exitCode = script(stop.promise);
+
+      // The streams end when the process does.
+      const output = () =>
+        new ReadableStream<Uint8Array>({
+          start: (controller) =>
+            void exitCode.then(() => {
+              // A stopped process's streams may be cancelled already.
+              try {
+                controller.close();
+              } catch {}
+            }),
+        });
 
       return {
         stdout: output(),
@@ -150,15 +161,25 @@ async function send(id: string, content: string, steer = false) {
   return (await sent.json<{ submissionId: number }>()).submissionId;
 }
 
-/** A session whose model calls shell `serve` (which runs until stopped), then answers. */
-async function start() {
+/**
+ * A session whose model calls shell `serve` (which runs until stopped), then answers, or makes
+ * request `index`'s reply from `later` when given.
+ */
+async function start(
+  scripts: Record<string, Script> = {},
+  later?: (index: number) => { command: string } | { text: string },
+) {
   const created = await (await post("/api/sessions")).json<{ id: string }>();
 
   const conversation = await runInDurableObject(env.AGENT.getByName("owner"), (_, state) =>
     state.storage.get(`session:${created.id}`),
   );
 
-  const container = fakeContainer({ serve: async (stopped) => 128 + (await stopped) });
+  const container = fakeContainer({
+    serve: async (stopped) => 128 + (await stopped),
+    ...scripts,
+  });
+
   await runInDurableObject(env.SANDBOX.getByName(String(conversation)), async (instance) => {
     Object.assign(instance, { container: () => Effect.succeed(container) });
   });
@@ -168,7 +189,10 @@ async function start() {
     expect(String(url)).toContain("api.openai.com");
     const index = requests.push(await new Response(init?.body).text()) - 1;
 
-    return codex(index, index === 0 ? { command: "serve" } : { text: `Answer ${index}` });
+    return codex(
+      index,
+      index === 0 ? { command: "serve" } : (later?.(index) ?? { text: `Answer ${index}` }),
+    );
   });
 
   await send(created.id, "Start the server");
@@ -272,6 +296,28 @@ it(
 
     // The command the interrupt killed is not a tool failure.
     expect(await toolPapercuts(id)).toEqual([]);
+  },
+);
+
+it(
+  "still logs a failure of the run that replaced the interrupted one",
+  { timeout: 45_000 },
+  async () => {
+    // The interrupting message's own turn runs a command that kills itself (exit 143).
+    const { id, requests } = await start({ selfkill: async () => 143 }, (index) =>
+      index === 1 ? { command: "selfkill" } : { text: `Answer ${index}` },
+    );
+
+    const steer = await send(id, "Actually, restart it", true);
+    expect((await post(`/api/sessions/${id}/queue/${steer}/interrupt`)).status).toBe(202);
+    await expect.poll(() => requests.length, { timeout: 15_000 }).toBe(3);
+
+    // The interrupted `serve` is not logged; the replacement's own exit 143 is.
+    await expect
+      .poll(async () => (await toolPapercuts(id)).map((row) => JSON.parse(row.message)), {
+        timeout: 15_000,
+      })
+      .toEqual([{ exitCode: 143, command: "selfkill" }]);
   },
 );
 
