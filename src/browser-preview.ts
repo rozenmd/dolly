@@ -12,10 +12,21 @@ const CdpReply = Schema.Struct({
     Schema.Struct({
       errorText: Schema.optional(Schema.String),
       data: Schema.optional(Schema.String),
-      exceptionDetails: Schema.optional(Schema.Unknown),
+      exceptionDetails: Schema.optional(
+        Schema.Struct({
+          text: Schema.optional(Schema.String),
+          exception: Schema.optional(
+            Schema.Struct({ description: Schema.optional(Schema.String) }),
+          ),
+        }),
+      ),
+      result: Schema.optional(Schema.Struct({ value: Schema.optional(Schema.Unknown) })),
     }),
   ),
 });
+
+/** A CDP command result, as the preview client reads it. */
+export type CdpResult = NonNullable<typeof CdpReply.Type.result>;
 
 export type CdpParams = {
   url?: string;
@@ -56,14 +67,27 @@ export class PreviewCdp {
     };
 
     this.socket.addEventListener("message", listener);
-    const timer = setTimeout(() => loaded.reject(new Error("Preview page load timed out")), 20_000);
+
+    const timer = setTimeout(
+      () =>
+        loaded.reject(
+          new Error(
+            `Preview page ${url} did not fire its load event within 20 seconds; the page never loaded (a dev server compiling this route on first request can take this long: retry, and check preview status logs)`,
+          ),
+        ),
+      20_000,
+    );
+
     // Navigation can fail before the load promise is awaited.
     void loaded.promise.catch(() => {});
 
     try {
       const result = await this.send("Page.navigate", { url });
 
-      if (result.errorText) throw new Error(`Preview navigation failed: ${result.errorText}`);
+      if (result.errorText)
+        throw new Error(
+          `Preview navigation to ${url} failed: ${result.errorText}; the page never loaded, so check preview status for the dev server's state and logs`,
+        );
       await loaded.promise;
     } finally {
       clearTimeout(timer);
@@ -116,6 +140,98 @@ export class PreviewCdp {
   }
 }
 
+const PageReadiness = Schema.Struct({
+  ready: Schema.Boolean,
+  invalidSelector: Schema.optional(Schema.Boolean),
+  selectorFound: Schema.optional(Schema.Boolean),
+  readyState: Schema.optional(Schema.String),
+  url: Schema.optional(Schema.String),
+  title: Schema.optional(Schema.String),
+  text: Schema.optional(Schema.String),
+});
+
+/** Runs in the page: never throws, so a timeout reports what the page looked like. */
+export function readinessExpression(selector: string, timeoutMs = 15_000) {
+  return `(async () => {
+    const deadline = Date.now() + ${timeoutMs};
+    const selector = ${JSON.stringify(selector)};
+    const found = () => {
+      if (!selector) return true;
+      try { return Boolean(document.querySelector(selector)); } catch { return undefined; }
+    };
+    const page = () => ({
+      readyState: document.readyState,
+      url: location.href,
+      title: document.title,
+      text: (document.body?.innerText ?? "").replace(/\\s+/g, " ").trim().slice(0, 300),
+    });
+    while (document.readyState !== "complete" || found() !== true) {
+      if (found() === undefined) return { ready: false, invalidSelector: true, ...page() };
+      if (Date.now() >= deadline) return { ready: false, selectorFound: found(), ...page() };
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    await Promise.race([document.fonts.ready, new Promise(resolve => setTimeout(resolve, 1000))]);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return { ready: true };
+  })()`;
+}
+
+type ExceptionDetails = NonNullable<NonNullable<typeof CdpReply.Type.result>["exceptionDetails"]>;
+
+function exceptionText(details: ExceptionDetails) {
+  return details.exception?.description?.split("\n")[0] ?? details.text ?? "unknown error";
+}
+
+/** Explain a page that is not ready: never loaded, or loaded without the selector. */
+export function readinessError(
+  requested: string,
+  selector: string | undefined,
+  state: typeof PageReadiness.Type,
+) {
+  const where = `${state.url ?? requested}${state.url && state.url !== requested ? ` (requested ${requested})` : ""}`;
+  const page = `${state.title ? ` Title: ${JSON.stringify(state.title)}.` : ""}${state.text ? ` Page text starts: ${JSON.stringify(state.text)}.` : ""}`;
+
+  if (state.invalidSelector)
+    return `waitFor ${JSON.stringify(selector)} is not a valid CSS selector; the page at ${where} loaded.`;
+
+  if (state.readyState !== "complete")
+    return `The page at ${where} started loading but never finished (document.readyState is ${JSON.stringify(state.readyState)} after 15 seconds); check preview status logs.${page}`;
+
+  return `The page at ${where} loaded, but waitFor selector ${JSON.stringify(selector)} did not appear within 15 seconds; check the selector, or the path if the page redirected or shows an error.${page}`;
+}
+
+/** Wait for document load and the optional selector, surviving client-side redirects. */
+export async function waitForPage(cdp: PreviewCdp, url: string, selector?: string) {
+  let failure = "";
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const reply = await cdp.send("Runtime.evaluate", {
+      expression: readinessExpression(selector ?? ""),
+      awaitPromise: true,
+      returnByValue: true,
+    });
+
+    if (reply.exceptionDetails) {
+      // A redirect or reload destroys the evaluation context; check the new document.
+      failure = exceptionText(reply.exceptionDetails);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      continue;
+    }
+
+    const state = reply.result?.value;
+
+    if (!Schema.is(PageReadiness)(state))
+      throw new Error(`The page at ${url} loaded, but its readiness check returned no result`);
+
+    if (state.ready) return;
+    throw new Error(readinessError(url, selector, state));
+  }
+
+  throw new Error(
+    `The page at ${url} loaded but kept navigating during the readiness check (a client-side redirect or reload loop?): ${failure}`,
+  );
+}
+
 type ScreenshotRequest = Extract<typeof PreviewRequest.Type, { action: "screenshot" }>;
 
 export async function capturePreview(
@@ -156,24 +272,7 @@ export async function capturePreview(
     const url = `http://${hostname}${input.path ?? "/"}`;
     await cdp.navigate(url);
 
-    const ready = await cdp.send("Runtime.evaluate", {
-      expression: `(async () => {
-        const deadline = Date.now() + 15000;
-        const selector = ${JSON.stringify(input.waitFor ?? "")};
-        while (document.readyState !== "complete" || (selector && !document.querySelector(selector))) {
-          if (Date.now() >= deadline) throw new Error("Preview readiness timed out");
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-        await Promise.race([document.fonts.ready, new Promise(resolve => setTimeout(resolve, 1000))]);
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        return true;
-      })()`,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-
-    if (ready.exceptionDetails)
-      throw new Error("Preview did not become ready; check path or waitFor selector");
+    await waitForPage(cdp, url, input.waitFor);
 
     const screenshot = await cdp.send("Page.captureScreenshot", {
       format: "png",

@@ -27,7 +27,19 @@ import {
   SHELL_TIMEOUT_MAX_SECONDS,
 } from "./shell-output";
 import type { Env } from "./env";
-import { PREVIEW_TTL_MS, PreviewPort } from "./preview";
+import {
+  logTail,
+  PREVIEW_RECORD_KEY,
+  PREVIEW_SCREENSHOT_WAIT_MS,
+  PREVIEW_START_WAIT_MS,
+  PREVIEW_TTL_MS,
+  PreviewPort,
+  previewUnavailable,
+  readinessHints,
+  type PreviewEnd,
+  type PreviewRecord,
+  type PreviewStatus,
+} from "./preview";
 import * as Schema from "effect/Schema";
 import previewSupervisor from "../container/preview.py?raw";
 import skillsInventory from "../container/skills.py?raw";
@@ -39,9 +51,12 @@ const PREVIEW_LOG = `${PREVIEW_DIRECTORY}/preview.log`;
 type RunningPreview = {
   token: string;
   port: number;
+  startedAt: number;
   expiresAt: number;
   process: ExecProcess;
   exited: boolean;
+  /** Whether the server has answered on its port at least once. */
+  ready: boolean;
 };
 
 type InitializationTiming = {
@@ -1354,11 +1369,66 @@ export class Sandbox extends DurableObject<Env> {
       : undefined;
   }
 
-  private async stopPreviewProcess() {
+  /** Whether anything answers HTTP on the port; any status counts. Never starts a container. */
+  private async previewAnswers(port: number) {
+    const container = this.ctx.container;
+
+    if (!container?.running) return false;
+
+    try {
+      const response = await container.getTcpPort(port).fetch("http://localhost/", {
+        signal: AbortSignal.timeout(1000),
+      });
+
+      await response.body?.cancel();
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async previewLogs() {
+    if (!this.ctx.container?.running) return "";
+
+    try {
+      const response = await new Files(this.ctx.container).readFile(PREVIEW_LOG, {
+        signal: AbortSignal.timeout(5000),
+      });
+
+      return redact(
+        await Effect.runPromise(
+          readBounded(response.body, { limit: 32_768 }).pipe(Effect.timeout("5 seconds")),
+        ),
+      );
+    } catch {
+      // No log exists before the first preview.
+      return "";
+    }
+  }
+
+  /** Explain a missing preview: expired, stopped, exited or lost to a sandbox restart. */
+  private async previewUnavailableMessage() {
+    return previewUnavailable(await this.ctx.storage.get<PreviewRecord>(PREVIEW_RECORD_KEY));
+  }
+
+  private async endPreview(preview: RunningPreview, ended: PreviewEnd) {
+    // An expired preview's supervisor stopped itself; "expired" is the better explanation.
+    if (preview.expiresAt <= Date.now()) return;
+    const record = await this.ctx.storage.get<PreviewRecord>(PREVIEW_RECORD_KEY);
+
+    if (record?.startedAt !== preview.startedAt || record.ended) return;
+    await this.ctx.storage.put(PREVIEW_RECORD_KEY, { ...record, ended, endedAt: Date.now() });
+  }
+
+  private async stopPreviewProcess(ended: PreviewEnd = "stopped") {
     const preview = this.preview;
     this.preview = undefined; // Revoke before waiting for process cleanup.
 
-    if (!preview || preview.exited) return;
+    if (!preview) return;
+    await this.endPreview(preview, ended);
+
+    if (preview.exited) return;
 
     try {
       preview.process.kill(15);
@@ -1380,21 +1450,10 @@ export class Sandbox extends DurableObject<Env> {
           if (this.livePreview()) throw new Error("A preview is already running; stop it first");
           await this.stopPreviewProcess();
           const container = await Effect.runPromise(this.container());
+
           // Do not accidentally publish an unrelated service already on this port.
-          let occupied = false;
-
-          try {
-            const response = await container.getTcpPort(port).fetch("http://localhost/", {
-              signal: AbortSignal.timeout(1000),
-            });
-
-            await response.body?.cancel();
-            occupied = true;
-          } catch {
-            // Connection refused is expected before the server starts.
-          }
-
-          if (occupied) throw new Error("Preview port is already in use; choose another port");
+          if (await this.previewAnswers(port))
+            throw new Error("Preview port is already in use; choose another port");
           const workspace = await this.ctx.storage.get("workspace");
 
           // Restored containers may predate image-provided runtime directories.
@@ -1416,46 +1475,71 @@ export class Sandbox extends DurableObject<Env> {
             },
           );
 
+          const startedAt = Date.now();
+
           const preview: RunningPreview = {
             process,
             token: crypto.randomUUID(),
             port,
-            expiresAt: Date.now() + PREVIEW_TTL_MS,
+            startedAt,
+            expiresAt: startedAt + PREVIEW_TTL_MS,
             exited: false,
+            ready: false,
           };
 
           this.preview = preview;
-          void process.exitCode.then(
-            () => {
-              preview.exited = true;
-            },
-            () => {
-              preview.exited = true;
-            },
-          );
+
+          const exited = () => {
+            preview.exited = true;
+
+            if (this.preview === preview)
+              void this.endPreview(preview, preview.ready ? "exited" : "failed").catch(() => {});
+          };
+
+          void process.exitCode.then(exited, exited);
 
           try {
-            const deadline = Date.now() + 30_000;
+            await this.ctx.storage.put(PREVIEW_RECORD_KEY, {
+              port,
+              startedAt,
+              expiresAt: preview.expiresAt,
+            } satisfies PreviewRecord);
+            const deadline = Date.now() + PREVIEW_START_WAIT_MS;
 
             while (!preview.exited && Date.now() < deadline) {
-              try {
-                const response = await container.getTcpPort(port).fetch("http://localhost/", {
-                  signal: AbortSignal.timeout(1000),
-                });
+              if (await this.previewAnswers(port)) {
+                preview.ready = true;
 
-                await response.body?.cancel();
-
-                return { port, expiresAt: preview.expiresAt };
-              } catch {
-                await scheduler.wait(250);
+                return { ready: true, state: "ready", port, expiresAt: preview.expiresAt };
               }
+
+              await scheduler.wait(250);
+            }
+
+            const logs = await this.previewLogs();
+
+            if (!preview.exited) {
+              // Slow servers (large monorepos) keep starting; status and screenshot pick them up.
+              const hints = readinessHints(logs, port);
+
+              return {
+                ready: false,
+                state: "starting",
+                port,
+                expiresAt: preview.expiresAt,
+                message:
+                  `The dev server is still running but has not answered on port ${port} after ${PREVIEW_START_WAIT_MS / 1000} seconds, so it was left starting. ` +
+                  `Call preview status until ready is true, or call screenshot, which waits up to ${PREVIEW_SCREENSHOT_WAIT_MS / 1000} more seconds for it.` +
+                  (hints.length ? ` Also: ${hints.join("; ")}.` : ""),
+                logTail: logTail(logs),
+              };
             }
 
             throw new Error(
-              "Dev server did not become ready within 30 seconds; check preview status logs",
+              `Dev server exited before it answered on port ${port}; fix the command and start again. Last log lines:\n${logTail(logs) || "(no output)"}`,
             );
           } catch (error) {
-            await this.stopPreviewProcess();
+            await this.stopPreviewProcess("failed");
             throw error;
           }
         }),
@@ -1465,28 +1549,29 @@ export class Sandbox extends DurableObject<Env> {
 
   async previewStatus() {
     const preview = this.livePreview();
-    let logs = "";
 
-    if (this.ctx.container?.running) {
-      try {
-        const response = await new Files(this.ctx.container).readFile(PREVIEW_LOG, {
-          signal: AbortSignal.timeout(5000),
-        });
+    if (preview && !preview.ready) preview.ready = await this.previewAnswers(preview.port);
+    const logs = await this.previewLogs();
 
-        logs = await Effect.runPromise(
-          readBounded(response.body, { limit: 32_768 }).pipe(Effect.timeout("5 seconds")),
-        );
-      } catch {
-        // No log exists before the first preview.
-      }
+    const status: PreviewStatus = { running: false, ready: false, state: "stopped", logs };
+
+    if (!preview) {
+      status.message = await this.previewUnavailableMessage();
+
+      return status;
     }
 
-    return {
-      running: Boolean(preview),
-      port: preview?.port,
-      expiresAt: preview?.expiresAt,
-      logs: redact(logs),
-    };
+    status.running = true;
+    status.ready = preview.ready;
+    status.state = preview.ready ? "ready" : "starting";
+    status.port = preview.port;
+    status.startedAt = preview.startedAt;
+    status.expiresAt = preview.expiresAt;
+    const hints = preview.ready ? [] : readinessHints(logs, preview.port);
+
+    if (hints.length) status.hints = hints;
+
+    return status;
   }
 
   previewStop() {
@@ -1501,10 +1586,33 @@ export class Sandbox extends DurableObject<Env> {
     );
   }
 
-  previewCapability() {
+  /** Authorize a screenshot, first waiting for a still-starting server to answer. */
+  async previewCapability(waitMs = PREVIEW_SCREENSHOT_WAIT_MS) {
     const preview = this.livePreview();
 
-    if (!preview) throw new Error("No active preview; use preview start first");
+    if (!preview) throw new Error(await this.previewUnavailableMessage());
+    const deadline = Date.now() + waitMs;
+
+    while (!preview.ready) {
+      if (await this.previewAnswers(preview.port)) {
+        preview.ready = true;
+        break;
+      }
+
+      if (Date.now() >= deadline) {
+        const logs = await this.previewLogs();
+        const hints = readinessHints(logs, preview.port);
+
+        throw new Error(
+          `Dev server on port ${preview.port} is still running but has not answered since it started at ${new Date(preview.startedAt).toISOString()}; ` +
+            `call preview status to follow it, then screenshot again${hints.length ? `. Also: ${hints.join("; ")}` : ""}. Last log lines:\n${logTail(logs) || "(no output)"}`,
+        );
+      }
+
+      await scheduler.wait(500);
+
+      if (this.livePreview() !== preview) throw new Error(await this.previewUnavailableMessage());
+    }
 
     return { token: preview.token, expiresAt: preview.expiresAt };
   }
@@ -1607,7 +1715,7 @@ export class Sandbox extends DurableObject<Env> {
     return Effect.runPromise(
       this.permit.withPermit(
         Effect.gen({ self: this }, function* () {
-          yield* attempt("preview.stop", () => this.stopPreviewProcess());
+          yield* attempt("preview.stop", () => this.stopPreviewProcess("restarted"));
 
           if (this.ctx.container?.running)
             yield* attempt("workspace.restart", () => this.ctx.container!.destroy());
