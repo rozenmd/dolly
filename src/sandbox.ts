@@ -44,19 +44,12 @@ import {
 } from "./preview";
 import * as Schema from "effect/Schema";
 import previewSupervisor from "../container/preview.py?raw";
+import { EXEC_SCRIPT } from "./exec-script";
 import skillsInventory from "../container/skills.py?raw";
 
 const PREVIEW_DIRECTORY = "/workspace/.dolly-preview";
 const PREVIEW_SUPERVISOR = `${PREVIEW_DIRECTORY}/supervisor.py`;
 const PREVIEW_LOG = `${PREVIEW_DIRECTORY}/preview.log`;
-
-/**
- * The fixed script dolly-exec.py runs with `bash -lc`. The command itself travels in
- * DOLLY_COMMAND, so it never appears in a process's argv, where `pgrep -f`/`pkill -f`
- * patterns taken from the command would match (and kill) the wrapper. It stays POSIX so
- * containers on an older image, whose supervisor still uses `sh -lc`, run it too.
- */
-const EXEC_SCRIPT = 'dolly_command=$DOLLY_COMMAND; unset DOLLY_COMMAND; eval "$dolly_command"';
 
 type RunningPreview = {
   token: string;

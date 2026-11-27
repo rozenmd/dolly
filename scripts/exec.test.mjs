@@ -10,8 +10,8 @@ import { test } from "node:test";
 const script = fileURLToPath(new URL("../container/exec.py", import.meta.url));
 const linux = { skip: process.platform !== "linux" };
 
-// Mirrors EXEC_SCRIPT in src/sandbox.ts: the command travels in DOLLY_COMMAND, not argv.
-const evalScript = 'dolly_command=$DOLLY_COMMAND; unset DOLLY_COMMAND; eval "$dolly_command"';
+// The Worker's fixed script: the command travels in DOLLY_COMMAND, not argv.
+const { EXEC_SCRIPT: evalScript } = await import("../src/exec-script.ts");
 
 const home = mkdtempSync(join(tmpdir(), "dolly-exec-home-"));
 
@@ -47,6 +47,28 @@ test("command supervisor runs commands with bash", linux, () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "3 y\nbonono\n1\npreapost prebpost\nglob\n");
+});
+
+test("older sh supervisors still run commands with bash", linux, () => {
+  // Workspaces restored from an older snapshot keep a supervisor that runs `sh -lc`.
+  const marker = `dolly-marker-${randomUUID()}`;
+
+  const result = spawnSync("sh", ["-lc", evalScript], {
+    encoding: "utf8",
+    timeout: 15000,
+    env: {
+      ...process.env,
+      HOME: home,
+      DOLLY_COMMAND: `a=(x y z); echo \${a[1]} \${PIPESTATUS[0]} pre{a,b}
+pgrep -f "${marker}" && exit 9
+test -z "\${DOLLY_COMMAND+set}" || exit 7
+exit 4`,
+    },
+  });
+
+  assert.equal(result.status, 4, result.stdout + result.stderr);
+  assert.equal(result.stdout, "y 0 prea preb\n");
+  assert.equal(result.stderr, "");
 });
 
 test("command text stays out of every process's argv", linux, () => {
