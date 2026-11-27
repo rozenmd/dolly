@@ -332,6 +332,44 @@ it("logs model failures automatically with secrets redacted", async () => {
   expect(JSON.stringify(await entries())).not.toContain("private-refresh");
 });
 
+it("keeps every field of a redacted shell failure, so a bearer token can't swallow stderr", async () => {
+  await credentials();
+  const command = "curl -sS https://api.example.com/v1 -H 'Authorization: Bearer private-token'";
+
+  const failure = (port: number) => ({
+    output: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          stdout: "",
+          stderr: `curl: (7) Failed to connect to api.example.com port ${port} after 3 ms: Couldn't connect to server`,
+          exitCode: 7,
+        }),
+      },
+    ],
+  });
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    for (const port of [443, 8443])
+      await agent["captureToolFailure"]({ name: "shell", arguments: { command } }, failure(port));
+  });
+  const rows = (await entries()).filter((row) => row.source === "tool:shell");
+  expect(rows).toHaveLength(2);
+
+  for (const row of rows) {
+    expect(row.message).not.toContain("private-token");
+    const summary = JSON.parse(row.message);
+    expect(summary).toMatchObject({
+      exitCode: 7,
+      command: expect.stringContaining("Bearer [redacted]"),
+    });
+    expect(summary.stderr).toContain("Failed to connect to api.example.com");
+    expect(row.signature).toBe(
+      "tool:shell|7|curl: (<n>) failed to connect to api.example.com port <n> after <n> ms: couldn't connect to server",
+    );
+  }
+});
+
 it("registers the papercuts tool and captures failed tool results through the real harness", async () => {
   await credentials();
   let requests = 0;
