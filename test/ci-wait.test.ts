@@ -839,6 +839,66 @@ it("wakes once per head that conflicts with the base; unknown and behind don't w
   expect(wakes[2]).not.toContain("conflicts with");
 });
 
+it("passing checks wait for mergeability; a conflict found with review feedback doesn't settle them", async () => {
+  github.checks = [done("lint", "success"), done("test", "success")];
+  // main just moved: GitHub is recomputing whether the head merges.
+  github.pull.mergeable = null;
+  github.pull.mergeableState = "unknown";
+  const { wakes } = waiter({ kind: "pr_checks", repository, number: 8 });
+
+  const id = await root();
+  await prompt(id, "Wait for CI");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Registered: ");
+
+  // The checks settle, but the wake waits for mergeability rather than reporting them as passed.
+  for (const ms of [20_000, 55_000, 90_000, 130_000]) await at(ms);
+  expect(wakes).toHaveLength(0);
+  expect((await wait(id))?.last_seen).toContain("waiting for GitHub to compute mergeability");
+
+  // GitHub finds a conflict just as a review thread lands on the same head: one wake for both.
+  github.pull.mergeable = false;
+  github.pull.mergeableState = "dirty";
+  github.threads = [thread(601)];
+  await at(160_000);
+  await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(1);
+  expect(wakes[0]).toContain("failed · PR #8 conflicts with main; PR #8: checks passed");
+  expect(wakes[0]).toContain("comment 601");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Woken 1");
+
+  // main changes again and the conflict clears on the same head and checks: the green checks were
+  // never recorded as reported, so the re-armed wait still reports them.
+  await prompt(id, "Wait again");
+  await expect
+    .poll(async () => (await transcript(id)).split("Registered: ").length, { timeout: 10_000 })
+    .toBe(3);
+  github.pull.mergeable = true;
+  github.pull.mergeableState = "clean";
+
+  for (const ms of [300_000, 340_000, 400_000]) await at(ms);
+  await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(2);
+  expect(wakes[1]).toContain("passed · PR #8: checks passed");
+  expect(wakes[1]).not.toContain("conflicts with");
+});
+
+it("passing checks wake anyway when mergeability stays unknown", async () => {
+  github.checks = [done("test", "success")];
+  github.pull.mergeable = null;
+  github.pull.mergeableState = "unknown";
+  const { wakes } = waiter({ kind: "pr_checks", repository, number: 8 });
+
+  const id = await root();
+  await prompt(id, "Wait for CI");
+  await expect.poll(() => transcript(id), { timeout: 10_000 }).toContain("Registered: ");
+
+  for (const ms of [20_000, 55_000, 90_000, 200_000, 300_000]) await at(ms);
+  expect(wakes).toHaveLength(0);
+
+  await at(400_000);
+  await expect.poll(() => wakes.length, { timeout: 4000 }).toBe(1);
+  expect(wakes[0]).toContain("passed · PR #8: checks passed");
+  expect(wakes[0]).toContain("GitHub hasn't yet computed whether aaaaaaa merges cleanly into main");
+});
+
 it("passing checks wait for the automatic review of their head, up to a timeout", async () => {
   const created = await SELF.fetch("https://worker/api/automations", {
     method: "POST",

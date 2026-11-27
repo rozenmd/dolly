@@ -78,6 +78,12 @@ const REPORT_TTL_MS = 24 * 60 * MINUTE;
 export const REVIEW_WAIT_MS = 15 * MINUTE;
 
 /**
+ * How long a wake that would settle CI waits for GitHub to compute whether the head merges. It
+ * normally takes seconds after a push to either side; this bounds a computation that never lands.
+ */
+export const MERGE_WAIT_MS = 5 * MINUTE;
+
+/**
  * Wakes for new review feedback one PR gets before the wake tells the session to stop fixing and
  * hand the PR over. The automatic review's own fix rounds are capped separately (review-handoff.ts).
  */
@@ -137,6 +143,8 @@ type PollState = {
   unchangedSince?: number;
   /** Passing checks on this head have waited for the automatic review since then. */
   reviewWait?: { headSha: string; since: number };
+  /** A settling wake on this head has waited for GitHub to compute mergeability since then. */
+  mergeWait?: { headSha: string; since: number };
 };
 
 type WaitResult = { outcome: CiWaitOutcome };
@@ -538,13 +546,23 @@ function reviewDetail(facts: ReturnType<typeof reviewFacts>, head: string) {
 export const CONFLICT_STEPS =
   "fetch the base, merge it into the PR's branch (or rebase onto it, if the branch is this session's own and nobody else pushed to it), resolve each conflict by understanding what both sides meant rather than taking one side wholesale, run the checks, push (force-push only your own rebased branch), and call wait_for pr_checks again. If you can't resolve a conflict confidently, don't guess: hand it to the owner (or your parent session) as a decision.";
 
+/** Drops a wake's CI signature, so the checks it mentions can still settle (and wake) later. */
+function withoutSignature(decision: Decision & { kind: "deliver" }): Decision {
+  const { signature: _, ...rest } = decision;
+
+  return rest;
+}
+
 /**
  * Decide one poll of a pr_checks wait: its checks and reviews (decideChecksAndReviews), then its
  * mergeability. A head that conflicts with the base wakes the session once (`conflicts` lists the
  * heads earlier wakes reported), since GitHub won't run pull_request workflows on it and CI would
  * otherwise look like it never starts. While an already reported conflict stands, only new review
- * feedback wakes: CI on that head is moot until a push resolves it. Mergeability GitHub hasn't
- * computed yet (unknown) and a base that merely moved ahead (behind) change nothing.
+ * feedback wakes: CI on that head is moot until a push resolves it. A base that merely moved ahead
+ * (behind) changes nothing. Mergeability GitHub hasn't computed yet (unknown) never wakes by itself,
+ * but it holds back a wake that would settle CI, for up to MERGE_WAIT_MS, so a conflict GitHub is
+ * still finding isn't reported as passing checks. No wake that mentions a conflict or an unknown
+ * mergeability records CI as reported, so the checks still wake once the PR is mergeable.
  */
 export function decidePr(
   input: WaitInput & { target: { kind: "pr_checks" } },
@@ -557,19 +575,26 @@ export function decidePr(
 ): Decision {
   const decision = decideChecksAndReviews(input, state, pull, reported, now, review);
 
-  if (pull.state !== "open" || pull.mergeability !== "conflicting") return decision;
+  if (pull.state !== "open") return decision;
 
   const head = pull.headSha;
   const base = pull.baseRef ?? "its base branch";
+
+  if (pull.mergeability === "unknown")
+    return awaitMergeability(input, state, decision, head, base, now);
+
+  if (pull.mergeability !== "conflicting") return decision;
+
   const what = `PR #${input.target.number} conflicts with ${base}`;
   const feedback = decision.kind === "deliver" && Boolean(decision.reviewItems?.length);
 
   if (conflicts.includes(head)) {
     if (feedback && decision.kind === "deliver")
-      return {
+      return withoutSignature({
         ...decision,
+        outcome: "failed",
         detail: `${decision.detail}\n${what} on ${short(head)} still (reported earlier): resolve it too.`,
-      };
+      });
 
     return {
       kind: "poll",
@@ -592,13 +617,13 @@ export function decidePr(
   const notice = `${input.target.repository}#${input.target.number}'s head ${short(head)} conflicts with ${base}. GitHub doesn't run pull_request workflows while a PR conflicts with its base, so CI won't run on it, and it can't merge, until the conflict is resolved. To resolve it: ${CONFLICT_STEPS}`;
 
   if (feedback && decision.kind === "deliver")
-    return {
+    return withoutSignature({
       ...decision,
       outcome: "failed",
       headline: `${what}; ${decision.headline}`,
       detail: `${notice}\n${decision.detail}`,
       conflictHead: head,
-    };
+    });
 
   return {
     kind: "deliver",
@@ -607,6 +632,55 @@ export function decidePr(
     detail: `${notice}\n${checks}`,
     conflictHead: head,
   };
+}
+
+/**
+ * While GitHub is still computing whether `head` merges, hold back a wake that would settle CI
+ * (passing checks, or none). Failed checks still wake at once, and fresh review feedback still wakes
+ * without marking the checks reported. After MERGE_WAIT_MS the settling wake goes out anyway.
+ */
+function awaitMergeability(
+  input: WaitInput,
+  state: PollState,
+  decision: Decision,
+  head: string,
+  base: string,
+  now: number,
+): Decision {
+  if (decision.kind !== "deliver" || decision.outcome === "failed") return decision;
+
+  const since = state.mergeWait?.headSha === head ? state.mergeWait.since : now;
+  const unknown = `GitHub hasn't yet computed whether ${short(head)} merges cleanly into ${base}`;
+
+  if (decision.reviewItems?.length)
+    return withoutSignature({
+      ...decision,
+      outcome: "finished",
+      detail: `${decision.detail}\n${unknown}: check github read_pull_request before calling it ready.`,
+    });
+
+  if (now - since >= MERGE_WAIT_MS)
+    return {
+      ...decision,
+      detail: `${decision.detail}\n${unknown} after ${Math.round((now - since) / MINUTE)} min: check github read_pull_request (mergeability) before calling it ready.`,
+    };
+
+  const signature = decision.signature ?? "";
+
+  const next: PollState = {
+    phase: "poll",
+    headSha: head,
+    fullReadAt: now,
+    lastSummary: `${decision.headline}; waiting for GitHub to compute mergeability`,
+    // The settle window and any review wait already ran: keep them, so a known answer wakes at once.
+    candidate:
+      state.candidate?.signature === signature ? state.candidate : { signature, since: now },
+    mergeWait: { headSha: head, since },
+  };
+
+  if (state.reviewWait) next.reviewWait = state.reviewWait;
+
+  return { kind: "poll", at: nextPoll(input, now, PR_POLL_MS), state: next };
 }
 
 /**
