@@ -9,6 +9,8 @@ class BrowserSocket extends EventTarget {
   /** Runtime.evaluate results, in order; the last one repeats. */
   evaluations: CdpResult[] = [{ result: { value: { ready: true } } }];
   navigation: CdpResult = {};
+  /** CDP command errors for Runtime.evaluate, used before evaluations. */
+  evaluateErrors: string[] = [];
   accept = vi.fn();
   close = vi.fn();
   result(method: string) {
@@ -31,7 +33,9 @@ class BrowserSocket extends EventTarget {
             id: command.id,
             ...(command.method === this.fail
               ? { error: { message: "deliberate failure" } }
-              : { result: this.result(command.method) }),
+              : command.method === "Runtime.evaluate" && this.evaluateErrors.length
+                ? { error: { message: this.evaluateErrors.shift() } }
+                : { result: this.result(command.method) }),
           }),
         }),
       );
@@ -276,5 +280,20 @@ it("says when navigation failed, so the page never loaded", async () => {
     capturePreview(bindings, unusedOutbound, "one.test", { action: "screenshot", path: "/x" }),
   ).rejects.toThrow(
     "Preview navigation to http://one.test/x failed: net::ERR_CONNECTION_REFUSED; the page never loaded",
+  );
+});
+
+it("retries when Chrome rejects the readiness check because the page navigated", async () => {
+  const { socket, bindings } = fixture(undefined, (socket) => {
+    socket.evaluateErrors = ["Inspected target navigated or closed"];
+  });
+
+  const result = await capturePreview(bindings, unusedOutbound, "one.test", {
+    action: "screenshot",
+  });
+
+  expect(result.output.some((block) => block.type === "image")).toBe(true);
+  expect(socket.commands.filter((command) => command.method === "Runtime.evaluate")).toHaveLength(
+    2,
   );
 });

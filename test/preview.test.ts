@@ -106,7 +106,11 @@ it("revokes preview capability before stopping its process without replacing wor
     });
     await instance.previewStop();
     expect(killed).toBe(15);
-    await expect(duringKill).rejects.toThrow("Preview on port 3000 was stopped at");
+    // Revoked before the kill; the reason is recorded concurrently, so only check it after.
+    await expect(duringKill).rejects.toThrow("use preview start again");
+    await expect(instance.previewCapability()).rejects.toThrow(
+      "Preview on port 3000 was stopped at",
+    );
     expect(await instance.previewStatus()).toMatchObject({
       running: false,
       message: expect.stringMatching(
@@ -188,4 +192,77 @@ it("points at the port and bind address a silent dev server logged", () => {
   ]);
   expect(readinessHints("http://localhost:3000 and http://0.0.0.0:3000", 3000)).toEqual([]);
   expect(readinessHints("compiling...", 3000)).toEqual([]);
+});
+
+it("stops the dev server even when recording why it ended fails", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance, state) => {
+    const startedAt = Date.now();
+    await state.storage.put(PREVIEW_RECORD_KEY, {
+      port: 3000,
+      startedAt,
+      expiresAt: startedAt + 60_000,
+    });
+    let killed = 0;
+    Object.assign(instance, {
+      preview: {
+        token: "private",
+        port: 3000,
+        startedAt,
+        expiresAt: startedAt + 60_000,
+        exited: false,
+        ready: true,
+        process: { kill: (signal: number) => (killed = signal), exitCode: Promise.resolve(0) },
+      },
+      endPreview: async () => {
+        throw new Error("storage unavailable");
+      },
+    });
+    await expect(instance.previewStop()).rejects.toThrow("storage unavailable");
+    expect(killed).toBe(15);
+  });
+});
+
+it("does not report a preview that ended while status probed it", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  await runInDurableObject(sandbox, async (instance, state) => {
+    const startedAt = Date.now();
+    await state.storage.put(PREVIEW_RECORD_KEY, {
+      port: 3000,
+      startedAt,
+      expiresAt: startedAt + 60_000,
+      ended: "failed",
+      endedAt: startedAt,
+    });
+
+    const preview = {
+      token: "private",
+      port: 3000,
+      startedAt,
+      expiresAt: startedAt + 60_000,
+      exited: false,
+      ready: false,
+      process: { kill: () => {}, exitCode: Promise.resolve(0) },
+    };
+
+    Object.assign(instance, {
+      preview,
+      livePreview: () => (preview.exited ? undefined : preview),
+      // The command exits during the probe.
+      previewAnswers: async () => {
+        preview.exited = true;
+
+        return false;
+      },
+    });
+    expect(await instance.previewStatus()).toMatchObject({
+      running: false,
+      state: "stopped",
+      message: expect.stringContaining("The last preview start on port 3000 failed"),
+    });
+    preview.exited = false;
+    await expect(instance.previewCapability()).rejects.toThrow(
+      "The last preview start on port 3000 failed",
+    );
+  });
 });

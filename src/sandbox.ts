@@ -1426,17 +1426,21 @@ export class Sandbox extends DurableObject<Env> {
     this.preview = undefined; // Revoke before waiting for process cleanup.
 
     if (!preview) return;
-    await this.endPreview(preview, ended);
-
-    if (preview.exited) return;
+    // Record first so callers racing the kill see why, but never let a failed write skip it.
+    const recorded = this.endPreview(preview, ended);
+    void recorded.catch(() => {});
 
     try {
-      preview.process.kill(15);
-      await preview.process.exitCode;
+      if (!preview.exited) {
+        preview.process.kill(15);
+        await preview.process.exitCode;
+      }
     } catch (error) {
       // A stopped/replaced container has already disposed of this process.
       if (this.ctx.container?.running) throw error;
     }
+
+    await recorded;
   }
 
   previewStart(command: string, port: number) {
@@ -1552,10 +1556,10 @@ export class Sandbox extends DurableObject<Env> {
 
     if (preview && !preview.ready) preview.ready = await this.previewAnswers(preview.port);
     const logs = await this.previewLogs();
-
     const status: PreviewStatus = { running: false, ready: false, state: "stopped", logs };
 
-    if (!preview) {
+    // The server may have exited, or been stopped, while we probed and read logs.
+    if (!preview || this.livePreview() !== preview) {
       status.message = await this.previewUnavailableMessage();
 
       return status;
@@ -1594,13 +1598,19 @@ export class Sandbox extends DurableObject<Env> {
     const deadline = Date.now() + waitMs;
 
     while (!preview.ready) {
-      if (await this.previewAnswers(preview.port)) {
+      const answered = await this.previewAnswers(preview.port);
+
+      if (this.livePreview() !== preview) throw new Error(await this.previewUnavailableMessage());
+
+      if (answered) {
         preview.ready = true;
         break;
       }
 
       if (Date.now() >= deadline) {
         const logs = await this.previewLogs();
+
+        if (this.livePreview() !== preview) throw new Error(await this.previewUnavailableMessage());
         const hints = readinessHints(logs, preview.port);
 
         throw new Error(
@@ -1610,8 +1620,6 @@ export class Sandbox extends DurableObject<Env> {
       }
 
       await scheduler.wait(500);
-
-      if (this.livePreview() !== preview) throw new Error(await this.previewUnavailableMessage());
     }
 
     return { token: preview.token, expiresAt: preview.expiresAt };

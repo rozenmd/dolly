@@ -200,16 +200,30 @@ export function readinessError(
   return `The page at ${where} loaded, but waitFor selector ${JSON.stringify(selector)} did not appear within 15 seconds; check the selector, or the path if the page redirected or shows an error.${page}`;
 }
 
+/** CDP command errors that mean a navigation replaced the evaluated document. */
+const NAVIGATED =
+  /Inspected target navigated or closed|Execution context was destroyed|Cannot find context with specified id/;
+
 /** Wait for document load and the optional selector, surviving client-side redirects. */
 export async function waitForPage(cdp: PreviewCdp, url: string, selector?: string) {
   let failure = "";
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    const reply = await cdp.send("Runtime.evaluate", {
-      expression: readinessExpression(selector ?? ""),
-      awaitPromise: true,
-      returnByValue: true,
-    });
+    let reply: CdpResult;
+
+    try {
+      reply = await cdp.send("Runtime.evaluate", {
+        expression: readinessExpression(selector ?? ""),
+        awaitPromise: true,
+        returnByValue: true,
+      });
+    } catch (error) {
+      // Chrome can reject the command itself when navigation replaces the page.
+      if (!(error instanceof Error) || !NAVIGATED.test(error.message)) throw error;
+      failure = error.message;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      continue;
+    }
 
     if (reply.exceptionDetails) {
       // A redirect or reload destroys the evaluation context; check the new document.
