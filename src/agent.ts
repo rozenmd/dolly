@@ -22,6 +22,7 @@ import {
   type EntryRecord,
   type InboxItem,
   type InputSubmissionDraft,
+  type ToolExecutionResult,
   type ToolRegistration,
   type Wake,
 } from "@earendil-works/pi-durable";
@@ -1162,10 +1163,7 @@ export class Agent extends DurableObject<Env> {
               ? { block: STEER_TOOL_SKIP }
               : undefined,
           afterTool: async (call, result, api) => {
-            const message = toolFailure(result);
-
-            if (message && call.name !== "papercuts")
-              await this.capturePapercut(`tool:${call.name}`, message, api.conversationId);
+            await this.captureToolFailure(call, result, api.conversationId);
           },
         }),
       ],
@@ -1805,8 +1803,34 @@ export class Agent extends DurableObject<Env> {
     return { title, ...(previous && { previous }), model: modelId };
   }
 
-  /** Recording must never replace a tool's original result or recursively report failures. */
-  private async capturePapercut(source: string, message: string, conversationId?: ConversationId) {
+  /** Log a failed tool call, if it failed, as a compact summary built from redacted fields. */
+  private async captureToolFailure(
+    call: { readonly name: string; readonly arguments?: object },
+    result: ToolExecutionResult,
+    conversationId?: ConversationId,
+  ) {
+    if (call.name === "papercuts" || !toolFailure(result, call)) return;
+
+    await this.capturePapercut(
+      `tool:${call.name}`,
+      "Tool failed without details",
+      conversationId,
+      (safe) => toolFailure(result, call, safe) ?? "Tool failed without details",
+    );
+  }
+
+  /**
+   * Recording must never replace a tool's original result or recursively report failures.
+   * `render` rebuilds the message from redacted parts, for messages that clip what they quote.
+   * Its output is stored as is: redacting serialized JSON again lets patterns such as
+   * `Bearer \S+` run past the end of a field and swallow the next one.
+   */
+  private async capturePapercut(
+    source: string,
+    message: string,
+    conversationId?: ConversationId,
+    render?: (safe: (text: string) => string) => string,
+  ) {
     try {
       const secrets = [
         ...(await Effect.runPromise(this.credentials.secrets)),
@@ -1828,7 +1852,7 @@ export class Agent extends DurableObject<Env> {
           state && conversationId !== undefined
             ? activeWorkspace(state, String(conversationId))?.config.repository
             : undefined,
-        message: redact(message, secrets),
+        message: render ? render((text) => redact(text, secrets)) : redact(message, secrets),
       });
     } catch {
       // Best effort: the harness/storage itself may be unavailable.

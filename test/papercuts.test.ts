@@ -3,7 +3,7 @@ import { SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudfl
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { configure, type ConversationId } from "@earendil-works/pi-durable";
-import { Papercuts, toolFailure } from "../src/papercuts";
+import { Papercuts, papercutSignature, toolFailure } from "../src/papercuts";
 import { headers, signIn } from "./session";
 
 beforeEach(async () => {
@@ -68,11 +68,199 @@ it("recognizes exceptions, diagnostics, JSON failures and shell exit codes witho
     { ok: false, message: "Denied" },
     { error: "No repo" },
     { exitCode: 1, stderr: "Build failed" },
+    { exitCode: 2, stdout: "", stderr: "" },
+    { exitCode: 124, timedOut: true, stdout: "", stderr: "" },
   ])
     expect(toolFailure(text(JSON.stringify(value)))).toBeTruthy();
 
-  for (const value of ["error handling documentation", '{"exitCode":0}', '{"ok":true}', "not JSON"])
+  for (const value of [
+    "error handling documentation",
+    '{"exitCode":0}',
+    '{"ok":true}',
+    "not JSON",
+    // grep/diff/test answering "no": exit 1 with nothing on stderr is not a failure.
+    '{"stdout":"","stderr":"  \\n","exitCode":1}',
+  ])
     expect(toolFailure(text(value))).toBeUndefined();
+
+  // Exit 1 with output on stdout only: "no" from grep/diff/test, a real failure from anything else.
+  const quiet = (stdout: string) => text(JSON.stringify({ stdout, stderr: "", exitCode: 1 }));
+  const diff = quiet("--- a\n+++ b\n-old\n+new");
+
+  for (const command of [
+    "diff -u a b",
+    "cd web && git diff --exit-code",
+    "cat log | grep -n warn",
+    "test -f out.txt",
+  ])
+    expect(toolFailure(diff, { arguments: { command } })).toBeUndefined();
+  const nodeTest = quiet("not ok 1 - parses input\n  ---\n  error: 'Expected values to be equal'");
+
+  for (const call of [undefined, { arguments: { command: "pnpm test" } }])
+    expect(toolFailure(nodeTest, call)).toContain("Expected values to be equal");
+});
+
+it("redacts whole fields before clipping them, so a secret at the cutoff leaves no prefix", () => {
+  const secret = "rt_".padEnd(60, "s3cr3t");
+  const safe = (value: string) => value.split(secret).join("[redacted]");
+
+  const result = {
+    output: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          stdout: "",
+          stderr: `${"e".repeat(480)}${secret} failed`,
+          exitCode: 2,
+        }),
+      },
+    ],
+  };
+
+  const summary = toolFailure(result, { arguments: { command: `curl -H ${secret}` } }, safe)!;
+  expect(summary).not.toContain("rt_s3cr3t");
+  expect(summary).toContain("curl -H [redacted]");
+  expect(JSON.parse(summary).stderr).toContain("[redacted]");
+});
+
+it("stores a compact summary of a shell failure instead of its whole output", () => {
+  const huge = "x".repeat(100_000);
+
+  const result = {
+    output: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          stdout: huge,
+          stderr: `sh: 1: rg: not found\n${"y".repeat(5000)}`,
+          exitCode: 127,
+          workspaceSetup: { state: "ready", log: huge },
+        }),
+      },
+    ],
+  };
+
+  const summary = JSON.parse(toolFailure(result, { arguments: { command: "rg foo src" } })!);
+  expect(summary).toMatchObject({ exitCode: 127, command: "rg foo src" });
+  expect(summary.stderr.startsWith("sh: 1: rg: not found")).toBe(true);
+  expect(summary.stderr.length).toBeLessThanOrEqual(501);
+  expect(summary).not.toHaveProperty("stdoutTail");
+  expect(summary).not.toHaveProperty("workspaceSetup");
+
+  const quiet = JSON.parse(
+    toolFailure({
+      output: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ stdout: `${huge}\n3 tests failed`, stderr: "", exitCode: 2 }),
+        },
+      ],
+    })!,
+  );
+
+  expect(quiet.stdoutTail.endsWith("3 tests failed")).toBe(true);
+  expect(quiet.stdoutTail.length).toBeLessThanOrEqual(301);
+
+  const timeout = JSON.parse(
+    toolFailure({
+      output: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ stdout: "", stderr: "", exitCode: 124, timedOut: true }),
+        },
+      ],
+    })!,
+  );
+
+  expect(timeout).toEqual({ exitCode: 124, timedOut: true });
+});
+
+it("gives repeats of one failure the same signature and different failures different ones", () => {
+  const shell = (stderr: string, exitCode = 127) => JSON.stringify({ exitCode, stderr });
+  expect(papercutSignature("tool:shell", shell("sh: 1: rg: not found"))).toBe(
+    "tool:shell|127|sh: <n>: rg: not found",
+  );
+  expect(
+    papercutSignature(
+      "tool:shell",
+      shell("warning: noisy\nError: ENOENT /workspace/repo/src/a.ts at 2026-11-27T10:00:00Z", 1),
+    ),
+  ).toBe(
+    papercutSignature(
+      "tool:shell",
+      shell("warning: other\nError: ENOENT /tmp/b/c.ts at 2025-01-01T00:00:00.123Z", 1),
+    ),
+  );
+  expect(
+    papercutSignature(
+      "tool:workspace",
+      JSON.stringify({
+        ok: false,
+        error: "Commit 3f2a9c1d failed for 7f0c1e9e-1111-4a2b-9c3d-000000000001",
+      }),
+    ),
+  ).toBe("tool:workspace||commit <hash> failed for <id>");
+  expect(papercutSignature("model", "529 servers overloaded, retry req_011CXyz123")).toBe(
+    "model||<n> servers overloaded, retry <id>",
+  );
+  expect(papercutSignature("tool:shell", shell("sh: 1: rg: not found"))).not.toBe(
+    papercutSignature("tool:shell", shell("sh: 1: rg: not found", 1)),
+  );
+});
+
+it("groups clipped legacy entries by what survived the clip, never by their stdout", () => {
+  // The old logger stored the whole reply clipped at 4,000 characters.
+  const legacy = (stdout: string) =>
+    JSON.stringify({ stdout, stderr: "sh: 1: rg: not found\n", exitCode: 127 }).slice(0, 4000);
+
+  expect(papercutSignature("tool:shell", legacy("a".repeat(5000)))).toBe(
+    papercutSignature("tool:shell", legacy("b ".repeat(2500))),
+  );
+  expect(papercutSignature("tool:shell", legacy("a".repeat(5000)))).toBe(
+    "tool:shell||truncated tool result",
+  );
+  expect(papercutSignature("tool:shell", legacy("short\n").padEnd(4100, " "))).toBe(
+    "tool:shell|127|sh: <n>: rg: not found",
+  );
+
+  const stderrFirst = JSON.stringify({
+    exitCode: 1,
+    stderr: `Error: ENOENT ${"z".repeat(5000)}`,
+  }).slice(0, 4000);
+
+  expect(papercutSignature("tool:shell", stderrFirst)).toMatch(/^tool:shell\|1\|error: enoent/);
+});
+
+it("adds signatures to entries stored before signatures existed", async () => {
+  await runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const sql = state.storage.sql;
+    // The Agent already created the current table; put it back in its pre-signature shape.
+    new Papercuts(sql);
+    sql.exec("DROP INDEX app_papercuts_signature");
+    sql.exec("ALTER TABLE app_papercuts DROP COLUMN signature");
+    sql.exec(
+      "INSERT INTO app_papercuts (id, kind, source, message, created_at) VALUES (?, ?, ?, ?, ?)",
+      "old",
+      "error",
+      "tool:shell",
+      JSON.stringify({
+        stdout: "x".repeat(10_000),
+        stderr: "sh: 1: rg: not found\n",
+        exitCode: 127,
+      }),
+      1,
+    );
+
+    const store = new Papercuts(sql);
+    expect(store.list()).toMatchObject([
+      { id: "old", signature: "tool:shell|127|sh: <n>: rg: not found" },
+    ]);
+    store.log({ kind: "error", source: "model", message: "Overloaded" });
+    expect(new Papercuts(sql).list().map((row) => row.signature)).toEqual([
+      "model||overloaded",
+      "tool:shell|127|sh: <n>: rg: not found",
+    ]);
+  });
 });
 
 async function credentials() {
@@ -144,6 +332,44 @@ it("logs model failures automatically with secrets redacted", async () => {
   expect(JSON.stringify(await entries())).not.toContain("private-refresh");
 });
 
+it("keeps every field of a redacted shell failure, so a bearer token can't swallow stderr", async () => {
+  await credentials();
+  const command = "curl -sS https://api.example.com/v1 -H 'Authorization: Bearer private-token'";
+
+  const failure = (port: number) => ({
+    output: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          stdout: "",
+          stderr: `curl: (7) Failed to connect to api.example.com port ${port} after 3 ms: Couldn't connect to server`,
+          exitCode: 7,
+        }),
+      },
+    ],
+  });
+
+  await runInDurableObject(env.AGENT.getByName("owner"), async (agent) => {
+    for (const port of [443, 8443])
+      await agent["captureToolFailure"]({ name: "shell", arguments: { command } }, failure(port));
+  });
+  const rows = (await entries()).filter((row) => row.source === "tool:shell");
+  expect(rows).toHaveLength(2);
+
+  for (const row of rows) {
+    expect(row.message).not.toContain("private-token");
+    const summary = JSON.parse(row.message);
+    expect(summary).toMatchObject({
+      exitCode: 7,
+      command: expect.stringContaining("Bearer [redacted]"),
+    });
+    expect(summary.stderr).toContain("Failed to connect to api.example.com");
+    expect(row.signature).toBe(
+      "tool:shell|7|curl: (<n>) failed to connect to api.example.com port <n> after <n> ms: couldn't connect to server",
+    );
+  }
+});
+
 it("registers the papercuts tool and captures failed tool results through the real harness", async () => {
   await credentials();
   let requests = 0;
@@ -203,4 +429,5 @@ it("registers the papercuts tool and captures failed tool results through the re
     "Select a repository",
   );
   expect(rows.every((row) => row.conversation_id !== null)).toBe(true);
+  expect(rows.every((row) => row.signature.length > 0)).toBe(true);
 });
