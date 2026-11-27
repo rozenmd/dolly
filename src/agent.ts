@@ -193,7 +193,7 @@ import {
   parseTime,
   toolFailure,
 } from "./papercuts";
-import { toolParameters } from "./tool-schema";
+import { dropUnknownFields, toolParameters } from "./tool-schema";
 import {
   formatPage,
   formatSlice,
@@ -550,10 +550,15 @@ export class Agent extends DurableObject<Env> {
           int({
             minimum: 1,
             maximum: SHELL_TIMEOUT_MAX_SECONDS,
-            description: `Seconds before the command is stopped (default ${SHELL_TIMEOUT_DEFAULT_SECONDS})`,
+            description: `Seconds before the command is stopped (default ${SHELL_TIMEOUT_DEFAULT_SECONDS}, at most ${SHELL_TIMEOUT_MAX_SECONDS}); seconds, not milliseconds`,
           }),
         ),
       }),
+      // A stray extra field (GPT's `"x": 0` or `"}": "x"`) no longer fails a complete command.
+      prepareArguments: dropUnknownFields<{ command: string; timeout?: number }>([
+        "command",
+        "timeout",
+      ]),
       replay: "unsafe",
       executionMode: "sequential",
       // Live output keeps its newest lines; the result itself fits Pi's limit (serializeShellResult).

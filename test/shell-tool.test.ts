@@ -268,6 +268,74 @@ it(
   },
 );
 
+it(
+  "runs a complete command whose call carries a stray extra field",
+  { timeout: 45_000 },
+  async () => {
+    // Argument shapes GPT sent that failed validation with "unknown field" (papercuts log).
+    const calls = [
+      { command: "one", x: 0 },
+      { command: "two", "}": "x" },
+      { command: "three", command_unused: "" },
+      { command: "four", limit: null, timeout: 30 },
+      { command: "five", "}},{": "} }]}  \n", parameters: { command: "five" } },
+    ].map((args) => ({ arguments: args }));
+
+    const ran: string[] = [];
+
+    const script = (name: string) => async (write: (text: string) => void) => {
+      ran.push(name);
+      write(`${name} ran\n`);
+
+      return 0;
+    };
+
+    const { id } = await start(
+      calls,
+      Object.fromEntries(
+        ["one", "two", "three", "four", "five"].map((name) => [name, script(name)]),
+      ),
+    );
+
+    await expect
+      .poll(async () => (await toolResults(id)).length, { timeout: 30_000 })
+      .toBe(calls.length);
+
+    const results = await toolResults(id);
+
+    expect(results.map((result) => result.isError)).toEqual(calls.map(() => false));
+    expect(results.map((result) => JSON.parse(result.text).stdout)).toEqual(
+      ["one", "two", "three", "four", "five"].map((name) => `${name} ran\n`),
+    );
+    expect(ran).toEqual(["one", "two", "three", "four", "five"]);
+  },
+);
+
+it(
+  "rejects a timeout in milliseconds with the allowed range, without running the command",
+  { timeout: 45_000 },
+  async () => {
+    const ran: string[] = [];
+
+    const { id } = await start([{ arguments: { command: "slow", timeout: 60_000 } }], {
+      slow: async () => {
+        ran.push("slow");
+
+        return 0;
+      },
+    });
+
+    await expect.poll(async () => (await toolResults(id)).length, { timeout: 15_000 }).toBe(1);
+
+    const [result] = await toolResults(id);
+
+    expect(result!.isError).toBe(true);
+    expect(result!.text).toContain("timeout");
+    expect(result!.text).toContain("3600");
+    expect(ran).toEqual([]);
+  },
+);
+
 it("kills the command when the session is stopped", { timeout: 45_000 }, async () => {
   const { id, container } = await start([{ arguments: { command: "serve" } }], {
     serve: async (write, stopped) => {
