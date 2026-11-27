@@ -120,6 +120,19 @@ const userTexts = async (id: string) =>
         : message.content.map((block) => block.text ?? "").join("\n\n"),
     );
 
+/** Tool failures the Agent logged as papercuts for session `id`. */
+const toolPapercuts = (id: string) =>
+  runInDurableObject(env.AGENT.getByName("owner"), async (_, state) => {
+    const conversationId = await state.storage.get<ConversationId>(`session:${id}`);
+
+    return state.storage.sql
+      .exec<{ source: string; message: string }>(
+        "SELECT source, message FROM app_papercuts WHERE source LIKE 'tool:%' AND conversation_id = ?",
+        String(conversationId),
+      )
+      .toArray();
+  });
+
 const queued = async (id: string) =>
   Schema.decodeUnknownSync(Schema.Struct({ items: Schema.Array(Schema.Unknown) }))(
     (await snapshot(id)).docs["pi.inbox"] ?? { items: [] },
@@ -256,6 +269,9 @@ it(
     expect(submissions).toEqual(expect.arrayContaining([later, first, steer, other]));
     expect(submissions).toHaveLength(6);
     expect(Math.max(...submissions)).toBeGreaterThan(other);
+
+    // The command the interrupt killed is not a tool failure.
+    expect(await toolPapercuts(id)).toEqual([]);
   },
 );
 
@@ -307,6 +323,8 @@ it("finishes an interrupt a restart cut short", { timeout: 45_000 }, async () =>
   expect(requests[answered]).toContain(INTERRUPT_NOTE.slice(0, 60));
   await expect.poll(async () => (await liveRun(id))?.run, { timeout: 15_000 }).toBeUndefined();
   expect(steer).toBeGreaterThan(0);
+  // Neither the restart nor the interrupt it finished left a tool failure behind.
+  expect(await toolPapercuts(id)).toEqual([]);
 
   const marked = await runInDurableObject(env.AGENT.getByName("owner"), (_, state) =>
     state.storage.list({ prefix: "interrupt:" }),
@@ -347,4 +365,7 @@ it("leaves a running turn alone when a restart finds no interrupt pending", asyn
 
   expect(marked.size).toBe(0);
   expect(queuedId).toBeGreaterThan(0);
+
+  // The restart cut the running command off ("may have partially run"): not a tool failure.
+  expect(await toolPapercuts(id)).toEqual([]);
 });

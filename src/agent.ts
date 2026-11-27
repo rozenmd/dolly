@@ -192,6 +192,7 @@ import {
   papercutsPrompt,
   parseTime,
   toolFailure,
+  harnessInterruption,
 } from "./papercuts";
 import { toolParameters } from "./tool-schema";
 import {
@@ -292,6 +293,9 @@ type PullRef = Pick<SessionPull, "repository" | "number">;
 
 /** Hibernation tag for per-session transcript streams, apart from sidebar feed sockets. */
 const STREAM_TAG = "stream";
+
+/** How long after a deliberate stop the abort results it causes are not logged as papercuts. */
+const STOP_WINDOW_MS = 60_000;
 
 /** Stored on each session stream socket so a woken instance can resume its watch. */
 const StreamAttachment = Schema.Struct({ session: Schema.String });
@@ -463,6 +467,7 @@ export class Agent extends DurableObject<Env> {
         ).pipe(Effect.provide(this.services)),
       ),
     reachesAll: (id) => this.startedFromWeb(id).catch(() => false),
+    stopped: (id) => this.noteStop(id),
     link: async (id) => {
       const base = await Effect.runPromise(readPublicBaseUrl(this.ctx.storage)).catch(() => null);
 
@@ -1196,8 +1201,13 @@ export class Agent extends DurableObject<Env> {
             steerQueued(await api.snapshot(InboxDoc, api.conversationId, context))
               ? { block: STEER_TOOL_SKIP }
               : undefined,
-          afterTool: async (call, result, api) => {
-            await this.captureToolFailure(call, result, api.conversationId);
+          afterTool: async (call, result, api, context) => {
+            await this.captureToolFailure(
+              call,
+              result,
+              api.conversationId,
+              context.abortSignal?.aborted === true,
+            );
           },
         }),
       ],
@@ -1837,13 +1847,49 @@ export class Agent extends DurableObject<Env> {
     return { title, ...(previous && { previous }), model: modelId };
   }
 
-  /** Log a failed tool call, if it failed, as a compact summary built from redacted fields. */
+  /**
+   * Conversations whose run someone stopped on purpose (Stop, "Interrupt and send now",
+   * cancel_task), by when: what that cut off is not a tool failure. In memory only: a restart
+   * labels the calls it cuts off itself.
+   */
+  private readonly stops = new Map<string, number>();
+
+  private noteStop(conversationId: ConversationId) {
+    const now = Date.now();
+
+    for (const [id, at] of this.stops) if (now - at > STOP_WINDOW_MS) this.stops.delete(id);
+    this.stops.set(String(conversationId), now);
+  }
+
+  private stoppedRecently(conversationId: ConversationId | undefined) {
+    const at = conversationId === undefined ? undefined : this.stops.get(String(conversationId));
+
+    return at !== undefined && Date.now() - at <= STOP_WINDOW_MS;
+  }
+
+  /**
+   * Log a failed tool call, if it failed, as a compact summary built from redacted fields. Calls
+   * the harness cut off are not failures: skipped for a steer, cut off by a restart, or stopped
+   * with their run (`aborted`: the call's own signal fired). Abort results of a run nobody here
+   * stopped are still logged.
+   */
   private async captureToolFailure(
     call: { readonly name: string; readonly arguments?: object },
     result: ToolExecutionResult,
     conversationId?: ConversationId,
+    aborted = false,
   ) {
     if (call.name === "papercuts" || !toolFailure(result, call)) return;
+
+    const interruption = harnessInterruption(result);
+
+    if (interruption === "steer" || interruption === "restart" || aborted) return;
+
+    if (
+      (interruption === "aborted" || interruption === "signalled") &&
+      this.stoppedRecently(conversationId)
+    )
+      return;
 
     await this.capturePapercut(
       `tool:${call.name}`,
@@ -4315,6 +4361,7 @@ export class Agent extends DurableObject<Env> {
       }, BACKGROUND_CONTEXT));
 
     if (running !== undefined) {
+      this.noteStop(conversationId);
       // The run and the work it owns: running tools are signalled, not waited out.
       await this.harness.abortTask(running, BACKGROUND_CONTEXT);
       await this.harness.waitForTask(running, BACKGROUND_CONTEXT);
@@ -4962,6 +5009,7 @@ export class Agent extends DurableObject<Env> {
 
         if (Option.isNone(conversation)) return undefined;
 
+        this.noteStop(conversation.value.id);
         yield* attempt("pi.abort", () =>
           conversation.value.abort(BACKGROUND_CONTEXT, { background: true }),
         );
