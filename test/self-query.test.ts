@@ -332,9 +332,12 @@ it("lists the owner's work by default and titles reviews by pull request", async
       expect.objectContaining({ id: asked, kind: "work", parentId: work }),
     ]),
   });
-  expect(JSON.stringify(listed)).not.toContain(review);
-  expect(JSON.stringify(listed)).not.toContain(nightly);
-  expect(JSON.stringify(listed)).not.toContain(worker);
+
+  // Compare whole ids: a spawned session's short numeric id can occur inside another's UUID.
+  for (const id of [review, nightly, worker])
+    expect(listed).toMatchObject({
+      sessions: expect.not.arrayContaining([expect.objectContaining({ id })]),
+    });
 
   expect(reviews).toMatchObject({
     ok: true,
