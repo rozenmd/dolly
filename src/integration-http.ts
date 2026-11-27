@@ -4,6 +4,7 @@ import * as Option from "effect/Option";
 import { exceptionDetails, redact } from "./diagnostics";
 import { OperationError, attempt } from "./operations";
 import { Buffer } from "node:buffer";
+import { LineWindow, type FileRange } from "./file-window";
 
 const ProviderError = Schema.Struct({
   message: Schema.optional(Schema.String),
@@ -104,9 +105,83 @@ async function fetchFollowingGitHub(url: string, init: RequestInit, signal: Abor
   }
 }
 
-export const integrationJson = Effect.fn("Integration.request")(function* (
+/** The error a body larger than {@link RESPONSE_LIMIT} fails with. */
+export const RESPONSE_TOO_LARGE = "Provider response exceeds 1 MiB";
+
+/** The most of a JSON response that is buffered. */
+const RESPONSE_LIMIT = 1_048_576;
+
+type BodyReader = ReadableStreamDefaultReader<Uint8Array>;
+
+/** A JSON body of at most {@link RESPONSE_LIMIT} bytes. */
+const readJson = (body: BodyReader) =>
+  Effect.gen(function* () {
+    const buffer = new Uint8Array(RESPONSE_LIMIT);
+    let size = 0;
+
+    while (true) {
+      const next = yield* attempt("integration.read", () => body.read());
+
+      if (next.done) break;
+
+      if (size + next.value.byteLength > buffer.byteLength)
+        return yield* new OperationError({
+          operation: "integration.body",
+          message: RESPONSE_TOO_LARGE,
+          details: { limit: buffer.byteLength },
+        });
+      buffer.set(next.value, size);
+      size += next.value.byteLength;
+    }
+
+    return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))(
+      new TextDecoder().decode(buffer.subarray(0, size)),
+    ).pipe(
+      Effect.mapError(
+        () =>
+          new OperationError({
+            operation: "integration.json",
+            message: "Provider returned invalid JSON",
+            details: null,
+          }),
+      ),
+    );
+  });
+
+/**
+ * A line window of a UTF-8 text body, decoded as it streams: reading stops once the window is
+ * full, so memory stays bounded by the window whatever the body's size.
+ */
+const readWindow = (range: FileRange) => (body: BodyReader) =>
+  Effect.gen(function* () {
+    const window = new LineWindow(range);
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+
+    const decode = (bytes?: Uint8Array) =>
+      attempt("integration.decode", async () =>
+        bytes ? decoder.decode(bytes, { stream: true }) : decoder.decode(),
+      );
+
+    while (!window.done) {
+      const next = yield* attempt("integration.read", () => body.read());
+
+      if (next.done) {
+        window.push(yield* decode());
+        break;
+      }
+
+      window.push(yield* decode(next.value));
+    }
+
+    const total = window.totalLines;
+
+    return { ...window.finish(), totalLines: window.done ? undefined : total };
+  });
+
+const integrationRequest = Effect.fn("Integration.request")(function* <A>(
   url: string,
   init: RequestInit,
+  readBody: (body: BodyReader) => Effect.Effect<A, OperationError>,
 ) {
   const authorization = new Headers(init.headers).get("Authorization") ?? "";
   const secrets = [authorization, authorization.replace(/^Bearer /, "")];
@@ -145,46 +220,11 @@ export const integrationJson = Effect.fn("Integration.request")(function* (
           details: null,
         });
 
-      return yield* Effect.acquireUseRelease(
-        Effect.succeed(reader),
-        (body) =>
-          Effect.gen(function* () {
-            const buffer = new Uint8Array(1_048_576);
-            let size = 0;
-
-            while (true) {
-              const next = yield* attempt("integration.read", () => body.read());
-
-              if (next.done) break;
-
-              if (size + next.value.byteLength > buffer.byteLength)
-                return yield* new OperationError({
-                  operation: "integration.body",
-                  message: "Provider response exceeds 1 MiB",
-                  details: { limit: buffer.byteLength },
-                });
-              buffer.set(next.value, size);
-              size += next.value.byteLength;
-            }
-
-            return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))(
-              new TextDecoder().decode(buffer.subarray(0, size)),
-            ).pipe(
-              Effect.mapError(
-                () =>
-                  new OperationError({
-                    operation: "integration.json",
-                    message: "Provider returned invalid JSON",
-                    details: null,
-                  }),
-              ),
-            );
-          }),
-        (body) =>
-          attempt("integration.cancel", () => body.cancel()).pipe(
-            Effect.ensuring(Effect.sync(() => body.releaseLock())),
-            Effect.catch(() => Effect.void),
-          ),
+      return yield* Effect.acquireUseRelease(Effect.succeed(reader), readBody, (body) =>
+        attempt("integration.cancel", () => body.cancel()).pipe(
+          Effect.ensuring(Effect.sync(() => body.releaseLock())),
+          Effect.catch(() => Effect.void),
+        ),
       );
     });
   }).pipe(
@@ -213,3 +253,10 @@ export const integrationJson = Effect.fn("Integration.request")(function* (
     ),
   );
 });
+
+export const integrationJson = (url: string, init: RequestInit) =>
+  integrationRequest(url, init, readJson);
+
+/** A window of lines of a text response, of any size; see {@link LineWindow}. */
+export const integrationWindow = (url: string, init: RequestInit, range: FileRange = {}) =>
+  integrationRequest(url, init, readWindow(range));

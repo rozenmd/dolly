@@ -130,7 +130,7 @@ export const DUPLICATE_WINDOW_MS = 10_000;
  * The version of {@link papercutSignature}. Raising it recomputes the signatures of open entries
  * once, at the next start, so groups made by an older algorithm merge or split as the new one says.
  */
-export const SIGNATURE_VERSION = 2;
+export const SIGNATURE_VERSION = 3;
 
 /**
  * A page's serialized budget. Tool results past 50 KiB are cut, which would drop `more` and
@@ -843,13 +843,37 @@ const LOCATION = /^(?:node:[\w/.-]+|(?:file:\/\/)?[\w@.+/-]*\.[cm]?[jt]sx?):\d+(
 /** Lines Node prints around any crash: stack frames, its own entry point, `^` markers. */
 const NOISE = /^(?:at\s|node:internal\/|triggerUncaughtException\(|\^+$)/;
 
+/**
+ * Progress lines tools print on stderr whatever the outcome, which never name a failure:
+ * - git: `From <url>`, `To <url>`, ` * branch <sha> -> FETCH_HEAD`, `   a1b2c3d..e4f5a6b  main -> origin/main`,
+ *   `remote: Counting objects: …`, `Receiving objects: …`, `Resolving deltas: …`, `HEAD is now at …`.
+ * - pnpm lifecycle scripts: `<path> postinstall$ node install.js`, `<path> postinstall: Done`
+ *   (never `: Failed`).
+ * - lint-staged: `[STARTED] …`, `[COMPLETED] …`, `[SKIPPED] …` (never `[FAILED]`).
+ */
+const PROGRESS = [
+  /^(?:From|To) (?:[a-z][\w+.-]*:\/\/|[\w.-]+@[\w.-]+:|\/)\S*$/i,
+  /^\* (?:branch|tag|\[new (?:branch|tag|ref)\])\s+\S+\s+->\s+\S+$/,
+  /^\+?\s*[0-9a-f]{7,}\.\.\.?[0-9a-f]{7,}\s+\S+\s+->\s+\S+/,
+  /^(?:remote:\s+)?(?:Enumerating|Counting|Compressing|Receiving|Resolving|Unpacking|Writing) (?:objects|deltas):/,
+  /^(?:remote:\s+)?Total \d+ \(delta \d+\)/,
+  /^Updating files:/,
+  /^HEAD is now at /,
+  /^\S+ (?:pre|post)?(?:install|prepare|prepublish|prepublishOnly|pack|publish)(?:\$ .*|: (?:Done|Running\.\.\.))$/,
+  /^\[(?:STARTED|COMPLETED|SKIPPED)\] /,
+];
+
+/** ANSI colour and cursor codes (CSI and OSC sequences). */
+// oxlint-disable-next-line no-control-regex
+const ANSI = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\))/g;
+
 /** The lines that may name a failure: without blanks, Node's boilerplate and code frames. */
 function candidates(value: string) {
   const lines: string[] = [];
   // A code frame runs from its location line to the blank line before the error.
   let frame = false;
 
-  for (const raw of value.split(/\r?\n/)) {
+  for (const raw of value.replace(ANSI, "").split(/\r?\n/)) {
     const line = raw.trim();
 
     if (!line) {
@@ -864,7 +888,14 @@ function candidates(value: string) {
 
     if (ERROR_CLASS.test(line)) frame = false;
 
-    if (frame || NOISE.test(line) || !/[a-z]/i.test(line) || OMITTED.test(`${line}\n`)) continue;
+    if (
+      frame ||
+      NOISE.test(line) ||
+      !/[a-z]/i.test(line) ||
+      OMITTED.test(`${line}\n`) ||
+      PROGRESS.some((pattern) => pattern.test(line))
+    )
+      continue;
     lines.push(line);
   }
 
@@ -1001,11 +1032,14 @@ export function papercutSignature(source: string, logged: string) {
   } else if (message.trimStart().startsWith("{")) {
     // Older entries stored the whole reply clipped at 4,000 characters, which is no longer JSON
     // and may have lost stderr and the exit code in a long stdout. Recover the fields that
-    // survived; a stdout prefix says nothing about the failure, so never group by it.
+    // survived; a stdout prefix says nothing about the failure, so never group by it. The
+    // workspace setup status a reply ended with describes setup, not this call: drop it.
+    const own = message.replace(/,"workspaceSetup":\{[\s\S]*$/, "");
+
     const field = (name: string) =>
       Option.getOrUndefined(
         Option.flatMap(
-          Option.fromNullishOr(new RegExp(`"${name}":"((?:[^"\\\\]|\\\\.)*)"?`).exec(message)),
+          Option.fromNullishOr(new RegExp(`"${name}":"((?:[^"\\\\]|\\\\.)*)"?`).exec(own)),
           (match) => decodeString(`"${match[1]}"`),
         ),
       );
@@ -1020,7 +1054,7 @@ export function papercutSignature(source: string, logged: string) {
       keyLine(field("stderr") ?? "") ||
       keyLine(
         field("error") ?? "",
-        message.includes('"state":"') || setupFooter(source, field("error")) ? EXITED : undefined,
+        own.includes('"state":"') || setupFooter(source, field("error")) ? EXITED : undefined,
       ) ||
       commandName(field("command")) ||
       "truncated tool result";

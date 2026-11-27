@@ -1125,6 +1125,138 @@ it("keys a setup warning on what failed, not on the head of an install log cut t
   );
 });
 
+it("skips git, pnpm and lint-staged progress lines and ANSI codes when choosing the key line", () => {
+  const fetch =
+    "From http://github.workspace/onlineornot/onlineornot-next\n * branch            c91656966bfcc08bae1b7f4ea60d378fb5103cf0 -> FETCH_HEAD\n";
+
+  // c078d578: the real error sat under git fetch's progress lines.
+  expect(
+    papercutSignature(
+      "tool:shell",
+      JSON.stringify({
+        stdout: "lambdas/AGENTS.md\n  140 AGENTS.md\n",
+        stderr: `${fetch}wc: apps/{,web-rr7/}AGENTS.md: No such file or directory\nwc: apps/web-rr7/{_content,app/components}/AGENTS.md: No such file or directory\n`,
+        exitCode: 1,
+        workspaceSetup: { state: "installing", updatedAt: 1795707881988 },
+      }),
+    ),
+  ).toBe("tool:shell|1|wc: apps/{,web-rr<n>/}agents.md: no such file or directory");
+
+  // 9542fc7c: progress alone says nothing; the command that ran does.
+  expect(
+    papercutSignature(
+      "tool:shell",
+      JSON.stringify({
+        exitCode: 1,
+        command: "git fetch --depth=1 origin 751d270f9128363284793adb5e69c63b544cb700 && git diff",
+        stderr:
+          "From http://github.workspace/rozenmd/dolly\n * branch            751d270f9128363284793adb5e69c63b544cb700 -> FETCH_HEAD",
+      }),
+    ),
+  ).toBe("tool:shell|1|git");
+
+  // Other git progress lines are skipped the same way.
+  expect(
+    papercutSignature(
+      "tool:shell",
+      JSON.stringify({
+        exitCode: 128,
+        stderr: [
+          "remote: Enumerating objects: 5, done.",
+          "remote: Counting objects: 100% (5/5), done.",
+          "remote: Compressing objects: 100% (3/3), done.",
+          "remote: Total 3 (delta 2), reused 0 (delta 0), pack-reused 0",
+          "Receiving objects: 100% (3/3), done.",
+          "Resolving deltas: 100% (2/2), done.",
+          "From git@github.com:rozenmd/dolly",
+          "   a1b2c3d..e4f5a6b  main       -> origin/main",
+          " + 1a2b3c4...5d6e7f8 topic      -> origin/topic  (forced update)",
+          "HEAD is now at e4f5a6b Fix things",
+          "fatal: bad object 0123abcd",
+        ].join("\n"),
+      }),
+    ),
+  ).toBe("tool:shell|128|fatal: bad object <hash>");
+
+  // A rejected push is a failure, not progress.
+  expect(
+    papercutSignature(
+      "tool:shell",
+      JSON.stringify({
+        exitCode: 1,
+        stderr:
+          "To http://github.workspace/rozenmd/dolly\n ! [rejected]        HEAD -> main (fetch first)",
+      }),
+    ),
+  ).toBe("tool:shell|1|! [rejected] head -> main (fetch first)");
+
+  // ea14b23a, d5cc5678: a shell reply clipped at 4,000 characters whose only error-like text is
+  // the setup status it ended with: that describes setup, not the command.
+  const setup = `,"workspaceSetup":{"state":"warning","updatedAt":1795646315642,"error":"les/.pnpm-461938ce postinstall: Done\\n.../node_modules/.pnpm-461938ce postinstall$ node -e \\"import('./config/scripts/postinstall.js').catch(() => void 0)\\"\\n.../node_modules/@sentry/.pnpm-461938ce postinstall$ node ./scripts/install.js\\nAgent skills awaiting approval: @tan`;
+
+  expect(
+    papercutSignature(
+      "tool:shell",
+      `{"stdout":"workers/auth/package.json:14:    \\"build\\": \\"wrangler deploy\\",\\n","stderr":"","exitCode":1${setup}`,
+    ),
+  ).toBe("tool:shell|1|truncated tool result");
+
+  // pnpm lifecycle lines never name a failure; `: Failed` does.
+  const pnpm = [
+    ".../node_modules/.pnpm-461938ce postinstall: Done",
+    `.../node_modules/.pnpm-461938ce postinstall$ node -e "import('./config/scripts/postinstall.js').catch(() => void 0)"`,
+    ". prepare$ husky",
+    ". prepare: Done",
+  ].join("\n");
+
+  expect(
+    papercutSignature("tool:shell", JSON.stringify({ exitCode: 1, stderr: `${pnpm}\nboom` })),
+  ).toBe("tool:shell|1|boom");
+  expect(
+    papercutSignature(
+      "tool:shell",
+      JSON.stringify({
+        exitCode: 1,
+        stderr: `${pnpm}\n.../node_modules/esbuild postinstall: Failed`,
+      }),
+    ),
+  ).toBe("tool:shell|1|.<path> postinstall: failed");
+
+  // c50d1a16: lint-staged's progress on stderr of a commit that went through.
+  const lintStaged = [
+    "[STARTED] Backing up original state...",
+    "[COMPLETED] Backed up original state in git stash (f4906a891)",
+    '[STARTED] oxfmt --write --config "/workspace/x/apps/web-rr7/.oxfmtrc.json" --ignore-path "/workspace/x/.oxfmtignore" --no-error-on-unmatched-pattern',
+    "[COMPLETED] Cleaning up temporary files...",
+  ].join("\n");
+
+  expect(
+    papercutSignature(
+      "tool:shell",
+      JSON.stringify({ exitCode: 1, command: "git commit -m x", stderr: lintStaged }),
+    ),
+  ).toBe("tool:shell|1|git");
+  expect(
+    papercutSignature(
+      "tool:shell",
+      JSON.stringify({
+        exitCode: 1,
+        stderr: `${lintStaged}\n[FAILED] oxfmt --write [FAILED]\n✖ oxfmt found errors`,
+      }),
+    ),
+  ).toBe("tool:shell|1|[failed] oxfmt --write [failed]");
+
+  // 967b5f97: vitest's coloured banner is not the key; colour codes never reach a signature.
+  expect(
+    papercutSignature(
+      "tool:shell",
+      `{"stdout":"\\n\\u001b[1m RUN \\u001b[22m","stderr":"\\u001b[90mstderr\\u001b[2m | src/docs-screenshots-browser.test.ts\\u001b[2m > \\u001b[22m\\u001b[2mcaptures docs screenshots\\n\\u001b[22m\\u001b[39m2026-11-26T14:14:52.981Z WARN [Better Auth]: Social provider google is missing clientId or clientSecret\\n\\u001b[90mstderr\\u001b[2m | src/a.test.ts`,
+    ),
+  ).toBe(
+    "tool:shell||<time> warn [better auth]: social provider google is missing clientid or clientsecret",
+  );
+});
+
 it("keys a failure with nothing on stderr on the command that ran, not on stdout", () => {
   const summary = (command: string, stdout: string, exitCode = 1) =>
     toolFailure(reply({ stdout, stderr: "", exitCode }), { arguments: { command } })!;
@@ -1252,6 +1384,7 @@ it("recomputes open entries' signatures once when the algorithm changes, leaving
       ],
       ["c", "tool:shell|1|triggeruncaughtexception(", null],
       ["d", "tool:shell|1|triggeruncaughtexception(", 5],
+      ["e", "tool:shell|1|from <url>", null],
     ] as const;
 
     const messages = {
@@ -1274,6 +1407,11 @@ it("recomputes open entries' signatures once when the algorithm changes, leaving
         stderr:
           "node:internal/modules/run_main:107\n    triggerUncaughtException(\n    ^\n\nTypeError: x is not a function",
       }),
+      e: JSON.stringify({
+        exitCode: 1,
+        stderr:
+          "From http://github.workspace/a/b\n * branch            c91656966bfcc08bae1b7f4ea60d378fb5103cf0 -> FETCH_HEAD\nwc: x: No such file or directory",
+      }),
     };
 
     for (const [id, signature, resolved] of rows)
@@ -1291,7 +1429,7 @@ it("recomputes open entries' signatures once when the algorithm changes, leaving
       Object.fromEntries(
         sql
           .exec<{ id: string; signature: string }>(
-            "SELECT id, signature FROM app_papercuts WHERE id IN ('a', 'b', 'c', 'd')",
+            "SELECT id, signature FROM app_papercuts WHERE id IN ('a', 'b', 'c', 'd', 'e')",
           )
           .toArray()
           .map((row) => [row.id, row.signature]),
@@ -1303,6 +1441,7 @@ it("recomputes open entries' signatures once when the algorithm changes, leaving
       b: "tool:workspace||- .<path> exited <n>",
       c: "tool:shell|1|typeerror: x is not a function",
       d: "tool:shell|1|triggeruncaughtexception(",
+      e: "tool:shell|1|wc: x: no such file or directory",
     });
     expect(
       sql.exec("SELECT value FROM app_papercuts_meta WHERE key = 'signature_version'").one().value,
