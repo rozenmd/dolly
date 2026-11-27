@@ -349,6 +349,8 @@ export type CoordinationDeps = {
   retiresSettledChildren?: (id: ConversationId) => Promise<boolean>;
   /** The conversation a web app session's public id names, as list_sessions reports it. */
   alias?: (id: string) => Promise<ConversationId | undefined>;
+  /** Record a child just spawned at `createdAt` beside the owner's sessions (its metadata). */
+  spawned?: (id: ConversationId, createdAt: number) => Promise<void>;
   now?: () => number;
 };
 
@@ -534,8 +536,12 @@ export class Coordination {
       async () => (await this.deps.retiresSettledChildren?.(parent)) === true,
     );
 
+    // The child this call created, not one an earlier call with the same requestId did.
+    let spawned: ConversationId | undefined;
+
     const created = yield* attempt("child.create", () =>
       conversation.commit(async (tx): Promise<SpawnResult> => {
+        spawned = undefined;
         const state = await tx.doc(Children, parent);
         const key = input.requestId;
 
@@ -628,12 +634,24 @@ export class Coordination {
           mode,
           createdAt: now,
         };
+        spawned = child.id;
 
         return { ok: true, taskId: String(child.id), model, url: "", createdAt: now };
       }, context),
     );
 
     if (!created.ok) return created;
+
+    // Like a session the owner creates, it records when it was created: the session list and a
+    // chief-spawned workspace's tab order read it. Best effort: the child runs either way.
+    const child = spawned;
+
+    if (child !== undefined && this.deps.spawned) {
+      const record = this.deps.spawned;
+
+      yield* Effect.promise(() => record(child, created.createdAt).catch(() => undefined));
+    }
+
     const url = yield* Effect.promise(() => this.link(created.taskId));
 
     return { ...created, url } satisfies SpawnResult;

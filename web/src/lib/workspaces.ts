@@ -91,8 +91,8 @@ const tabbed = (sessions: readonly Member[], session: Member) =>
   !session.parentId || Boolean(session.kept) || spawnedByChief(sessions, session);
 
 /**
- * The sessions a workspace shows as tabs: its own oldest first, then the spawned ones kept, and
- * automatic reviews last, so work started in a review's workspace names and opens its row.
+ * The sessions a workspace shows as tabs: the one the chief of staff spawned, if it started the
+ * workspace, then its own oldest first, then the spawned ones kept, and automatic reviews last, so work started in a review's workspace names and opens its row.
  */
 export function workspaceTabs<T extends Member>(sessions: readonly T[], workspaceId: string) {
   const age = (session: Member) => session.createdAt ?? session.updatedAt;
@@ -104,6 +104,8 @@ export function workspaceTabs<T extends Member>(sessions: readonly T[], workspac
     .sort(
       (a, b) =>
         Number(Boolean(a.automation)) - Number(Boolean(b.automation)) ||
+        // The session the chief spawned started the workspace, however recently it was prompted.
+        Number(!spawnedByChief(sessions, a)) - Number(!spawnedByChief(sessions, b)) ||
         Number(Boolean(a.parentId) && !spawnedByChief(sessions, a)) -
           Number(Boolean(b.parentId) && !spawnedByChief(sessions, b)) ||
         age(a) - age(b) ||

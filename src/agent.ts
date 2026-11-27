@@ -464,6 +464,13 @@ export class Agent extends DurableObject<Env> {
     alias: (id) => this.ctx.storage.get<ConversationId>(`session:${id}`),
     retiresSettledChildren: async (id) =>
       (await this.ctx.storage.get<ChiefRecord>(CHIEF_KEY))?.conversation === id,
+    spawned: async (id, createdAt) => {
+      const key = sessionMetadataKey(id);
+      const metadata = await this.ctx.storage.get<SessionMetadata>(key);
+
+      if (metadata?.createdAt === undefined)
+        await this.ctx.storage.put(key, { ...metadata, createdAt } satisfies SessionMetadata);
+    },
   });
   private readonly checkpointTask = workspaceCheckpoint(
     (sandboxId, turnId) => this.env.SANDBOX.getByName(sandboxId).checkpoint(turnId),

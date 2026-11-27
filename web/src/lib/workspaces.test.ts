@@ -50,6 +50,25 @@ describe("workspaces", () => {
     expect(workspaceTabs(sessions, "w-work").map((tab) => tab.id)).toEqual(["work"]);
   });
 
+  it("keeps the chief's session as the workspace's first tab when a newer tab joins", () => {
+    const joined = [
+      ...sessions,
+      // Joined later, then the chief's session was prompted again (sessions spawned before
+      // they recorded createdAt sort by their latest prompt).
+      session("followup", { workspaceId: "w-delegated", createdAt: 5, updatedAt: 5 }),
+    ].map((item) => (item.id === "delegated" ? { ...item, updatedAt: 10 } : item));
+
+    expect(workspaceTabs(joined, "w-delegated").map((tab) => tab.id)).toEqual([
+      "delegated",
+      "followup",
+    ]);
+    expect(workspaceRows(joined).find((row) => row.id === "w-delegated")).toMatchObject({
+      main: "delegated",
+      title: "delegated",
+      from: "Barbie",
+    });
+  });
+
   it("falls back to them like any other sidebar session, but not to reviews", () => {
     expect(
       sidebarSessions(sessions)

@@ -403,6 +403,10 @@ it("starts a workspace for each session the chief spawns, unlike other sessions'
   expect(byId.get(delegated)?.workspaceId).toBeDefined();
   expect(byId.get(delegated)?.workspaceId).not.toBe(byId.get(chief!.id)?.workspaceId);
 
+  // Spawned sessions record when they were created, as sessions the owner creates do.
+  for (const id of [delegated, investigation, nested])
+    expect(byId.get(id)?.createdAt, id).toBeGreaterThan(0);
+
   // A read-only delegation is not mistaken for an automatic review, so the sidebar lists it.
   expect(byId.get(investigation)?.automation).toBeUndefined();
   expect(byId.get(investigation)?.workspaceId).not.toBe(byId.get(delegated)?.workspaceId);
@@ -428,6 +432,9 @@ it("starts a workspace for each session the chief spawns, unlike other sessions'
     workspaceId: byId.get(delegated)?.workspaceId,
     repository: "octocat/project",
   });
+  // The chief's session stays the oldest, so it stays the workspace's first tab and names its row.
+  expect(after.get(tab.id)?.createdAt).toBeGreaterThanOrEqual(byId.get(delegated)?.createdAt ?? 0);
+  expect(after.get(delegated)?.createdAt).toBe(byId.get(delegated)?.createdAt);
 
   // Another session's child still names no workspace.
   const refused = await SELF.fetch("https://worker/api/sessions", {
