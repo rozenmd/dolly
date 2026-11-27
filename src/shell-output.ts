@@ -4,6 +4,8 @@
  * runs. Commands may run for many minutes, so neither may grow without bound.
  */
 
+import { OperationError } from "./operations";
+
 /** Seconds a shell tool command may run when the model does not say. */
 export const SHELL_TIMEOUT_DEFAULT_SECONDS = 600;
 
@@ -155,15 +157,24 @@ export class OutputRelay {
   }
 }
 
+/** A `Sandbox.runUntilCancelled` command stopped through `Sandbox.cancel`. */
+export type RunCancelled = { readonly cancelled: true };
+
+export const RUN_CANCELLED_MESSAGE = "The command was cancelled";
+
+export const isRunCancelled = (outcome: object): outcome is RunCancelled =>
+  "cancelled" in outcome && outcome.cancelled === true;
+
 /**
  * Run a sandbox command that `signal` can stop. A Durable Object RPC in flight cannot be cancelled,
- * so aborting asks the Sandbox to stop the run by its execution ID; the run then rejects.
+ * so aborting asks the Sandbox to stop the run by its execution ID. The Sandbox reports the stop as
+ * a value (a rejected RPC is logged by workerd as an uncaught exception); this rejects with it.
  */
-export async function runCancellable<A>(
+export async function runCancellable<A extends object>(
   sandbox: { cancel(executionId: string): boolean | Promise<boolean> },
   signal: AbortSignal | undefined,
   run: (executionId: string) => Promise<A>,
-): Promise<A> {
+): Promise<Exclude<A, RunCancelled>> {
   signal?.throwIfAborted();
 
   const executionId = crypto.randomUUID();
@@ -175,7 +186,16 @@ export async function runCancellable<A>(
   signal?.addEventListener("abort", cancel, { once: true });
 
   try {
-    return await run(executionId);
+    const outcome = await run(executionId);
+
+    if (isRunCancelled(outcome))
+      throw new OperationError({
+        operation: "sandbox.run",
+        message: RUN_CANCELLED_MESSAGE,
+        details: null,
+      });
+
+    return outcome as Exclude<A, RunCancelled>;
   } finally {
     signal?.removeEventListener("abort", cancel);
   }

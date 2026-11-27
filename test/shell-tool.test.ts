@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { runCancellable } from "../src/shell-output";
 import { Live, Snapshot } from "../src/transcript";
 import { headers, signIn } from "./session";
 
@@ -367,16 +368,60 @@ it("stops a run whose cancel reached the Sandbox first", async () => {
   });
 
   expect(await sandbox.cancel("early")).toBe(false);
-  let failure: unknown;
 
-  // Awaiting the RPC directly, as expect().rejects does not, keeps its rejection handled.
-  try {
-    await sandbox.run("never", {}, { executionId: "early" });
-  } catch (error) {
-    failure = error;
-  }
-
-  expect(failure).toMatchObject({ message: "The command was cancelled" });
+  // A cancelled run resolves across the RPC boundary rather than rejecting: workerd logs every
+  // rejected Durable Object RPC as "Uncaught (in promise)", which made each stop look like a bug.
+  expect(await sandbox.runUntilCancelled("never", {}, { executionId: "early" })).toEqual({
+    cancelled: true,
+  });
   // It never started, so there was nothing to kill.
   expect(container.kills).toEqual([]);
+});
+
+it("reports a stopped run as a value over RPC and rejects only the caller's runCancellable", async () => {
+  const sandbox = env.SANDBOX.getByName(crypto.randomUUID());
+  let started = false;
+
+  const container = fakeContainer({
+    never: async (_, stopped) => {
+      started = true;
+
+      return 128 + (await stopped);
+    },
+  });
+
+  await runInDurableObject(sandbox, async (instance) => {
+    Object.assign(instance, { container: () => Effect.succeed(container) });
+  });
+
+  const abort = new AbortController();
+  let outcome: unknown;
+
+  const run = runCancellable(sandbox, abort.signal, async (executionId) => {
+    outcome = await sandbox.runUntilCancelled("never", {}, { executionId });
+
+    return outcome as object;
+  });
+
+  // Let the run start before stopping it, as the shell tool's abort does.
+  // (Polled: a promise resolved inside the Durable Object would resume this test in its context.)
+  await expect.poll(() => started, { timeout: 10_000 }).toBe(true);
+  abort.abort();
+
+  await expect(run).rejects.toMatchObject({
+    _tag: "OperationError",
+    message: "The command was cancelled",
+  });
+  // The RPC itself resolved: nothing rejected inside the Sandbox for workerd to report.
+  expect(outcome).toEqual({ cancelled: true });
+  expect(container.kills).toEqual([{ command: "never", signal: 15 }]);
+
+  // A real failure still rejects (called in the object, so the expected error is not logged).
+  const failure = await runInDurableObject(sandbox, (instance) =>
+    instance.runUntilCancelled("unknown", {}, { executionId: "other" }).then(
+      () => undefined,
+      (error: unknown) => error,
+    ),
+  );
+  expect(String(failure)).toContain("Unexpected command: unknown");
 });

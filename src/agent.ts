@@ -578,17 +578,20 @@ export class Agent extends DurableObject<Env> {
 
             const env = await this.agentGitEnv();
 
-            const result = await runCancellable(sandbox, context.abortSignal, (executionId) =>
-              sandbox.run(command, env, {
-                timeout: timeout ?? SHELL_TIMEOUT_DEFAULT_SECONDS,
-                executionId,
-                onOutput: (text: string) => {
-                  // Output after the call has settled has nowhere to go.
-                  try {
-                    api.output(text);
-                  } catch {}
-                },
-              }),
+            const result = await runCancellable(
+              sandbox,
+              context.abortSignal,
+              async (executionId) =>
+                await sandbox.runUntilCancelled(command, env, {
+                  timeout: timeout ?? SHELL_TIMEOUT_DEFAULT_SECONDS,
+                  executionId,
+                  onOutput: (text: string) => {
+                    // Output after the call has settled has nowhere to go.
+                    try {
+                      api.output(text);
+                    } catch {}
+                  },
+                }),
             );
 
             const output = { ...result, workspaceSetup: workspace?.setup };
