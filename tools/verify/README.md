@@ -15,6 +15,22 @@ scripts/*.test.mjs infra/*.test.ts`, exactly what CI's `node` suite runs). No Vi
 suites, browser sessions, builds or deployments are included. Unlike `pnpm check`,
 this does not run frontend unit tests.
 
+## Local dev server
+
+`pnpm dev` serves the Worker and web app on `127.0.0.1:8787` with the production
+configuration, so it builds the sandbox and Claude Code container images and needs
+Docker. In a Dolly sandbox (no Docker, no route to Cloudflare's `Request.cf`
+endpoint) run `pnpm dev:sandbox` instead, for example as the `preview` command on
+port 8787: it uses the test Worker configuration (`test/worker/vite.config.ts`),
+which drops the containers and enables the local Access bypass, and binds
+`0.0.0.0`. Both scripts set `CLOUDFLARE_CF_FETCH_ENABLED=false`, since Dolly never
+reads `request.cf`. Signed-in pages still need seeded storage and a session cookie.
+
+If the dev server fails with `ReferenceError: module is not defined`, delete
+`node_modules/.vite`: an optimizer cache from a run that could not resolve React
+(before `publicHoistPattern` in `pnpm-workspace.yaml` hoisted web's React to the
+root) is reused otherwise.
+
 ## Worker test setup
 
 Worker suites under `test/` share one Miniflare instance per file, so storage

@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vp -C . dev --host 127.0.0.1 --port 8787",
+    "dev": "CLOUDFLARE_CF_FETCH_ENABLED=false vp -C . dev --host 127.0.0.1 --port 8787",
+    "dev:sandbox": "CLOUDFLARE_CF_FETCH_ENABLED=false vp -C . dev --config test/worker/vite.config.ts --host 0.0.0.0 --port 8787",
     "dev:web": "pnpm --dir web dev",
     "build:web": "pnpm --dir web build",
     "check:web": "pnpm --dir web typecheck && pnpm --dir web test",
