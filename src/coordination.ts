@@ -338,6 +338,8 @@ export type CoordinationDeps = {
   repository?: (name: string, context: Context) => Promise<string>;
   /** Whether a session may reach sessions outside its own family: those started from the web app. */
   reachesAll?: (id: ConversationId) => Promise<boolean>;
+  /** A session's run is being stopped on purpose (cancel_task), so what it cuts off isn't a failure. */
+  stopped?: (id: ConversationId) => Promise<void>;
   /** A session's link in the web app. */
   link?: (id: string) => Promise<string>;
   /** A session's title, as the sidebar shows it. */
@@ -902,8 +904,10 @@ export class Coordination {
         this.harness.conversation(session, context),
       );
 
-      if (conversation)
+      if (conversation) {
+        yield* Effect.promise(async () => await this.deps.stopped?.(conversation.id));
         yield* attempt("target.abort", () => conversation.abort(context, { background: true }));
+      }
     }
 
     return `Cancelled task \`${id}\`.`;

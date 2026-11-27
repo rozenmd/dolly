@@ -1,6 +1,7 @@
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
+import { STEER_TOOL_SKIP } from "./steer-interrupt";
 
 export const RESOLUTION_REASONS = [
   "fixed",
@@ -121,6 +122,15 @@ const SAMPLE_IDS = 3;
 export const GROUP_REPOSITORIES = 10;
 const NOTE_MAX = 1000;
 const DAY = 86_400_000;
+
+/** Repeats of one signature in one conversation this close together are one occurrence. */
+export const DUPLICATE_WINDOW_MS = 10_000;
+
+/**
+ * The version of {@link papercutSignature}. Raising it recomputes the signatures of open entries
+ * once, at the next start, so groups made by an older algorithm merge or split as the new one says.
+ */
+export const SIGNATURE_VERSION = 2;
 
 /**
  * A page's serialized budget. Tool results past 50 KiB are cut, which would drop `more` and
@@ -243,6 +253,41 @@ export class Papercuts {
       sql.exec("ALTER TABLE app_papercuts ADD COLUMN resolution_note TEXT");
 
     sql.exec(`CREATE INDEX IF NOT EXISTS app_papercuts_signature ON app_papercuts(signature)`);
+    this.recomputeSignatures();
+  }
+
+  /** Once per {@link SIGNATURE_VERSION}: recompute open entries' signatures with the current algorithm. */
+  private recomputeSignatures() {
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS app_papercuts_meta (
+      key TEXT PRIMARY KEY,
+      value INTEGER NOT NULL
+    )`);
+
+    const version =
+      this.sql
+        .exec<{ value: number }>(
+          "SELECT value FROM app_papercuts_meta WHERE key = 'signature_version'",
+        )
+        .toArray()[0]?.value ?? 1;
+
+    if (version >= SIGNATURE_VERSION) return;
+
+    for (const row of this.sql
+      .exec<{ id: string; source: string; message: string; signature: string | null }>(
+        "SELECT id, source, message, signature FROM app_papercuts WHERE resolved_at IS NULL",
+      )
+      .toArray()) {
+      const signature = papercutSignature(row.source, row.message);
+
+      if (signature !== row.signature)
+        this.sql.exec("UPDATE app_papercuts SET signature = ? WHERE id = ?", signature, row.id);
+    }
+
+    this.sql.exec(
+      `INSERT INTO app_papercuts_meta (key, value) VALUES ('signature_version', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      SIGNATURE_VERSION,
+    );
   }
 
   log(input: {
@@ -255,6 +300,24 @@ export class Papercuts {
     const message = input.message.trim().slice(0, 4000);
 
     if (!message) throw new Error("Papercut message is empty");
+    const signature = papercutSignature(input.source, message);
+    const now = Date.now();
+
+    // The same failure reported twice in a burst (parallel calls, a retried hook) is one entry.
+    if (input.conversationId !== undefined) {
+      const duplicate = this.sql
+        .exec<{ id: string }>(
+          `SELECT id FROM app_papercuts WHERE signature = ? AND conversation_id = ?
+           AND resolved_at IS NULL AND created_at > ? ORDER BY created_at DESC LIMIT 1`,
+          signature,
+          input.conversationId,
+          now - DUPLICATE_WINDOW_MS,
+        )
+        .toArray()[0];
+
+      if (duplicate) return { id: duplicate.id, duplicate: true as const };
+    }
+
     const id = crypto.randomUUID();
     this.sql.exec(
       `INSERT INTO app_papercuts
@@ -266,8 +329,8 @@ export class Papercuts {
       input.kind,
       input.source,
       message,
-      papercutSignature(input.source, message),
-      Date.now(),
+      signature,
+      now,
     );
 
     return { id };
@@ -534,6 +597,9 @@ const ToolReply = Schema.fromJsonString(
     stderr: Schema.optional(Schema.String),
     // Written by summarize below, read back when computing signatures.
     stdoutTail: Schema.optional(Schema.String),
+    command: Schema.optional(Schema.String),
+    // A workspace setup status (`ready`, `installing`, `warning`): its error is an install log's tail.
+    state: Schema.optional(Schema.Json),
     message: Schema.optional(Schema.Json),
     code: Schema.optional(Schema.Json),
   }),
@@ -569,6 +635,29 @@ const head = (value: string, max: number) =>
   value.length > max ? `${value.slice(0, max)}…` : value;
 
 const tail = (value: string, max: number) => (value.length > max ? `…${value.slice(-max)}` : value);
+
+/** Workspace setup states (workspace.ts `WorkspaceSetup`): the only `state` values kept. */
+const SETUP_STATES = new Set(["queued", "checkout", "installing", "ready", "warning", "failed"]);
+
+/** A workspace setup status. Any other `state` is a tool's own data and is never stored. */
+const setupState = (reply: Reply) =>
+  isString(reply.state) && SETUP_STATES.has(reply.state) ? reply.state : undefined;
+
+const isSetup = (reply: Reply) => setupState(reply) !== undefined;
+
+/** The line dolly-setup.py ends a failed setup with, followed by what failed. */
+const SETUP_PROBLEMS = "Setup finished with problems";
+
+/**
+ * A setup error is the tail of an install log, already cut to its last 2,000 characters: its
+ * start is mid-line noise. Keep what failed: the problems section, else the end.
+ */
+function setupError(error: string) {
+  const log = error.trim();
+  const problems = log.lastIndexOf(SETUP_PROBLEMS);
+
+  return problems >= 0 ? head(log.slice(problems), FIELD_MAX) : tail(log, FIELD_MAX);
+}
 
 /** Commands whose exit 1 means "no": no match, no difference, condition false. */
 const ANSWERS_NO = /^(?:grep|egrep|fgrep|rg|diff|cmp|test|\[|git\s+(?:diff|grep))(?:\s|$)/;
@@ -616,8 +705,9 @@ function summarize(reply: Reply, rawCommand: string | undefined, safe: (text: st
     ...(reply.exitCode !== undefined && { exitCode: reply.exitCode }),
     ...(reply.timedOut && { timedOut: true }),
     ...(reply.ok === false && { ok: false }),
+    ...(isSetup(reply) && { state: setupState(reply) }),
     ...(command && { command: head(command, COMMAND_MAX) }),
-    ...(error && { error: head(error, FIELD_MAX) }),
+    ...(error && { error: isSetup(reply) ? setupError(error) : head(error, FIELD_MAX) }),
     ...(message && { message: head(message, FIELD_MAX) }),
     ...(code && { code: head(code, FIELD_MAX) }),
     ...(stderr && { stderr: head(stderr, STDERR_HEAD) }),
@@ -673,20 +763,141 @@ export function toolFailure(
       : undefined;
 }
 
+/**
+ * How a tool call was cut off by the harness rather than failing on its own:
+ * - `steer`: skipped because the owner's new instructions were waiting (steer-interrupt.ts);
+ * - `restart`: the process restarted while it ran, so it ended "interrupted" or "abandoned";
+ * - `aborted`: its run was aborted (stopped, interrupted, cancelled) while it ran;
+ * - `signalled`: a command that exited on SIGINT, SIGKILL or SIGTERM, as one the abort of its
+ *   run kills does when the kill outruns the abort.
+ * Whether `aborted` and `signalled` are deliberate is for the caller to say: it knows who stopped what.
+ */
+export type Interruption = "steer" | "restart" | "aborted" | "signalled";
+
+const SIGNAL_EXITS = new Set([130, 137, 143]);
+
+export function harnessInterruption(result: ToolExecutionResult): Interruption | undefined {
+  for (const diagnostic of result.diagnostics ?? []) {
+    if (diagnostic.severity !== "error") continue;
+
+    if (diagnostic.code === "blocked" && diagnostic.message.includes(STEER_TOOL_SKIP))
+      return "steer";
+
+    if (diagnostic.code === "interrupted" || diagnostic.code === "abandoned") return "restart";
+
+    if (diagnostic.code === "aborted") return "aborted";
+  }
+
+  for (const part of result.output ?? []) {
+    if (part.type !== "text") continue;
+    const reply = Option.getOrUndefined(decodeReply(part.text));
+
+    if (reply?.exitCode !== undefined && SIGNAL_EXITS.has(reply.exitCode) && !reply.timedOut)
+      return "signalled";
+  }
+
+  return undefined;
+}
+
 const ERRORISH =
-  /error|fail|fatal|not found|denied|cannot|can't|unable|invalid|refused|missing|timed? ?out|overloaded|exception|panic/i;
+  /error|fail|fatal|not found|denied|cannot|can't|unable|invalid|refused|missing|timed? ?out|overloaded|exception|panic|problems|exited \d+/i;
 
-const meaningful = (line: string) => {
-  const trimmed = line.trim();
+/** A thrown JavaScript error as Node prints it: `TypeError [ERR_X]: ...`, `Error: ...`. */
+const ERROR_CLASS = /^(?:Uncaught\s+)?(?:[A-Z][\w$.]*)?(?:Error|Exception)(?:\s*\[[\w-]+\])?:\s/;
 
-  return trimmed.length > 0 && /[a-z]/i.test(trimmed) && !OMITTED.test(`${trimmed}\n`);
-};
+/** A setup script's failure: `- .agents/setup exited 22`. */
+const EXITED = /\bexited -?\d+\b/;
 
-/** The line that best names a failure: the first error-like line, else the first (or last) line. */
-function keyLine(value: string, fromEnd = false) {
-  const lines = value.split(/\r?\n/).filter(meaningful);
+/** A code frame's location line (`node:internal/modules/run_main:107`, `file:///a/b.ts:169`). */
+const LOCATION = /^(?:node:[\w/.-]+|(?:file:\/\/)?[\w@.+/-]*\.[cm]?[jt]sx?):\d+(?::\d+)?$/;
 
-  return lines.find((line) => ERRORISH.test(line)) ?? (fromEnd ? lines.at(-1) : lines[0]) ?? "";
+/** Lines Node prints around any crash: stack frames, its own entry point, `^` markers. */
+const NOISE = /^(?:at\s|node:internal\/|triggerUncaughtException\(|\^+$)/;
+
+/** The lines that may name a failure: without blanks, Node's boilerplate and code frames. */
+function candidates(value: string) {
+  const lines: string[] = [];
+  // A code frame runs from its location line to the blank line before the error.
+  let frame = false;
+
+  for (const raw of value.split(/\r?\n/)) {
+    const line = raw.trim();
+
+    if (!line) {
+      frame = false;
+      continue;
+    }
+
+    if (LOCATION.test(line)) {
+      frame = true;
+      continue;
+    }
+
+    if (ERROR_CLASS.test(line)) frame = false;
+
+    if (frame || NOISE.test(line) || !/[a-z]/i.test(line) || OMITTED.test(`${line}\n`)) continue;
+    lines.push(line);
+  }
+
+  return lines;
+}
+
+/**
+ * The line that best names a failure: one matching `prefer`, else a thrown error, else the first
+ * error-like line, else the first line.
+ */
+function keyLine(value: string, prefer?: RegExp) {
+  const lines = candidates(value);
+
+  return (
+    (prefer && lines.find((line) => prefer.test(line))) ??
+    lines.find((line) => ERROR_CLASS.test(line)) ??
+    lines.find((line) => ERRORISH.test(line)) ??
+    lines[0] ??
+    ""
+  );
+}
+
+/** A thrown error printed on stdout (by a test runner, say); other stdout says nothing. */
+const thrownLine = (value: string) => candidates(value).find((line) => ERROR_CLASS.test(line));
+
+/** `sh: 1: X: not found`, `bash: line 1: X: command not found`, `zsh: command not found: X`. */
+const MISSING_COMMAND = [
+  /^(?:\S*\/)?[a-z]*sh: (?:line )?(?:\d+: )?(.+?): (?:command )?not found$/,
+  /^(?:\S*\/)?[a-z]*sh: command not found: (.+)$/,
+];
+
+/** The command a shell said it could not find, if it said so. */
+function missingCommand(stderr: string) {
+  for (const line of stderr.split(/\r?\n/))
+    for (const pattern of MISSING_COMMAND) {
+      const match = pattern.exec(line.trim());
+
+      if (match?.[1]) return match[1];
+    }
+
+  return undefined;
+}
+
+/**
+ * The program a shell command ran first, for failures that say nothing else: `pnpm` for
+ * `cd web && pnpm test`. Leading `cd`s and variable assignments are skipped; paths keep only
+ * their last part.
+ */
+export function commandName(command: string | undefined) {
+  for (const segment of (command ?? "").split(/&&|\|\||;|\||\n/)) {
+    const word = segment
+      .trim()
+      .replace(/^[({!\s]+/, "")
+      .split(/\s+/)
+      .find((candidate) => !/^[A-Za-z_]\w*=/.test(candidate));
+
+    if (!word || word === "cd") continue;
+
+    return word.replace(/["'`]/g, "").split("/").at(-1) ?? "";
+  }
+
+  return "";
 }
 
 /** Strip what varies between repeats of the same failure: times, ids, hashes, paths, numbers. */
@@ -710,9 +921,26 @@ export function normalizeSignatureLine(line: string) {
 }
 
 /**
- * A stable key grouping repeats of one papercut: `source|exit code|normalized key line`. The key
- * line is the first error-like line of stderr, else of the error field, else of the message, else
- * the last line of stdout. Works on compact summaries and on the full JSON older entries stored.
+ * Summaries stored before setup replies kept `state` held only `error`'s first 500 characters:
+ * a workspace failure whose kept text still ends with the setup footer is one of those.
+ */
+const setupFooter = (source: string, error: string | undefined) =>
+  source === "tool:workspace" && (error ?? "").includes(SETUP_PROBLEMS);
+
+const setupLike = (source: string, reply: Reply) =>
+  isSetup(reply) || setupFooter(source, text(reply.error));
+
+/** The first line of a result the harness wrote itself: `Tool shell was interrupted ...`. */
+const HARNESS_LINE = /^Tool (?:call blocked: |\S+ (?:was|is|could|failed|ended) )/;
+
+/**
+ * A stable key grouping repeats of one papercut: `source|exit code|normalized key line`.
+ * - A shell that could not find a command gives `source||command not found: X`, whatever the exit.
+ * - Otherwise the key line is the first error-like line of stderr (a thrown error first, never
+ *   Node's boilerplate), else of the error field (for setup, its `exited <n>` line first), else of
+ *   the message, else a thrown error on stdout, else the name of the command that ran.
+ * - A result the harness wrote keys on its first line, not on the partial output after it.
+ * Works on compact summaries and on the full JSON older entries stored.
  */
 export function papercutSignature(source: string, message: string) {
   const parsed = decodeReply(message);
@@ -723,12 +951,18 @@ export function papercutSignature(source: string, message: string) {
     const reply = parsed.value;
     const stderr = (reply.stderr ?? "").replace(OMITTED, "");
     const stdout = reply.stdoutTail ?? reply.stdout ?? "";
+    const missing = missingCommand(stderr);
+
+    if (missing !== undefined)
+      return `${source}||${normalizeSignatureLine(`command not found: ${missing}`)}`;
+
     exit = reply.exitCode === undefined ? "" : String(reply.exitCode);
     line =
       keyLine(stderr) ||
-      keyLine(text(reply.error) ?? "") ||
+      keyLine(text(reply.error) ?? "", setupLike(source, reply) ? EXITED : undefined) ||
       keyLine(text(reply.message) ?? "") ||
-      keyLine(stdout, true) ||
+      thrownLine(stdout) ||
+      commandName(reply.command) ||
       (reply.timedOut ? "timed out" : "");
   } else if (message.trimStart().startsWith("{")) {
     // Older entries stored the whole reply clipped at 4,000 characters, which is no longer JSON
@@ -742,10 +976,24 @@ export function papercutSignature(source: string, message: string) {
         ),
       );
 
+    const missing = missingCommand(field("stderr") ?? "");
+
+    if (missing !== undefined)
+      return `${source}||${normalizeSignatureLine(`command not found: ${missing}`)}`;
+
     exit = /"exitCode":(-?\d+)/.exec(message)?.[1] ?? "";
     line =
-      keyLine(field("stderr") ?? "") || keyLine(field("error") ?? "") || "truncated tool result";
-  } else line = keyLine(message);
+      keyLine(field("stderr") ?? "") ||
+      keyLine(
+        field("error") ?? "",
+        message.includes('"state":"') || setupFooter(source, field("error")) ? EXITED : undefined,
+      ) ||
+      commandName(field("command")) ||
+      "truncated tool result";
+  } else {
+    const first = message.trimStart().split(/\r?\n/, 1)[0] ?? "";
+    line = HARNESS_LINE.test(first) ? first : keyLine(message);
+  }
 
   return `${source}|${exit}|${normalizeSignatureLine(line)}`;
 }
