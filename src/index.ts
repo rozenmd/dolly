@@ -12,6 +12,7 @@ import { slackRoutes } from "./slack-routes";
 import { mcpRoutes } from "./mcp-routes";
 import { automationRoutes } from "./automation-routes";
 import { authorizeAccess } from "./access";
+import { devSignedIn } from "./dev-seed";
 import { AgentApi } from "./api";
 import { ChildRequest, DefaultModelSetting, NewSession, SessionSettings } from "./models";
 import { OperationError } from "./operations";
@@ -119,6 +120,15 @@ app.use("/api/*", async (c, next) => {
 
 const owner = (c: Context<{ Bindings: Env }>) => c.env.AGENT.getByName("owner");
 
+/** The signed-in owner's login, or null. Local dev with DEV_SIGNED_IN needs no cookie (dev-seed.ts). */
+const session = (c: Context<{ Bindings: Env }>) =>
+  devSignedIn(c.env)
+    ? rpc("auth.dev", async () => await owner(c).devSeed())
+    : rpc(
+        "auth.session",
+        async () => await owner(c).authSession(getCookie(c, SESSION_COOKIE) ?? ""),
+      );
+
 // Signing in needs only Cloudflare Access. So does creating the GitHub App, until someone owns it.
 app.use("/api/*", async (c, next) => {
   if (c.req.path === "/api/auth" || c.req.path === "/api/auth/github") return next();
@@ -129,9 +139,7 @@ app.use("/api/*", async (c, next) => {
   )
     return next();
 
-  const signedIn = await Effect.runPromise(
-    rpc("auth.session", async () => await owner(c).authSession(getCookie(c, SESSION_COOKIE) ?? "")),
-  );
+  const signedIn = await Effect.runPromise(session(c));
 
   if (!signedIn) return c.json({ error: "Sign in with GitHub" }, 401);
   await next();
@@ -178,12 +186,7 @@ app.get("/api/screenshots/:format/:hash", async (c) => {
 app.get("/api/auth", async (c) => {
   const [state, user] = await Promise.all([
     Effect.runPromise(rpc("auth.state", async () => await owner(c).authState())),
-    Effect.runPromise(
-      rpc(
-        "auth.session",
-        async () => await owner(c).authSession(getCookie(c, SESSION_COOKIE) ?? ""),
-      ),
-    ),
+    Effect.runPromise(session(c)),
   ]);
 
   if ("error" in state) return c.json(state, 502);

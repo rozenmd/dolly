@@ -35,6 +35,8 @@ test("typed Cloudflare config keeps SQLite namespaces and the sandbox image", ()
   assert.equal(worker.env.BROWSER.type, "browser");
   assert.equal(worker.previewUrls, false);
   assert.equal(worker.env.ACCESS_LOCAL_DEV.value, "false");
+  // Dev-only sign-in (src/dev-seed.ts) is set only by test/worker/vite.config.ts.
+  assert.equal(worker.env.DEV_SIGNED_IN, undefined);
   assert.equal(worker.env.ACCESS_TEAM_DOMAIN.type, "text");
   assert.equal(worker.env.ACCESS_AUD.type, "text");
   assert.equal(worker.env.CODEX_MODEL, undefined);
