@@ -36,6 +36,7 @@ import type { Env } from "./env";
 import {
   BROWSER_PORT_HEADER,
   isWebSocketUpgrade,
+  localOrigin,
   logTail,
   PREVIEW_RECORD_KEY,
   PREVIEW_TOKEN_HEADER,
@@ -1828,10 +1829,13 @@ export class Sandbox extends DurableObject<Env> {
   private portFetch(request: Request, port: number) {
     const url = new URL(request.url);
     url.protocol = "http:";
+    const page = url.origin;
     // Use an internal host accepted by dev servers, rather than disabling host checks.
     url.host = "localhost";
     const headers = new Headers(request.headers);
     headers.set("Host", "localhost");
+    // The page's own Origin must match that Host, or same-origin checks refuse it.
+    localOrigin(headers, page, url.origin);
 
     return this.ctx.container!.getTcpPort(port).fetch(
       new Request(url, {

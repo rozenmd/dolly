@@ -1,6 +1,12 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./env";
-import { BROWSER_PORT_HEADER, isWebSocketUpgrade, previewRequest, sandboxUpgrade } from "./preview";
+import {
+  BROWSER_PORT_HEADER,
+  isWebSocketUpgrade,
+  previewRequest,
+  previewResponse,
+  sandboxUpgrade,
+} from "./preview";
 
 /** The reserved sandbox host that brokers Cloudflare Browser Run over the DevTools protocol. */
 export const BROWSER_HOST = "browser.workspace";
@@ -22,7 +28,7 @@ export class SandboxOutbound extends WorkerEntrypoint<Env, { sandbox: string; po
     if (isWebSocketUpgrade(forwarded))
       return stub.fetch(sandboxUpgrade(forwarded, BROWSER_PORT_HEADER, String(port)));
 
-    return stub.browserFetch(forwarded, port);
+    return previewResponse(await stub.browserFetch(forwarded, port));
   }
 }
 

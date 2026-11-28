@@ -200,9 +200,82 @@ export const isWebSocketUpgrade = (request: Request) =>
 export const PREVIEW_TOKEN_HEADER = "X-Dolly-Preview-Token";
 export const BROWSER_PORT_HEADER = "X-Dolly-Browser-Port";
 
-const INTERNAL_HEADERS = /^(cookie|authorization|cf-access-.*|x-dolly-.*)$/i;
+const INTERNAL_HEADERS = /^(authorization|cf-access-.*|x-dolly-.*)$/i;
 
-/** Pin a browser request to one hostname, without the application's credentials. */
+/**
+ * Cookie name prefixes a browser accepts only from a secure origin, and the names the plain-http
+ * preview origin stores them under instead. The proxy renames them back on the way in.
+ */
+const COOKIE_PREFIXES = [
+  ["__Host-", "dolly-host--"],
+  ["__Secure-", "dolly-secure--"],
+] as const;
+
+/** Restore cookie names the preview renamed, so the dev server sees the names it set. */
+export function previewCookie(header: string) {
+  return header
+    .split(";")
+    .map((part) => {
+      const cookie = part.trim();
+
+      for (const [prefix, stored] of COOKIE_PREFIXES)
+        if (cookie.toLowerCase().startsWith(stored)) return prefix + cookie.slice(stored.length);
+
+      return cookie;
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
+/**
+ * Make a dev server's Set-Cookie stick on the plain-http, single-host preview origin: drop
+ * Secure, Partitioned and Domain (so the cookie stays host-only), relax SameSite=None (which
+ * requires Secure) to Lax, and store __Host-/__Secure- names under names http may set.
+ */
+export function previewSetCookie(cookie: string) {
+  const [pair = "", ...attributes] = cookie.split(";");
+  const equals = pair.indexOf("=");
+  let name = equals < 0 ? "" : pair.slice(0, equals).trim();
+  const value = equals < 0 ? pair.trim() : pair.slice(equals + 1).trim();
+
+  for (const [prefix, stored] of COOKIE_PREFIXES)
+    if (name.toLowerCase().startsWith(prefix.toLowerCase())) {
+      name = stored + name.slice(prefix.length);
+      break;
+    }
+
+  const kept = attributes.flatMap((attribute) => {
+    const trimmed = attribute.trim();
+    const key = trimmed.split("=")[0].trim().toLowerCase();
+
+    if (!trimmed || key === "secure" || key === "partitioned" || key === "domain") return [];
+
+    if (key === "samesite" && /^samesite\s*=\s*none$/i.test(trimmed)) return ["SameSite=Lax"];
+
+    return [trimmed];
+  });
+
+  return [equals < 0 ? value : `${name}=${value}`, ...kept].join("; ");
+}
+
+/** Rewrite a dev server's response cookies for the preview origin; upgrades pass unchanged. */
+export function previewResponse(response: Response) {
+  const cookies = response.headers.getSetCookie();
+
+  if (!cookies.length || response.webSocket) return response;
+  const rewritten = new Response(response.body, response);
+  rewritten.headers.delete("Set-Cookie");
+
+  for (const cookie of cookies) rewritten.headers.append("Set-Cookie", previewSetCookie(cookie));
+
+  return rewritten;
+}
+
+/**
+ * Pin a browser request to one hostname, without the application's credentials or forged
+ * capabilities. Cookies pass: each preview is a fresh Browser Run session on its own host, so
+ * the only cookies it can hold for that host are ones the dev server (or its page) set.
+ */
 export function previewRequest(request: Request, hostname: string) {
   const url = new URL(request.url);
   const upgrade = isWebSocketUpgrade(request);
@@ -216,11 +289,26 @@ export function previewRequest(request: Request, hostname: string) {
 
   for (const name of Array.from(headers.keys()).filter((name) => INTERNAL_HEADERS.test(name)))
     headers.delete(name);
+  const cookie = headers.get("Cookie");
+
+  if (cookie !== null) headers.set("Cookie", previewCookie(cookie));
 
   if (url.protocol === "http:") return new Request(request, { headers });
   url.protocol = "http:";
 
   return new Request(url, { method: request.method, headers, redirect: "manual" });
+}
+
+/**
+ * A page's own Origin and Referer, rewritten from the preview origin to the origin the dev
+ * server sees, so its same-origin checks (WebSocket Origin guards, CSRF) pass. Others are kept.
+ */
+export function localOrigin(headers: Headers, from: string, to: string) {
+  if (headers.get("Origin") === from) headers.set("Origin", to);
+  const referer = headers.get("Referer");
+
+  if (referer !== null && (referer === from || referer.startsWith(`${from}/`)))
+    headers.set("Referer", to + referer.slice(from.length));
 }
 
 /** Add a sandbox capability header to an upgrade bound for the sandbox's fetch handler. */
@@ -242,6 +330,6 @@ export class PreviewOutbound extends WorkerEntrypoint<Env, PreviewRoute> {
     if (isWebSocketUpgrade(forwarded))
       return sandbox.fetch(sandboxUpgrade(forwarded, PREVIEW_TOKEN_HEADER, this.ctx.props.token));
 
-    return sandbox.previewFetch(forwarded, this.ctx.props.token);
+    return previewResponse(await sandbox.previewFetch(forwarded, this.ctx.props.token));
   }
 }

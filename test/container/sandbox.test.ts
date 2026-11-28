@@ -219,15 +219,22 @@ it("privately previews without an image-provided runtime directory and preserves
   }
 });
 
-/** A dependency-free WebSocket server: greets each upgrade with its path and cookie. */
+/**
+ * A dependency-free HTTP and WebSocket server: answers each request with its path, the Host,
+ * Origin and Referer it saw and its cookies; /login sets cookies a secure origin would need.
+ */
 const WEBSOCKET_SERVER = `node -e '
 const http = require("http"), crypto = require("crypto");
-const server = http.createServer((req, res) => res.end("http:" + req.url));
+const seen = (prefix, req) => prefix + req.url + " host:" + req.headers.host + " origin:" + (req.headers.origin || "none") + " referer:" + (req.headers.referer || "none") + " cookie:" + (req.headers.cookie || "none");
+const server = http.createServer((req, res) => {
+  if (req.url === "/login") res.setHeader("Set-Cookie", ["__Host-session=abc; Path=/; Secure; HttpOnly; SameSite=Lax", "theme=dark; Domain=localhost; Secure; SameSite=None"]);
+  res.end(seen("http:", req));
+});
 server.on("upgrade", (req, socket) => {
   const accept = crypto.createHash("sha1").update(req.headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
   socket.write("HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: " + accept + "\\r\\n\\r\\n");
-  const text = Buffer.from("ws:" + req.url + " cookie:" + (req.headers.cookie || "none"));
-  socket.write(Buffer.concat([Buffer.from([0x81, text.length]), text]));
+  const text = Buffer.from(seen("ws:", req));
+  socket.write(Buffer.concat([Buffer.from(text.length < 126 ? [0x81, text.length] : [0x81, 126, text.length >> 8, text.length & 255]), text]));
 });
 server.listen(3000, "0.0.0.0");
 '`;
@@ -251,7 +258,7 @@ async function firstMessage(response: Response) {
   }
 }
 
-it("carries a page's WebSocket upgrades to the dev server with the preview's access checks", async () => {
+it("carries a page's WebSocket upgrades, same-origin headers and cookies to the dev server with the preview's access checks", async () => {
   const name = crypto.randomUUID();
   const sandbox = env.SANDBOX.getByName(name);
 
@@ -261,39 +268,76 @@ it("carries a page's WebSocket upgrades to the dev server with the preview's acc
     SandboxOutbound: LoopbackForExport<typeof SandboxOutbound>;
   };
 
-  const upgrade = (url: string) =>
-    new Request(url, { headers: { Upgrade: "websocket", Cookie: "app-session" } });
+  const page = (origin: string, headers: Record<string, string> = {}) => ({
+    Origin: origin,
+    Referer: `${origin}/sessions/1`,
+    Cookie: "dolly-host--session=abc; theme=dark",
+    Authorization: "Bearer app-secret",
+    ...headers,
+  });
+
+  const upgrade = (url: string, headers: Record<string, string> = {}) =>
+    new Request(url, { headers: { Upgrade: "websocket", ...headers } });
 
   try {
     await sandbox.previewStart(WEBSOCKET_SERVER, 3000);
     const { token } = await sandbox.previewCapability();
     const hostname = "preview-websocket.test";
+    const own = `http://${hostname}`;
 
     const outbound = (token: string) =>
       loopback.PreviewOutbound({ props: { sandboxId: name, token, hostname } });
 
-    const live = await outbound(token).fetch(upgrade(`http://${hostname}/api/events?x=1`));
+    // The dev server's Secure and __Host- cookies come back in a form the http origin keeps.
+    const login = await outbound(token).fetch(`${own}/login`);
+    expect(login.headers.getSetCookie()).toEqual([
+      "dolly-host--session=abc; Path=/; HttpOnly; SameSite=Lax",
+      "theme=dark; SameSite=Lax",
+    ]);
+
+    // A real upgrade reached the server, with the page's own Origin matching the Host it saw
+    // and the preview's cookies under the names the server set, but no other credentials.
+    const live = await outbound(token).fetch(upgrade(`${own}/api/events?x=1`, page(own)));
     expect(live.status).toBe(101);
-    // A real upgrade reached the server, without the application's cookie.
-    expect(await firstMessage(live)).toBe("ws:/api/events?x=1 cookie:none");
-    expect(await (await outbound(token).fetch(`http://${hostname}/page`)).text()).toBe(
-      "http:/page",
+    expect(await firstMessage(live)).toBe(
+      "ws:/api/events?x=1 host:localhost origin:http://localhost referer:http://localhost/sessions/1 cookie:__Host-session=abc; theme=dark",
     );
+    expect(await (await outbound(token).fetch(`${own}/page`, { headers: page(own) })).text()).toBe(
+      "http:/page host:localhost origin:http://localhost referer:http://localhost/sessions/1 cookie:__Host-session=abc; theme=dark",
+    );
+    // Another origin is passed through untouched, so the server can still refuse it.
+    expect(
+      await firstMessage(
+        await outbound(token).fetch(
+          upgrade(`${own}/ws`, { Origin: "http://evil.test", Referer: "http://evil.test/" }),
+        ),
+      ),
+    ).toBe("ws:/ws host:localhost origin:http://evil.test referer:http://evil.test/ cookie:none");
     // The same checks as HTTP: a wrong token or host gets nothing.
-    expect((await outbound("forged").fetch(upgrade(`http://${hostname}/ws`))).status).toBe(404);
+    expect((await outbound("forged").fetch(upgrade(`${own}/ws`))).status).toBe(404);
     expect((await outbound(token).fetch(upgrade("http://other.test/ws"))).status).toBe(404);
 
-    // The brokered browser's sandbox host carries upgrades too.
+    // The brokered browser's sandbox host carries upgrades, origins and cookies too.
     const browser = loopback.SandboxOutbound({
       props: { sandbox: sandbox.id.toString(), port: 3000 },
     });
 
     expect(
-      await firstMessage(await browser.fetch(upgrade("http://sandbox.workspace/socket"))),
-    ).toBe("ws:/socket cookie:none");
+      await firstMessage(
+        await browser.fetch(
+          upgrade("http://sandbox.workspace/socket", page("http://sandbox.workspace")),
+        ),
+      ),
+    ).toBe(
+      "ws:/socket host:localhost origin:http://localhost referer:http://localhost/sessions/1 cookie:__Host-session=abc; theme=dark",
+    );
+    expect((await browser.fetch("http://sandbox.workspace/login")).headers.getSetCookie()).toEqual([
+      "dolly-host--session=abc; Path=/; HttpOnly; SameSite=Lax",
+      "theme=dark; SameSite=Lax",
+    ]);
 
     await sandbox.previewStop();
-    expect((await outbound(token).fetch(upgrade(`http://${hostname}/ws`))).status).toBe(404);
+    expect((await outbound(token).fetch(upgrade(`${own}/ws`))).status).toBe(404);
   } finally {
     await sandbox.previewStop();
     await sandbox.restart();

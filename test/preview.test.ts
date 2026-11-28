@@ -7,19 +7,23 @@ import {
   PREVIEW_RECORD_KEY,
   PREVIEW_TOKEN_HEADER,
   PREVIEW_TTL_MS,
+  localOrigin,
+  previewCookie,
   previewRequest,
   PreviewRequest,
+  previewResponse,
+  previewSetCookie,
   readinessHints,
 } from "../src/preview";
 
-it("pins browser routing to one hostname and strips application credentials", async () => {
+it("pins browser routing to one hostname and strips application credentials but not its cookies", async () => {
   for (const url of ["https://scoped.test/", "http://other.test/", "http://scoped.test:3000/"])
     expect(previewRequest(new Request(url), "scoped.test")).toBeNull();
 
   const forwarded = previewRequest(
     new Request("http://scoped.test/page", {
       headers: {
-        Cookie: "app-cookie",
+        Cookie: "app-cookie=1; dolly-host--session=s; dolly-secure--csrf=c",
         Authorization: "Bearer app-secret",
         "CF-Access-Client-Secret": "access-secret",
         Accept: "text/html",
@@ -30,9 +34,56 @@ it("pins browser routing to one hostname and strips application credentials", as
 
   expect(forwarded?.url).toBe("http://scoped.test/page");
 
-  for (const header of ["cookie", "authorization", "cf-access-client-secret"])
+  for (const header of ["authorization", "cf-access-client-secret"])
     expect(forwarded?.headers.get(header)).toBeNull();
   expect(forwarded?.headers.get("accept")).toBe("text/html");
+  // The preview host's own cookies reach the dev server under the names it set.
+  expect(forwarded?.headers.get("cookie")).toBe("app-cookie=1; __Host-session=s; __Secure-csrf=c");
+});
+
+it("adapts dev-server cookies to the plain-http, single-host preview origin and back", async () => {
+  expect(previewSetCookie("__Host-dolly-session=abc; Path=/; Secure; HttpOnly; SameSite=Lax")).toBe(
+    "dolly-host--dolly-session=abc; Path=/; HttpOnly; SameSite=Lax",
+  );
+  expect(
+    previewSetCookie(
+      "__Secure-id=a=b; Domain=example.test; secure; SameSite=None; Partitioned; Max-Age=60",
+    ),
+  ).toBe("dolly-secure--id=a=b; SameSite=Lax; Max-Age=60");
+  expect(previewSetCookie("theme=dark; Path=/settings")).toBe("theme=dark; Path=/settings");
+  expect(previewCookie("dolly-host--dolly-session=abc;theme=dark")).toBe(
+    "__Host-dolly-session=abc; theme=dark",
+  );
+
+  const headers = new Headers({ "Content-Type": "text/plain", Location: "/next" });
+  headers.append("Set-Cookie", "__Host-a=1; Path=/; Secure");
+  headers.append("Set-Cookie", "b=2; Domain=preview.test");
+  const response = previewResponse(new Response("body", { status: 302, headers }));
+
+  expect(response.status).toBe(302);
+  expect(response.headers.get("location")).toBe("/next");
+  expect(response.headers.getSetCookie()).toEqual(["dolly-host--a=1; Path=/", "b=2"]);
+  expect(await response.text()).toBe("body");
+  const plain = new Response("x");
+  expect(previewResponse(plain)).toBe(plain);
+});
+
+it("rewrites only the page's own Origin and Referer to the dev server's origin", () => {
+  const rewrite = (init: Record<string, string>) => {
+    const headers = new Headers(init);
+    localOrigin(headers, "http://preview-1.test", "http://localhost");
+
+    return [headers.get("origin"), headers.get("referer")];
+  };
+
+  expect(
+    rewrite({ Origin: "http://preview-1.test", Referer: "http://preview-1.test/sessions/1?a" }),
+  ).toEqual(["http://localhost", "http://localhost/sessions/1?a"]);
+  expect(rewrite({ Origin: "http://other.test", Referer: "http://preview-1.test.evil/" })).toEqual([
+    "http://other.test",
+    "http://preview-1.test.evil/",
+  ]);
+  expect(rewrite({ Origin: "null" })).toEqual(["null", null]);
 });
 
 it("validates action-specific preview inputs and rejects absolute/network paths", () => {
@@ -85,13 +136,14 @@ it("bounds screenshot actions and scale", () => {
     expect(valid({ action: "screenshot", ...input })).toBe(false);
 });
 
-it("forwards WebSocket upgrades without credentials or forged sandbox capabilities", () => {
+it("forwards WebSocket upgrades with their cookies but without credentials or forged sandbox capabilities", () => {
   const upgrade = (url: string, headers: Record<string, string> = {}) =>
     new Request(url, { headers: { Upgrade: "websocket", ...headers } });
 
   const forwarded = previewRequest(
     upgrade("ws://scoped.test/api/sessions/1/events", {
-      Cookie: "app-cookie",
+      Cookie: "app-cookie=1",
+      Authorization: "Bearer app-secret",
       [PREVIEW_TOKEN_HEADER]: "forged",
       [BROWSER_PORT_HEADER]: "22",
       "Sec-WebSocket-Protocol": "chat",
@@ -103,7 +155,9 @@ it("forwards WebSocket upgrades without credentials or forged sandbox capabiliti
   expect(forwarded?.headers.get("upgrade")).toBe("websocket");
   expect(forwarded?.headers.get("sec-websocket-protocol")).toBe("chat");
 
-  for (const header of ["cookie", PREVIEW_TOKEN_HEADER, BROWSER_PORT_HEADER])
+  expect(forwarded?.headers.get("cookie")).toBe("app-cookie=1");
+
+  for (const header of ["authorization", PREVIEW_TOKEN_HEADER, BROWSER_PORT_HEADER])
     expect(forwarded?.headers.get(header)).toBeNull();
   // ws: is only an upgrade's scheme, and the hostname pin still applies.
   expect(previewRequest(new Request("ws://scoped.test/"), "scoped.test")).toBeNull();
