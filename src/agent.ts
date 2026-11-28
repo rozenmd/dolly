@@ -179,6 +179,7 @@ import {
   startLogin,
 } from "./chatgpt-login";
 import { GitHubAuth } from "./github-auth";
+import { DEV_OWNER, DEV_SESSION_TITLE, devTranscript } from "./dev-seed";
 import {
   agentGitIdentityEnv,
   commitAttributionPrompt,
@@ -2153,6 +2154,61 @@ export class Agent extends DurableObject<Env> {
       ),
     );
   }
+
+  private devSeeding?: Promise<{ login: string }>;
+
+  /**
+   * Local development only (dev-seed.ts): seed the owner and one session with a short
+   * transcript, once. The Worker calls this only when `devSignedIn(env)` holds.
+   */
+  devSeed() {
+    this.devSeeding ??= (async () => {
+      if (await this.ctx.storage.get("dev:seeded")) return { login: DEV_OWNER.login };
+      await this.ctx.storage.put("auth:owner", DEV_OWNER);
+
+      const now = Date.now();
+
+      const conversation = await this.harness.createConversation(
+        {
+          ownership: { kind: "ownerless" },
+          agent: { model: { provider: "openai", modelId: DEFAULT_OPENAI_MODEL } },
+        },
+        BACKGROUND_CONTEXT,
+      );
+
+      await this.harness.commit(async (tx) => {
+        for (const entry of devTranscript(now)) await tx.appendEntry(conversation.id, entry);
+      }, BACKGROUND_CONTEXT);
+
+      const id = crypto.randomUUID();
+      const workspaceId = crypto.randomUUID();
+
+      await this.ctx.storage.put({
+        [`session:${id}`]: conversation.id,
+        [`workspace:${workspaceId}`]: conversation.id,
+        [sessionMetadataKey(conversation.id)]: {
+          createdAt: now,
+          workspaceId,
+          archived: false,
+          title: DEV_SESSION_TITLE,
+        } satisfies SessionMetadata,
+        "dev:seeded": id,
+      });
+      this.sessionsFeed.changed();
+
+      return { login: DEV_OWNER.login };
+    })();
+
+    const seeding = this.devSeeding;
+
+    // A failed seed is retried on the next request.
+    seeding.then(undefined, () => {
+      if (this.devSeeding === seeding) this.devSeeding = undefined;
+    });
+
+    return seeding;
+  }
+
   authSignOut(token: string) {
     return this.githubRun(Effect.flatMap(GitHubAuth, (auth) => auth.signOut(token)));
   }

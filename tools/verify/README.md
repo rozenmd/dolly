@@ -26,7 +26,27 @@ which drops the containers and enables the local Access bypass, and binds
 `0.0.0.0`, so it also sets `X_LOCAL_EXPLORER=false`: the Cloudflare plugin's Local
 Explorer (`/cdn-cgi/local/explorer`, on by default) sits outside Dolly's auth and
 can read Durable Object storage. Both scripts set `CLOUDFLARE_CF_FETCH_ENABLED=false`,
-since Dolly never reads `request.cf`. Signed-in pages still need seeded storage and a session cookie.
+since Dolly never reads `request.cf`.
+
+For signed-in pages, run `DOLLY_DEV_SIGNED_IN=1 pnpm dev:sandbox` (the `preview` command as
+is, with the variable in front). It adds a `DEV_SIGNED_IN` binding to the test Worker config,
+and `src/dev-seed.ts` then treats every request as signed in as `octocat`, without a cookie (the
+preview's browser sends none), and on the first request seeds one session, "Seeded dev
+session", with a short transcript (a prompt, a `shell` call and its output, and an answer).
+Find its id with `curl localhost:8787/api/sessions` and screenshot `/session/<id>`, waiting for
+`.app-shell`. No model is connected, so a "Connect a model" dialog opens; dismiss it with the
+screenshot action `{press: "Escape"}`. Sign-in needs both `DEV_SIGNED_IN=true` and
+`ACCESS_LOCAL_DEV=true`; the production config sets neither (`scripts/config.test.mjs` guards
+both). This mode keeps its storage in `.cloudflare/dev-signed-in`, apart from plain `dev:sandbox`'s
+`.cloudflare/state`, so a real local sign-in is never replaced; delete it to seed afresh.
+
+Until the preview forwards a matching `Origin`, this covers the signed-in shell, sidebar and
+session chrome only, not the transcript: the preview rewrites `Host` to `localhost` but forwards
+the page's `Origin` (`http://preview-….test`), so Dolly's same-origin WebSocket check refuses
+`/api/sessions/:id/events` and `/api/events`, and the page shows "Session connection lost".
+Over a direct connection the transcript streams (`test/dev-seed.test.ts`). Once the preview is
+fixed, verify the transcript with a screenshot whose `waitFor` names seeded message text, not
+just `.app-shell`.
 
 If the dev server fails with `ReferenceError: module is not defined`, delete
 `node_modules/.vite`: an optimizer cache from a run that could not resolve React

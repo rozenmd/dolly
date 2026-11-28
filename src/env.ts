@@ -12,6 +12,8 @@ export interface Env {
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
   ACCESS_LOCAL_DEV?: string;
+  /** Local development only (dev-seed.ts); never set by the production config. */
+  DEV_SIGNED_IN?: string;
   AGENT: DurableObjectNamespace<Agent>;
   SANDBOX: DurableObjectNamespace<Sandbox>;
   CLAUDE_CODE: DurableObjectNamespace<ClaudeCode>;
