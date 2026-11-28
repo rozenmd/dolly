@@ -800,14 +800,14 @@ it("attaches a repository by full name, short name or other casing while another
 
     // The container is the only simulated boundary: it records which sandbox was prepared.
     const prepared: string[] = [];
-    // SAFETY: runWorkspace calls only prepare() on the sandbox stub for checkout and attach.
+    // SAFETY: runWorkspace calls only prepareSettled() on the sandbox stub for checkout and attach.
     vi.spyOn(agent["env"].SANDBOX, "getByName").mockImplementation(
       (name: string) =>
         ({
-          prepare: async () => {
+          prepareSettled: async () => {
             prepared.push(name);
 
-            return { setup: { state: "ready", updatedAt: 0 } };
+            return { prepared: { setup: { state: "ready", updatedAt: 0 } } };
           },
         }) as never,
     );
