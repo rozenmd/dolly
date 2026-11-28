@@ -38,13 +38,13 @@ export const WebFetchToolInput = Schema.Struct({
   url: Schema.optional(Schema.String),
   handle: Schema.optional(Schema.String),
   mode: Schema.optional(Schema.Literals(["text", "raw"])),
-  headChars: Schema.optional(Schema.Number),
+  headChars: Schema.optional(Schema.Finite),
   refresh: Schema.optional(Schema.Boolean),
   find: Schema.optional(Schema.String),
   caseSensitive: Schema.optional(Schema.Boolean),
-  context: Schema.optional(Schema.Number),
-  offset: Schema.optional(Schema.Number),
-  limit: Schema.optional(Schema.Number),
+  context: Schema.optional(Schema.Finite),
+  offset: Schema.optional(Schema.Finite),
+  limit: Schema.optional(Schema.Finite),
 });
 
 export type WebFetchToolInput = typeof WebFetchToolInput.Type;

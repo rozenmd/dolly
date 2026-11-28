@@ -146,6 +146,21 @@ it("sends Claude every tool's arguments as root properties", async () => {
     },
   });
 
+  // Effect's Schema.Number exports as anyOf [number, string enum "Infinity"/"-Infinity"/"NaN"].
+  // With a string branch in the union, a Claude session's numeric argument (papercuts limit: 200)
+  // reached the tool as the string "200" and failed validation. Number arguments must offer the
+  // model numbers only, in every tool, deferred ones included.
+  const nonFinite = (requests[0]?.tools ?? []).filter((tool) =>
+    JSON.stringify(tool.input_schema).includes('"NaN"'),
+  );
+
+  expect(nonFinite.map((tool) => tool.name)).toEqual([]);
+
+  for (const field of ["limit", "olderThanDays"])
+    expect(byName.papercuts?.input_schema.properties).toHaveProperty(field, {
+      anyOf: [{ type: "number" }, { type: "null" }],
+    });
+
   expect(byName.dolly?.input_schema).toMatchObject({
     required: ["action"],
     properties: {
