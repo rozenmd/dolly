@@ -37,13 +37,16 @@ Find its id with `curl localhost:8787/api/sessions` and screenshot `/session/<id
 `.app-shell`. No model is connected, so a "Connect a model" dialog opens; dismiss it with the
 screenshot action `{press: "Escape"}`. Sign-in needs both `DEV_SIGNED_IN=true` and
 `ACCESS_LOCAL_DEV=true`; the production config sets neither (`scripts/config.test.mjs` guards
-both). Storage persists under `.cloudflare/state`; delete it to seed afresh.
+both). This mode keeps its storage in `.cloudflare/dev-signed-in`, apart from plain `dev:sandbox`'s
+`.cloudflare/state`, so a real local sign-in is never replaced; delete it to seed afresh.
 
-Through the `preview` tool the session page currently shows "Session connection lost": the
-preview rewrites `Host` to `localhost` but forwards the page's `Origin`
-(`http://preview-….test`), so Dolly's same-origin WebSocket check refuses
-`/api/sessions/:id/events` and `/api/events`. Over a direct connection the transcript streams
-(`test/dev-seed.test.ts`).
+Until the preview forwards a matching `Origin`, this covers the signed-in shell, sidebar and
+session chrome only, not the transcript: the preview rewrites `Host` to `localhost` but forwards
+the page's `Origin` (`http://preview-….test`), so Dolly's same-origin WebSocket check refuses
+`/api/sessions/:id/events` and `/api/events`, and the page shows "Session connection lost".
+Over a direct connection the transcript streams (`test/dev-seed.test.ts`). Once the preview is
+fixed, verify the transcript with a screenshot whose `waitFor` names seeded message text, not
+just `.app-shell`.
 
 If the dev server fails with `ReferenceError: module is not defined`, delete
 `node_modules/.vite`: an optimizer cache from a run that could not resolve React
