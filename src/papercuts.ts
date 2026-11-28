@@ -24,7 +24,7 @@ export const PapercutRequest = Schema.Union([
     status: Schema.optional(Status),
     signature: Schema.optional(Schema.String),
     group: Schema.optional(Schema.Boolean),
-    limit: Schema.optional(Schema.Number),
+    limit: Schema.optional(Schema.Finite),
     cursor: Schema.optional(Schema.String),
   }),
   Schema.Struct({ action: Schema.Literal("read"), id: Schema.String }),
@@ -40,7 +40,7 @@ export const PapercutRequest = Schema.Union([
   }),
   Schema.Struct({
     action: Schema.Literal("resolve_stale"),
-    olderThanDays: Schema.Number,
+    olderThanDays: Schema.Finite,
     repository: Schema.optional(Schema.String),
     note: Schema.optional(Schema.String),
   }),
@@ -55,14 +55,14 @@ export const PapercutToolInput = Schema.Struct({
   status: Schema.optional(Status),
   signature: Schema.optional(Schema.String),
   group: Schema.optional(Schema.Boolean),
-  limit: Schema.optional(Schema.Number),
+  limit: Schema.optional(Schema.Finite),
   cursor: Schema.optional(Schema.String),
   id: Schema.optional(Schema.String),
   ids: Schema.optional(Schema.Array(Schema.String)),
   before: Schema.optional(Schema.String),
   reason: Schema.optional(Reason),
   note: Schema.optional(Schema.String),
-  olderThanDays: Schema.optional(Schema.Number),
+  olderThanDays: Schema.optional(Schema.Finite),
 });
 
 export type Papercut = {
